@@ -1,0 +1,28 @@
+# pdca-pdca — Codex project context
+
+This repository is managed with the **PDCA harness**: a Plan→Do→Check→Act cycle whose
+model steps ("leaves") may run as `codex`. Codex reads this file automatically for a
+session at the repo root, so it is **shared project context — not a per-leaf role**. Each
+leaf's specific role (planner / builder / reviewer / publisher / sign-off / act) is
+inlined into that session's prompt from `agents/<name>.md`; follow the role you are given
+there. `agents/<name>.md` is the canonical, vendor-neutral source of truth for each role.
+
+## STOP discipline (every leaf)
+
+You may open a **draft** PR and `git push`, but you MUST NOT mark a PR ready, merge it, or
+approve it — `gh pr ready`, `gh pr merge`, and `gh pr review --approve` are the human's
+Check sign-off, not the model's. This is enforced mechanically too: the driver puts a
+guarded `gh` shim first on `PATH` that refuses those calls (single-sourced from
+`.claude/hooks/builder_guard.py`).
+
+## Boundaries
+
+- Write only the artifacts your role names, into the bundle directory the prompt gives you
+  (e.g. `patch.diff`, `build-notes.md`, `check-review.md`, `commit-msg.txt`,
+  `pr-description.md`). Do **not** branch, push, or open PRs yourself — the deterministic
+  `pdca` steps do the git/PR mechanics after you finish.
+- Ground `path:line` citations on `$PDCA_TARGET` / `$PDCA_WORKTREE` (the driver sets them);
+  do not search unrelated checkouts on the machine.
+
+See `docs/INTEGRATION.md` (this repo's concretizations) and `PCDA/quality-cycle.md` (the
+reference model) for the full contract.

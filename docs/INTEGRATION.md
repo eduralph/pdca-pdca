@@ -1,0 +1,165 @@
+# Repository integration — pdca-pdca
+
+> What pdca-pdca provides to plug into the generic PDCA cycle (see
+> [quality-cycle.md](../PCDA/quality-cycle.md)). This is the project's answer to the
+> "which / where / how" questions the generic model deliberately leaves open.
+> It does **not** restate the cycle. Conflict rule: generic wins on cycle
+> *shape*; this integration wins on *instantiation*.
+>
+> Copier pre-filled what it could from your answers. Everything marked **TODO**
+> or **[planned]** is yours to complete — an unfilled integration means the
+> cycle is running on tribal knowledge, the exact failure this doc prevents.
+> Maintained by Act (append changes; don't silently rewrite).
+
+## 1. Tracker integration
+- **System / URL:** github — https://github.com/eduralph/pdca-harness/issues
+- **Issue-ID format:** `#123`
+- **Cross-link form (commit/PR → tracker):** TODO (e.g. `Fixes #nnnn` for GitHub Issues)
+- **Status → disposition mapping:** TODO
+- **Per-release field updated on a fix:** TODO
+- **Comment voice / template:** `templates/tracker-comment.md.tpl`
+
+## 2. Branch-target rules
+- **Per-area branch map:** default → `main`; TODO any per-area overrides
+- **Override convention:** TODO (typically the PR review thread)
+- **Cross-version cherry-pick rules:** TODO / none
+- **Master-vs-maintenance rule:** TODO (cite the project's own statement)
+
+## 3. Reproduction fixtures and runners
+- **Canonical fixture path:** TODO
+- **Reproduction runner(s) + commands:** TODO
+- **Verification runner (test suite):** TODO
+- **Platform variants:** TODO / none
+- **What counts as a successful repro:** TODO (exit code / log marker / screenshot)
+
+## 4. Conformance ruleset (answers the validation-tooling matrix for this repo)
+For each tier: the **written ruleset** it consumes, its **home**, and the
+**single-sourced command** the driver and CI both run. The "Written ruleset"
+column is load-bearing — name the project's *normative source* for each tier (a
+contributor guide, an addon-dev doc, a PEP/RFC) and, ideally, cite individual
+rules back to it (`<doc>:<line>`). A gate you can trace to a written source is
+auditable; one you can't is folklore.
+
+Gating policy (see `engine/README.md`): ship every tier **advisory**
+(`gating = false`) except the per-fix C4 (red→green). Runtime / conformance /
+interface tiers audit code the current fix didn't introduce, so promote a tier to
+gating only once its targeted artifacts are clean; gate interface/E2E on a smoke
+test, not the full suite.
+
+| Tier | Written ruleset | Home | Single-sourced command | Status |
+|---|---|---|---|---|
+| T1 structure | TODO | TODO | TODO | [planned] |
+| T2 shape | TODO | TODO | TODO | [planned] |
+| T3 runtime | TODO | TODO | TODO | [planned] |
+| T4 contribution | TODO | fork hooks / PR CI | TODO | [planned] |
+| T5 judgment | reviewer contract below | Check reviewer + sign-off | (model) | [planned] |
+
+- **Reviewer family (cross-vendor, ≠ builder):** codex — canonical role body
+  `agents/reviewer.md`, inlined for a codex reviewer / resolved via `--agent reviewer` for a
+  claude one (`.claude/agents/reviewer.md` renders only when the reviewer family is claude).
+  `AGENTS.md` now carries general codex **project context** (STOP discipline, boundaries),
+  not the reviewer role.
+- **Builder family:** claude — canonical role body `agents/builder.md`; the
+  Claude wrapper `.claude/agents/builder.md` (with the ready-mark block enforced by the
+  `.claude/hooks/builder_guard.py` PreToolUse hook) is materialized only when the builder
+  family is claude. A codex builder runs `codex exec --sandbox workspace-write`, confined to
+  the worktree cwd.
+- **Interactive family:** claude — the human-in-the-loop leaves (Plan,
+  Sign-off, Publish, Act) run a seeded `claude --agent <name>` REPL or a `codex` TUI, chosen
+  by `interactive_family`. A codex publisher gets the same `gh` STOP-shim the builder does
+  (it has no PreToolUse hook), so it can't `gh pr ready`/`merge`.
+- **Role prompts (vendor-neutral source):** each leaf's instructions live once in
+  `agents/<name>.md`. Claude leaves also get `.claude/agents/<name>.md` (frontmatter wrapper
+  that includes that body, so `--agent` resolves); non-Claude (inline) leaves read the
+  `agents/` body directly. Only Claude leaves carry a `.claude/agents/` file.
+- **Vendor profiles:** every family-specific behavior (streaming, extra-dir grounding,
+  role-prompt injection, STOP-guard mechanism) is data in `pdca_harness.families`,
+  overridable via `pdca.toml [families.<name>]` — swapping or adding a vendor is a
+  config edit, not a driver change. A non-claude builder gets the STOP discipline
+  from the driver's `gh` PATH shim (same `builder_guard.py` rules as the claude hook).
+- **Project-defined human-only items** (reviewer emits NEEDS-HUMAN by design): TODO
+  enumerate them so the model knows when to defer and the human what to expect.
+
+## 5. Upstream-isn't-ahead routine
+- **What "upstream" is:** TODO (canonical URL, branches, fork relationship)
+- **Search routine + tokenization gotchas:** TODO (search by affected file path)
+- **Merged-history check command:** TODO (`git log` / `gh search` invocation)
+
+## 6. Brief and design-proposal templates
+- **Brief template:** `templates/brief.md.tpl`
+- **Design-proposal template:** `templates/design-proposal.md.tpl` [built] — the
+  Plan artifact for the **exception** (major architecture / API / data-model / UX).
+  The planner reserves it for changes that warrant a proposal; most work uses the
+  brief. Any canonical upstream process (GEPS/RFC) still owns the final document;
+  the cycle produces the draft + the Do spec.
+- **Required project-specific frontmatter/sections:** TODO / none
+
+## 7. Bundle and act-log paths
+- **Bundle root + ID format:** `results/issue_<id>/`
+- **Act log path:** `process/act-log.md`
+- **Iterate archive:** a rejected attempt is preserved in `iteration-v<N>/` in the
+  bundle (the brief is archived with it on iterate-to-Plan) — fixed by the harness
+
+## 8. Committing and PR conventions
+- **Commit-message format:** TODO (subject length, wrap column, trailer, refs)
+- **PR description format:** see `templates/pr-description.md.tpl` (Root cause / Fix / Verified against / Test)
+- **Enforcement mechanism:** TODO (commit-msg hook / PR CI / human review)
+
+## 9. Repo-specific scripts and tooling
+List every project-specific script the cycle invokes (role → path + invocation + status).
+
+| Role | Path | Invocation | Status |
+|---|---|---|---|
+| Tracker scrape / handoff generator | TODO | | [planned] |
+| Conformance gate runners | TODO | | [planned] |
+| Repro / verification runners | TODO | | [planned] |
+| Driver | `src/pdca_harness/` | `pdca-pdca run <id>` | [built — stub leaves] |
+| Act tooling (L4) | `src/pdca_harness/act.py` | `pdca-pdca act index`, `pdca-pdca act log --date <d>` | [built] |
+| Gates (single-sourced) | `pdca.toml` `[[gates.checks]]` | `pdca-pdca gates [<id>] [--working-tree]` | [built — stub fallback; fill checks] |
+| Reviewer role prompt | `agents/reviewer.md` (canonical body; inlined for codex, `.claude/agents/reviewer.md` is the Claude packaging) | (model leaf) | [built — contract; wire command mode] |
+| Builder role prompt | `agents/builder.md` (canonical body); `.claude/agents/builder.md` (Claude wrapper) + `.claude/hooks/builder_guard.py` | (model leaf) | [built — ready-mark blocked] |
+
+## 10. Maintainer and governance
+- **Who reviews:** Eduard Ralph
+- **Ready-mark gate:** TODO (who marks PRs ready, and the convention before the mark)
+- **External-contribution flow differences:** TODO / none
+- **MAINTAINERS file:** TODO / none
+
+### Composing with the host's CI / PR governance (issue #67)
+
+PDCA **supplements** your existing PR/issue governance; it does not replace it. Map
+the harness onto what your host already enforces:
+
+| Host gate (governance layer) | PDCA equivalent (supplement) | How they compose |
+|---|---|---|
+| require-linked-issue on PRs | `[tracker].issue_trailer` (`Fixes #{id}`) in the publish commit/PR | The trailer satisfies the host's linked-issue rule; `init from brief` maps onto an issue that already passes it. |
+| DCO / append-only-doc / ready-mark policy | builder/publisher STOP-discipline (`builder_guard.py` PreToolUse hook) | The hook is a *backstop* that blocks `gh pr ready` / `gh pr merge` for the leaves; your host policy is the authority. |
+| Your own CI (`cargo xtask ci`, etc.) | `pdca-pdca gates --working-tree` merge re-gate workflow | Delegate gates to your runner (§4) so both run the *same* checks — no second definition. |
+
+If the host already provides one of these, omit the shipped equivalent at render time:
+`ship_ci_workflow = false` drops `.github/workflows/check-gates.yml`; `ship_merge_guard
+= false` drops the `builder_guard.py` hook (and its agent wiring). Both default on for a
+standalone project.
+
+## 11. Per-repo P-/D-/C-/A- extensions
+None today. Add repo-prefixed rules (e.g. `pdca-pdca-C7`) that *tighten
+or add to* a generic rule — never weaken one — as running cycles surface them.
+
+## Answering an interactive leaf from another device
+
+The four `interactive = true` leaves — planner, sign-off, publisher, Act — hand the terminal
+to a human+model REPL and block there. That means the human has to be at the terminal the
+flow runs in, for the whole batch: a `pdca flow` over several bundles can park on one
+sign-off adjudication for hours because nobody is at that machine.
+
+Claude Code's `--remote-control` flag removes the constraint. Append it to an interactive
+leaf's `argv` in `pdca.toml` and that leaf becomes answerable from another enrolled device;
+nothing else changes — `signoff-decision`, the §6 ticks and the C6 accept-guard all run the
+same code path, and only the human's location differs.
+
+Enabling Remote Control in your own shell does **not** reach the leaves: each is a separate
+`claude` subprocess whose argv comes from `pdca.toml`. That is the whole reason this needs
+documenting.
+
+The headless builder and reviewer must not carry the flag — it starts an *interactive*
+session, and they have no human to reach.

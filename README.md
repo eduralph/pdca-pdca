@@ -1,0 +1,153 @@
+# pdca-pdca
+
+Self-hosting PDCA quality-cycle instance: drives contributions to pdca-harness with pdca-harness
+
+One command takes an issue from a brief all the way to a human-signed-off, verified
+change — `Plan → Do → Check → sign-off → Act` — pausing only where a human belongs.
+
+The driver is deterministic (state machine + gates + the C6 accept-guard are plain
+code); a model is invoked only at the five **leaves**. See
+[PCDA/quality-cycle.md](PCDA/quality-cycle.md) for the model and
+[docs/INTEGRATION.md](docs/INTEGRATION.md) for this project's concretizations.
+
+## Prerequisites
+
+`make install-check` (or `pdca-pdca doctor` once installed) reports the harness-universal
+tools and the configured leaf CLIs and prints the exact fix for anything missing. (Your gate
+toolchain is only checked if you declare it — see the last bullet.)
+
+- **Python 3.11+** — the driver is stdlib-only (`tomllib`).
+- **git** and **make** — per-cycle worktree isolation, and the bootstrap / front-door target
+  runner (on Windows use `scripts/install.ps1` instead of `make`).
+- a **pip-capable venv** (`python3-venv`; a clean Debian/Ubuntu lacks `ensurepip`) — `make
+  install` provisions it via `apt`, or falls back to `get-pip.py` (needs `curl`).
+- **[gh](https://github.com/cli/cli)**, authenticated (`gh auth login`) — draft-PR
+  publish/merge and the tracker scrape.
+- the **leaf-backend CLI(s)** you wire in `pdca.toml` `[leaves.*]` — e.g. `claude` and/or
+  `codex` — for a *live* `flow`; the `--rehearse` / stub slice needs none. `make install`
+  auto-installs a backend with an official installer (currently `claude`); for others (e.g.
+  `codex`) it reports the CLI as missing with a hint, and you install it yourself.
+- whatever your **gates** shell out to (`pdca.toml` `[[gates.checks]]`) — provision it via
+  `[install].extra_bootstrap` (survives `copier update`). Note `make install-check` doesn't run
+  that command; declare the tools as `[[doctor.checks]]` rows so `pdca-pdca doctor` verifies them.
+
+## Install + run
+
+Bootstrap once (per platform), then drive the cycle with the **console script** —
+`pdca-pdca`, the cross-platform run interface:
+
+```bash
+make install            # Ubuntu/macOS: .venv + the `pdca-pdca` console script
+#   pwsh -File scripts/install.ps1   # Windows equivalent
+make setup              # ONCE: grant Claude read of the workspace
+```
+
+```bash
+pdca-pdca flow 123 --rehearse   # offline dry-run: PLANNED → … → COMPLETE on stubs
+pdca-pdca flow 123              # run the whole cycle for issue 123 (live)
+pdca-pdca flow 123 124 125      # several ids → batch (lanes + cheap-first sign-off)
+pdca-pdca                       # the status dashboard (bare invocation)
+```
+
+Before `make install`, run it from source as `python -m pdca_harness.cli flow 123`
+(with `PYTHONPATH=src`).
+
+Run `pdca-pdca flow` **in a real terminal** — the Plan, sign-off, publish and Act
+steps open Claude interactively. **Trust:** the first interactive session asks once to
+*trust* the project — a one-time **global** setting (`~/.claude.json`), not something
+`make setup` can write (`setup` handles file *permissions*). Accept it.
+
+What happens, step by step (the cycle has four beats; review/sign-off/publish are
+steps *within* Check):
+
+1. **Plan** (interactive) — Claude reads your input documents (e.g. a tracker CSV
+   via `--from-csv`) and, with you, writes `results/issue_<id>/brief.md`.
+   An unbriefed id is auto-planned; already-briefed ids go straight to Do.
+2. **Do** (headless) — Claude implements the brief: `patch.diff`, the test, `build-notes.md`.
+3. **Check** — the deterministic gates run (`→ … still working` heartbeats while
+   they do), then a headless advisory reviewer.
+4. **Sign-off** (Check step, interactive) — Claude reviews the result *with* you; you
+   clear the §6 items and decide `accept` / `iterate-do` / `iterate-plan`. The driver
+   records §9 under the C6 guard.
+5. **Publish** (Check step, interactive, on accept) — Claude drafts the contribution
+   artifacts (commit-msg + PR description) and the driver opens a **draft PR** — the
+   closing work of Check. `--no-publish` skips it; `--rehearse` dry-runs it.
+6. **Act** (interactive, on by default after COMPLETE; `--no-act` to skip) — Claude
+   reviews the frozen cycle and suggests process improvements if any are warranted.
+
+When a Plan/sign-off/publish session ends, exit Claude (**Ctrl-D**) to let the flow continue.
+
+## Commands
+
+Run the cycle through `pdca-pdca` (the console script). `make` is bootstrap-only.
+
+| Command | What it does |
+|---|---|
+| `pdca-pdca` | The status dashboard (bare invocation). |
+| `pdca-pdca flow <id> [--from-csv PATH] [--no-publish] [--no-act] [--by NAME] [--lanes N]` | Run the full cycle for one issue. On an accept it opens a draft PR (`--no-publish` stops at COMPLETE); Act runs by default (`--no-act` skips); `--by` sets §9 attribution. |
+| `pdca-pdca flow <id> <id> …` | **Batch**: several ids fan out across lanes; unbriefed ids are auto-planned (one shared Plan session); sign off cheap-first. |
+| `pdca-pdca flow --from-csv PATH` | Plan a batch the planner picks from a tracker export, then drive it. |
+| `pdca-pdca flow <id> … --rehearse` | Dry-run the *same* control flow on stub leaves + stub gates in an isolated bundle root — **no Claude, no live gates, instant**. |
+| `pdca-pdca flow <id> … --from-briefs DIR` | Init any missing bundle from `DIR/<id>.md` before driving. |
+| `pdca-pdca status` / `queue` | List bundle states / the cheap-first sign-off burn-down. |
+| `pdca-pdca publish <id> [--dry-run]` | Re-publish an accepted bundle as a draft PR (the flow does this on accept). |
+| `pdca-pdca signoff <id> --accept` | Record the human Check sign-off (refused while §6 NEEDS-HUMAN is open). |
+| `pdca-pdca try <id>` | Launch the patched build from the bundle's worktree so you can hands-on test it during Check (needs `[manual_test].cmd` + `[driver].worktree`). |
+| `pdca-pdca act index` / `act log --date <d>` | Cross-cycle Act tooling. |
+| `make` / `make check` | Self-test (full / fast offline). |
+| `make install` / `make setup` | Bootstrap: console script in `.venv/` / Claude read-permissions. |
+
+If something looks stuck, it isn't — a headless `claude -p` and a long gate print
+nothing until they finish, so the flow shows a `… still working (NmSSs elapsed)`
+heartbeat. Let it run.
+
+## Gates (what makes a change "verified")
+
+Configured in [pdca.toml](pdca.toml) `[[gates.checks]]`, single-sourced for the
+local driver and CI (`pdca-pdca gates` / `pdca-pdca gates --working-tree`). Until you add real
+rows the driver uses an all-PASS stub fallback — fill the gates first (see
+[docs/INTEGRATION.md](docs/INTEGRATION.md) §4). Guidance learned the hard way:
+
+- The **per-fix** correctness gate (apply the bundle's `patch.diff`, run *only* its
+  test, assert red-without / green-with) is what makes a cycle mean something — make
+  it `gating = true`, `scope = "bundle"`.
+- A **whole-suite** runtime gate on the unmodified tree can't gate a single fix (a
+  pre-existing failure makes it red regardless) — ship it `gating = false`
+  (advisory) until the suite is green-baseline.
+
+## Brief vs. design proposal
+
+The planner picks the Plan template with you: ordinary fixes *and* most new
+functionality use [templates/brief.md.tpl](templates/brief.md.tpl); a change big
+enough to warrant a design proposal uses
+[templates/design-proposal.md.tpl](templates/design-proposal.md.tpl). Not every
+feature is a design proposal — it's the exception, authored at Plan.
+
+## Layout
+
+```
+src/pdca_harness/   the deterministic driver (state machine, gates, leaves, flow)
+engine/             your verification engine — the gate runners gates invoke (you fill in)
+templates/          brief / design-proposal / SUMMARY templates
+results/issue_<id>/  one bundle per issue — the state IS the files here
+pdca.toml           project config: leaves, gates, tracker, paths
+docs/INTEGRATION.md this project's concretizations
+PCDA/               the generic model (reference docs)
+.claude/agents/     the five leaf agents (planner, builder, reviewer, signoff, act)
+```
+
+## Notes
+
+- **Iteration is built in.** `iterate-do` rebuilds against the same brief;
+  `iterate-plan` re-opens Plan. The flow loops until `COMPLETE` (bounded).
+- **Nothing is pushed for you.** The builder may open a *draft* PR for CI but can
+  never mark it ready/merge — enforced by `.claude/hooks/builder_guard.py`.
+- **Rendered from a template.** This project was generated from a Copier PDCA
+  template; run `copier update` to pull upstream harness improvements.
+
+## License
+
+Licensed under Apache-2.0 ([LICENSE](LICENSE), [NOTICE](NOTICE)). The PDCA
+harness this project was generated from is Apache-2.0, which carries no copyleft into
+this repo. Contributions are gated on the [Developer Certificate of Origin](DCO) —
+sign off with `git commit -s` (see [CONTRIBUTING.md](CONTRIBUTING.md)).
