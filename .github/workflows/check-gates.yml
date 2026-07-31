@@ -24,4 +24,4 @@ jobs:
       - name: Install the harness
         run: pip install -e .
       - name: Run the single-sourced gates (repo scope)
-        run: pdca gates --working-tree
+        run: pdca-pdca gates --working-tree
