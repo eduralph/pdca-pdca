@@ -41,7 +41,7 @@ templates_dir = "templates"
 # only N copies, not one per bundle. Leave at 1 unless per-lane disk / sign-off
 # ergonomics actually bite (then prefer this over N separate workspaces).
 [driver]
-lanes = 1
+lanes = 2
 # Sign-off pass budget for one `pdca flow` run (issue #260): how many build-all → sign-off
 # passes a wave gets (and how many iterations a single issue gets) before the driver stops
 # driving it. A hard bundle can legitimately need many sign-off iterations; when the budget
@@ -167,7 +167,7 @@ sweep_worktrees = "clean"
 # three ways, so a NEW line adjacent to a line instances commonly edit (and `lanes` is the
 # most edited in this table) lands as a git conflict marker in pdca.toml — after which
 # every `pdca` command dies at config load. Add new keys here, away from the contested ones.
-size_guard = "off"
+size_guard = "warn"
 
 
 # Empirical size backstop thresholds (issue #324). Measured at Check from the patch that
