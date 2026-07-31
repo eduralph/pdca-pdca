@@ -201,7 +201,10 @@ size_guard = "off"
 # Python one); it survives `copier update` (config, not a template file). Empty ⇒ nothing.
 # For multiple concerns, drop composable scripts into scripts/bootstrap-tools.d/*.sh instead.
 [install]
-extra_bootstrap = ""
+# copier: the target's render/update suites SKIP themselves without it (a green
+# that tested nothing); markdown-it-py + PyYAML: the T2 docs gate, pinned to the
+# versions the target's own docs-check.yml installs.
+extra_bootstrap = ".venv/bin/pip install --quiet copier 'markdown-it-py[linkify]==3.0.0' 'PyYAML==6.0.2'"
 
 # Manual-test launch (`pdca try <id>`). Check's validation act and the visual / GUI /
 # manual-repro §6 NEEDS-HUMAN rows are a human call — for a GUI app that means running the
@@ -219,7 +222,9 @@ extra_bootstrap = ""
 # like a gate command; "" ⇒ `pdca try` errors with a configure-me hint.
 [manual_test]
 # cmd = "python -m gramps"   # e.g. launch the app; a "./scripts/run-app.sh" wrapper also works
-cmd = ""
+# The target is a template + CLI driver, not a GUI: hands-on validation is a shell
+# in the patched worktree (render it, run the toy slice, poke the docs). Exit to return.
+cmd = "bash"
 
 [tracker]
 system = "github"
@@ -235,7 +240,7 @@ issue_trailer = "Fixes #{id}"
 # DETERMINISTICALLY hyperlinks the ticket id in the PR body (a Markdown link on the id, not
 # a bare number) — it does not depend on the model complying. E.g. Mantis
 # "https://github.com/eduralph/pdca-harness/issues/view.php?id={id}", GitHub "https://github.com/eduralph/pdca-harness/issues/{id}". "" ⇒ no link (bare id).
-issue_url_pattern = ""
+issue_url_pattern = "https://github.com/eduralph/pdca-harness/issues/{id}"
 # Optional default tracker export the Plan leaf reads the issue row from when `flow`
 # runs without --from-csv (it reads ONLY that issue's row, not a repo scan):
 # export_csv = "path/to/export.csv"
@@ -273,6 +278,14 @@ issue_url_pattern = ""
 # [[plan.source]]
 # type = "command"           # exactly today's notes_cmd, but one of several sources
 # cmd = "./engine/scripts/scrape-notes.sh {id}"
+
+# The tracker IS GitHub here, so `gh` is the canonical fetch: this source writes the
+# bundle's notes.json itself (role = "tracker") and the planner briefs from the full
+# issue thread with no scrape script.
+[[plan.source]]
+type = "github"
+role = "tracker"
+repo = "eduralph/pdca-harness"
 
 # Publish mechanics — `pdca publish` and the flow's publish-on-accept (docs 03 §Check
 # closing step). Branch patterns are `{id}` / `{slug}` format strings; the
@@ -690,6 +703,31 @@ argv = ["claude", "--agent", "publisher", "--permission-mode", "acceptEdits"]
 # per_lane = true
 # level = "WARN"
 
+# The self-hosting target: every cycle's Do/Check runs in a worktree off this
+# sibling checkout (the [publisher.checkouts] sibling default resolves to it too).
+[[doctor.checks]]
+group = "target"
+id = "sibling checkout ../pdca-harness"
+cmd = "test -e ../pdca-harness/.git"
+hint = "git clone https://github.com/eduralph/pdca-harness.git ../pdca-harness"
+required = true
+
+# Without copier the target's render/update suites SKIP themselves — a green T3
+# that tested nothing — so this row is required, not a WARN.
+[[doctor.checks]]
+group = "engine"
+id = "copier importable (.venv)"
+cmd = ".venv/bin/python3 -c 'import copier'"
+hint = "make install — [install].extra_bootstrap provisions copier into .venv"
+required = true
+
+[[doctor.checks]]
+group = "engine"
+id = "docs-render deps (.venv)"
+cmd = ".venv/bin/python3 -c 'import markdown_it, yaml'"
+hint = "make install — extra_bootstrap provisions markdown-it-py[linkify] + PyYAML (T2 docs gate)"
+level = "WARN"
+
 # Deterministic Check gates (docs 04). Each check runs a shell command; it PASSES
 # iff the command exits 0. `scope = "repo"` runs against the working tree (and is
 # what CI re-runs via `pdca gates --working-tree`); `scope = "bundle"` needs the
@@ -782,6 +820,20 @@ argv = ["claude", "--agent", "publisher", "--permission-mode", "acceptEdits"]
 [gates]
 
 checks = [
+  # C4 — the one GATING per-fix correctness check (docs/INTEGRATION.md §3/§4): the bundle's
+  # test red with the production hunks reverted, green with the full patch. Test-only /
+  # docs-only patches exit 77 UNVERIFIABLE → §6 NEEDS-HUMAN (issue #165), never a false fail.
+  { id = "C4-verify", tier = "C4", label = "fix verified: bundle test red pre-fix, green post-fix", cmd = "./engine/scripts/run-verify.sh", gating = true, scope = "bundle" },
+
+  # T2 Shape — the target's own docs checkers (lint_docs.py + render_site.py --check),
+  # ADVISORY: they audit the whole docs tree, not only what this fix touched.
+  { id = "T2-docs", tier = "T2", label = "shape: docs lint + site render link audit", cmd = "./engine/scripts/run-docs-check.sh", gating = false, scope = "bundle" },
+
+  # T3 Runtime — both target suites (root render/update-compat + template offline driver
+  # suite), ADVISORY: a whole-suite run is red on any pre-existing failure regardless of
+  # the patch. The render/update tests copy the WORKING TREE, so the patch is exercised.
+  { id = "T3-suite", tier = "T3", label = "runtime: render/update-compat + offline driver suites", cmd = "./engine/scripts/run-suite.sh", gating = false, scope = "bundle" },
+
   # T4 Contribution — lint the publisher's two artifacts before they are pushed: the PR body
   # must open with a `**User impact:**` line (the user-visible effect, before Root cause) and
   # both commit-msg.txt + pr-description.md must carry the tracker id. `contribcheck` reads
