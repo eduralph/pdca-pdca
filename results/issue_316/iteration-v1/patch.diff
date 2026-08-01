@@ -1,0 +1,999 @@
+diff --git a/template/src/pdca_harness/act.py b/template/src/pdca_harness/act.py
+index 10d1243..9e3970e 100644
+--- a/template/src/pdca_harness/act.py
++++ b/template/src/pdca_harness/act.py
+@@ -459,11 +459,11 @@ def _save_ledger(cfg: Config, entries: list[dict]) -> None:
+     _ledger_path(cfg).write_text(json.dumps(entries, indent=2) + "\n", encoding="utf-8")
+ 
+ 
+-def _recurring(entries: list[ActEntry]) -> dict[str, str]:
+-    """Normalized-signal → a representative raw text, for each signal appearing in more
+-    than one cycle (the §10 Act-candidate + §6 NEEDS-HUMAN pool). A miss is "the same"
+-    across cycles by its normalized key, so a class showing once in §10 of one cycle and
+-    once in §6 of another still counts as recurring."""
++def _recurring(entries: list[ActEntry], min_count: int = 2) -> dict[str, str]:
++    """Normalized-signal → a representative raw text, for each signal appearing at
++    least ``min_count`` times (the §10 Act-candidate + §6 NEEDS-HUMAN pool). A miss is
++    "the same" across cycles by its normalized key, so a class showing once in §10 of
++    one cycle and once in §6 of another still counts as recurring."""
+     counts: Counter = Counter()
+     raw_of: dict[str, str] = {}
+     for e in entries:
+@@ -473,16 +473,22 @@ def _recurring(entries: list[ActEntry]) -> dict[str, str]:
+                 continue
+             counts[n] += 1
+             raw_of.setdefault(n, s)
+-    return {n: raw_of[n] for n, c in counts.items() if c > 1}
++    return {n: raw_of[n] for n, c in counts.items() if c >= min_count}
+ 
+ 
+-def register_signals(cfg: Config, entries: list[ActEntry], date: str) -> list[str]:
++def register_signals(cfg: Config, entries: list[ActEntry], date: str,
++                     min_count: int = 2) -> list[str]:
+     """Track each recurring signal not already in the ledger as an ``open`` entry
+-    (idempotent, deduped by normalized signal). Returns the raw texts newly registered."""
++    (idempotent, deduped by normalized signal). Returns the raw texts newly registered.
++
++    ``min_count`` is the registration threshold. The default 2 keeps the #149
++    contract — SUMMARY §6/§10 chatter earns a ledger row only by recurring; PR-review
++    triage (#316) registers external findings at 1, because each already cost a
++    shipped defect plus a review round: first sight IS the signal there."""
+     ledger = load_ledger(cfg)
+     known = {e.get("signal") for e in ledger}
+     added: list[str] = []
+-    for norm, raw in _recurring(entries).items():
++    for norm, raw in _recurring(entries, min_count).items():
+         if norm not in known:
+             ledger.append({"signal": norm, "raw": raw, "first_seen": date,
+                            "status": "open", "applied_date": None, "location": ""})
+diff --git a/template/src/pdca_harness/cli.py b/template/src/pdca_harness/cli.py
+index c18b7c2..b1948d3 100644
+--- a/template/src/pdca_harness/cli.py
++++ b/template/src/pdca_harness/cli.py
+@@ -21,7 +21,7 @@ from pathlib import Path
+ 
+ from . import (act, brief, cleanup, doctor, drift, driver, flow, gates, leaves, manual_test,
+                merged, publish, queue, registry, revalidate, revert, signoff, sizing, sources,
+-               split, state, sweep, waves, worktree)
++               split, state, sweep, triage, waves, worktree)
+ from .config import Config
+ 
+ 
+@@ -312,6 +312,30 @@ def main(argv: list[str] | None = None) -> int:
+     p_actres.add_argument("--location", default="", help="where the delta landed (path:line / rule)")
+     p_actres.add_argument("--date", help="applied date (ISO; default today)")
+ 
++    # PR-review triage (issue #316): ingest a published PR's external review findings
++    # into the Act ledger — the outer loop's highest-value signal, otherwise invisible
++    # unless a human transcribes it.
++    p_triage = sub.add_parser(
++        "triage",
++        help="ingest a published PR's external review findings into the Act ledger (#316)",
++        description="Pull a published PR's reviews + review comments via `gh api`, "
++                    "classify each finding (BUG / CONVENTION / NOISE / TEST-GAP) by "
++                    "keyword heuristics (tunable from the instance rubric's class "
++                    "list), route by class — a BUG on a merged PR files a tracker "
++                    "issue whose body carries a carry-forward note; CONVENTION / "
++                    "NOISE / TEST-GAP append candidate gate-row, rubric-line and "
++                    "rubric-exclusion entries to process/act-log.md — and register "
++                    "every finding in the Act ledger under a class-keyed signal "
++                    "(codex-pr:<slug>), so `act` flags a class that recurs after its "
++                    "process delta was applied. Proposes only: it never edits "
++                    "pdca.toml or the rubric. Re-running the same PR ingests only "
++                    "findings that arrived since the last run.")
++    p_triage.add_argument("pr", help="the PR: a URL (https://github.com/OWNER/REPO/pull/N), "
++                                     "OWNER/REPO#N, or a bare number with --repo")
++    p_triage.add_argument("--repo", default="",
++                          help="the PR's repository (OWNER/REPO) when `pr` is a bare number")
++    p_triage.add_argument("--date", help="triage date (ISO; default today)")
++
+     # Tracker reconciliation (issue #300): bundles and the issue tracker drift out of
+     # sync; cleanup reports the discrepancies (dry-run default) and --apply acts.
+     p_cleanup = sub.add_parser(
+@@ -435,6 +459,9 @@ def main(argv: list[str] | None = None) -> int:
+         return _drift(cfg, args)
+     if args.cmd == "act":
+         return _act(cfg, args)
++    if args.cmd == "triage":
++        return triage.run(cfg, args.pr, repo=args.repo,
++                          date=args.date or datetime.date.today().isoformat())
+     if args.cmd == "signoff":
+         return _signoff(cfg, args)
+     if args.cmd == "publish":
+diff --git a/template/src/pdca_harness/config.py b/template/src/pdca_harness/config.py
+index a2b2691..d8ae5f9 100644
+--- a/template/src/pdca_harness/config.py
++++ b/template/src/pdca_harness/config.py
+@@ -347,6 +347,13 @@ class Config:
+     # `pdca doctor` runs each cmd (exit 0 = OK) after its config-derived checks, the
+     # same declare-in-config pattern as [[gates.checks]].
+     doctor_checks: list[dict] = field(default_factory=list)
++    # PR-review triage (#316): the optional single MODEL pass over the findings the
++    # keyword heuristics could not classify — a shell command fed the unclassified
++    # findings as a JSON list on stdin that must print a JSON list of class names.
++    # "" (the default) ⇒ keyword-only: the model pass never runs, and an instance
++    # taking a `copier update` gains no model call it did not ask for.
++    # ``[triage].model_cmd``.
++    triage_model_cmd: str = ""
+ 
+     def profile(self, leaf: LeafConfig):
+         """The resolved :class:`~pdca_harness.families.FamilyProfile` for ``leaf``."""
+@@ -635,6 +642,7 @@ class Config:
+             families={k.strip().lower(): dict(v)
+                       for k, v in data.get("families", {}).items()},
+             doctor_checks=list(data.get("doctor", {}).get("checks", [])),
++            triage_model_cmd=str(data.get("triage", {}).get("model_cmd", "") or ""),
+         )
+ 
+ 
+diff --git a/template/src/pdca_harness/triage.py b/template/src/pdca_harness/triage.py
+new file mode 100644
+index 0000000..eeab758
+--- /dev/null
++++ b/template/src/pdca_harness/triage.py
+@@ -0,0 +1,534 @@
++"""PR-review triage (issue #316) — ingest a published PR's external review findings
++into the Act ledger.
++
++The outer improvement loop's highest-value signal is what EXTERNAL reviewers find on
++published PRs — and today it is invisible to Act: the pipeline stops at the draft PR,
++and the ledger only receives what a human remembers to transcribe. ``pdca triage <pr>``
++closes that gap deterministically:
++
++  (a) pull the PR's reviews + review comments via ``gh api`` (the same
++      ``subprocess.run(["gh", …])`` pattern as publish/cleanup's gh machinery);
++  (b) classify each finding into one of four classes — BUG / CONVENTION / NOISE /
++      TEST-GAP — by keyword heuristics, with each class's keyword list overridable
++      from the instance rubric's class list (#314) where one is configured;
++  (c) route by class: a BUG on a MERGED PR files a tracker issue (the one piece of
++      tracker-side automation in scope, via split's existing gh machinery) whose body
++      carries a carry-forward note the next cycle's Plan reads from the ticket;
++      CONVENTION appends a candidate gate row / rubric line to the act log; NOISE a
++      candidate rubric-exclusion entry; TEST-GAP a candidate test note. The act log
++      is the CEILING: this command proposes — it never edits ``pdca.toml``, never
++      files gate rows, never touches the rubric itself;
++  (d) register EVERY finding through :func:`act.register_signals` under a class-keyed
++      signal name, so :func:`act.recurrences` flags a class that reappears after its
++      process delta was applied — the existing #149 ledger becomes the recurrence
++      tracker for external findings too.
++
++## The signal-name grammar (stable across runs — recurrence matching depends on it)
++
++    codex-pr:<class-slug>[-<keyword-slug>]     e.g.  codex-pr:convention-docstring
++
++``codex-pr:`` marks an external-PR-review finding; the slug is the finding's CLASS
++plus the keyword that decided it. Both come from the keyword table (built-in or
++rubric-supplied), never from the free comment text — so the same class of miss maps
++to the same signal on every run, which is what lets ``recurrences()`` match a
++reappearance. A finding no keyword reaches registers as ``codex-pr:unclassified``
++(and is listed for the human, or for the config-gated model pass below).
++
++## Classification is heuristic-first, deliberately
++
++Deterministic, cheap, auditable. Precedence on a multi-class match is severity-first
++(BUG > TEST-GAP > CONVENTION > NOISE): "nit: this crashes" is a bug someone softened,
++and mis-filing a real bug as noise buries it, while the reverse only files a
++too-serious candidate a human then downgrades. The optional single MODEL pass runs
++only over the unclassified remainder and only when ``[triage].model_cmd`` is set
++(off by default) — keyword-only is complete and useful on its own.
++
++Re-running on the same PR is the normal case (findings arrive over days, after
++publish): a re-run ingests only findings NOT yet in the PR's stored triage record
++(``process/triage/pr-<repo>-<n>.json``), and never re-files a tracker issue for a
++finding it already filed — tracker issues cannot be rolled back (the split rule).
++"""
++
++from __future__ import annotations
++
++import datetime
++import json
++import re
++import subprocess
++import sys
++from dataclasses import asdict, dataclass
++from pathlib import Path
++
++from . import act, publish, rubric, split
++from .config import Config
++
++#: Prefix marking an external-PR-review signal in the Act ledger (grammar above).
++SIGNAL_PREFIX = "codex-pr"
++
++#: The four routing classes — the engine contract, in severity-first precedence order.
++#: The rubric can retune each class's KEYWORDS; the class set (and its routing) is fixed.
++CLASSES = ("BUG", "TEST-GAP", "CONVENTION", "NOISE")
++
++#: Built-in keyword table (case-insensitive, whole-word/phrase match). An instance
++#: rubric (#314) overrides one class's keywords with a class-list line like
++#: ``- BUG: crash, race, corrupt``; classes the rubric doesn't name keep these, and
++#: instances without a rubric get exactly this table (see :func:`class_keywords`).
++DEFAULT_KEYWORDS: dict[str, tuple[str, ...]] = {
++    "BUG": ("bug", "broken", "crash", "crashes", "incorrect", "wrong", "corrupt",
++            "corrupts", "race", "leak", "regression", "off-by-one", "traceback",
++            "exception", "error", "fails", "failure", "data loss", "silently"),
++    "TEST-GAP": ("untested", "no test", "missing test", "test gap", "coverage",
++                 "not covered", "add a test", "needs a test", "vacuous test"),
++    "CONVENTION": ("convention", "style", "naming", "docstring", "typo",
++                   "formatting", "lint", "house style", "prefer"),
++    "NOISE": ("nit", "nitpick", "cosmetic", "non-blocking", "optional",
++              "feel free"),
++}
++
++
++@dataclass
++class Finding:
++    """One external review finding — a review body or an inline review comment."""
++
++    source: str          # "review" | "review-comment"
++    author: str
++    text: str
++    url: str = ""
++    path: str = ""       # inline comments only: the file commented on
++    cls: str = ""        # one of CLASSES, or "" = unclassified
++    keyword: str = ""    # the keyword that decided the class ("" for a model verdict)
++
++    @property
++    def signal(self) -> str:
++        """The class-keyed ledger signal (grammar in the module docstring)."""
++        if not self.cls:
++            return f"{SIGNAL_PREFIX}:unclassified"
++        slug = _slug(self.cls + (f" {self.keyword}" if self.keyword else ""))
++        return f"{SIGNAL_PREFIX}:{slug}"
++
++
++def _slug(s: str) -> str:
++    """Slugify via publish's slugifier — one grammar for every harness-made name."""
++    return publish._slugify(s)
++
++
++# ----------------------------------------------------------------------------
++# (a) pull — the gh subprocess pattern publish/cleanup use (cleanup.py:66).
++# ----------------------------------------------------------------------------
++def _gh(args: list[str]) -> subprocess.CompletedProcess:
++    return subprocess.run(["gh", *args], capture_output=True, text=True)
++
++
++def _api(path: str):
++    """Parsed JSON from ``gh api <path>``, or ``None`` on any failure (gh error,
++    unparseable output). The CALLER fails closed: a triage that silently ingested
++    half a PR's findings would under-register signals — the one direction this
++    command must not degrade in."""
++    proc = _gh(["api", path])
++    if proc.returncode != 0:
++        if (proc.stderr or "").strip():
++            print((proc.stderr or "").strip(), file=sys.stderr)
++        return None
++    try:
++        return json.loads(proc.stdout or "")
++    except ValueError:
++        return None
++
++
++_PR_URL_RE = re.compile(r"https?://[^/\s]+/([\w.-]+/[\w.-]+)/pull/(\d+)")
++_PR_SHORT_RE = re.compile(r"^([\w.-]+/[\w.-]+)#(\d+)$")
++
++
++def parse_pr(pr: str, repo: str = "") -> tuple[str, str]:
++    """``(owner/repo, number)`` from a PR URL, ``OWNER/REPO#N``, or a bare number
++    plus an explicit ``repo``; ``("", "")`` when unresolvable. A bare number WITHOUT
++    a repo is refused rather than guessed: gh's checkout-default repository could
++    hold an unrelated same-numbered PR (the same fail-closed rule as cleanup's
++    ``--repo`` derivation, #300)."""
++    pr = (pr or "").strip()
++    m = _PR_URL_RE.search(pr)
++    if m:
++        return m.group(1), m.group(2)
++    m = _PR_SHORT_RE.match(pr)
++    if m:
++        return m.group(1), m.group(2)
++    if pr.lstrip("#").isdigit() and repo.strip():
++        return repo.strip(), pr.lstrip("#")
++    return "", ""
++
++
++def _findings(reviews, comments) -> list[Finding]:
++    """Findings out of the two gh api payloads. A body-less review (a bare APPROVED /
++    CHANGES_REQUESTED event) carries no finding text and is skipped; everything with
++    text counts — filtering is the classifier's job, not the extractor's."""
++    out: list[Finding] = []
++    for r in reviews if isinstance(reviews, list) else []:
++        if not isinstance(r, dict):
++            continue
++        body = str(r.get("body") or "").strip()
++        if body:
++            out.append(Finding(source="review", author=_login(r), text=body,
++                               url=str(r.get("html_url") or "")))
++    for c in comments if isinstance(comments, list) else []:
++        if not isinstance(c, dict):
++            continue
++        body = str(c.get("body") or "").strip()
++        if body:
++            out.append(Finding(source="review-comment", author=_login(c), text=body,
++                               url=str(c.get("html_url") or ""),
++                               path=str(c.get("path") or "")))
++    return out
++
++
++def _login(item: dict) -> str:
++    user = item.get("user")
++    return str(user.get("login") or "") if isinstance(user, dict) else ""
++
++
++# ----------------------------------------------------------------------------
++# (b) classify — keyword heuristics, rubric-tunable, severity-first.
++# ----------------------------------------------------------------------------
++_CLASS_LINE_RE = re.compile(r"^\s*[-*]\s*([A-Za-z][\w -]*?)\s*:\s*(.+?)\s*$")
++
++
++def class_keywords(rubric_text: str = "") -> dict[str, tuple[str, ...]]:
++    """The per-class keyword table: built-ins, overridden per class from the instance
++    rubric's class list where one is configured (#314). A rubric list line of the
++    shape ``- BUG: crash, race, corrupt`` (class name, then comma-separated keywords)
++    replaces THAT class's built-ins; classes the rubric doesn't name keep theirs, and
++    unknown class names are ignored — the four-class routing is the engine contract.
++    Instances without a rubric get exactly :data:`DEFAULT_KEYWORDS`."""
++    table = dict(DEFAULT_KEYWORDS)
++    for line in (rubric_text or "").splitlines():
++        m = _CLASS_LINE_RE.match(line)
++        if not m:
++            continue
++        cls = re.sub(r"[\s_]+", "-", m.group(1).strip().upper())
++        if cls not in CLASSES:
++            continue
++        kws = tuple(k.strip().lower() for k in m.group(2).split(",") if k.strip())
++        if kws:
++            table[cls] = kws
++    return table
++
++
++def classify(f: Finding, table: dict[str, tuple[str, ...]]) -> None:
++    """Assign ``f.cls``/``f.keyword`` — the first class (severity-first CLASSES
++    order) with a whole-word keyword match, decided by its first matching keyword in
++    table order. Deterministic on purpose: the winning keyword names the signal, and
++    recurrence matching needs the same miss to map to the same signal every run."""
++    text = f.text.lower()
++    for cls in CLASSES:
++        for kw in table.get(cls, ()):
++            if re.search(r"(?<!\w)" + re.escape(kw) + r"(?!\w)", text):
++                f.cls, f.keyword = cls, kw
++                return
++
++
++def _rubric_text(cfg: Config, repo_spec: str) -> str:
++    """The configured rubric's text, read from the triaged PR's mapped checkout —
++    fail-OPEN like :func:`rubric.load`: a rubric problem must never block triage
++    (built-in keywords still classify). Triage is out-of-band (no bundle, no
++    worktree), so it reads the checkout ``publish._checkout_path`` maps for the PR's
++    own repository, through the same path-escape guard the rubric module uses."""
++    rel = str(getattr(cfg, "rubric_file", "") or "").strip()
++    if not rel:
++        return ""
++    try:
++        target = publish._checkout_path(cfg, repo_spec)
++        path = rubric._resolve(target, rel)
++        if path is None or not path.is_file():
++            return ""
++        text = path.read_text(encoding="utf-8")
++    except (OSError, UnicodeDecodeError):
++        return ""
++    section = str(getattr(cfg, "rubric_section", "") or "").strip()
++    return rubric._section(text, section) if section else text
++
++
++def _model_pass(cfg: Config, findings: list[Finding]) -> None:
++    """The config-gated single MODEL pass over the unclassified remainder (#316
++    scope: off by default; keyword-only must be complete without it).
++    ``[triage].model_cmd`` receives the unclassified findings as a JSON list on
++    stdin and must print a JSON list of class names in the same order; anything
++    unparsable, missing, or outside the four classes is ignored — fail-open, the
++    finding simply stays ``codex-pr:unclassified`` for the human."""
++    cmd = str(getattr(cfg, "triage_model_cmd", "") or "").strip()
++    rest = [f for f in findings if not f.cls]
++    if not cmd or not rest:
++        return
++    payload = json.dumps([{"text": f.text, "classes": list(CLASSES)} for f in rest])
++    try:
++        proc = subprocess.run(cmd, shell=True, input=payload, capture_output=True,
++                              text=True, timeout=600)
++        verdicts = json.loads(proc.stdout or "")
++    except (OSError, subprocess.SubprocessError, ValueError):
++        return
++    if not isinstance(verdicts, list):
++        return
++    for f, v in zip(rest, verdicts):
++        cls = re.sub(r"[\s_]+", "-", str(v).strip().upper())
++        if cls in CLASSES:
++            f.cls = cls  # class-level signal; no deciding keyword
++
++
++# ----------------------------------------------------------------------------
++# The per-PR triage record — the signal HISTORY recurrence detection reads, and the
++# dedupe that makes re-runs safe (no double-filed tracker issues, no duplicate
++# registrations). One JSON file per PR under process/triage/.
++# ----------------------------------------------------------------------------
++def _records_dir(cfg: Config) -> Path:
++    return cfg.process_dir / "triage"
++
++
++def _record_path(cfg: Config, repo_spec: str, number: str) -> Path:
++    return _records_dir(cfg) / f"pr-{_slug(repo_spec)}-{number}.json"
++
++
++def _load_record(path: Path) -> dict:
++    """The stored record, or ``{}`` — tolerant like :func:`act.load_ledger`."""
++    if not path.exists():
++        return {}
++    try:
++        data = json.loads(path.read_text(encoding="utf-8"))
++    except (ValueError, OSError):
++        return {}
++    return data if isinstance(data, dict) else {}
++
++
++def _entries(cfg: Config) -> list[act.ActEntry]:
++    """Every stored triage finding as synthetic :class:`act.ActEntry` rows — the
++    entries :func:`act.register_signals` and :func:`act.recurrences` read, exactly
++    the shape frozen-bundle extracts feed them (#149/#316).
++
++    One entry per (PR, ingest date), NOT one per record: recurrence compares
++    ``e.date > applied``, so folding an old finding into a re-run's entry would
++    advance its date past a delta applied in between and fabricate a recurrence.
++    The bundle name is ``pr_<n>`` so ``recurred_in`` names the PR."""
++    out: list[act.ActEntry] = []
++    d = _records_dir(cfg)
++    for p in sorted(d.glob("pr-*.json")) if d.is_dir() else []:
++        rec = _load_record(p)
++        by_date: dict[str, list[str]] = {}
++        for f in rec.get("findings", []):
++            if isinstance(f, dict) and f.get("signal"):
++                by_date.setdefault(str(f.get("date") or ""), []).append(str(f["signal"]))
++        num = str(rec.get("number") or p.stem)
++        for dt, sigs in sorted(by_date.items()):
++            out.append(act.ActEntry(bundle=Path(f"pr_{num}"), date=dt,
++                                    act_candidates=sigs))
++    return out
++
++
++# ----------------------------------------------------------------------------
++# (c) route — BUG files a tracker issue (merged PRs only); everything else appends
++# candidates to the act log, which is the ceiling.
++# ----------------------------------------------------------------------------
++def _issue_body(f: Finding, repo_spec: str, number: str, pr_url: str, date: str) -> str:
++    """The filed BUG issue's body — finding + provenance + the carry-forward note.
++    The note rides IN the issue body on purpose: the tracker thread is the one input
++    the next cycle's Plan actually reads (the notes fetch), whereas the originating
++    bundle is frozen — appending to a COMPLETE bundle's brief would mutate a record
++    the Act frontier fingerprints (#299)."""
++    quoted = "\n".join("> " + line for line in f.text.strip().splitlines())
++    where = f" on `{f.path}`" if f.path else ""
++    return (
++        f"An external reviewer found a BUG-class issue on the merged PR {pr_url} "
++        f"(ingested {date} by `pdca triage`).\n\n"
++        f"{quoted}\n\n"
++        f"— {f.author or 'unknown'}, via {f.source}{where}"
++        + (f" ({f.url})" if f.url else "") + "\n\n"
++        "## Carry-forward (for the next cycle's Plan)\n\n"
++        "The PR merged with this finding unaddressed, so the defect is live on the "
++        f"target's base. It is registered in the Act ledger as `{f.signal}`; the "
++        "fixing cycle should cite the originating PR, and once a process delta "
++        "lands, mark the signal applied (`act resolve`) so a recurrence is flagged.\n"
++    )
++
++
++def _excerpt(text: str, n: int = 90) -> str:
++    one = re.sub(r"\s+", " ", text.strip())
++    return one if len(one) <= n else one[: n - 1].rstrip() + "…"
++
++
++def _entry_text(repo_spec: str, number: str, pr_url: str, merged: bool, date: str,
++                new: list[Finding], filed: dict[int, str], bug_note: str,
++                added: list[str], recs: list[dict]) -> str:
++    """The act-log entry for one triage run: findings, per-class routed candidates
++    (proposals only — the human applies them), registered signals, recurrences."""
++    lines = [
++        f"# PR-review triage — {date} — {repo_spec}#{number} "
++        f"({'merged' if merged else 'open'}) — {len(new)} new finding(s)",
++        "",
++        f"PR: {pr_url}",
++        "",
++        "## Findings (class-keyed signals)",
++    ]
++    for f in new:
++        who = f.author or "unknown"
++        lines.append(f"- [{f.cls or 'UNCLASSIFIED'}] {f.signal} — "
++                     f"{_excerpt(f.text)} ({who}, {f.source})")
++    lines += ["", "## Routed  (candidates only — the human applies each; this "
++                  "command never edits pdca.toml or the rubric)"]
++    for i, f in enumerate(new):
++        if f.cls == "BUG":
++            if i in filed:
++                lines.append(f"- BUG → filed tracker issue #{filed[i]} "
++                             f"(carry-forward note in its body): {_excerpt(f.text)}")
++            else:
++                lines.append(f"- BUG → candidate tracker issue (NOT filed: "
++                             f"{bug_note or 'unknown'}): {_excerpt(f.text)}")
++        elif f.cls == "CONVENTION":
++            lines.append(f"- CONVENTION → candidate gate row / rubric line: enforce "
++                         f"\"{f.keyword or f.signal}\" ([[gates.checks]] row or a "
++                         f"rubric convention line) — {_excerpt(f.text)}")
++        elif f.cls == "NOISE":
++            lines.append(f"- NOISE → candidate rubric-exclusion entry: declare "
++                         f"\"{f.keyword or f.signal}\" a rejected finding class in "
++                         f"the rubric — {_excerpt(f.text)}")
++        elif f.cls == "TEST-GAP":
++            lines.append(f"- TEST-GAP → candidate test: cover "
++                         f"\"{f.keyword or f.signal}\" — {_excerpt(f.text)}")
++        else:
++            lines.append(f"- UNCLASSIFIED → needs a human (or set "
++                         f"[triage].model_cmd): {_excerpt(f.text)}")
++    lines += ["", "## Registered signals (act-ledger.json)"]
++    lines += [f"- {raw}" for raw in added] or ["- (all already tracked)"]
++    if recs:
++        lines += ["", "## ⚠ Recurrences (class reappeared after its delta was applied)"]
++        lines += [f"- {r['signal']} — applied {r['applied']}, recurred in "
++                  + ", ".join(r["recurred_in"]) for r in recs]
++    return "\n".join(lines)
++
++
++# ----------------------------------------------------------------------------
++def run(cfg: Config, pr: str, *, repo: str = "", date: str = "") -> int:
++    """``pdca triage <pr>`` — pull, classify, route, register. Returns a process
++    code: 0 done (including "nothing new"), 1 failed (unreachable PR, a filing
++    error, a held Act session), 2 usage."""
++    date = date or datetime.date.today().isoformat()
++    repo_spec, number = parse_pr(pr, repo)
++    if not number:
++        print("triage: cannot resolve the PR — pass a URL "
++              "(https://github.com/OWNER/REPO/pull/N), OWNER/REPO#N, or a bare "
++              "number WITH --repo OWNER/REPO (guessing gh's default repository "
++              "could triage an unrelated same-numbered PR)", file=sys.stderr)
++        return 2
++    meta = _api(f"repos/{repo_spec}/pulls/{number}")
++    if not isinstance(meta, dict):
++        print(f"triage: could not read PR {repo_spec}#{number} via `gh api` — "
++              "nothing ingested; fix gh/auth and re-run", file=sys.stderr)
++        return 1
++    reviews = _api(f"repos/{repo_spec}/pulls/{number}/reviews?per_page=100")
++    comments = _api(f"repos/{repo_spec}/pulls/{number}/comments?per_page=100")
++    if reviews is None or comments is None:
++        # Fail CLOSED: half an ingest silently under-registers signals.
++        print(f"triage: could not pull the reviews/comments of {repo_spec}#{number} "
++              "— nothing ingested; fix gh/auth and re-run", file=sys.stderr)
++        return 1
++
++    findings = _findings(reviews, comments)
++    if not findings:
++        print(f"triage: no review findings on {repo_spec}#{number} — nothing to ingest")
++        return 0
++    table = class_keywords(_rubric_text(cfg, repo_spec))
++    for f in findings:
++        classify(f, table)
++    _model_pass(cfg, findings)  # config-gated; off by default
++
++    # Re-runs ingest only what is NEW since the stored record — findings arrive over
++    # days, and an already-filed BUG issue must never be filed twice (irreversible,
++    # the split rule).
++    rec_path = _record_path(cfg, repo_spec, number)
++    rec = _load_record(rec_path)
++    prior = rec.get("findings", []) if isinstance(rec.get("findings"), list) else []
++    seen = {(str(p.get("source") or ""), str(p.get("url") or ""), str(p.get("text") or ""))
++            for p in prior if isinstance(p, dict)}
++    new = [f for f in findings if (f.source, f.url, f.text) not in seen]
++    if not new:
++        print(f"triage: {repo_spec}#{number} — no new findings "
++              f"({len(findings)} already ingested on {rec.get('date') or '?'})")
++        return 0
++
++    merged = bool(meta.get("merged") or meta.get("merged_at"))
++    pr_url = str(meta.get("html_url") or f"https://github.com/{repo_spec}/pull/{number}")
++
++    # Route BUG first — filing is the irreversible step, so it happens before the
++    # record write that makes it non-repeatable (mirrors split's file-then-record
++    # order: the record is what guarantees a re-run cannot duplicate the issue).
++    filed: dict[int, str] = {}
++    bug_note, failures = "", 0
++    bugs = [i for i, f in enumerate(new) if f.cls == "BUG"]
++    if bugs and not merged:
++        bug_note = ("PR not merged — the fix can still land on the open PR; "
++                    "candidate kept in the act log")
++    elif bugs:
++        can, repo_or_why = split.can_file(cfg)
++        if not can:
++            bug_note = repo_or_why  # degrade loudly to a logged candidate, exit 0
++        else:
++            for i in bugs:
++                try:
++                    filed[i] = split._create_issue(
++                        repo_or_why,
++                        f"[pr-triage] BUG finding on {repo_spec}#{number}: "
++                        + _excerpt(new[i].text, 60),
++                        _issue_body(new[i], repo_spec, number, pr_url, date),
++                        "", cfg.root)
++                except split.SplitError as exc:
++                    bug_note = str(exc)  # incl. UncertainFiling — never retry blind
++                    failures += 1
++
++    # Durably record what was ingested/filed BEFORE registering: a crash after this
++    # point cannot re-file an issue, and the ledger self-heals — registration always
++    # re-derives from the FULL record history, so a lost registration is added by
++    # the next run rather than lost for good.
++    payload = [{**asdict(f), "signal": f.signal, "date": date,
++                "issue": filed.get(i, "")} for i, f in enumerate(new)]
++    _records_dir(cfg).mkdir(parents=True, exist_ok=True)
++    rec_path.write_text(json.dumps(
++        {"repo": repo_spec, "number": number, "url": pr_url, "merged": merged,
++         "date": date, "findings": prior + payload}, indent=2) + "\n",
++        encoding="utf-8")
++
++    # (d) register + log, under the shared Act session lock like `act log --append`
++    # (#299): a triage overlapping a flow's auto-Act must not interleave ledger and
++    # act-log writes with the review in progress.
++    with act.act_session(cfg) as held:
++        if not held:
++            print("triage: another Act session is running (a flow's auto-Act or a "
++                  "concurrent append) — the findings are recorded in "
++                  f"{rec_path}; re-run to register them when it finishes",
++                  file=sys.stderr)
++            return 1
++        entries = _entries(cfg)  # full triage history, incl. the record just written
++        # Every finding registers on FIRST sight (min_count=1): an external finding
++        # already cost a shipped defect plus a review round — the recurring-only
++        # threshold exists for SUMMARY chatter, not for external findings.
++        added = act.register_signals(cfg, entries, date, min_count=1)
++        recs = [r for r in act.recurrences(cfg, entries)
++                if str(r.get("signal", "")).startswith(SIGNAL_PREFIX)]
++        log = act.append_entry(cfg, _entry_text(
++            repo_spec, number, pr_url, merged, date, new, filed, bug_note,
++            added, recs))
++
++    counts = {c: sum(1 for f in new if f.cls == c) for c in CLASSES}
++    unclassified = sum(1 for f in new if not f.cls)
++    summary = ", ".join(f"{n} {c}" for c, n in counts.items() if n)
++    if unclassified:
++        summary = ", ".join(s for s in (summary, f"{unclassified} unclassified") if s)
++    print(f"triage: {repo_spec}#{number} ({'merged' if merged else 'open'}) — "
++          f"{len(new)} new finding(s): {summary or 'none'}")
++    for i, f in enumerate(new):
++        route = (f"filed tracker issue #{filed[i]}" if i in filed
++                 else "act-log candidate")
++        print(f"  [{f.cls or 'UNCLASSIFIED'}] {f.signal} → {route}")
++    if bug_note:
++        print(f"  note: {bug_note}", file=sys.stderr)
++    if added:
++        print(f"  registered {len(added)} new signal(s) in the Act ledger")
++    for r in recs:
++        print(f"  ⚠ {r['signal']} recurred after its delta was applied "
++              f"({r['applied']}) — in " + ", ".join(r["recurred_in"]))
++    print(f"appended entry to {log}")
++    return 1 if failures else 0
+diff --git a/template/tests/test_triage.py b/template/tests/test_triage.py
+new file mode 100644
+index 0000000..57b67f8
+--- /dev/null
++++ b/template/tests/test_triage.py
+@@ -0,0 +1,325 @@
++"""Offline slice for `pdca triage` (#316) — external PR-review ingestion into Act.
++
++Drives ``triage.run`` (and the CLI wiring) against CANNED ``gh`` output — the gh
++subprocesses are stubbed the same way the publish/cleanup slices stub theirs. Proves
++the four criteria: (a) the PR's reviews AND review comments are pulled via `gh api`;
++(b) each finding is keyword-classified into BUG / CONVENTION / NOISE / TEST-GAP;
++(c) routing — a BUG on a merged PR files a tracker issue whose body carries a
++carry-forward note, CONVENTION appends a candidate gate row / rubric line to the act
++log, NOISE a candidate rubric-exclusion entry; (d) EVERY finding is registered
++through ``act.register_signals`` under a class-keyed signal name, and
++``act.recurrences`` flags the class when the same signal reappears after its process
++delta was applied. No Claude, no git, no network.
++"""
++
++from __future__ import annotations
++
++import io
++import json
++import os
++import shutil
++import tempfile
++import unittest
++from contextlib import redirect_stderr, redirect_stdout
++from pathlib import Path
++from types import SimpleNamespace
++from unittest import mock
++
++from pdca_harness import act, cli, split, triage
++from pdca_harness.config import Config, LeafConfig
++
++_REPO = "example-org/example-repo"
++_PR_URL = f"https://github.com/{_REPO}/pull/7"
++
++# One finding per class, worded to hit exactly one keyword group each; plus a
++# body-less APPROVED review, which carries no finding text and must be skipped.
++_REVIEWS = [
++    {"user": {"login": "codex"}, "state": "CHANGES_REQUESTED",
++     "body": "This branch is untested — please cover the revert path too.",
++     "html_url": f"{_PR_URL}#pullrequestreview-1"},
++    {"user": {"login": "codex"}, "state": "APPROVED", "body": "",
++     "html_url": f"{_PR_URL}#pullrequestreview-2"},
++]
++_COMMENTS = [
++    {"user": {"login": "codex"}, "path": "src/marker.py",
++     "body": "This crashes when the marker file is empty.",
++     "html_url": f"{_PR_URL}#discussion_r1"},
++    {"user": {"login": "codex"}, "path": "src/cli.py",
++     "body": "House style: the docstring should be imperative mood.",
++     "html_url": f"{_PR_URL}#discussion_r2"},
++    {"user": {"login": "codex"}, "path": "src/cli.py",
++     "body": "Nit: double blank line here, cosmetic only.",
++     "html_url": f"{_PR_URL}#discussion_r3"},
++]
++
++
++def _meta(number: int, merged: bool) -> dict:
++    return {"number": number, "merged": merged,
++            "merged_at": "2026-06-15T10:00:00Z" if merged else None,
++            "html_url": f"https://github.com/{_REPO}/pull/{number}",
++            "title": "a published fix"}
++
++
++def _api_map(number: int = 7, merged: bool = True, reviews=None, comments=None) -> dict:
++    base = f"repos/{_REPO}/pulls/{number}"
++    return {base: _meta(number, merged),
++            f"{base}/reviews": _REVIEWS if reviews is None else reviews,
++            f"{base}/comments": _COMMENTS if comments is None else comments}
++
++
++class TriageSlice(unittest.TestCase):
++    def setUp(self) -> None:
++        self.tmp = Path(tempfile.mkdtemp())
++        self.cfg = Config(
++            root=self.tmp,
++            bundle_root=self.tmp / "results",
++            process_dir=self.tmp / "process",
++            templates_dir=self.tmp / "templates",
++            default_branch="main",
++            tracker_system="github",   # tracker repo derives from the URL (sources)
++            tracker_url=f"https://github.com/{_REPO}/issues",
++            issue_id_example="1",
++            builder=LeafConfig(mode="stub"),
++            reviewer=LeafConfig(mode="stub"),
++        )
++        self.gh_calls: list[list[str]] = []
++
++    def tearDown(self) -> None:
++        shutil.rmtree(self.tmp, ignore_errors=True)
++
++    def _fake_gh(self, api_map: dict, issue_numbers=("901",)):
++        """A gh stub: canned `gh api` payloads; `gh issue create` prints an issue URL
++        (the bare-URL line split's machinery parses). Everything is recorded."""
++        it = iter(issue_numbers)
++
++        def fake(cmd, *args, **kwargs):
++            self.gh_calls.append(list(cmd))
++            if cmd[:2] == ["gh", "api"]:
++                path = cmd[2].split("?")[0]
++                if path in api_map:
++                    return SimpleNamespace(returncode=0,
++                                           stdout=json.dumps(api_map[path]), stderr="")
++                return SimpleNamespace(returncode=1, stdout="",
++                                       stderr=f"HTTP 404: {path}")
++            if cmd[:3] == ["gh", "issue", "create"]:
++                n = next(it)
++                return SimpleNamespace(
++                    returncode=0,
++                    stdout=f"https://github.com/{_REPO}/issues/{n}\n", stderr="")
++            return SimpleNamespace(returncode=0, stdout="", stderr="")
++        return fake
++
++    def _run(self, pr: str = _PR_URL, *, date: str = "2026-06-20",
++             api_map: dict | None = None, issue_numbers=("901", "902"),
++             ) -> tuple[int, str, str]:
++        fake = self._fake_gh(api_map if api_map is not None else _api_map(),
++                             issue_numbers)
++        out, err = io.StringIO(), io.StringIO()
++        with mock.patch.object(triage.subprocess, "run", side_effect=fake), \
++                mock.patch.object(split.subprocess, "run", side_effect=fake), \
++                mock.patch.object(split.shutil, "which", return_value="/usr/bin/gh"), \
++                redirect_stdout(out), redirect_stderr(err):
++            rc = triage.run(self.cfg, pr, date=date)
++        return rc, out.getvalue(), err.getvalue()
++
++    def _record(self) -> dict:
++        recs = sorted((self.cfg.process_dir / "triage").glob("pr-*.json"))
++        self.assertEqual(len(recs), 1, recs)
++        return json.loads(recs[0].read_text(encoding="utf-8"))
++
++    def _act_log(self) -> str:
++        return (self.cfg.process_dir / "act-log.md").read_text(encoding="utf-8")
++
++    def _issue_creates(self) -> list[list[str]]:
++        return [c for c in self.gh_calls if c[:3] == ["gh", "issue", "create"]]
++
++    # ---- (a) pull -----------------------------------------------------------
++    def test_pulls_reviews_and_review_comments(self) -> None:
++        rc, _, _ = self._run()
++        self.assertEqual(rc, 0)
++        findings = self._record()["findings"]
++        self.assertEqual({f["source"] for f in findings},
++                         {"review", "review-comment"})
++        self.assertEqual(len(findings), 4)  # the body-less APPROVED review is no finding
++        api_paths = [c[2] for c in self.gh_calls if c[:2] == ["gh", "api"]]
++        self.assertTrue(any("/pulls/7/reviews" in p for p in api_paths))
++        self.assertTrue(any("/pulls/7/comments" in p for p in api_paths))
++
++    def test_unreadable_pull_aborts_without_ingesting(self) -> None:
++        # Fail CLOSED: a half-ingested PR silently under-registers signals.
++        broken = _api_map()
++        del broken[f"repos/{_REPO}/pulls/7/comments"]
++        rc, _, err = self._run(api_map=broken)
++        self.assertEqual(rc, 1)
++        self.assertIn("nothing ingested", err)
++        self.assertFalse((self.cfg.process_dir / "triage").exists())
++
++    # ---- (b) classify -------------------------------------------------------
++    def test_classifies_each_finding_into_the_four_classes(self) -> None:
++        self._run()
++        by_text = {f["text"]: f for f in self._record()["findings"]}
++        self.assertEqual(by_text[_COMMENTS[0]["body"]]["cls"], "BUG")
++        self.assertEqual(by_text[_COMMENTS[1]["body"]]["cls"], "CONVENTION")
++        self.assertEqual(by_text[_COMMENTS[2]["body"]]["cls"], "NOISE")
++        self.assertEqual(by_text[_REVIEWS[0]["body"]]["cls"], "TEST-GAP")
++        # The class-keyed signal grammar: codex-pr:<class-slug>-<keyword-slug>,
++        # derived from the keyword table (never the free text) so it is stable.
++        self.assertEqual(by_text[_COMMENTS[0]["body"]]["signal"], "codex-pr:bug-crashes")
++        self.assertEqual(by_text[_REVIEWS[0]["body"]]["signal"],
++                         "codex-pr:test-gap-untested")
++
++    def test_precedence_is_severity_first(self) -> None:
++        # "nit: … crashes …" is a bug someone softened — BUG outranks NOISE.
++        f = triage.Finding(source="review-comment", author="codex",
++                           text="Nit: this crashes on empty input.")
++        triage.classify(f, triage.class_keywords())
++        self.assertEqual(f.cls, "BUG")
++
++    def test_rubric_class_list_overrides_one_class_keywords(self) -> None:
++        table = triage.class_keywords("## Review rubric\n- BUG: kaboom\n")
++        self.assertEqual(table["BUG"], ("kaboom",))
++        self.assertEqual(table["NOISE"], triage.DEFAULT_KEYWORDS["NOISE"])  # untouched
++
++    # ---- (c) route ----------------------------------------------------------
++    def test_bug_on_merged_pr_files_tracker_issue_with_carry_forward(self) -> None:
++        rc, _, _ = self._run()
++        self.assertEqual(rc, 0)
++        creates = self._issue_creates()
++        self.assertEqual(len(creates), 1)  # exactly the one BUG finding
++        cmd = creates[0]
++        self.assertEqual(cmd[cmd.index("--repo") + 1], _REPO)
++        body = cmd[cmd.index("--body") + 1]
++        self.assertIn("Carry-forward", body)                 # the note Plan will read
++        self.assertIn(_PR_URL, body)                         # provenance
++        self.assertIn(_COMMENTS[0]["body"], body)            # the finding itself
++        self.assertIn("codex-pr:bug-crashes", body)          # its ledger signal
++        self.assertIn("filed tracker issue #901", self._act_log())
++
++    def test_bug_on_unmerged_pr_files_nothing(self) -> None:
++        rc, _, _ = self._run(api_map=_api_map(merged=False))
++        self.assertEqual(rc, 0)
++        self.assertEqual(self._issue_creates(), [])
++        self.assertIn("NOT filed", self._act_log())          # candidate kept, loudly
++
++    def test_convention_and_noise_route_to_act_log_candidates(self) -> None:
++        self._run()
++        log = self._act_log()
++        self.assertIn("candidate gate row / rubric line", log)   # CONVENTION routing
++        self.assertIn("codex-pr:convention-style", log)
++        self.assertIn("candidate rubric-exclusion entry", log)   # NOISE routing
++        self.assertIn("codex-pr:noise-nit", log)
++
++    def test_rerun_ingests_only_new_findings_and_never_refiles(self) -> None:
++        self._run()
++        rc, out, _ = self._run(date="2026-06-21")            # same canned PR again
++        self.assertEqual(rc, 0)
++        self.assertIn("no new findings", out)
++        self.assertEqual(len(self._issue_creates()), 1)      # ONE issue across both runs
++
++    # ---- (d) register + recurrence -----------------------------------------
++    def test_registers_every_finding_class_keyed(self) -> None:
++        self._run()
++        ledger = act.load_ledger(self.cfg)
++        signals = {e["signal"] for e in ledger}
++        # EVERY finding registers on first sight — singletons included.
++        self.assertLessEqual({"codex-pr:bug-crashes", "codex-pr:convention-style",
++                              "codex-pr:noise-nit", "codex-pr:test-gap-untested"},
++                             signals)
++        self.assertTrue(all(e["status"] == "open" for e in ledger))
++
++    def test_recurrence_flagged_when_class_keyed_signal_reappears(self) -> None:
++        self._run(date="2026-06-20")                         # PR 7 registers the signal
++        raw = act.resolve(self.cfg, "codex-pr:bug-crashes", "process/act-log.md",
++                          "2026-07-01")                      # the human applies a delta
++        self.assertEqual(raw, "codex-pr:bug-crashes")
++        # The same class-keyed signal reappears on ANOTHER PR after the applied date.
++        pr8 = _api_map(number=8, reviews=[], comments=[
++            {"user": {"login": "codex"}, "path": "src/marker.py",
++             "body": "This crashes again when the marker file is empty.",
++             "html_url": f"https://github.com/{_REPO}/pull/8#discussion_r9"}])
++        rc, out, _ = self._run(f"https://github.com/{_REPO}/pull/8",
++                               date="2026-07-10", api_map=pr8,
++                               issue_numbers=("902",))
++        self.assertEqual(rc, 0)
++        self.assertIn("recurred", out)                       # surfaced to the operator
++        recs = act.recurrences(self.cfg, triage._entries(self.cfg))
++        hit = [r for r in recs if r["signal"] == "codex-pr:bug-crashes"]
++        self.assertEqual(len(hit), 1)
++        self.assertEqual(hit[0]["applied"], "2026-07-01")
++        self.assertEqual(hit[0]["recurred_in"], ["pr_8"])
++
++    def test_parse_pr_refuses_a_bare_number_without_repo(self) -> None:
++        # gh's checkout-default repo could hold an unrelated same-numbered PR.
++        self.assertEqual(triage.parse_pr("7"), ("", ""))
++        self.assertEqual(triage.parse_pr("7", _REPO), (_REPO, "7"))
++        self.assertEqual(triage.parse_pr(_PR_URL), (_REPO, "7"))
++        self.assertEqual(triage.parse_pr(f"{_REPO}#7"), (_REPO, "7"))
++
++
++class TriageCli(unittest.TestCase):
++    """The `pdca triage` subcommand exists and routes to the engine (red on a main
++    without the subparser: argparse rejects the verb with SystemExit)."""
++
++    def setUp(self) -> None:
++        self.tmp = Path(tempfile.mkdtemp())
++        (self.tmp / "pdca.toml").write_text('[paths]\nbundle_root = "results"\n',
++                                            encoding="utf-8")
++        self._cwd = Path.cwd()
++        os.chdir(self.tmp)
++
++    def tearDown(self) -> None:
++        os.chdir(self._cwd)
++        shutil.rmtree(self.tmp, ignore_errors=True)
++
++    def test_cli_wires_the_triage_subcommand(self) -> None:
++        with mock.patch.object(triage, "run", return_value=0) as m:
++            rc = cli.main(["triage", _PR_URL, "--date", "2026-07-25"])
++        self.assertEqual(rc, 0)
++        _cfg, pr = m.call_args.args
++        self.assertEqual(pr, _PR_URL)
++        self.assertEqual(m.call_args.kwargs["date"], "2026-07-25")
++        self.assertEqual(m.call_args.kwargs["repo"], "")
++
++    def test_cli_usage_error_on_unresolvable_pr(self) -> None:
++        with redirect_stderr(io.StringIO()):
++            rc = cli.main(["triage", "7"])   # bare number, no --repo → fail closed
++        self.assertEqual(rc, 2)
++
++    def test_cli_drives_the_engine_end_to_end(self) -> None:
++        # `pdca triage <pr>` all the way through: parse → pull (stubbed gh) →
++        # classify → route (issue filed) → register — the success criterion is
++        # phrased against the COMMAND, not just the engine function.
++        (self.tmp / "pdca.toml").write_text(
++            '[paths]\nbundle_root = "results"\n\n[tracker]\nsystem = "github"\n'
++            f'url = "https://github.com/{_REPO}/issues"\n', encoding="utf-8")
++        calls: list[list[str]] = []
++
++        def fake(cmd, *args, **kwargs):
++            calls.append(list(cmd))
++            if cmd[:2] == ["gh", "api"]:
++                path, amap = cmd[2].split("?")[0], _api_map()
++                if path in amap:
++                    return SimpleNamespace(returncode=0,
++                                           stdout=json.dumps(amap[path]), stderr="")
++                return SimpleNamespace(returncode=1, stdout="", stderr="HTTP 404")
++            if cmd[:3] == ["gh", "issue", "create"]:
++                return SimpleNamespace(
++                    returncode=0,
++                    stdout=f"https://github.com/{_REPO}/issues/901\n", stderr="")
++            return SimpleNamespace(returncode=0, stdout="", stderr="")
++
++        with mock.patch.object(triage.subprocess, "run", side_effect=fake), \
++                mock.patch.object(split.subprocess, "run", side_effect=fake), \
++                mock.patch.object(split.shutil, "which", return_value="/usr/bin/gh"), \
++                redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
++            rc = cli.main(["triage", _PR_URL, "--date", "2026-06-20"])
++        self.assertEqual(rc, 0)
++        ledger = json.loads(Path("process/act-ledger.json").read_text(encoding="utf-8"))
++        self.assertIn("codex-pr:bug-crashes", {e["signal"] for e in ledger})
++        self.assertIn("PR-review triage",
++                      Path("process/act-log.md").read_text(encoding="utf-8"))
++        self.assertTrue(any(c[:3] == ["gh", "issue", "create"] for c in calls))
++
++
++if __name__ == "__main__":
++    raise SystemExit(unittest.main())

@@ -1,0 +1,602 @@
+diff --git a/docs/07-crosscutting.md b/docs/07-crosscutting.md
+index 66c2e00..5a13563 100644
+--- a/docs/07-crosscutting.md
++++ b/docs/07-crosscutting.md
+@@ -151,6 +151,26 @@ accepted but silently treated as `"warn"` for exactly this reason (see step 03).
+ Retune the weights and cutoffs per-instance under `[driver.sizing]` in
+ `pdca.toml` if your own corpus disagrees with the defaults above.
+ 
++**The thresholds stay honest by review, not by faith.** A calibrated number that
++only moves when someone re-derives it by hand is wrong for a long time before
++anyone notices — so the loop is instrumented where cross-cycle patterns are
++already reviewed: `pdca act index` renders a `sizing:` line per frozen cycle,
++the a-priori estimate beside the measured outcome from the bundle's recorded
++size signal (a blank outcome means the bundle predates the signal — "not
++measured", never "measured small"). When the two visibly drift, re-run
++`scripts/size-calibrate` over the instance and walk its output back into
++`[driver.sizing]` — the step-by-step procedure lives in that table's comment
++block in `pdca.toml`. The model half of the estimate is covered by the same
++review: `model_weight` (how much a sizer-leaf escalation adds to the score,
++`0` = band-only, today's behaviour) is a `[driver.sizing]` config value
++revisited at Act cadence rather than a constant baked into the engine. That
++revisit has a named blind spot: the index's `sizing:` line shows the
++structural estimate only (the stored sizer verdict is not joined in) and
++`size-calibrate` mines no model-verdict feature, so whether sizer escalations
++track real churn is not yet observable from either artifact. Until one of them
++grows that column, the evidenced Act-cadence outcome for `model_weight` is
++"stays 0, gap recorded" — not a retune.
++
+ ### The split
+ 
+ `pdca split` is the deterministic decomposition path — two verbs, because the
+diff --git a/template/pdca.toml.jinja b/template/pdca.toml.jinja
+index 7a92dcd..7a294d4 100644
+--- a/template/pdca.toml.jinja
++++ b/template/pdca.toml.jinja
+@@ -170,6 +170,48 @@ sweep_worktrees = "clean"
+ size_guard = "off"
+ 
+ 
++# A-priori size-estimate weights + cutoffs (issues #320/#359). [driver.sizing] tunes the
++# structural estimator that scores each brief BEFORE Do runs; the shipped defaults are
++# calibrated against 86 settled bundles of a real instance, so this block is commented out
++# — uncomment only the keys you retune, anything omitted keeps the shipped default. A
++# sub-table: it must sit after every bare [driver] key (see the note above size_guard).
++#
++# RETUNING (#359) — walking a fresh `size-calibrate` run back into this table. The numbers
++# only stay honest against YOUR corpus, and drift is visible in the Act index's per-cycle
++# `sizing:` line (a-priori estimate vs measured outcome). At Act cadence:
++#   1. Mine the instance:  PYTHONPATH=src scripts/size-calibrate   (add `--csv out.csv`
++#      for the per-bundle table a threshold is actually argued from).
++#   2. "Rank correlation … vs rounds": set each feature weight proportional to |rho|
++#      against ROUNDS — churn is what the score predicts. A feature indistinguishable
++#      from noise keeps weight 0; weighting it would be fitting noise.
++#   3. "Median feature value, converged vs churned": put `brief_bytes_kb` at the knee
++#      between the two medians (shipped: 12).
++#   4. Set `watch` where the churn rate first clears your corpus base rate, `oversized`
++#      where precision peaks (shipped: 4 / 7 at a 19% base rate).
++#
++# `model_weight` (#359): how much a sizer-leaf escalation (a watch/oversized verdict from
++# [leaves.sizer]) adds to the numeric score. 0 — the default — is today's behaviour: the
++# model raises the BAND only, escalate-only, and the score stays purely structural. It is
++# config rather than a constant precisely so the Act-cadence review above can move it —
++# but know the loop's blind spot before you do: the Act index's `sizing:` line carries
++# the STRUCTURAL estimate only (the stored sizer verdict is not joined in), and
++# size-calibrate mines no model-verdict feature, so escalation-vs-outcome correlation is
++# not observable from either artifact yet. Until one of them grows that column — or you
++# mine the bundles' sizing.json by hand — a retuning pass has no evidence that can
++# justify moving model_weight off 0: leave it at 0 and record the gap in the Act notes
++# rather than tuning it on taste.
++# [driver.sizing]
++# conflicts_with = 3
++# difficulty_high = 3
++# ext_deps = 3
++# brief_bytes = 3
++# is_plan_pointer = -2
++# brief_bytes_kb = 12
++# watch = 4
++# oversized = 7
++# model_weight = 0
++
++
+ # Empirical size backstop thresholds (issue #324). Measured at Check from the patch that
+ # actually arrived, unlike [driver.sizing] which guesses from the brief before a line is
+ # written — and much better at it: against "did this bundle churn >=3 rounds" over the same
+diff --git a/template/src/pdca_harness/act.py b/template/src/pdca_harness/act.py
+index 10d1243..6803121 100644
+--- a/template/src/pdca_harness/act.py
++++ b/template/src/pdca_harness/act.py
+@@ -23,7 +23,7 @@ from collections import Counter
+ from dataclasses import dataclass, field
+ from pathlib import Path
+ 
+-from . import revalidate, signoff, state
++from . import revalidate, signoff, size_signal, sizing, state
+ from .config import Config
+ 
+ # Cross-platform advisory file lock (#299 review): ``fcntl`` is Unix-only, and cli.py
+@@ -76,6 +76,12 @@ class ActEntry:
+     act_candidates: list[str] = field(default_factory=list)  # §10 hints
+     reval_deltas: list[str] = field(default_factory=list)  # revalidation stamps (#11)
+     fingerprint: str = ""  # SUMMARY.md hash AT EXTRACTION time (#299 review round 17)
++    # Sizing column (#359): the a-priori estimate joined to the measured outcome, so
++    # estimator drift is reviewed where cross-cycle patterns already are. Either side is
++    # "" when unavailable — a bundle predating the recorded size signal (#324) must read
++    # as "not measured", never as "measured small".
++    size_estimate: str = ""  # e.g. "watch (score 5)" — from the brief, pre-Do text only
++    size_outcome: str = ""   # e.g. "34 KB / 3 file(s) / 1 round(s)" — size-signal.json
+ 
+ 
+ def frozen_bundles(cfg: Config) -> list[Path]:
+@@ -533,7 +539,7 @@ def index(cfg: Config, since: str | None = None,
+ 
+     ``bundles`` (#299) restricts the extraction to an explicit list (e.g. the
+     unreviewed set); default is every frozen bundle."""
+-    entries = [_extract(d / "SUMMARY.md", d)
++    entries = [_extract(d / "SUMMARY.md", d, cfg)
+                for d in (frozen_bundles(cfg) if bundles is None else bundles)]
+     if since:
+         entries = [e for e in entries if e.date and e.date >= since]
+@@ -567,6 +573,12 @@ def render_index(entries: list[ActEntry], pats: dict[str, list[str]],
+             f"- §6 NEEDS-HUMAN ({len(e.needs_human)}): " + ("; ".join(e.needs_human) or "—"),
+             f"- §7 unproven ({len(e.unproven)}): " + ("; ".join(e.unproven) or "—"),
+             f"- §10 Act candidates ({len(e.act_candidates)}): " + ("; ".join(e.act_candidates) or "—"),
++            # Sizing column (#359): the a-priori estimate beside the measured outcome
++            # (#324's recorded signal), so the estimator is audited at the review that
++            # already looks across cycles — a number that only moves when someone
++            # re-derives it by hand is wrong long before anyone finds out (the 0.56
++            # 67%→62% episode). A blank side means "not measured", never "small".
++            f"- sizing: estimate {e.size_estimate or '—'} → outcome {e.size_outcome or '—'}",
+         ]
+         # Only when present — a frozen gate result the current engine now contradicts
+         # (esp. a frozen FAIL now PASS = stale artifact, or a frozen PASS now FAIL =
+@@ -710,9 +722,56 @@ def append_reviewed(cfg: Config, entries: list[ActEntry], render, *, date: str,
+ 
+ 
+ # ----------------------------------------------------------------------------
+-def _extract(summary: Path, bundle: Path) -> ActEntry:
++def _size_column(bundle: Path, cfg: Config) -> tuple[str, str]:
++    """The sizing column's two sides for one bundle (#359): ``(estimate, outcome)``.
++
++    The estimate is the brief-derived a-priori score (``sizing.estimate`` reads only the
++    text above the first carry-forward heading, so it is a priori even after an iterate).
++    Deliberately structural-only: the stored sizer verdict is read through
++    ``leaves.current_sizing``, and ``leaves`` imports this module — folding it in here
++    would close an import cycle for a decoration on an advisory column.
++
++    The outcome is the RECORDED size signal (#324), via ``size_signal.read`` — never
++    ``current``/``measure``: a bundle predating the signal file must render blank rather
++    than have an outcome fabricated at review time from whatever is on disk now.
++    Both sides are "" when unavailable; the renderer shows the blank.
++    """
++    estimate = ""
++    if (bundle / "brief.md").is_file():
++        est = sizing.estimate(bundle / "brief.md", cfg)
++        estimate = f"{est.band} (score {est.score})"
++    signal = size_signal.read(bundle)
++    if signal is None:
++        return estimate, ""
++
++    def _num(key: str) -> int:
++        # Same tolerance as size_signal._thresholds: a garbled value in a recorded file
++        # reads 0, because an unreadable number must not cost the whole index.
++        try:
++            return int(signal.get(key, 0))
++        except (TypeError, ValueError, OverflowError):
++            return 0
++
++    try:
++        # int / int divides through float, so a recorded value that PARSES as a Python
++        # int yet exceeds float range (~1.8e308) sails past _num's guard and raises
++        # OverflowError at the `/ 1024` — the same failure class size_signal._int
++        # documents for `1e309`, one representation over. One garbled size-signal.json
++        # must cost its own cell, never the whole index. Blank rather than clamped:
++        # a clamp prints a number that reads as a measurement nobody made, and this
++        # column's contract is that a blank outcome means "not measured".
++        return estimate, (f"{_num('patch_bytes') / 1024:.0f} KB / "
++                          f"{_num('patch_files')} file(s) / {_num('rounds')} round(s)")
++    except OverflowError:
++        return estimate, ""
++
++
++def _extract(summary: Path, bundle: Path, cfg: Config | None = None) -> ActEntry:
++    # ``cfg=None`` keeps direct callers (tests) working; the sizing column then stays
++    # blank, which is the honest reading for "not computed".
++    size_est, size_out = _size_column(bundle, cfg) if cfg is not None else ("", "")
+     if not summary.exists():
+-        return ActEntry(bundle=bundle)
++        return ActEntry(bundle=bundle, size_estimate=size_est, size_outcome=size_out)
+     # The fingerprint is captured HERE, at extraction time (#299 review round 17):
+     # the entry's hash must attest the content the review/scaffold actually read,
+     # not whatever a concurrent redo leaves on disk by the time the frontier writes.
+@@ -737,6 +796,8 @@ def _extract(summary: Path, bundle: Path) -> ActEntry:
+         act_candidates=_candidates(s10),
+         reval_deltas=revalidate.deltas(bundle),  # frozen-gate staleness surfaced (#11)
+         fingerprint=fingerprint,
++        size_estimate=size_est,
++        size_outcome=size_out,
+     )
+ 
+ 
+diff --git a/template/src/pdca_harness/cli.py b/template/src/pdca_harness/cli.py
+index c18b7c2..2125712 100644
+--- a/template/src/pdca_harness/cli.py
++++ b/template/src/pdca_harness/cli.py
+@@ -777,7 +777,7 @@ def _size(cfg: Config, issue_ids: list[str]) -> int:
+         # read-only and must stay safe to run against a live queue. Without this the one
+         # deliberate way to ask "how big is this?" showed only the structural bands and
+         # never the decomposability answer the instance had already paid a model for.
+-        est = sizing.combine(sizing.estimate(d / "brief.md", cfg), leaves.current_sizing(d, cfg))
++        est = sizing.combine(sizing.estimate(d / "brief.md", cfg), leaves.current_sizing(d, cfg), cfg)
+         print(f"{est.band}\t{d.name}\tscore={est.score} "
+               f"churn={est.churn_band} patch={est.patch_band}"
+               + (f" sizer={est.model_band}" if est.model_band else ""))
+@@ -817,7 +817,7 @@ def _status(cfg: Config, issue_id: str | None) -> int:
+         # queue, which is where a human is actually looking.
+         oversized = (d / "brief.md").exists() and sizing.combine(
+             sizing.estimate(d / "brief.md", cfg),
+-            leaves.current_sizing(d, cfg)).band == sizing.OVERSIZED
++            leaves.current_sizing(d, cfg), cfg).band == sizing.OVERSIZED
+         if s == state.AWAITING_SIGNOFF:
+             n = len(signoff.open_needs_human(d / "SUMMARY.md"))
+             flag = "  [cheap: confirm]" if n == 0 else f"  [{n} NEEDS-HUMAN]"
+diff --git a/template/src/pdca_harness/config.py b/template/src/pdca_harness/config.py
+index a2b2691..1caa42f 100644
+--- a/template/src/pdca_harness/config.py
++++ b/template/src/pdca_harness/config.py
+@@ -319,6 +319,11 @@ class Config:
+     # Structural size-estimate weights + cutoffs ([driver.sizing], issue #320). A raw
+     # table so an instance can retune against its OWN corpus without patching the engine —
+     # the whole point of #324's calibration loop. Empty => sizing.DEFAULT_* apply.
++    # Also carries `model_weight` (#359) — how much a sizer-leaf escalation adds to the
++    # numeric score (sizing.DEFAULT_MODEL_WEIGHT = 0, i.e. band-only, today's behaviour).
++    # Like every key here it is REVIEWED AT ACT CADENCE against the Act index's
++    # estimate-vs-outcome sizing column plus a fresh scripts/size-calibrate run — the
++    # retuning walk is documented in pdca.toml's [driver.sizing] comment block.
+     sizing: dict = field(default_factory=dict)
+     # Empirical Check-time backstop thresholds ([driver.size_signal], issue #324). Same
+     # shape and same reason as `sizing` above: an instance retunes against its own corpus.
+diff --git a/template/src/pdca_harness/leaves.py b/template/src/pdca_harness/leaves.py
+index 11518ae..c2d1ddc 100644
+--- a/template/src/pdca_harness/leaves.py
++++ b/template/src/pdca_harness/leaves.py
+@@ -1068,7 +1068,7 @@ def _split_prompt(d: Path, cfg: Config) -> str:
+     # `sizing.json` stays, and handing the splitter seams drawn from a replaced brief tells
+     # it the old decomposition describes the current one.
+     verdict = current_sizing(d, cfg) or {}
+-    est = sizing.combine(sizing.estimate(d / "brief.md", cfg), verdict or None)
++    est = sizing.combine(sizing.estimate(d / "brief.md", cfg), verdict or None, cfg)
+     # LIST or nothing. The verdict is model output and the contract tolerates an untidy
+     # schema — but tolerant has to mean ignored, not iterated: `proposed_seams: 1` raised
+     # TypeError here, and `do_split` has already unlinked the previous proposal by then.
+diff --git a/template/src/pdca_harness/plan_policy.py b/template/src/pdca_harness/plan_policy.py
+index 76e1a0b..f2e3326 100644
+--- a/template/src/pdca_harness/plan_policy.py
++++ b/template/src/pdca_harness/plan_policy.py
+@@ -117,7 +117,7 @@ def size_reasons(d, cfg, *, before_do: bool = True) -> list[HoldReason]:
+     # for free.
+     from . import leaves
+     est = sizing.combine(est, leaves.run_sizer(d, cfg) if before_do
+-                         else leaves.current_sizing(d, cfg))
++                         else leaves.current_sizing(d, cfg), cfg)
+     if est.band != sizing.OVERSIZED:
+         return []
+ 
+diff --git a/template/src/pdca_harness/sizing.py b/template/src/pdca_harness/sizing.py
+index e66eaee..fb15f6c 100644
+--- a/template/src/pdca_harness/sizing.py
++++ b/template/src/pdca_harness/sizing.py
+@@ -94,6 +94,25 @@ DEFAULT_WEIGHTS = {
+     "is_plan_pointer": -2,   # ρ -0.24 — de-escalates
+ }
+ 
++#: Weight of the sizer LEAF's verdict in the numeric score when :func:`combine` folds one
++#: in (``[driver.sizing].model_weight``, issue #359). The shipped default 0 is today's
++#: behaviour exactly: an above-``ok`` verdict escalates the BAND only and the score stays
++#: purely structural — the corpus that would justify a non-zero weight accumulates per
++#: instance, and weighting an unmeasured signal would be fitting folklore.
++#:
++#: A CONFIG VALUE, not a constant, so the review can actually move it: revisit at Act
++#: cadence, against the Act index's per-cycle `sizing:` estimate-vs-outcome column and a
++#: fresh ``scripts/size-calibrate`` run — once model escalations demonstrably track real
++#: churn in YOUR corpus, raise it there like any other ``[driver.sizing]`` weight.
++#:
++#: Neither surface can show that yet: the index's `sizing:` line joins the STRUCTURAL
++#: estimate only, and ``size-calibrate`` mines no model-verdict feature, so the
++#: escalation-vs-outcome correlation a non-zero weight would rest on is unobservable
++#: today. The retuning walk in pdca.toml's ``[driver.sizing]`` block names this blind
++#: spot so an Act-cadence review does not mistake "no visible correlation" for
++#: "no correlation" — or, worse, move the weight without evidence either way.
++DEFAULT_MODEL_WEIGHT = 0
++
+ #: Brief-size cutoff, in KB, measured ABOVE the first carry-forward heading. 12 KB is the
+ #: knee: below it recall barely improves, above it recall falls faster than precision
+ #: rises. Measuring the file as-is instead would leak the outcome into the predictor — an
+@@ -404,7 +423,7 @@ class AprioriBrief:
+         return value
+ 
+ 
+-def combine(structural: SizeEstimate, model: dict | None) -> SizeEstimate:
++def combine(structural: SizeEstimate, model: dict | None, cfg=None) -> SizeEstimate:
+     """Fold the sizer leaf's verdict into the structural estimate — **escalate only**.
+ 
+     The model reads meaning; structure counts fields. So the model may raise a band that
+@@ -414,6 +433,13 @@ def combine(structural: SizeEstimate, model: dict | None) -> SizeEstimate:
+     least fails predictably, and "combined so the model can only escalate" is the property
+     #320 is named for — asserted directly in the tests.
+ 
++    ``cfg`` reads ``[driver.sizing].model_weight`` (#359): an above-``ok`` verdict adds
++    that weight to the numeric score, the same shape as a structural feature firing. At
++    the default 0 (:data:`DEFAULT_MODEL_WEIGHT` — see its Act-cadence note) the score is
++    byte-identical to today's, so ``cfg=None`` callers and untouched configs lose nothing.
++    Escalate-only holds for the score too: the weight is added only on a verdict that
++    names watch/oversized, and never subtracted.
++
+     **What is guaranteed:** a missing verdict, a non-dict verdict, or one whose ``band`` is
+     absent or not one of ok/watch/oversized leaves the structural estimate exactly as it
+     was. The leaf is optional and offline runs must be unaffected.
+@@ -432,6 +458,13 @@ def combine(structural: SizeEstimate, model: dict | None) -> SizeEstimate:
+     if band not in _ORDER:
+         return structural
+     combined = higher(structural.band, band)
++    score = structural.score
++    if _ORDER[band] > _ORDER[OK]:
++        # The model flagged something — its configured weight joins the score exactly
++        # like a structural feature's would. 0 by default (current behaviour), clamped
++        # at 0: a negative weight would let the model LOWER a structural score, the
++        # single point of failure this whole function exists to forbid.
++        score += max(0, _cfg_int(cfg, "model_weight", DEFAULT_MODEL_WEIGHT))
+     reasons = list(structural.reasons)
+     outcomes = model.get("independent_outcomes")
+     detail = f"sizer says {band}"
+@@ -445,7 +478,7 @@ def combine(structural: SizeEstimate, model: dict | None) -> SizeEstimate:
+     if confidence in ("low", "medium", "high"):
+         detail += f" (confidence {confidence})"
+     reasons.append(detail)
+-    return SizeEstimate(structural.score, combined, reasons,
++    return SizeEstimate(score, combined, reasons,
+                         churn_band=structural.churn_band,
+                         patch_band=structural.patch_band,
+                         model_band=band)
+diff --git a/template/tests/test_act_index_sizing.py b/template/tests/test_act_index_sizing.py
+new file mode 100644
+index 0000000..ac96193
+--- /dev/null
++++ b/template/tests/test_act_index_sizing.py
+@@ -0,0 +1,256 @@
++"""The Act-index sizing column + configurable model weight (issue #359).
++
++#359 closes the calibration loop #320/#324 opened: the a-priori estimate and the measured
++outcome are JOINED per frozen bundle in the Act index — the review that already looks
++across cycles — so estimator drift is seen there instead of waiting for someone to
++re-derive the numbers by hand (the 0.56 67%→62% episode). Proven here:
++
++* ``act.index`` carries the estimate (brief-derived, a priori) beside the outcome read
++  from the bundle's RECORDED ``size-signal.json``, and ``act.render_index`` prints them;
++* a bundle predating the signal renders a graceful blank — never an outcome fabricated
++  by measuring whatever is on disk at review time;
++* ``model_weight`` is read from ``[driver.sizing]`` (``cfg.sizing``), defaults to 0 —
++  today's band-only behaviour — and stays escalate-only;
++* the retuning walk from ``size-calibrate`` output back into ``[driver.sizing]`` is
++  documented in the config template's comment block;
++* (iteration 2) one garbled recorded value — an int too large for float — blanks its
++  own outcome cell instead of aborting the whole index, and the retuning walk names
++  the model-verdict blind spot so a review cannot mistake it for evidence.
++
++Offline, stdlib only. Run from the project root:
++    PYTHONPATH=src python -m unittest discover -s tests
++"""
++
++from __future__ import annotations
++
++import json
++import shutil
++import tempfile
++import unittest
++from pathlib import Path
++
++from pdca_harness import act, signoff, sizing
++from pdca_harness.config import Config, LeafConfig
++
++TEMPLATES = Path(__file__).resolve().parents[1] / "templates"
++
++
++def _config_template() -> str:
++    """The shipped config, template-repo or rendered instance — same fallback as
++    test_size_signal's example-block guard, because this suite runs in BOTH (the render
++    test re-runs it inside a rendered instance, where the file is `pdca.toml`)."""
++    root = Path(__file__).resolve().parents[1]
++    for name in ("pdca.toml.jinja", "pdca.toml"):
++        p = root / name
++        if p.is_file():
++            return p.read_text(encoding="utf-8")
++    raise AssertionError("no pdca.toml template found")
++
++
++def _cfg(root: Path) -> Config:
++    return Config(
++        root=root,
++        bundle_root=root / "results",
++        process_dir=root / "process",
++        templates_dir=TEMPLATES,
++        default_branch="main",
++        tracker_system="github",
++        tracker_url="",
++        issue_id_example="1",
++        builder=LeafConfig(mode="stub"),
++        reviewer=LeafConfig(mode="stub"),
++    )
++
++
++#: A brief with a real a-priori footprint (difficulty + a declared conflict), so the
++#: estimate joined into the index is visibly non-trivial rather than a degenerate 0/ok.
++_BRIEF = (
++    "- **Slug:** act-sizing\n"
++    "- **Difficulty:** high — wide surface\n"
++    "- **Conflicts with:** #311\n"
++)
++
++
++def _freeze(cfg: Config, iid: str, *, date: str = "2026-07-01",
++            patch: str = "diff --git a/x b/x\n") -> Path:
++    """A COMPLETE (frozen) bundle with an accepted §9 — the only material Act reads."""
++    d = cfg.bundle(iid)
++    d.mkdir(parents=True)
++    (d / "brief.md").write_text(_BRIEF, encoding="utf-8")
++    (d / "patch.diff").write_text(patch, encoding="utf-8")
++    (d / "check-gates.json").write_text("{}", encoding="utf-8")
++    shutil.copyfile(TEMPLATES / "SUMMARY.md.tpl", d / "SUMMARY.md")
++    signoff.record(d / "SUMMARY.md", action="accept", by="T", date=date)
++    return d
++
++
++class IndexSizingColumn(unittest.TestCase):
++    def setUp(self) -> None:
++        self.tmp = Path(tempfile.mkdtemp())
++        self.cfg = _cfg(self.tmp)
++
++    def tearDown(self) -> None:
++        shutil.rmtree(self.tmp, ignore_errors=True)
++
++    def test_index_joins_estimate_and_recorded_outcome(self) -> None:
++        """Criterion (a): the a-priori estimate beside the measured outcome, per bundle."""
++        d = _freeze(self.cfg, "42")
++        (d / "size-signal.json").write_text(json.dumps(
++            {"patch_bytes": 34816, "patch_files": 3, "rounds": 1,
++             "replans": 0, "auto_iters": 0}), encoding="utf-8")
++
++        [entry] = act.index(self.cfg)
++        # The estimate side is the brief-derived a-priori estimate — the same one the
++        # driver computes — asserted via the estimator itself so this binds the JOIN,
++        # not the estimator's internal numerology.
++        est = sizing.estimate(d / "brief.md", self.cfg)
++        expected_est = f"{est.band} (score {est.score})"
++        self.assertNotEqual(est.band, sizing.OK)  # the fixture brief really scores
++        self.assertEqual(entry.size_estimate, expected_est)
++        self.assertEqual(entry.size_outcome, "34 KB / 3 file(s) / 1 round(s)")
++
++        out = act.render_index([entry], act.patterns([entry]))
++        self.assertIn(
++            f"- sizing: estimate {expected_est} → outcome 34 KB / 3 file(s) / 1 round(s)",
++            out)
++
++    def test_bundle_predating_signal_renders_blank_never_a_measurement(self) -> None:
++        """Criterion (a), the blank half: no recorded signal ⇒ '—', and NEVER an outcome
++        measured at review time — the bundle carries a 2 KB patch that a fallback
++        measurement would happily report, and reporting it would fake a record #324
++        never made."""
++        _freeze(self.cfg, "7", patch="diff --git a/x b/x\n" + "+" * 2048 + "\n")
++
++        [entry] = act.index(self.cfg)
++        self.assertEqual(entry.size_outcome, "")
++        out = act.render_index([entry], act.patterns([entry]))
++        self.assertIn("- sizing: estimate ", out)
++        self.assertIn("→ outcome —", out)
++        self.assertNotIn("2 KB", out)
++
++    def test_overflowing_recorded_value_blanks_outcome_never_aborts_index(self) -> None:
++        """Iteration 2 (T3): a recorded value can parse as a Python int yet exceed float
++        range, so it sails past the int() guard and the `/ 1024` division raises
++        OverflowError. One garbled size-signal.json must cost its own outcome cell —
++        the criterion's graceful blank, same reading as "predates the signal" — never
++        abort the whole index. The healthy sibling bundle is the point: it proves the
++        index SURVIVES the garbled record, not merely that one entry reads blank."""
++        bad = _freeze(self.cfg, "13")
++        (bad / "size-signal.json").write_text(json.dumps(
++            {"patch_bytes": 10 ** 400, "patch_files": 3, "rounds": 1}), encoding="utf-8")
++        good = _freeze(self.cfg, "42")
++        (good / "size-signal.json").write_text(json.dumps(
++            {"patch_bytes": 34816, "patch_files": 3, "rounds": 1}), encoding="utf-8")
++
++        entries = act.index(self.cfg)  # pre-fix this raises OverflowError
++        by_name = {e.bundle.name: e for e in entries}
++        self.assertEqual(by_name["issue_13"].size_outcome, "")
++        self.assertNotEqual(by_name["issue_13"].size_estimate, "")  # estimate survives
++        self.assertEqual(by_name["issue_42"].size_outcome, "34 KB / 3 file(s) / 1 round(s)")
++
++        out = act.render_index(entries, act.patterns(entries))
++        self.assertIn("→ outcome —", out)  # the garbled record reads "not measured"
++        self.assertIn("→ outcome 34 KB / 3 file(s) / 1 round(s)", out)
++
++
++class ModelWeight(unittest.TestCase):
++    """Criterion (c): `model_weight` is `[driver.sizing]` config, defaulting to today's
++    behaviour, and escalate-only like the rest of `combine`'s contract."""
++
++    def setUp(self) -> None:
++        self.tmp = Path(tempfile.mkdtemp())
++        self.cfg = _cfg(self.tmp)
++        self.structural = sizing.SizeEstimate(
++            3, sizing.WATCH, ["difficulty=high"],
++            churn_band=sizing.WATCH, patch_band=sizing.OK)
++
++    def tearDown(self) -> None:
++        shutil.rmtree(self.tmp, ignore_errors=True)
++
++    def test_default_is_current_behaviour_band_only(self) -> None:
++        # No config, and config without the key: the model escalates the BAND and the
++        # score stays purely structural — byte-for-byte today's behaviour.
++        for cfg in (None, self.cfg):
++            est = sizing.combine(self.structural, {"band": "oversized"}, cfg)
++            self.assertEqual(est.band, sizing.OVERSIZED)
++            self.assertEqual(est.score, 3)
++        self.assertEqual(sizing.DEFAULT_MODEL_WEIGHT, 0)
++
++    def test_configured_weight_joins_score_on_escalation(self) -> None:
++        self.cfg.sizing = {"model_weight": 5}
++        est = sizing.combine(self.structural, {"band": "watch"}, self.cfg)
++        self.assertEqual(est.score, 8)
++        self.assertEqual(est.band, sizing.WATCH)
++
++    def test_ok_verdict_carries_no_weight(self) -> None:
++        # The weight is "how much a model ESCALATION is worth" — an `ok` verdict flags
++        # nothing, so it adds nothing regardless of configuration.
++        self.cfg.sizing = {"model_weight": 5}
++        est = sizing.combine(self.structural, {"band": "ok"}, self.cfg)
++        self.assertEqual(est.score, 3)
++
++    def test_weight_is_escalate_only_and_typo_tolerant(self) -> None:
++        # A negative weight would let the model LOWER a structural score — the exact
++        # single-point-of-failure `combine` exists to forbid — so it clamps to 0. A
++        # malformed value falls back to the default rather than aborting the beat,
++        # the same tolerance as every other `[driver.sizing]` key.
++        for bad in (-3, "lots"):
++            self.cfg.sizing = {"model_weight": bad}
++            est = sizing.combine(self.structural, {"band": "oversized"}, self.cfg)
++            self.assertEqual(est.score, 3, f"model_weight={bad!r} moved the score")
++
++    def test_missing_verdict_untouched_with_weight_configured(self) -> None:
++        self.cfg.sizing = {"model_weight": 5}
++        self.assertIs(sizing.combine(self.structural, None, self.cfg), self.structural)
++
++
++class RetuningDocs(unittest.TestCase):
++    def _sizing_block(self) -> str:
++        """The `[driver.sizing]` example block, scoped to end where the NEXT sub-table's
++        section begins — the `[driver.size_signal]` guard in test_size_signal.py scans
++        from ITS header to EOF, so the two blocks must not read each other's keys."""
++        parts = _config_template().split("# [driver.sizing]", 1)
++        self.assertEqual(len(parts), 2, "the [driver.sizing] example block is missing")
++        return parts[1].split("[driver.size_signal]", 1)[0]
++
++    def test_config_template_documents_the_retuning_walk(self) -> None:
++        """Criterion (b): the `[driver.sizing]` comment block every rendered instance
++        gets walks `size-calibrate` output back into the table, and defines
++        `model_weight` with its Act-cadence review noted."""
++        text = _config_template()
++        self.assertIn("# [driver.sizing]", text)
++        self.assertIn("size-calibrate", text)
++        self.assertIn("model_weight", text)
++        self.assertIn("Act cadence", text)
++
++    def test_retuning_walk_names_the_model_verdict_blind_spot(self) -> None:
++        """Iteration 2 (C5): the index's sizing line is structural-only and the
++        calibrator mines no model-verdict feature, so escalation-vs-outcome correlation
++        is unobservable today. The walk must SAY so where `model_weight` is documented —
++        otherwise an Act-cadence review reads the loop as licensing a weight change
++        that no shipped artifact can evidence."""
++        text = _config_template()
++        self.assertIn("model-verdict", text)
++        self.assertIn("escalation-vs-outcome", text)
++
++    def test_shipped_example_matches_the_defaults_both_ways(self) -> None:
++        """Same guard the `[driver.size_signal]` example carries: the block is presented
++        as 'the defaults, uncomment to retune', so a drifted value CHANGES behaviour
++        while looking like it preserves it — and a default absent from the example is
++        one an instance cannot discover."""
++        import re as _re
++        defaults = dict(sizing.DEFAULT_WEIGHTS)
++        defaults.update(brief_bytes_kb=sizing.DEFAULT_BRIEF_KB,
++                        watch=sizing.DEFAULT_WATCH,
++                        oversized=sizing.DEFAULT_OVERSIZED,
++                        model_weight=sizing.DEFAULT_MODEL_WEIGHT)
++        found = dict(_re.findall(r"^#\s*(\w+)\s*=\s*(-?\d+)\s*$",
++                                 self._sizing_block(), _re.MULTILINE))
++        self.assertEqual(set(found), set(defaults))
++        for key, value in found.items():
++            with self.subTest(key=key):
++                self.assertEqual(int(value), defaults[key])
++
++
++if __name__ == "__main__":
++    unittest.main()

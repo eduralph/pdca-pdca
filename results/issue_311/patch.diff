@@ -1,0 +1,992 @@
+diff --git a/template/pdca.toml.jinja b/template/pdca.toml.jinja
+index 7a92dcd..f07690b 100644
+--- a/template/pdca.toml.jinja
++++ b/template/pdca.toml.jinja
+@@ -851,6 +851,33 @@ checks = [
+ ]
+ {% endif %}
+ 
++# Host-only CI parity (issue #311). CI jobs the host runs on EVERY PR but the delegated
++# gate runner does not cover (a spell-checker like `typos`, a docs lint). The T4 slot runs
++# BEFORE patch.diff is applied, so it structurally cannot see prose that arrives in the
++# patch — a bundle can pass Check green and open a PR that immediately fails a required
++# status. Declare those commands here and the harness runs each one FROM a reconstructed
++# base + patch.diff tree, at two seams:
++#   * at Check, as gate rows (defaults: tier "T4", bundle scope) against the same lane
++#     worktree the bundle-scoped gates trust (#296) — a red lands in check-gates +
++#     SUMMARY §6 where sign-off sees it;
++#   * again in `{{ cli_name }} publish`, immediately before anything is pushed: the
++#     harness re-FETCHES, PINS the exact base commit the push will build on, materializes
++#     base + patch.diff in an ephemeral worktree at that commit, runs the commands there,
++#     and builds the pushed branch on that same commit — so a green certifies the very
++#     tree being pushed even when the base advanced since Check. ANY command that does
++#     not pass — any non-zero exit, exit 77 included — blocks the push (no branch, no
++#     PR) and is recorded in the bundle's host-ci.json naming the command and the base.
++# A bare string is shorthand for { cmd = "..." }; a table row may also set id / label /
++# tier. `gating` is forced true (the host's CI will fail the PR on these regardless, so
++# an advisory row would re-open the exact observed gap). The target must be a git
++# checkout; at Check without a patched worktree the rows read UNVERIFIABLE (→ §6), and
++# publish refuses rather than push content the declared CI never saw. Empty / absent
++# (the default) ⇒ byte-identical behaviour everywhere.
++# host_ci = [
++#   "typos",
++#   { id = "docs-lint", cmd = "make docs-lint" },
++# ]
++
+ # Reverse registry-consistency (issue #205). The FORWARD direction (a source file a patch
+ # adds must be registered in a manifest) is a project gate; this is the REVERSE, generic in
+ # the harness: every line a patch ADDS to one of these manifest files must reference a path
+diff --git a/template/src/pdca_harness/config.py b/template/src/pdca_harness/config.py
+index a2b2691..e405d0b 100644
+--- a/template/src/pdca_harness/config.py
++++ b/template/src/pdca_harness/config.py
+@@ -127,6 +127,18 @@ class Config:
+     issue_url_pattern: str = ""
+     repo_checkouts: dict[str, str] = field(default_factory=dict)  # repo_spec → local path
+     gates_checks: list[dict] = field(default_factory=list)
++    # Host-only CI parity commands (issue #311): ``[gates] host_ci`` — CI jobs the host
++    # runs on EVERY PR but the delegated gate runner does not cover (a spell-checker like
++    # `typos`, a docs lint). The T4 slot runs before ``patch.diff`` is applied, so it
++    # structurally cannot see content that arrives in the patch — a bundle could pass
++    # Check green and open a PR that immediately fails a required status. Each declared
++    # command runs FROM a reconstructed base + ``patch.diff`` tree: at Check as a gate
++    # row (``gates._run_checks``, the lane worktree) and again in ``publish`` immediately
++    # before anything is pushed (``publish._host_ci_passes``, an ephemeral tree pinned to
++    # the exact base commit the push will build on). A bare string is shorthand for
++    # ``{cmd = "..."}``; rows are normalized by :func:`_normalize_host_ci` (always
++    # gating). Empty (the default) ⇒ byte-identical behaviour everywhere.
++    host_ci_checks: list[dict] = field(default_factory=list)
+     # Reverse registry-consistency (issue #205): [gates.registry_consistency] naming an
+     # instance's manifest files ({files=[...], pattern="<regex, group 1 = path>"}). The
+     # `registry-check` subcommand (wired as a bundle-scoped gate) fails a patch that adds a
+@@ -419,6 +431,7 @@ class Config:
+         leaves = data.get("leaves", {})
+         gates = data.get("gates", {})
+         gates_checks = list(gates.get("checks", []))
++        host_ci_checks = _normalize_host_ci(gates.get("host_ci", []))
+         gates_runner = gates.get("runner", "")
+         registry_consistency = dict(gates.get("registry_consistency", {}))
+         install_extra_bootstrap = data.get("install", {}).get("extra_bootstrap", "")
+@@ -433,8 +446,11 @@ class Config:
+         }
+         # PDCA_GATES_MODE=stub empties the configured checks → the all-PASS stub
+         # rows, so an offline "rehearse" runs the control flow without Docker.
++        # host_ci rows are emptied too (#311): same determinism reason — a rehearse
++        # must not run instance CI commands (or reconstruct worktrees) offline.
+         if os.environ.get("PDCA_GATES_MODE") == "stub":
+             gates_checks = []
++            host_ci_checks = []
+ 
+         # PDCA_LEAVES_MODE forces every leaf's mode regardless of pdca.toml — so
+         # CI and the offline self-test (`make`) stay deterministic (=stub, no
+@@ -599,6 +615,7 @@ class Config:
+             act=leaf("act"),
+             author=data.get("project", {}).get("author", ""),
+             gates_checks=gates_checks,
++            host_ci_checks=host_ci_checks,
+             registry_consistency=registry_consistency,
+             install_extra_bootstrap=install_extra_bootstrap,
+             manual_test_cmd=manual_test_cmd,
+@@ -638,6 +655,44 @@ class Config:
+         )
+ 
+ 
++def _normalize_host_ci(entries: list) -> list[dict]:
++    """Normalize ``[gates] host_ci`` (issue #311) into gate-check-shaped rows.
++
++    A bare string is shorthand for ``{cmd = "<string>"}``. Defaults, chosen so a
++    declared row closes the blind spot without further configuration: ``tier = "T4"``
++    (the CI-parity slot the issue names — the contribution as the host's CI will see
++    it), ``scope = "bundle"`` (they need the patched tree), and an ``id``/``label``
++    derived from the command so a failure always names what ran. Explicit id / label /
++    tier keys on a table row win over those defaults — but ``gating`` is FORCED true,
++    a contract rather than a default: the host's CI will fail the PR on every declared
++    command regardless of what an advisory row believed, and the #311 criterion is
++    literal — a command that exits non-zero blocks publish. A declared
++    ``gating = false`` is therefore ignored, loudly (the sign-off round that reviewed
++    this feature did not bless a bypass carve-out).
++    """
++    out: list[dict] = []
++    for i, entry in enumerate(entries):
++        row = dict(entry) if isinstance(entry, dict) else {"cmd": str(entry)}
++        cmd = str(row.get("cmd", "") or row.get("subcmd", ""))
++        if not cmd.strip():
++            # The #338 lesson: `subprocess.run("")` exits 0, so a command-less row
++            # would pass VACUOUSLY at every seam it is meant to guard. Drop it loudly.
++            print(f"config: [gates] host_ci entry {i} has no cmd/subcmd — ignoring it",
++                  file=sys.stderr)
++            continue
++        if not row.pop("gating", True):
++            print(f"config: [gates] host_ci entry {i} declares gating = false — "
++                  "ignored: a declared host-CI command always blocks (the host's CI "
++                  "will fail the PR on it either way, #311)", file=sys.stderr)
++        row["gating"] = True
++        row.setdefault("id", f"host-ci-{i}")
++        row.setdefault("tier", "T4")
++        row.setdefault("scope", "bundle")
++        row.setdefault("label", f"host CI: {cmd}")
++        out.append(row)
++    return out
++
++
+ def _find_root(start: Path) -> Path:
+     """Walk up from ``start`` to the directory containing ``pdca.toml``."""
+     start = start.resolve()
+diff --git a/template/src/pdca_harness/gates.py b/template/src/pdca_harness/gates.py
+index 417e94b..6799f67 100644
+--- a/template/src/pdca_harness/gates.py
++++ b/template/src/pdca_harness/gates.py
+@@ -277,8 +277,9 @@ def _applies(chk: dict, scopes: tuple[str, ...], labels: frozenset[str] | None)
+ def _run_checks(cfg: Config, *, cwd: Path, bundle: Path | None, scopes: tuple[str, ...],
+                 worktree_override: Path | None = None) -> list[dict]:
+     # No configured gates → the offline stub: the full 5/5/1 with the mechanical
+-    # gate elements stub-passed (so the offline slice runs green).
+-    if not cfg.gates_checks:
++    # gate elements stub-passed (so the offline slice runs green). A declared
++    # [gates] host_ci row counts as real configuration too (#311).
++    if not cfg.gates_checks and not cfg.host_ci_checks:
+         return _assemble_matrix([], stub=True)
+ 
+     labels = _bundle_target(bundle, cfg.gate_target_match, cfg.gate_target_default, cfg.gate_target_flags)
+@@ -324,6 +325,32 @@ def _run_checks(cfg: Config, *, cwd: Path, bundle: Path | None, scopes: tuple[st
+                 continue
+             configured.append(_run_one(chk, cwd=cwd, bundle=bundle, runner=cfg.gates_runner,
+                                        worktree_path=wt))
++        # Host-only CI parity rows ([gates] host_ci, issue #311): commands the host's CI
++        # runs on every PR but the delegated gate runner does not cover (a spell-checker,
++        # a docs lint). Unlike the rows above (cwd=cfg.root; each command must target
++        # $PDCA_WORKTREE itself), these run FROM the reconstructed base + patch.diff
++        # tree: the point of the feature is that the HARNESS guarantees the tree under
++        # test is the patched one — the T4 slot runs pre-apply, so it structurally cannot
++        # see content that arrives in the patch. No bundle (the CI working-tree /
++        # integration re-gate) ⇒ skipped: there the host's own CI runs these for real.
++        # No patched tree (isolation off / target not a git checkout) ⇒ an UNVERIFIABLE
++        # row (→ SUMMARY §6 NEEDS-HUMAN), never a run against the wrong tree — a green
++        # over unpatched content is the exact lie this feature closes (#296 doctrine).
++        if bundle is not None:
++            for chk in cfg.host_ci_checks:
++                if wt is None:
++                    configured.append(_row(
++                        f"{chk.get('tier', 'T4')} {chk.get('label', chk.get('id', ''))}",
++                        "unverifiable",
++                        oracle=chk.get("cmd", "") or chk.get("subcmd", ""),
++                        rule_id=chk.get("id", ""),
++                        path_line="host CI needs the patched tree — no worktree "
++                                  "([driver].worktree off or target not a git checkout)",
++                        gating=bool(chk.get("gating", True)),
++                        element=chk.get("tier", "T4")))
++                else:
++                    configured.append(_run_one(chk, cwd=wt, bundle=bundle,
++                                               runner=cfg.gates_runner, worktree_path=wt))
+     finally:
+         if ovf_primary is not None and wt is not None:
+             worktree.overflow_remove(ovf_primary, wt)
+diff --git a/template/src/pdca_harness/publish.py b/template/src/pdca_harness/publish.py
+index f0bd705..4ec60b9 100644
+--- a/template/src/pdca_harness/publish.py
++++ b/template/src/pdca_harness/publish.py
+@@ -31,7 +31,7 @@ import subprocess
+ import sys
+ from pathlib import Path
+ 
+-from . import brief, gates, leaves, progress, state
++from . import brief, gates, leaves, progress, state, worktree
+ from .config import Config
+ 
+ COMMIT_MSG = "commit-msg.txt"
+@@ -40,6 +40,10 @@ PR_BODY = "pr-description.md"
+ # Do worktree and stacked PR base off the prior waves' folded work (#wave-model); absent ⇒
+ # build / open the PR off the target base.
+ STACK_BASE_FILE = "stack-base"
++# The pre-push host-CI record (issue #311): the [gates] host_ci rows as run against the
++# pinned base + patch.diff tree, written when the gate REFUSES (so the refusal survives
++# for the human, naming the command and the base) and removed again once they pass.
++HOST_CI_JSON = "host-ci.json"
+ 
+ 
+ def _ensure_texts(cfg: Config, d: Path) -> bool:
+@@ -290,6 +294,11 @@ def publish(
+             kind = "stacked draft PR" if own_repo else "stacked draft PR (fork: cumulative diff vs base)"
+         print(f"publish --dry-run — {d.name} → {kind} on {repo_spec} ({branch} → {pr_base}):")
+         print(f"  # stash the target working tree (Do/Check leave it dirty), restore it after")
++        if cfg.host_ci_checks:
++            print(f"  # host CI gate (#311): fetch, pin the exact {checkout_base} commit the "
++                  f"push will build on, and run {len(cfg.host_ci_checks)} declared command(s) "
++                  "against base + patch.diff in an ephemeral worktree — ANY non-zero exit "
++                  "blocks the push")
+         for c in steps + ([pr_cmd] if open_pr else []):
+             print("  " + " ".join(shlex.quote(x) for x in c))
+         return 0
+@@ -304,6 +313,22 @@ def publish(
+     if stack_branch:
+         _warn_if_squash_only(repo_spec)  # a stacked PR must merge-commit, not squash (#123)
+ 
++    # Host-only CI parity gate ([gates] host_ci, issue #311): the declared commands must
++    # pass against the tree the push would publish, before anything is pushed. The T4
++    # gate above runs with cwd=cfg.root against the tree BEFORE patch.diff is applied,
++    # so it structurally cannot see content that arrives in the patch (the wyrd `typos`
++    # class: Check green, PR opens red on a required status). The gate fetches and PINS
++    # the exact base commit; the plan's `checkout -B` is then rebased onto that same
++    # commit so the certified tree IS the pushed tree even when the base advanced since
++    # Check (iteration-1 C5). Undeclared ⇒ ci_base stays "" and the steps run unchanged.
++    ci_ok, ci_base = _host_ci_passes(cfg, d, repo,
++                                     "origin" if stack_branch else base_remote,
++                                     checkout_base)
++    if not ci_ok:
++        return 1
++    if ci_base:
++        steps = _pin_checkout(steps, git, branch, ci_base)
++
+     orig_ref = _current_ref(repo)
+     stashed = _stash_worktree(repo)
+     try:
+@@ -340,6 +365,10 @@ def publish(
+         "by": by or _signoff_by(d) or cfg.author or "unknown", "date": today,
+         "id_pending": pending_id,
+     }
++    if ci_base:
++        # The base commit the host-CI gate certified — and, via _pin_checkout, the exact
++        # parent the pushed branch was built on (#311): auditable certified == pushed.
++        record["host_ci_base"] = ci_base
+     if stack_branch:
+         record["stacks_on"] = brief.stacks_on(d / "brief.md")
+     (d / "publish.json").write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+@@ -399,6 +428,11 @@ def _publish_stacked(
+         print(f"publish --dry-run — {d.name} → commit stacked onto {repo_spec} "
+               f"PR branch {branch} (base {base_ref}):")
+         print(f"  # stash the target working tree (Do/Check leave it dirty), restore it after")
++        if cfg.host_ci_checks:
++            print(f"  # host CI gate (#311): fetch, pin the exact {base_ref} commit the "
++                  f"push will build on, and run {len(cfg.host_ci_checks)} declared command(s) "
++                  "against base + patch.diff in an ephemeral worktree — ANY non-zero exit "
++                  "blocks the push")
+         for c in steps:
+             print("  " + " ".join(shlex.quote(x) for x in c))
+         print("  " + " ".join(shlex.quote(x) for x in pr_list)
+@@ -417,6 +451,15 @@ def _publish_stacked(
+               "'Onto branch' brief field to use the default new-PR flow.", file=sys.stderr)
+         return 1
+ 
++    # Host-only CI parity gate (#311) — this path pushes too, so it is gated the same
++    # way as the new-PR path: fetch, pin the exact PR-branch commit the push builds on,
++    # run the declared commands against pinned base + patch.diff, block on ANY non-zero.
++    ci_ok, ci_base = _host_ci_passes(cfg, d, repo, remote, base_ref)
++    if not ci_ok:
++        return 1
++    if ci_base:
++        steps = _pin_checkout(steps, git, branch, ci_base)
++
+     # Stash the (Do/Check-dirtied) tree so checkout -B + apply run clean; restore after (#83).
+     orig_ref = _current_ref(repo)
+     stashed = _stash_worktree(repo)
+@@ -433,12 +476,15 @@ def _publish_stacked(
+     finally:
+         _restore_worktree(repo, orig_ref, stashed)
+ 
+-    (d / "publish.json").write_text(json.dumps({
++    rec = {
+         "mode": "stacked",
+         "branch": branch, "pr_url": pr_url, "base": base_ref, "repo": repo_spec,
+         "by": by or _signoff_by(d) or cfg.author or "unknown", "date": today,
+         "id_pending": pending_id,
+-    }, indent=2) + "\n", encoding="utf-8")
++    }
++    if ci_base:
++        rec["host_ci_base"] = ci_base  # certified == pushed, auditable (#311)
++    (d / "publish.json").write_text(json.dumps(rec, indent=2) + "\n", encoding="utf-8")
+ 
+     print(f"\nCommit stacked onto {repo_spec} PR branch {branch} ({pr_url}).")
+     print(f"  watch CI:  gh pr checks {pr_url} --watch")
+@@ -713,6 +759,107 @@ def _t4_passes(cfg: Config, d: Path) -> bool:
+     return True
+ 
+ 
++def _pinned_base(repo: Path, fetch_remote: str, base_ref: str) -> tuple[str, str]:
++    """``(sha, error)`` — fetch and resolve the exact base commit the push will build on.
++
++    Runs the SAME fetch the push plan's first step runs, then resolves ``base_ref`` to a
++    commit SHA. The SHA — not the moving ref — is what the host-CI gate certifies and
++    what :func:`_pin_checkout` rebases the push onto, so "certified tree == pushed tree"
++    holds by construction (iteration-1 C5: a warm, no-fetch reconstruction certified a
++    stale base while the push fetched afterward). A non-empty ``error`` means the base
++    cannot be pinned; the caller fails closed."""
++    r = subprocess.run(["git", "-C", str(repo), "fetch", fetch_remote],
++                       capture_output=True, text=True)
++    if r.returncode != 0:
++        tail = (r.stderr or "").strip().splitlines()
++        return "", f"`git fetch {fetch_remote}` failed ({tail[-1] if tail else 'no output'})"
++    r = subprocess.run(["git", "-C", str(repo), "rev-parse", "--verify", "--quiet",
++                        base_ref + "^{commit}"], capture_output=True, text=True)
++    sha = (r.stdout or "").strip()
++    if r.returncode != 0 or not sha:
++        return "", f"base ref '{base_ref}' does not resolve after the fetch"
++    return sha, ""
++
++
++def _pin_checkout(steps: list[list[str]], git, branch: str, base_commit: str) -> list[list[str]]:
++    """Rebase the push plan's ``checkout -B`` step onto the exact commit host CI certified.
++
++    The plan was built against a moving ref (``<remote>/<base>``), which its own
++    ``fetch`` step would re-resolve at push time — re-opening the certified-vs-pushed
++    gap on a base that advances mid-publish (#311, iteration-1 C5). Matched on the
++    step's verbs, not a list index, so a plan reordering can't silently pin the wrong
++    step."""
++    return [git("checkout", "-B", branch, base_commit) if c[3:5] == ["checkout", "-B"]
++            else c for c in steps]
++
++
++def _host_ci_passes(cfg: Config, d: Path, repo: Path, fetch_remote: str,
++                    base_ref: str) -> tuple[bool, str]:
++    """Run the declared host-only CI commands (``[gates] host_ci``, issue #311) against
++    the exact tree the push would publish; ``(False, "")`` blocks the publish before
++    anything is pushed.
++
++    The pre-push counterpart of the Check-time host-CI rows (``gates._run_checks``) —
++    but NOT the lane reconstruction those trust: the lane is deliberately warm and
++    never fetches (``worktree.rebuild_for_gate`` — Check attests the base Do built
++    against), while the push builds on the freshly fetched base, so a lane-based run
++    can certify a stale base and still let publish push a tree the declared CI never
++    saw (iteration-1 C5). So this fetches (the same fetch the push plan runs), PINS
++    the resolved base commit, materializes an ephemeral ``base + patch.diff`` tree at
++    that commit (``worktree.for_publish``), runs the commands there, and returns the
++    pinned SHA so the push's ``checkout -B`` builds on it — certified tree == pushed
++    tree, by construction.
++
++    Nothing declared ⇒ ``(True, "")`` with no work at all — an instance that opts out
++    is byte-identical to today (criterion c). EVERY command that does not pass blocks
++    the push — including exit 77 (a Check gate's "cannot decide" channel) and any row
++    hand-marked non-gating: the #311 criterion is literal ("a command that exits
++    non-zero … blocks publish — no branch is pushed, no PR is opened"), the host's CI
++    will fail the PR on these commands regardless of a carve-out, and sign-off did not
++    bless one (iteration-1 C3). A refusal names the command on stderr and records
++    every row plus the pinned base in the bundle's ``host-ci.json`` (removed again
++    once they pass). Fail CLOSED when the base can't be pinned or no tree can be
++    materialized — pushing content the declared CI never saw is the exact blind spot
++    this closes."""
++    if not cfg.host_ci_checks:
++        return True, ""
++    record = d / HOST_CI_JSON
++
++    def _refuse(reason: str, rows: list[dict], base: str = "") -> tuple[bool, str]:
++        record.write_text(json.dumps({"overall": "fail", "reason": reason,
++                                      "base": base, "rows": rows},
++                                     indent=2) + "\n", encoding="utf-8")
++        print(f"publish: host CI gate — {reason} — nothing was pushed, no PR was "
++              f"opened; see {d.name}/{HOST_CI_JSON}.", file=sys.stderr)
++        return False, ""
++
++    sha, err = _pinned_base(repo, fetch_remote, base_ref)
++    if not sha:
++        return _refuse(f"cannot pin the base commit the push would build on — {err}", [])
++    try:
++        wt = worktree.for_publish(d, repo, sha)
++    except worktree.WorktreeError as exc:
++        return _refuse(f"no pushed-tree to run against ({exc})", [], base=sha)
++    rows: list[dict] = []
++    try:
++        for chk in cfg.host_ci_checks:
++            rows.append(gates._run_one(chk, cwd=wt, bundle=d,
++                                       runner=cfg.gates_runner, worktree_path=wt))
++    finally:
++        worktree.overflow_remove(repo, wt)
++    failed = [r for r in rows if r["result"] != "pass"]
++    if failed:
++        for r in failed:
++            print(f"publish: host CI '{r['rule_id']}' did NOT pass against the pinned "
++                  f"base + patch.diff ({r['result']}) — command: {r['oracle']}\n"
++                  f"    {r['path_line']}", file=sys.stderr)
++        return _refuse(f"{len(failed)} host CI command(s) did not pass against the "
++                       f"tree the push would publish (base {sha[:12]} + patch.diff) — "
++                       "fix the tree (or the command) and retry", rows, base=sha)
++    record.unlink(missing_ok=True)
++    return True, sha
++
++
+ def _check_repo(repo: Path, repo_spec: str, required_remotes=("upstream", "origin")) -> int:
+     """The local checkout must exist and have the remotes this publish path needs.
+ 
+diff --git a/template/src/pdca_harness/worktree.py b/template/src/pdca_harness/worktree.py
+index 9286094..eda8312 100644
+--- a/template/src/pdca_harness/worktree.py
++++ b/template/src/pdca_harness/worktree.py
+@@ -532,6 +532,59 @@ def _overflow_create(d: Path, primary: Path, base_ref: str) -> Path | None:
+         return None
+ 
+ 
++def for_publish(d: Path, primary: Path, base_commit: str) -> Path:
++    """Materialize an EPHEMERAL ``base_commit + patch.diff`` tree for the pre-push
++    host-CI gate (``[gates] host_ci``, issue #311); the caller MUST tear it down with
++    ``overflow_remove(primary, tree)`` once the commands have run.
++
++    Deliberately NOT the lane reconstruction (:func:`rebuild_for_gate`): the lane is
++    warm and never fetches — a Check gate must attest the base Do built against —
++    while publish's push step fetches and builds the branch on the CURRENT base, so a
++    lane-based pre-push run can certify a stale base and let publish push a tree the
++    declared CI never saw. Publish therefore fetches, resolves the exact commit its
++    push will build on, and hands that SHA here; this only materializes it. An
++    ephemeral sibling tree (the #226 overflow shape, uncapped — exactly one exists,
++    removed synchronously) also never disturbs a lane a concurrent Do or gate read may
++    own, so no lane lock is needed.
++
++    Fail CLOSED (#296 doctrine): every failure raises :class:`WorktreeError` with the
++    reason — the pre-push gate must refuse rather than run against the wrong tree or
++    let publish push content the declared CI never saw.
++    """
++    if not (primary / ".git").exists():
++        raise WorktreeError(
++            f"{d.name}: {primary} is not a git checkout — cannot materialize the "
++            "tree the push would publish for the host-CI gate")
++    ovf = _overflow_path(primary)
++    _git(primary, "worktree", "prune")  # drop admin entries for any vanished trees first
++    if _git(primary, "worktree", "add", "--force", "--detach", str(ovf), base_commit) != 0:
++        raise WorktreeError(
++            f"{d.name}: could not create a worktree at {base_commit[:12]} for the "
++            "host-CI gate — the pinned base commit must be materializable")
++    try:
++        patch = d / "patch.diff"
++        patch_text = patch.read_text(encoding="utf-8") if patch.is_file() else ""
++        if patch_text.strip():
++            if _GITLINK_RE.search(patch_text):
++                # Same gitlink fail-closed as rebuild_for_gate (#296 review round 2):
++                # plain `git apply` exits 0 while skipping the gitlink, so this tree
++                # would carry the wrong submodule revision under a green run.
++                raise WorktreeError(
++                    f"{d.name}: patch.diff changes a submodule gitlink (mode 160000), "
++                    "which this reconstruction cannot materialize — `git apply` would "
++                    "silently skip it and a green would certify the wrong submodule "
++                    "revision (#296)")
++            if _git(ovf, "apply", str(patch.resolve())) != 0:
++                raise WorktreeError(
++                    f"{d.name}: patch.diff does not apply onto the fetched base "
++                    f"{base_commit[:12]} — the base advanced past the fix; "
++                    "rebase/re-Check the bundle, then retry")
++    except WorktreeError:
++        overflow_remove(primary, ovf)
++        raise
++    return ovf
++
++
+ def for_gate(d: Path, cfg: Config,
+              hold: contextlib.ExitStack | None = None) -> tuple[Path | None, Path | None]:
+     """Resolve the worktree a gate should read for bundle ``d`` (issues #226, #296).
+diff --git a/template/tests/test_host_ci.py b/template/tests/test_host_ci.py
+new file mode 100644
+index 0000000..67a2247
+--- /dev/null
++++ b/template/tests/test_host_ci.py
+@@ -0,0 +1,515 @@
++"""Host-only CI parity gate (`[gates] host_ci`, issue #311) — offline slice.
++
++The blind spot this closes: an instance's only CI-parity gates delegate to the host's
++runner, and the T4 publish gate runs with ``cwd=cfg.root`` against the tree BEFORE
++``patch.diff`` is applied (`publish._t4_passes`) — so a host CI job outside that runner
++(a spell-checker like `typos`, a docs lint) structurally cannot see content that arrives
++in the patch. Result: Check green, PR opens red on a required status (observed four
++times in the wyrd instance).
++
++The success criterion, asserted here against stub commands:
++  (a) a declared command that exits non-zero AGAINST THE TREE THE PUSH WOULD PUBLISH
++      blocks publish — no branch is pushed, no PR is opened — and the failure is
++      recorded with the command named. "Non-zero" is literal: exit 77 and a
++      hand-marked non-gating row block too (iteration-1 C3 — no unblessed carve-outs);
++  (b) a command that exits 0 leaves publish behaviour unchanged;
++  (c) an instance that declares nothing is byte-identical to today.
++
++Iteration-1 C5 is covered by the real-git class: the publish-leg gate must FETCH and
++PIN the exact base commit the push will build on — a warm no-fetch reconstruction
++certified a stale base while the push fetched afterward, so the gate could pass a tree
++other than the one pushed. Red on pre-fix `main`: publish consulted only `_t4_passes`
++and pushed regardless of any declared host-CI command. The git/gh subprocesses are
++stubbed the way this suite already stubs them (`test_publish_slice`); the real-git
++class uses a toy bare origin + clone — no Claude, no network.
++"""
++
++from __future__ import annotations
++
++import contextlib
++import io
++import json
++import os
++import shutil
++import subprocess as sp
++import tempfile
++import unittest
++from contextlib import redirect_stderr, redirect_stdout
++from pathlib import Path
++from types import SimpleNamespace
++from unittest import mock
++
++from pdca_harness import gates, publish, signoff, worktree
++from pdca_harness.config import Config, LeafConfig, _normalize_host_ci
++
++TEMPLATES = Path(__file__).resolve().parents[1] / "templates"
++
++
++def _cfg(root: Path) -> Config:
++    """Stub leaves, no configured gates, generic publish defaults (own-repo remotes)."""
++    return Config(
++        root=root,
++        bundle_root=root / "results",
++        process_dir=root / "process",
++        templates_dir=TEMPLATES,
++        default_branch="main",
++        tracker_system="github",
++        tracker_url="https://example.org/issues",
++        issue_id_example="1",
++        builder=LeafConfig(mode="stub"),
++        reviewer=LeafConfig(mode="stub"),
++        planner=LeafConfig(mode="stub", interactive=True),
++        signoff=LeafConfig(mode="stub", interactive=True),
++        publisher=LeafConfig(mode="stub", interactive=True),
++        act=LeafConfig(mode="stub", interactive=True),
++        gates_checks=[],
++        base_remote="origin",
++        # Hermetic: pin the toy target inside this test's tmp root (see
++        # test_publish_slice for why the sibling convention must not be relied on here).
++        repo_checkouts={"example-org/example-repo": str(root / "example-repo")},
++    )
++
++
++_FIX_BRIEF = (
++    "- **Slug:** my-fix\n"
++    "- **Repo + branch target:** example-org/example-repo @ main\n"
++)
++_STACK_BRIEF = _FIX_BRIEF + "- **Onto branch:** origin/feature/x\n"
++
++
++def _bundle(cfg: Config, issue_id: str, *, brief_body: str = _FIX_BRIEF) -> Path:
++    """An accepted (COMPLETE) bundle with a non-empty patch — publish's precondition."""
++    d = cfg.bundle(issue_id)
++    d.mkdir(parents=True)
++    (d / "brief.md").write_text(brief_body, encoding="utf-8")
++    (d / "patch.diff").write_text("diff --git a/x b/x\n", encoding="utf-8")
++    (d / "check-gates.json").write_text("{}", encoding="utf-8")
++    shutil.copyfile(TEMPLATES / "SUMMARY.md.tpl", d / "SUMMARY.md")
++    signoff.record(d / "SUMMARY.md", action="accept", by="Tester", date="2026-07-31")
++    return d
++
++
++class HostCiConfig(unittest.TestCase):
++    """`[gates] host_ci` parses into gate-check-shaped rows; absent ⇒ empty (criterion c)."""
++
++    def setUp(self) -> None:
++        self.tmp = Path(tempfile.mkdtemp())
++        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
++
++    def _load(self, toml: str) -> Config:
++        (self.tmp / "pdca.toml").write_text(toml, encoding="utf-8")
++        return Config.load(self.tmp)
++
++    def test_bare_string_and_table_rows_normalize(self) -> None:
++        cfg = self._load(
++            "[gates]\n"
++            'host_ci = ["typos", { id = "docs", cmd = "./lint", tier = "T2" }]\n')
++        self.assertEqual(cfg.host_ci_checks, [
++            {"cmd": "typos", "gating": True, "id": "host-ci-0", "tier": "T4",
++             "scope": "bundle", "label": "host CI: typos"},
++            {"id": "docs", "cmd": "./lint", "gating": True, "tier": "T2",
++             "scope": "bundle", "label": "host CI: ./lint"},
++        ])
++
++    def test_gating_false_is_forced_true_loudly(self) -> None:
++        # Iteration-1 C3: a `gating = false` row published despite a failing command.
++        # The key is now a contract, not a default — forced true, ignored loudly.
++        err = io.StringIO()
++        with redirect_stderr(err):
++            cfg = self._load('[gates]\nhost_ci = [{ cmd = "typos", gating = false }]\n')
++        self.assertTrue(cfg.host_ci_checks[0]["gating"])
++        self.assertIn("gating", err.getvalue())
++
++    def test_absent_key_is_empty(self) -> None:
++        # Criterion (c) at the config layer: nothing declared ⇒ nothing runs anywhere.
++        cfg = self._load("[gates]\nchecks = []\n")
++        self.assertEqual(cfg.host_ci_checks, [])
++
++    def test_commandless_entry_is_dropped_loudly(self) -> None:
++        # The #338 lesson: `subprocess.run("")` exits 0, so an empty cmd would pass
++        # vacuously. A row with neither cmd nor subcmd is dropped with a warning.
++        err = io.StringIO()
++        with redirect_stderr(err):
++            cfg = self._load('[gates]\nhost_ci = [{ id = "oops" }, "typos"]\n')
++        self.assertEqual(len(cfg.host_ci_checks), 1)
++        self.assertEqual(cfg.host_ci_checks[0]["cmd"], "typos")
++        self.assertIn("host_ci", err.getvalue())
++
++    def test_gates_stub_mode_empties_host_ci(self) -> None:
++        # PDCA_GATES_MODE=stub must silence host CI too (offline rehearse determinism).
++        with mock.patch.dict(os.environ, {"PDCA_GATES_MODE": "stub"}):
++            cfg = self._load('[gates]\nhost_ci = ["typos"]\n')
++        self.assertEqual(cfg.host_ci_checks, [])
++
++
++class HostCiPublishGate(unittest.TestCase):
++    """The pre-push leg: `publish` runs the declared commands against the pinned
++    base + patch.diff tree and refuses to push on ANY non-pass — the seam `_t4_passes`
++    (pre-apply, cwd=root) structurally cannot cover."""
++
++    SHA = "a" * 40  # the pinned base commit `_pinned_base` is stubbed to resolve
++
++    def setUp(self) -> None:
++        self.tmp = Path(tempfile.mkdtemp())
++        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
++        self.cfg = _cfg(self.tmp)
++        # The tree for_publish hands back in these offline tests (a real dir, no git).
++        self.tree = self.tmp / "pushed-tree"
++        self.tree.mkdir()
++        self.calls: list[list[str]] = []
++
++    def _fake_run(self, cmd, *a, **k):
++        self.calls.append(list(cmd))
++        return SimpleNamespace(returncode=0, stdout="", stderr="")
++
++    def _publish(self, issue_id: str, *, pinned=None, for_publish=None,
++                 existing_pr: str | None = None):
++        """Real (non-dry) publish with git/gh stubbed and the pin + tree controlled."""
++        pb = pinned if pinned is not None else mock.MagicMock(return_value=(self.SHA, ""))
++        fp = for_publish if for_publish is not None else mock.MagicMock(
++            return_value=self.tree)
++        buf, err = io.StringIO(), io.StringIO()
++        with contextlib.ExitStack() as st:
++            st.enter_context(mock.patch.object(publish, "_check_repo", return_value=0))
++            st.enter_context(mock.patch.object(publish.subprocess, "run",
++                                               side_effect=self._fake_run))
++            st.enter_context(mock.patch.object(publish, "_pinned_base", pb))
++            st.enter_context(mock.patch.object(publish.worktree, "for_publish", fp))
++            st.enter_context(mock.patch.object(publish.worktree, "overflow_remove",
++                                               mock.MagicMock()))
++            if existing_pr is not None:
++                st.enter_context(mock.patch.object(publish, "_existing_pr",
++                                                   return_value=existing_pr))
++            st.enter_context(redirect_stdout(buf))
++            st.enter_context(redirect_stderr(err))
++            rc = publish.publish(self.cfg, issue_id, by="Tester", today="2026-07-31")
++        return rc, err.getvalue(), pb, fp
++
++    def test_failing_command_blocks_publish_and_names_it(self) -> None:
++        # Criterion (a): non-zero ⇒ no push, no PR, the command named + recorded with
++        # the pinned base it was judged against.
++        d = _bundle(self.cfg, "A1")
++        self.cfg.host_ci_checks = _normalize_host_ci(["exit 1"])
++        rc, err, _, _ = self._publish("A1")
++        self.assertEqual(rc, 1)
++        self.assertFalse(any("push" in c for c in self.calls))          # nothing pushed
++        self.assertFalse(any(c[:3] == ["gh", "pr", "create"] for c in self.calls))
++        self.assertIn("exit 1", err)                                    # command named
++        self.assertIn("host-ci-0", err)
++        record = json.loads((d / "host-ci.json").read_text(encoding="utf-8"))
++        self.assertEqual(record["overall"], "fail")
++        self.assertEqual(record["base"], self.SHA)                      # judged base pinned
++        self.assertIn("exit 1", json.dumps(record))                     # recorded too
++        self.assertFalse((d / "publish.json").exists())
++
++    def test_exit_77_blocks_publish_too(self) -> None:
++        # Iteration-1 C3: exit 77 is a CHECK gate's "cannot decide" channel (→ §6),
++        # but criterion (a) is literal — a command that exits non-zero blocks publish.
++        # The host's CI will fail the PR on it regardless of what a carve-out believed.
++        _bundle(self.cfg, "U1")
++        self.cfg.host_ci_checks = _normalize_host_ci(["exit 77"])
++        rc, err, _, _ = self._publish("U1")
++        self.assertEqual(rc, 1)
++        self.assertFalse(any("push" in c for c in self.calls))
++        self.assertIn("exit 77", err)
++
++    def test_hand_marked_non_gating_row_still_blocks(self) -> None:
++        # Iteration-1 C3, belt-and-braces: even a row that BYPASSES the normalizer's
++        # forced gating (hand-built config) must block — the publish leg does not
++        # consult `gating` at all.
++        _bundle(self.cfg, "G1")
++        self.cfg.host_ci_checks = [{"id": "adv", "cmd": "exit 1", "gating": False,
++                                    "tier": "T4", "scope": "bundle",
++                                    "label": "host CI: exit 1"}]
++        rc, _err, _, _ = self._publish("G1")
++        self.assertEqual(rc, 1)
++        self.assertFalse(any("push" in c for c in self.calls))
++
++    def test_passing_command_leaves_publish_unchanged(self) -> None:
++        # Criterion (b): exit 0 ⇒ the push + PR proceed exactly as today, a stale
++        # failure record from an earlier refused attempt is cleared, and the record
++        # names the certified base commit (== the commit the push built on).
++        d = _bundle(self.cfg, "B1")
++        (d / "host-ci.json").write_text("{}", encoding="utf-8")         # stale record
++        self.cfg.host_ci_checks = _normalize_host_ci(["true"])
++        rc, _err, _, _ = self._publish("B1")
++        self.assertEqual(rc, 0)
++        self.assertTrue(any("push" in c for c in self.calls))
++        self.assertTrue(any(c[:3] == ["gh", "pr", "create"] for c in self.calls))
++        record = json.loads((d / "publish.json").read_text(encoding="utf-8"))
++        self.assertEqual(record["host_ci_base"], self.SHA)              # certified == pushed
++        self.assertFalse((d / "host-ci.json").exists())                 # stale record gone
++
++    def test_undeclared_is_byte_identical(self) -> None:
++        # Criterion (c): nothing declared ⇒ no fetch/pin, no worktree work, no record,
++        # publish as today.
++        d = _bundle(self.cfg, "C1")
++        rc, _err, pb, fp = self._publish("C1")                          # host_ci_checks == []
++        self.assertEqual(rc, 0)
++        pb.assert_not_called()                                          # zero extra work
++        fp.assert_not_called()
++        self.assertTrue(any("push" in c for c in self.calls))
++        self.assertFalse((d / "host-ci.json").exists())
++        record = json.loads((d / "publish.json").read_text(encoding="utf-8"))
++        self.assertNotIn("host_ci_base", record)
++
++    def test_unpinnable_base_fails_closed(self) -> None:
++        # The base the push would build on cannot be fetched/resolved ⇒ refuse — never
++        # certify some other tree, never push content the declared CI never saw.
++        d = _bundle(self.cfg, "N1")
++        self.cfg.host_ci_checks = _normalize_host_ci(["true"])
++        rc, err, _, _ = self._publish(
++            "N1", pinned=mock.MagicMock(return_value=("", "`git fetch origin` failed")))
++        self.assertEqual(rc, 1)
++        self.assertFalse(any("push" in c for c in self.calls))
++        self.assertIn("pin", err)
++        self.assertTrue((d / "host-ci.json").exists())
++
++    def test_worktree_error_fails_closed(self) -> None:
++        # A patch that no longer applies onto the fetched base raises WorktreeError —
++        # refuse, never push a tree that cannot be shown to match base + patch.diff.
++        _bundle(self.cfg, "N2")
++        self.cfg.host_ci_checks = _normalize_host_ci(["true"])
++        boom = mock.MagicMock(side_effect=worktree.WorktreeError("patch did not apply"))
++        rc, err, _, _ = self._publish("N2", for_publish=boom)
++        self.assertEqual(rc, 1)
++        self.assertFalse(any("push" in c for c in self.calls))
++        self.assertIn("patch did not apply", err)
++
++    def test_stacked_onto_branch_path_is_gated_too(self) -> None:
++        # The `Onto branch` path pushes as well — the gate must sit before its push.
++        _bundle(self.cfg, "S1", brief_body=_STACK_BRIEF)
++        self.cfg.host_ci_checks = _normalize_host_ci(["exit 1"])
++        rc, _err, _, _ = self._publish(
++            "S1", existing_pr="https://example.org/pr/1")
++        self.assertEqual(rc, 1)
++        # Refused before any mutating git step ran (the mocked runner records all).
++        self.assertFalse(any("push" in c or "apply" in c or "commit" in c
++                             for c in self.calls))
++
++
++class HostCiCheckLeg(unittest.TestCase):
++    """The Check leg: host-CI rows land in the gates matrix (→ check-gates / SUMMARY §6
++    via the existing gating-fail routing), honest-unverifiable without a patched tree."""
++
++    def setUp(self) -> None:
++        self.tmp = Path(tempfile.mkdtemp())
++        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
++        self.cfg = _cfg(self.tmp)
++
++    def _gate_bundle(self, iid: str) -> Path:
++        d = self.cfg.bundle(iid)
++        d.mkdir(parents=True)
++        (d / "brief.md").write_text(_FIX_BRIEF, encoding="utf-8")
++        (d / "patch.diff").write_text("", encoding="utf-8")
++        return d
++
++    def test_rows_are_unverifiable_without_a_patched_tree(self) -> None:
++        # No git target here ⇒ no reconstructable tree: the row defers to the human
++        # (§6) instead of running somewhere wrong — overall stays non-fail.
++        d = self._gate_bundle("G1")
++        self.cfg.host_ci_checks = _normalize_host_ci(["true"])
++        with redirect_stderr(io.StringIO()):
++            result = gates.run_gates(d, self.cfg)
++        row = next(r for r in result["rows"] if r["rule_id"] == "host-ci-0")
++        self.assertEqual(row["result"], "unverifiable")
++        self.assertEqual(row["element"], "T4")
++        self.assertTrue(row["gating"])
++        self.assertEqual(result["overall"], "pass")   # unverifiable ≠ fail (→ §6 instead)
++
++    def test_no_bundle_skips_host_ci(self) -> None:
++        # The CI working-tree re-gate has no patch context — and the host's own CI runs
++        # these jobs there for real. No host-CI row appears.
++        self.cfg.host_ci_checks = _normalize_host_ci(["true"])
++        with redirect_stderr(io.StringIO()):
++            result = gates.run_working_tree(self.cfg)
++        self.assertFalse(any(r["rule_id"].startswith("host-ci") for r in result["rows"]))
++
++    def test_undeclared_keeps_the_stub_matrix(self) -> None:
++        # Criterion (c) at Check: with nothing configured at all, the offline stub
++        # matrix is exactly what it is today.
++        d = self._gate_bundle("G2")
++        result = gates.run_gates(d, self.cfg)
++        self.assertEqual(result["overall"], "pass")
++        self.assertTrue(all(r["rule_id"].endswith("-stub") or r["rule_id"] == ""
++                            for r in result["rows"]))
++
++
++class HostCiPatchedTree(unittest.TestCase):
++    """Real-git leg: the publish gate fetches, PINS the exact base commit the push will
++    build on, runs the command against that base + patch.diff, and builds the pushed
++    branch on the same commit — so a check that only fails when the patch's (or the
++    advanced base's) content is present proves both the pre-apply blindness (wyrd) and
++    the stale-base certification (iteration-1 C5) are closed."""
++
++    MARKER = "teh_typo_marker"
++    _PATCH = (
++        "diff --git a/file.txt b/file.txt\n--- a/file.txt\n+++ b/file.txt\n"
++        "@@ -1 +1,2 @@\n base\n+" + MARKER + "\n"
++    )
++    _BENIGN_PATCH = (
++        "diff --git a/file.txt b/file.txt\n--- a/file.txt\n+++ b/file.txt\n"
++        "@@ -1 +1,2 @@\n base\n+benign\n"
++    )
++
++    def setUp(self) -> None:
++        self.tmp = Path(tempfile.mkdtemp())
++        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
++        self.cfg = _cfg(self.tmp)
++        self.repo = self.tmp / "checkout"
++        origin = self.tmp / "origin.git"
++        sp.run(["git", "init", "-q", "--bare", str(origin)], check=True)
++        sp.run(["git", "clone", "-q", str(origin), str(self.repo)], check=True)
++        run = lambda *a: sp.run(["git", "-C", str(self.repo), *a], check=True,
++                                capture_output=True)
++        run("config", "user.email", "t@example.com")
++        run("config", "user.name", "T")
++        run("config", "commit.gpgsign", "false")
++        (self.repo / "file.txt").write_text("base\n", encoding="utf-8")
++        run("add", "-A"); run("commit", "-q", "-m", "base")
++        run("branch", "-M", "main"); run("push", "-q", "-u", "origin", "main")
++        self.cfg.repo_checkouts = {"example-org/example-repo": str(self.repo)}
++        self.d = _bundle(self.cfg, "RG")
++        (self.d / "patch.diff").write_text(self._PATCH, encoding="utf-8")
++
++    def _pushed_heads(self) -> str:
++        return sp.run(["git", "-C", str(self.repo), "ls-remote", "--heads", "origin"],
++                      capture_output=True, text=True).stdout
++
++    def _advance_origin(self, fname: str, content: str) -> str:
++        """Advance the REMOTE main by one commit the local checkout has NOT fetched
++        (a second clone commits + pushes); returns the new tip SHA."""
++        side = self.tmp / ("side-" + fname.replace(".", "-"))
++        sp.run(["git", "clone", "-q", "-b", "main", str(self.tmp / "origin.git"),
++                str(side)], check=True)
++        run = lambda *a: sp.run(["git", "-C", str(side), *a], check=True,
++                                capture_output=True)
++        run("config", "user.email", "t@example.com")
++        run("config", "user.name", "T")
++        run("config", "commit.gpgsign", "false")
++        (side / fname).write_text(content, encoding="utf-8")
++        run("add", "-A"); run("commit", "-q", "-m", f"advance: {fname}")
++        run("push", "-q", "origin", "main")
++        return sp.run(["git", "-C", str(side), "rev-parse", "HEAD"],
++                      capture_output=True, text=True).stdout.strip()
++
++    def test_typo_arriving_in_the_patch_blocks_the_push(self) -> None:
++        # The wyrd shape end-to-end: the "typo" exists ONLY in patch.diff, so a check
++        # run pre-apply (the old T4 seam) passes — only a run against the patched tree
++        # can catch it. Publish must refuse with nothing pushed.
++        check = f"! grep -rq {self.MARKER} ."
++        self.cfg.host_ci_checks = _normalize_host_ci([check])
++        # Sanity: the same command is GREEN against the unpatched checkout — the exact
++        # blindness of the pre-apply seam.
++        self.assertEqual(sp.run(check, shell=True, cwd=self.repo).returncode, 0)
++        buf = io.StringIO()
++        with redirect_stdout(buf), redirect_stderr(buf):
++            rc = publish.publish(self.cfg, "RG", open_pr=False, by="T", today="2026-07-31")
++        self.assertEqual(rc, 1, buf.getvalue())
++        self.assertNotIn("fix/RG-my-fix", self._pushed_heads())   # no branch pushed
++        record = json.loads((self.d / "host-ci.json").read_text(encoding="utf-8"))
++        self.assertIn(self.MARKER, json.dumps(record))            # command named
++        base = sp.run(["git", "-C", str(self.tmp / "origin.git"), "rev-parse", "main"],
++                      capture_output=True, text=True).stdout.strip()
++        self.assertEqual(record["base"], base)                    # …and the judged base
++        self.assertFalse((self.d / "publish.json").exists())
++
++    def test_base_advanced_since_check_blocks_the_push(self) -> None:
++        # Iteration-1 C5: the remote base advances AFTER the fix was built/Checked; the
++        # local checkout has not fetched, so its origin/main is stale. A warm no-fetch
++        # reconstruction certified stale base + patch (green) while the push then
++        # fetched and built the branch on the ADVANCED base whose content fails the
++        # declared command — gate green, pushed tree red. The gate must fetch + pin
++        # the commit the push will use, judge THAT tree, and refuse.
++        advanced = self._advance_origin("typos.txt", self.MARKER + "\n")
++        (self.d / "patch.diff").write_text(self._BENIGN_PATCH, encoding="utf-8")
++        check = f"! grep -rq {self.MARKER} ."
++        self.cfg.host_ci_checks = _normalize_host_ci([check])
++        # Sanity — the stale-base blindness: the command is GREEN in the unfetched
++        # checkout (the fault exists only on the advanced remote base).
++        self.assertEqual(sp.run(check, shell=True, cwd=self.repo).returncode, 0)
++        buf = io.StringIO()
++        with redirect_stdout(buf), redirect_stderr(buf):
++            rc = publish.publish(self.cfg, "RG", open_pr=False, by="T", today="2026-07-31")
++        self.assertEqual(rc, 1, buf.getvalue())
++        self.assertNotIn("fix/RG-my-fix", self._pushed_heads())   # nothing pushed
++        record = json.loads((self.d / "host-ci.json").read_text(encoding="utf-8"))
++        self.assertEqual(record["base"], advanced)                # judged the FETCHED base
++        self.assertIn(self.MARKER, json.dumps(record))
++
++    def test_push_builds_on_the_certified_commit_not_a_later_base(self) -> None:
++        # The PIN: the base advances BETWEEN the gate's certification and the push's
++        # own fetch. Without the pin, `checkout -B` re-resolves origin/main at push
++        # time and publishes a tree the gate never saw (content-red here); with it,
++        # the pushed branch is built on exactly the certified commit.
++        (self.d / "patch.diff").write_text(self._BENIGN_PATCH, encoding="utf-8")
++        self.cfg.host_ci_checks = _normalize_host_ci([f"! grep -rq {self.MARKER} ."])
++        real = worktree.for_publish
++        seen: dict[str, str] = {}
++
++        def certify_then_advance(d, primary, base_commit):
++            seen["sha"] = base_commit
++            tree = real(d, primary, base_commit)
++            self._advance_origin("late.txt", self.MARKER + "\n")  # after certification
++            return tree
++
++        buf = io.StringIO()
++        with mock.patch.object(publish.worktree, "for_publish",
++                               side_effect=certify_then_advance), \
++             redirect_stdout(buf), redirect_stderr(buf):
++            rc = publish.publish(self.cfg, "RG", open_pr=False, by="T", today="2026-07-31")
++        self.assertEqual(rc, 0, buf.getvalue())
++        origin = str(self.tmp / "origin.git")
++        parent = sp.run(["git", "-C", origin, "rev-parse", "fix/RG-my-fix^"],
++                        capture_output=True, text=True).stdout.strip()
++        self.assertEqual(parent, seen["sha"])                     # built on the certified commit…
++        files = sp.run(["git", "-C", origin, "ls-tree", "-r", "--name-only",
++                        "fix/RG-my-fix"], capture_output=True, text=True).stdout
++        self.assertNotIn("late.txt", files)                       # …not on the later base
++        pj = json.loads((self.d / "publish.json").read_text(encoding="utf-8"))
++        self.assertEqual(pj["host_ci_base"], seen["sha"])
++
++    def test_clean_patch_passes_and_publishes(self) -> None:
++        # Criterion (b) with the real mechanics: a green host CI leaves the push
++        # intact, and the pushed commit's parent IS the certified base commit.
++        self.cfg.host_ci_checks = _normalize_host_ci(["! grep -rq no_such_marker ."])
++        buf = io.StringIO()
++        with redirect_stdout(buf), redirect_stderr(buf):
++            rc = publish.publish(self.cfg, "RG", open_pr=False, by="T", today="2026-07-31")
++        self.assertEqual(rc, 0, buf.getvalue())
++        self.assertIn("fix/RG-my-fix", self._pushed_heads())      # pushed as today
++        self.assertFalse((self.d / "host-ci.json").exists())
++        origin = str(self.tmp / "origin.git")
++        base = sp.run(["git", "-C", origin, "rev-parse", "main"],
++                      capture_output=True, text=True).stdout.strip()
++        parent = sp.run(["git", "-C", origin, "rev-parse", "fix/RG-my-fix^"],
++                        capture_output=True, text=True).stdout.strip()
++        pj = json.loads((self.d / "publish.json").read_text(encoding="utf-8"))
++        self.assertEqual(pj["host_ci_base"], base)
++        self.assertEqual(parent, base)                            # certified == pushed
++
++    def test_check_gate_row_runs_in_the_patched_worktree(self) -> None:
++        # The Check leg runs FROM the reconstructed worktree: the command sees the
++        # patched content and its cwd is the lane tree, not cfg.root / the primary.
++        self.cfg.host_ci_checks = _normalize_host_ci(
++            [f'grep -q {self.MARKER} file.txt && pwd > "$PDCA_BUNDLE/hostci-cwd"'])
++        with redirect_stderr(io.StringIO()):
++            result = gates.run_gates(self.d, self.cfg)
++        row = next(r for r in result["rows"] if r["rule_id"] == "host-ci-0")
++        self.assertEqual(row["result"], "pass", row)
++        ran_in = Path((self.d / "hostci-cwd").read_text(encoding="utf-8").strip())
++        self.assertEqual(ran_in.resolve(), (self.tmp / "checkout.pdca-wt").resolve())
++
++    def test_check_gate_red_fails_overall(self) -> None:
++        # A red host-CI row is GATING: overall fails, and the #166 routing then lands
++        # it in SUMMARY §6 where sign-off must see it.
++        self.cfg.host_ci_checks = _normalize_host_ci(["false"])
++        with redirect_stderr(io.StringIO()):
++            result = gates.run_gates(self.d, self.cfg)
++        row = next(r for r in result["rows"] if r["rule_id"] == "host-ci-0")
++        self.assertEqual(row["result"], "fail")
++        self.assertEqual(result["overall"], "fail")
++
++
++if __name__ == "__main__":
++    unittest.main()

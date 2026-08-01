@@ -1,0 +1,29 @@
+feat(driver): hold an absent external dependency before Do (#340)
+
+Since b0bc575f818ebb8f3050b8c91f25e6c335d21282 (#333) every checkable
+token in a brief's `External dependencies` must name a
+`[[doctor.checks]]` row — but nothing ever executed the row.
+Registration required only a non-empty detect `cmd`, so a planner
+could discharge every check on a machine where the dependency is
+absent, and Do dispatched into the silently-worked-around case whose
+only remaining detector was the builder's own self-report.
+
+The dependency guard now runs the detect cmd of exactly the rows the
+brief's tokens name — never the instance's wider doctor inventory —
+and holds the bundle before Do on a non-zero exit, quoting the row's
+own install hint. Rows are read from pdca.toml as it stands on disk,
+so a row registered during the Plan beat counts in the same pass, and
+the verdict is recomputed per beat, never cached: install the tool
+(or fix the row) and the next attempt proceeds, no re-plan.
+
+[driver].dependency_guard keeps its modes: `off` is byte-identical to
+before, `warn` reports the same failure without holding, and `hold`
+(the default) gains the probe on top of the registration check. Named
+detect cmds now run on every beat the policy is consulted, not just
+on `pdca doctor`, so the config comment documents the expectation
+they must meet: cheap and side-effect-free — a probe is a read,
+never a provisioning step. `(no-check: …)`-annotated and plain-prose
+dependencies yield no token and are neither reconciled nor probed,
+so declaring a dependency stays free of side effects.
+
+Fixes #340

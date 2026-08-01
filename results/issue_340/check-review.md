@@ -1,0 +1,15 @@
+Reviewing issue 340: make the Plan-exit dependency guard execute exactly the brief-named registered detect commands before Do dispatch.
+
+| Item | Verdict | Basis |
+|------|---------|-------|
+| C1 Spec | PASS | The acceptance boundary is decidable—named rows only, non-zero holds, and existing modes remain distinct—and the target documents that contract at `docs/03-plan.md:244`. |
+| C2 Reproduction (red pre-fix) | PASS | In a disposable target clone with the production fix removed but the regression retained, the failing-command case returned no reason and failed at `template/tests/test_dependency_guard.py:324`. |
+| C3 Change | PASS | The supplied diff exactly matches the target worktree and forms one dependency-guard change: detect execution is centralized at `template/src/pdca_harness/doctor.py:356` and consumed by the existing policy at `template/src/pdca_harness/plan_policy.py:209`. |
+| C4 Verification (red→green) | PASS | Independent red→green reproduced (pre-fix test exit 1, patched exit 0), and all nine probe cases pass, including the pre-Do hold asserted at `template/tests/test_dependency_guard.py:329`. |
+| C5 Causal adequacy | NEEDS-HUMAN | Decide whether a per-beat capability probe is the intended causal boundary or downstream dependency use should instead become lazy/structurally impossible—`subprocess.run` at `template/src/pdca_harness/doctor.py:395` triggers the mandated symptom-guard smell test and determines whether this fixes cause or policy symptom. |
+| T1 Structure | PASS | The patch is confined to the existing doctor/policy/config/test/documentation seams, and fresh-on-disk row ownership remains with `Config.current_doctor_checks` at `template/src/pdca_harness/config.py:398`. |
+| T2 Shape | PASS | Docs lint, site rendering/link audit, and `git diff --check` all pass; the operational cheap/read-only command constraint is present at `template/pdca.toml.jinja:713`. |
+| T3 Runtime | PASS | The reported suite failure did not reproduce: 1,323 offline driver tests and all 7 Copier render/update tests pass, with passing/off/warn and selective execution covered at `template/tests/test_dependency_guard.py:334`. |
+| T4 Contribution | NEEDS-HUMAN | Confirm the user-impact opener and issue-340 linkage in the actual contribution artifacts—the supplied inputs omit those artifacts, so the available `pdca-pdca contribcheck` cannot independently reproduce the asserted pass and convention compliance remains provisional. |
+| T5 Judgment | NEEDS-HUMAN | Confirm no closed or rejected PR already implements these affected paths—merged history was checked path-by-path, but the GitHub closed-PR query could not reach `api.github.com`, so duplication risk is not mechanically settled. |
+| Validation — fitness-to-purpose | NEEDS-HUMAN | Decide whether executing configured shell probes on every policy consultation is worth the earlier failure detection and side-effect/latency exposure described at `docs/03-plan.md:247`; this ship/iterate judgment is human-only by design. |
