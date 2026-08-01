@@ -1,0 +1,24 @@
+feat(bootstrap): expose the console script on PATH at make install
+
+`make install` built the venv and installed the console script into
+.venv/bin, then stopped: the CLI did not answer to its bare name in a
+fresh shell, and every operator invented the last hop themselves
+(activate the venv, prefix the path, hand-roll a symlink). It bites the
+project's own machinery too — gate rows spawn the CLI by bare name via
+/bin/sh (the shipped contribcheck row), so a fresh render + make install
+failed command-not-found until PATH was fixed by hand.
+
+Finish the job in bootstrap-tools.sh: for every pyproject
+[project.scripts] entry, idempotently symlink .venv/bin/<cli> ->
+~/.local/bin/<cli> when ~/.local/bin exists and is on PATH, reported as
+one OK|INSTALLED row. When ~/.local/bin is absent or off PATH, the step
+prints one WARN naming the exact ln -s command instead — it never
+mutates shell profiles. An existing ~/.local/bin/<cli> that is not a
+symlink into this repo's .venv (another instance's default-name CLI, a
+foreign binary) is never overwritten. --check (make install-check)
+reports the row without creating anything, and a missing link is an
+optional nicety: it never turns bootstrap red. No venv activation is
+needed — pip console-script shebangs pin the venv interpreter by
+absolute path, so the symlink alone makes bare-name spawns work.
+
+Fixes #376
