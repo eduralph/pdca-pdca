@@ -1,0 +1,32 @@
+feat(triage): ingest external PR review findings into the Act ledger
+
+External reviewer findings on published PRs are the improvement loop's
+highest-value signal, and today they are invisible to it: the pipeline
+stops at the draft PR, and the Act ledger only receives what a human
+remembers to transcribe. The same class of miss can ship again and
+again without the process ever noticing.
+
+`pdca triage <pr>` closes that gap. It pulls a published PR's reviews
+and review comments via `gh api`, following pagination so no finding
+past the first hundred is dropped; classifies each finding by keyword
+heuristics into BUG / TEST-GAP / CONVENTION / NOISE, with per-class
+keywords tunable from the instance rubric's class list; and routes by
+class: a BUG on a merged PR files a tracker issue whose body carries a
+carry-forward note for the next cycle's Plan, while CONVENTION, NOISE
+and TEST-GAP append candidate gate-row, rubric-exclusion and test
+entries to process/act-log.md. Every finding also registers in the Act
+ledger under a stable class-keyed signal (codex-pr:<slug>), so a class
+that reappears after its process delta was applied is flagged as a
+recurrence. A finding no keyword reaches stays visible as
+codex-pr:unclassified for the human (or for the optional,
+off-by-default [triage].model_cmd pass) — a fifth bucket by design,
+never force-fitted into a class.
+
+The command proposes only: it never edits pdca.toml or the rubric.
+Re-running the same PR ingests only findings that arrived since the
+last run and never re-files an issue; the per-PR record doubles as a
+recovery journal, so a run interrupted between filing and registering
+(a held Act session, a crash) is finished by the next run instead of
+being stranded by the no-new-findings fast path.
+
+Fixes #316
