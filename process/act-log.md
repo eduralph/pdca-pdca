@@ -29,4 +29,81 @@
 - The next Do phases should not recreate <specific issue>. Watch the next K cycles.
 -->
 
-(no Act reviews yet)
+# Act review — 2026-08-01 — cycles considered: issue_311, issue_316, issue_331, issue_340, issue_341, issue_359, issue_368, issue_375, issue_376
+
+First Act review of the instance — nine frozen bundles, all merged-wider.
+
+## What the cycles' records exposed
+- **T5 prior-art check unresolvable — 6 of 9 cycles** (311, 316, 340, 359, 375,
+  376 §6): the codex reviewer sandbox cannot reach `api.github.com`, so "confirm
+  no closed/rejected work duplicates this" lands in §6 every time (the ledger's
+  open recurring signal). Root cause: upstream pdca-harness#277 closed COMPLETED
+  via PR #287, but the fix is an **opt-in** (`[leaves.sandbox] network_access`)
+  this instance had never enabled — `pdca.toml` still carried it commented out.
+- **T4 contribcheck vacuous/unreproducible at Check — 9 of 9 cycles** (§6
+  everywhere; named by issue_341 §10): contribcheck is default-open before the
+  publish artifacts exist (by design, re-gated at publish per harness #339), but
+  the Check matrix records a plain green PASS the reviewer cannot reproduce, so
+  it is escalated every cycle.
+- **T3 advisory red on the synthetic `issue_500/split-proposal.md` fixture —
+  6 of 9 cycles** (311, 331, 340, 341, 368, 376): a pre-existing driver-suite
+  fixture flake, unrelated to any bundle's patch, at a transient `/tmp` path
+  nobody can inspect; issue_311 §10 additionally showed the T3 evidence
+  extractor capturing arbitrary fixture stdout as its evidence line.
+- **T2/T3 oracles absent from the reviewer sandbox — 4 of 9 cycles** (331, 341,
+  368, 375 §6): the gate runners the frozen records name
+  (`engine/scripts/run-docs-check.sh`, `run-suite.sh`) are not in the reviewer's
+  permitted target; issue_375 §10 also noted no preflight checks the sandbox
+  interior (doctor checks the host).
+- **One-off (issue_331 §10):** the deliberate-abandon escape hatch shipped as a
+  raw `python3 .claude/hooks/handoff_guard.py --abandon` invocation — should be
+  a rendered `/abandon` slash command.
+- **One-offs (issue_316):** §10 — the triage rubric's "one of four" wording vs
+  an accepted 5th (unclassified-remainder) bucket caused a sign-off ruling;
+  §6 C5 — recurrence identity is keyword-derived (`triage.py:108`), so synonyms
+  split what should be one signal.
+
+## Process deltas
+- Gates/config (this repo): enabled `[leaves.sandbox]` `network_access = true`
+  (pdca.toml:676–677) so the codex reviewer leaf can reach `api.github.com` for
+  the T5 closed/rejected-PR prior-art check. Trade-off accepted with the human:
+  the codex network grant opens the network layer for every command in that
+  leaf (no per-domain scoping); filesystem confinement unchanged. Shipped as
+  draft PR https://github.com/eduralph/pdca-pdca/pull/25 (human marks
+  ready/merges). Ledger signal "t5 judgment — confirm no closed or rejected"
+  marked applied.
+- No spec-template, ruleset, or agent-skill delta warranted this review — the
+  remaining findings are harness-machinery issues, routed upstream below rather
+  than papered over locally.
+
+## Follow-ups routed (not process deltas — work handed to an owner)
+- Harness/driver issue (upstream, template machinery): Check-matrix reporting of
+  a default-open T4 as PASS → filed
+  https://github.com/eduralph/pdca-harness/issues/401
+- Harness/driver issue (upstream): `issue_500/split-proposal.md` suite-fixture
+  flake + T3 evidence extractor capturing arbitrary fixture stdout → filed
+  https://github.com/eduralph/pdca-harness/issues/402
+- Harness/driver issue (upstream): reviewer sandbox lacks the T2/T3 gate
+  oracles; no sandbox-interior preflight → filed
+  https://github.com/eduralph/pdca-harness/issues/403
+- Harness/driver issue (upstream, follow-up on open #331): render an `/abandon`
+  slash command wrapping the handoff-guard escape hatch → filed
+  https://github.com/eduralph/pdca-harness/issues/404
+- Open Act item: triage rubric should state five buckets explicitly (issue_316
+  §10) → owner: next triage brief author; revisit next review.
+- Design issue (routed to human to schedule, outside the cycle): triage
+  recurrence-identity representation — broad class vs class+keyword vs semantic
+  slug (issue_316 §6 C5, `template/src/pdca_harness/triage.py:108`). Needs a
+  design decision, not a bug fix; no brief authored.
+
+## How effectiveness will be judged
+- The T5 "confirm no closed or rejected work" NEEDS-HUMAN class should stop
+  recurring once PR #25 merges — the ledger will flag the signal as
+  likely-ineffective if it recurs after 2026-08-01.
+- T4/T3/oracle §6 noise should drop as upstream #401–#403 land and reach this
+  instance via `copier update`; if the same classes recur over the next ~3
+  cycles with the issues still open, that is expected — recurrence *after* they
+  ship is the signal to watch.
+
+---
+
