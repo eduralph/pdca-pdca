@@ -669,9 +669,13 @@ argv = ["claude", "--remote-control", "--agent", "publisher", "--permission-mode
 # makes tomllib refuse the file ("Cannot declare ('leaves','sandbox') twice") and the driver
 # will not start at all (PR #292 review). Also note `network_access` must be the UNQUOTED
 # boolean `true`; a quoted "true"/"false" is rejected and the grant stays closed.
-# [leaves.sandbox]
 # unsandboxed_commands = ["cargo xtask fdb-conformance", "cargo xtask etcd-conformance"]  # claude
-# network_access = true                                                                    # codex
+# Act 2026-08-01: enabled network_access for the codex reviewer leaf — the T5
+# closed/rejected-PR prior-art check hit NEEDS-HUMAN in 6 of 9 frozen cycles because
+# api.github.com was unreachable from the sandbox. Upstream #277 shipped this as an
+# opt-in (PR #287); this instance had never opted in. Filesystem confinement stays.
+[leaves.sandbox]
+network_access = true  # codex
 
 # Doctor rows (`pdca doctor`) — optional. The doctor derives its main checks from
 # this file (every command leaf's CLI + auth, gh, bundle root, notes_cmd); declare
