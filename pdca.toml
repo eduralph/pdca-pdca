@@ -453,21 +453,21 @@ mode = "command"
 family = "claude"
 interactive = true
 agent = "planner"
-argv = ["claude", "--agent", "planner", "--permission-mode", "acceptEdits", "--remote-control"]
+argv = ["claude", "--remote-control", "--agent", "planner", "--permission-mode", "acceptEdits"]
 
 [leaves.signoff]
 mode = "command"
 family = "claude"
 interactive = true
 agent = "signoff"
-argv = ["claude", "--agent", "signoff", "--permission-mode", "acceptEdits", "--remote-control"]
+argv = ["claude", "--remote-control", "--agent", "signoff", "--permission-mode", "acceptEdits"]
 
 [leaves.act]
 mode = "command"
 family = "claude"
 interactive = true
 agent = "act"
-argv = ["claude", "--agent", "act", "--permission-mode", "acceptEdits", "--remote-control"]
+argv = ["claude", "--remote-control", "--agent", "act", "--permission-mode", "acceptEdits"]
 
 # Publisher — Check's closing step: writes commit-msg.txt + pr-description.md (the
 # git/draft-PR mechanics are deterministic code in pdca_harness.publish). A non-claude
@@ -477,7 +477,7 @@ mode = "command"
 family = "claude"
 interactive = true
 agent = "publisher"
-argv = ["claude", "--agent", "publisher", "--permission-mode", "acceptEdits", "--remote-control"]
+argv = ["claude", "--remote-control", "--agent", "publisher", "--permission-mode", "acceptEdits"]
 
 
 # FAMILY PROFILES (vendor neutrality). Every vendor-CLI-specific behavior is DATA
