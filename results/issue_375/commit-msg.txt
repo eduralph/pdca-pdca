@@ -1,0 +1,27 @@
+fix(template): honor the configured cli_name in rendered invocations
+
+An instance rendered with a namespaced console-script name — exactly what
+copier.yml recommends when several instances share a machine — got a CI
+merge re-gate that ran the literal `pdca gates --working-tree` and failed
+command-not-found on every PR. The failure presents as a broken CI runner,
+not a render bug. The workflow has carried the literal name since its
+introduction in 36e72c9f23e8878c566e71e2777d51e9fc144686; the cli_name
+answer arrived in 899087738df7a811737a704a368e86fc6f3ecbef without
+touching it, and no render test exercised a non-default name.
+
+Restore cli_name as the single source of the command name: every bare
+`pdca <subcommand>` invocation in a template/**/*.jinja source now renders
+through {{ cli_name }} — 58 sites across 11 files, the CI workflow plus
+the operator and agent instructions that are executed, not just read,
+under a namespaced render. The default render (cli_name = "pdca") is
+byte-identical to before, so existing single-instance renders are
+unchanged.
+
+A new render-check test (tests/test_render_cli_name.py) renders the
+template with a namespaced answer and asserts that no file rendered from
+a .jinja source still carries a bare default-name invocation, keeping the
+whole class caught. Three template/tests/test_split.py assertions that
+hardcoded the default name against the role-prompt source are now
+name-agnostic — the same defect class in a shipped non-jinja file.
+
+Fixes #375
