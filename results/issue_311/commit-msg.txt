@@ -1,0 +1,33 @@
+feat(gates): host_ci runs host-only CI on the tree the push publishes
+
+An instance whose host CI runs jobs on every PR that the delegated gate
+runner does not cover (a spell-checker like `typos`, a docs lint) has a
+structural blind spot: the T4 publish gate runs with cwd=cfg.root
+against the tree BEFORE patch.diff is applied, so content arriving in
+the patch is invisible to it. A bundle can pass Check green and open a
+PR that immediately fails a required status — observed four times in
+the wyrd instance, always the `typos` job.
+
+`[gates] host_ci` closes the gap: declare those commands and the
+harness runs each one against a reconstructed base + patch.diff tree,
+at two seams. At Check they run as gate rows in the lane worktree, so
+a red reaches check-gates and the sign-off summary. In publish they run
+again immediately before anything is pushed: the gate fetches, pins the
+exact base commit the push will build on, materializes base +
+patch.diff in an ephemeral worktree at that commit, runs the commands
+there, and rebases the push's `checkout -B` onto the same commit — so
+a green certifies the very tree being pushed even when the base
+advanced since Check, by construction rather than by timing. The
+certified commit is recorded as `host_ci_base` in publish.json, so
+certified == pushed stays auditable after the fact.
+
+Any command that does not pass — any non-zero exit, exit 77 included —
+blocks the push: no branch, no PR, and the refusal is recorded in the
+bundle's host-ci.json naming the command and the base it was judged
+against. A declared `gating = false` is forced true, loudly: the
+host's CI will fail the PR on a declared command regardless, so an
+advisory row would re-open the exact observed gap. An unpinnable base
+or unmaterializable tree fails closed. Nothing declared (the default)
+is byte-identical to today's behaviour everywhere.
+
+Fixes #311
