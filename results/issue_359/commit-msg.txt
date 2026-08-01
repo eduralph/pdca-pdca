@@ -1,0 +1,34 @@
+feat(sizing): add estimate-vs-outcome column and model_weight config
+
+Calibrated thresholds only stay right while someone checks them: the
+0.56 release shipped an estimator precision figure that had silently
+moved 67% -> 62% because a parsing fix changed what was measured — a
+drift nobody could have caught without re-deriving the numbers by
+hand. This change instruments the calibration loop where cross-cycle
+patterns are already reviewed, instead of leaving drift to chance.
+
+`pdca act index` now renders a per-cycle `sizing:` line joining the
+a-priori estimate (scored from the brief before any code exists) to
+the measured outcome from the cycle's recorded size signal, the
+Check-time record introduced in
+cad960143d6344f1ccf35899e5fcc42562488ea6 (#324). A blank side always
+means "not measured", never "measured small": a cycle predating the
+signal renders a blank outcome, and a garbled recorded value (an int
+too large for float) blanks its own cell instead of aborting the
+whole index.
+
+The [driver.sizing] comment block in pdca.toml now documents the
+retuning walk from a fresh scripts/size-calibrate run back into the
+table, and `model_weight` — how much a sizer escalation adds to the
+numeric score — becomes a [driver.sizing] config value revisited at
+Act cadence rather than an engine constant. The default 0 is today's
+behaviour exactly, the weight stays escalate-only, and the docs name
+the loop's blind spot: neither the index nor the calibrator can show
+escalation-vs-outcome correlation yet, so an evidence-based review
+leaves the weight at 0 and records the gap.
+
+Shipped default weights are unchanged; retuning itself is out of
+scope. Archived iteration-v*/brief.md files are deliberately not
+mined for correlations — the miner names that gap on every run.
+
+Fixes #359
