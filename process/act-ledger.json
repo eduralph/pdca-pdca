@@ -1,0 +1,10 @@
+[
+  {
+    "signal": "t5 judgment — confirm no closed or rejected",
+    "raw": "T5 Judgment — Confirm no closed or rejected PR already implements these affected paths—merged history was checked path-by-path, but the GitHub closed-PR query could not reach `api.github.com`, so duplication risk is not mechanically settled.",
+    "first_seen": "2026-08-01",
+    "status": "applied",
+    "applied_date": "2026-08-01",
+    "location": "pdca.toml [leaves.sandbox] network_access = true (PR https://github.com/eduralph/pdca-pdca/pull/25)"
+  }
+]
