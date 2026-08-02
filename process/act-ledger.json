@@ -1,10 +1,18 @@
 [
   {
-    "signal": "t5 judgment — confirm no closed or rejected",
-    "raw": "T5 Judgment — Confirm no closed or rejected PR already implements these affected paths—merged history was checked path-by-path, but the GitHub closed-PR query could not reach `api.github.com`, so duplication risk is not mechanically settled.",
+    "signal": "t5 judgment \u2014 confirm no closed or rejected",
+    "raw": "T5 Judgment \u2014 Confirm no closed or rejected PR already implements these affected paths\u2014merged history was checked path-by-path, but the GitHub closed-PR query could not reach `api.github.com`, so duplication risk is not mechanically settled.",
     "first_seen": "2026-08-01",
     "status": "applied",
     "applied_date": "2026-08-01",
     "location": "pdca.toml [leaves.sandbox] network_access = true (PR https://github.com/eduralph/pdca-pdca/pull/25)"
+  },
+  {
+    "signal": "validation \u2014 fitness-to-purpose \u2014 human sign-off must decide",
+    "raw": "Validation \u2014 fitness-to-purpose \u2014 Human sign-off must decide whether batch-recording terminal bundles is the right operational answer for preventing local-only provenance, independent of the passing offline tests (`brief.md:7`).",
+    "first_seen": "2026-08-01",
+    "status": "structural",
+    "applied_date": "2026-08-02",
+    "location": "By design, no delta possible: validation fitness-to-purpose is human-only (CLAUDE.md sign-off contract; SUMMARY \u00a76 is the intended surface). Recorded structural at the 2026-08-02 Act review."
   }
 ]
