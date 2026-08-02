@@ -5,7 +5,7 @@
     "first_seen": "2026-08-01",
     "status": "applied",
     "applied_date": "2026-08-01",
-    "location": "pdca.toml [leaves.sandbox] network_access = true (PR https://github.com/eduralph/pdca-pdca/pull/25)"
+    "location": "pdca.toml [leaves.sandbox] network_access = true (PR https://github.com/eduralph/pdca-pdca/pull/25). CONFIRMED EFFECTIVE at the second 2026-08-02 Act review: the class appears in 0 of the 9 cycles frozen since (317, 332, 356, 369, 370, 372, 379, 380, 386, 387)."
   },
   {
     "signal": "validation \u2014 fitness-to-purpose \u2014 human sign-off must decide",
@@ -14,5 +14,21 @@
     "status": "structural",
     "applied_date": "2026-08-02",
     "location": "By design, no delta possible: validation fitness-to-purpose is human-only (CLAUDE.md sign-off contract; SUMMARY \u00a76 is the intended surface). Recorded structural at the 2026-08-02 Act review."
+  },
+  {
+    "signal": "t4 contribution \u2014 the owed decision is whether",
+    "raw": "T4 Contribution \u2014 The owed decision is whether the contribution artifacts satisfy project policy; `commit-msg.txt` / `pr-description.md` were not provided to this reviewer and `pdca-pdca contribcheck` could not be rerun from the artifact set.",
+    "first_seen": "2026-08-02",
+    "status": "open",
+    "applied_date": null,
+    "location": "Pending upstream https://github.com/eduralph/pdca-harness/issues/401 (Check reports a default-open T4 as PASS before the publish artifacts exist; issue_387's record shows the row's evidence string is literally empty). No local delta: the reporting is harness machinery. Re-check at the next review."
+  },
+  {
+    "signal": "c4 fix verified: bundle test red pre-fix, green",
+    "raw": "C4 fix verified: bundle test red pre-fix, green post-fix unverifiable \u2014 no behavioral production change to revert (test-only or docs-only patch)",
+    "first_seen": "2026-08-02",
+    "status": "open",
+    "applied_date": null,
+    "location": "Two halves (second 2026-08-02 Act review). (a) STRUCTURAL: a genuine test-only/docs-only patch has no production hunk to revert, so C4 cannot go red\u2192green and #165 routes it to \u00a76 by design \u2014 no delta possible. (b) DEFECT: the marker is matched anywhere in captured output, so a bundle that merely MENTIONS `PDCA-UNVERIFIABLE:` has a green gating C4 flipped to unverifiable \u2014 filed upstream as https://github.com/eduralph/pdca-harness/issues/428 (evidence: results/issue_387/check-gates.json C4 row). Close when #428 lands."
   }
 ]

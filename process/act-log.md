@@ -29,6 +29,130 @@
 - The next Do phases should not recreate <specific issue>. Watch the next K cycles.
 -->
 
+# Act review — 2026-08-02 (second review of the day) — cycles considered: issue_356, issue_379, issue_380, issue_386, issue_387
+
+Third Act review — five bundles frozen since the earlier 2026-08-02 review (the
+index carried all 19; the 14 previously reviewed were considered only for
+effectiveness follow-up, not re-reviewed). All five merged-wider.
+
+## What the cycles' records exposed
+- **A false-unverifiable in the gate classifier — new, filed as harness #428.**
+  `_classify` honours the `PDCA-UNVERIFIABLE:` marker as a bare substring on *any*
+  output line, with no check that the **gate itself** emitted it
+  (`template/src/pdca_harness/gates.py:595`). #329 closed the `rc != 0` half; the
+  exit-0 half is open. issue_387's frozen C4 row proves it fires: `result:
+  "unverifiable"` on a **gating** row, with a reason that is a fragment of a code
+  comment the bundle's test read back — ``"<reason>` and exit 77\n# (-> SUMMARY §6
+  NEEDS-HUMAN, non-gating)…"``. Structural for this instance, because our target
+  *is* the harness and its own suite echoes that literal as fixture data
+  (`template/tests/test_gates_unverifiable.py:28,32,103`,
+  `test_prod_path_gate.py:51-89`). Effect: the one gating correctness check stops
+  being a verdict — `unverifiable` is not a failure and does not reach `overall`.
+- **The "T3 fixture flake" is a misdiagnosis, and the red is already fixed.**
+  Reproduced directly: `tests.test_split` is **green** (96 tests OK), and the
+  `/tmp/…/issue_500/split-proposal.md` lines are *leaked stdout* printed after the
+  summary — production CLI code (`cli.py:787`, `print(child)`) driven by tests that
+  do not capture it, block-buffered under a pipe so it flushes last. The harness
+  then files that last line as the gate's evidence. A full wrapper run against a
+  current target: root suite `Ran 7 tests … OK`, driver suite `Ran 1468 tests …
+  OK (skipped=2)`, **RC=0** — a *passing* gate whose recorded evidence reads like a
+  failure path. The historical `T3-suite: fail` rows (311, 317, 340, 341, 368, 370,
+  372, 376, 379, 380, 386, 387) were genuine and were resolved by #417/#418 — i.e.
+  by this instance's own issue_369 and issue_372 cycles. What recurs in §6 now has
+  no failure behind it at all.
+- **#403 is a reachability + invocation-contract gap, not a seeding gap**
+  (issue_386 §10). The wrappers exist at the instance root and require cwd + a set
+  `$PDCA_WORKTREE` + the instance venv; the reviewer works from `$PDCA_TARGET`,
+  where neither holds. Intermittent — same gates, same wrappers, cleared on
+  issue_356 and escalated on 380/386/387 — which points at guidance, not machinery.
+- **The 2026-08-01 T5 network delta (PR #25) is confirmed effective.** The
+  "could not reach `api.github.com`" prior-art class appears in **0 of the 9**
+  cycles frozen since it landed (317, 332, 356, 369, 370, 372, 379, 380, 386, 387).
+  The earlier entry's criterion (absent over ~3 cycles) is met.
+- **Known-open classes recurring — expected, no new delta.** T2/T3 oracles
+  unreachable (380/386/387 → #403), vacuous T4 contribcheck green (all five → #401,
+  whose evidence string is literally empty in issue_387's record), C4 stash
+  reproduction (→ #419). All still OPEN upstream.
+- **"C4 unverifiable on a test-only/docs-only patch" (379, 386, 387) has two
+  halves.** The genuine one is by design — no production hunk to revert means no
+  red→green, so #165 routes it to §6. The other half is #428 above. Only the
+  second is a defect.
+
+## Process deltas
+- Gates (this repo, instance-owned): `engine/scripts/run-suite.sh:19-49` — the T3
+  wrapper now runs both suites to completion, ends on a deterministic verdict line
+  (`== T3: root suite OK, driver suite OK`) and exits with the preserved rc, so the
+  harness's last-line evidence rule captures a verdict instead of whatever the
+  suite leaked. Verified both ways: green tree → verdict last, `RC=0`; synthetic red
+  tree that *prints a decoy* `/tmp/…/issue_500/split-proposal.md` → `== T3: root
+  suite FAILED (rc 1), driver suite FAILED (rc 1)`, `RC=1`, decoy not captured.
+  **Explicitly a stopgap, and marked so in the file:** the fix belongs upstream in
+  #402: revert this block and take the upstream version once #402 lands.
+- No spec-template, ruleset, or agent-skill delta warranted. The reviewer role
+  prompt (the natural home for the #403 invocation contract) is copier-managed
+  (`agents/` renders from the template), so a local edit would be clobbered on
+  `copier update` — it belongs upstream.
+
+## Follow-ups routed (not process deltas — work handed to an owner)
+- Harness/driver issue (upstream, template machinery): the `PDCA-UNVERIFIABLE`
+  marker is matched anywhere in captured output, flipping a green gating C4 to
+  unverifiable → filed https://github.com/eduralph/pdca-harness/issues/428
+- Harness/driver issue (upstream, correction to an open issue filed on a false
+  premise): #402 says the `issue_500` fixture flakes; it does not and never failed.
+  Posted the reproduction, the leak's origin (`cli.py:787`) and the last-line
+  evidence rule →
+  https://github.com/eduralph/pdca-harness/issues/402#issuecomment-5160169457
+- Harness/driver issue (upstream, added evidence to open #403): the wrappers are
+  present but the reviewer runs them from the wrong root without `$PDCA_WORKTREE`;
+  cleared on 356, escalated on 380/386/387 →
+  https://github.com/eduralph/pdca-harness/issues/403#issuecomment-5160031102
+- Open Act item (carried from 2026-08-01, unchanged): triage rubric should state
+  five buckets explicitly (issue_316 §10) → owner: next triage brief author; still
+  no triage-class brief in this interval, so nothing to judge yet.
+- Design issue **CLOSED — declined by the human at this review** (was: routed
+  2026-08-01 for a dedicated design phase): triage recurrence-identity
+  representation, broad class vs class+keyword vs semantic slug (issue_316 §6 C5,
+  `template/src/pdca_harness/triage.py:108`). Decision: do **not** redesign the
+  identity grammar; accept reading through the reviews to judge whether two
+  findings are the same complaint. Rationale: the alternative that actually
+  detects synonyms is a semantic slug, which puts a model in charge of naming
+  ledger identities and makes those names unstable across model versions — a
+  worse trade than doing the comparison by hand on a path that runs rarely.
+  No further scheduling; do not re-route this at the next review.
+- **Consequence of that decision, binding on future Act reviews:** for
+  `codex-pr:*` triage signals, the absence of a recurrence is **not** evidence
+  that a delta worked. `act.py:522 recurrences()` matches signals by exact string
+  (`act.py:535`) and `triage.py:108` keys them on class **+ the matched keyword**,
+  so synonyms inside one class ("untested" / "missing test", `triage.py:81`)
+  register as separate signals that each look like a first occurrence. A future
+  review must read the findings themselves before calling a triage-class delta
+  effective. This does NOT affect the §6-derived signals from our own bundles —
+  including this review's "confirmed effective" call on the T5 network grant,
+  which rests on §6 text, not on the triage grammar.
+  **Routed upstream as default policy** (the human's call — this is not a
+  pdca-pdca lesson, it holds for every instance): state it in the Act role prompt
+  (`template/agents/act.md.jinja`, `## What you read`) and beside the existing
+  blind-spot precedent in `docs/07-crosscutting.md:167` → filed
+  https://github.com/eduralph/pdca-harness/issues/429
+- Ledger: T5 network signal annotated **confirmed effective**; the C4-unverifiable
+  signal annotated with its two halves (#165 structural / #428 defect); T4
+  contribution signal left open pending #401 (process/act-ledger.json).
+
+## How effectiveness will be judged
+- The next frozen cycles' T3 rows should carry `== T3: root suite …, driver suite …`
+  as their evidence, and the `/tmp/…/issue_500/split-proposal.md` string should
+  disappear from §6 entirely. If it survives, the last-line assumption is wrong and
+  the delta should be reverted rather than patched.
+- #428: C4 rows should stop reading `unverifiable` on bundles that merely *mention*
+  the marker. Until it lands, expect the class to keep appearing on harness-facing
+  work — that is not evidence against the filing.
+- When #402 lands, revert `engine/scripts/run-suite.sh:19-49` and confirm the
+  upstream fix alone keeps the evidence line meaningful.
+- T5 prior-art class: recorded confirmed effective this review; re-open only if it
+  reappears.
+
+---
+
 # Act review — 2026-08-02 — cycles considered: issue_317, issue_332, issue_369, issue_370, issue_372
 
 Second Act review — five bundles frozen since the 2026-08-01 review (the index
