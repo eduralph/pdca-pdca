@@ -129,6 +129,11 @@ effectiveness follow-up, not re-reviewed). All five merged-wider.
   effective. This does NOT affect the §6-derived signals from our own bundles —
   including this review's "confirmed effective" call on the T5 network grant,
   which rests on §6 text, not on the triage grammar.
+  **Routed upstream as default policy** (the human's call — this is not a
+  pdca-pdca lesson, it holds for every instance): state it in the Act role prompt
+  (`template/agents/act.md.jinja`, `## What you read`) and beside the existing
+  blind-spot precedent in `docs/07-crosscutting.md:167` → filed
+  https://github.com/eduralph/pdca-harness/issues/429
 - Ledger: T5 network signal annotated **confirmed effective**; the C4-unverifiable
   signal annotated with its two halves (#165 structural / #428 defect); T4
   contribution signal left open pending #401 (process/act-ledger.json).
