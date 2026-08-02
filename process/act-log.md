@@ -109,6 +109,26 @@ effectiveness follow-up, not re-reviewed). All five merged-wider.
 - Open Act item (carried from 2026-08-01, unchanged): triage rubric should state
   five buckets explicitly (issue_316 §10) → owner: next triage brief author; still
   no triage-class brief in this interval, so nothing to judge yet.
+- Design issue **CLOSED — declined by the human at this review** (was: routed
+  2026-08-01 for a dedicated design phase): triage recurrence-identity
+  representation, broad class vs class+keyword vs semantic slug (issue_316 §6 C5,
+  `template/src/pdca_harness/triage.py:108`). Decision: do **not** redesign the
+  identity grammar; accept reading through the reviews to judge whether two
+  findings are the same complaint. Rationale: the alternative that actually
+  detects synonyms is a semantic slug, which puts a model in charge of naming
+  ledger identities and makes those names unstable across model versions — a
+  worse trade than doing the comparison by hand on a path that runs rarely.
+  No further scheduling; do not re-route this at the next review.
+- **Consequence of that decision, binding on future Act reviews:** for
+  `codex-pr:*` triage signals, the absence of a recurrence is **not** evidence
+  that a delta worked. `act.py:522 recurrences()` matches signals by exact string
+  (`act.py:535`) and `triage.py:108` keys them on class **+ the matched keyword**,
+  so synonyms inside one class ("untested" / "missing test", `triage.py:81`)
+  register as separate signals that each look like a first occurrence. A future
+  review must read the findings themselves before calling a triage-class delta
+  effective. This does NOT affect the §6-derived signals from our own bundles —
+  including this review's "confirmed effective" call on the T5 network grant,
+  which rests on §6 text, not on the triage grammar.
 - Ledger: T5 network signal annotated **confirmed effective**; the C4-unverifiable
   signal annotated with its two halves (#165 structural / #428 defect); T4
   contribution signal left open pending #401 (process/act-ledger.json).
