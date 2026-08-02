@@ -29,6 +29,68 @@
 - The next Do phases should not recreate <specific issue>. Watch the next K cycles.
 -->
 
+# Act review — 2026-08-02 — cycles considered: issue_317, issue_332, issue_369, issue_370, issue_372
+
+Second Act review — five bundles frozen since the 2026-08-01 review (the index
+carried all 14; the nine previously reviewed were considered only for
+effectiveness follow-up, not re-reviewed). Four merged-wider, one closed as a
+split (issue_332).
+
+## What the cycles' records exposed
+- **Known upstream classes recurring while their fixes are still open — expected,
+  no new delta.** T2/T3 oracle wrappers absent from the reviewer sandbox
+  (317, 369, 370, 372 §6 → harness #403); T4 contribcheck vacuous/unreproducible
+  at Check (317, 369, 370, 372 §6 → harness #401); the synthetic
+  `issue_500/split-proposal.md` T3 fixture flake (317, 370, 372 §6 → harness
+  #402). Per the 2026-08-01 entry's own effectiveness criteria, recurrence
+  *before* those issues land is expected; recurrence after they ship via
+  `copier update` is the signal to watch.
+- **New recurring finding — reviewer sandbox git index is read-only, blocking
+  C4 red→green reproduction** (issue_317 §6 C4: "Git stash could not write the
+  read-only worktree index"; issue_372 §6 C4: "git stash could not run because
+  this worktree's git index is read-only"). Distinct from #403: even with the
+  oracles present, the reviewer cannot stash the patch to reproduce the pre-fix
+  red, so C4 lands in §6 as a judgment call instead of a mechanical re-check.
+- **Early effectiveness signal for the 2026-08-01 T5 delta (PR #25 network
+  grant):** the "could not reach `api.github.com`" prior-art class appears in
+  none of the five new cycles' §6. Tentative — same-day cycles, small sample —
+  but the first evidence the delta worked. Keep watching.
+- **The 4× "Validation — fitness-to-purpose — human sign-off must decide"
+  recurring signal is structural, not a gap:** validation fitness is human-only
+  by design (the sign-off contract), so this class will appear in §6 of every
+  cycle and no process delta can or should remove it.
+- **issue_332** (split close, no patch built) exposed nothing recurring — the
+  split path produced a clean one-item §6 and a confirmable disposition.
+
+## Process deltas
+- None to this repo's spec template, ruleset, gates, or agent skills — agreed
+  with the human. Every recurring finding is either already-filed upstream
+  harness machinery (#401–#403, open) or structural (validation is human-only);
+  a local change would paper over the former and mis-frame the latter.
+- Ledger: "validation — fitness-to-purpose — human sign-off must decide" marked
+  **structural** (by design, no delta possible) instead of open
+  (process/act-ledger.json).
+
+## Follow-ups routed (not process deltas — work handed to an owner)
+- Harness/driver issue (upstream, sandbox machinery per the template-vs-instance
+  boundary): reviewer sandbox's read-only git index blocks stash-based C4
+  red→green reproduction (issue_317 + issue_372 §6 C4) → filed
+  https://github.com/eduralph/pdca-harness/issues/419
+- Open Act item (carried from 2026-08-01, unchanged): triage rubric should state
+  five buckets explicitly (issue_316 §10) → owner: next triage brief author;
+  no triage-class brief ran this interval, so nothing to judge yet.
+
+## How effectiveness will be judged
+- C4 stash-reproduction NEEDS-HUMAN (317/372 class) should stop recurring once
+  upstream #419 lands and reaches this instance; recurrence after it ships is
+  the signal.
+- T5 prior-art network class: if it stays absent over the next ~3 cycles, record
+  the PR #25 delta as confirmed effective at the next review.
+- #401–#403 classes: continued recurrence is expected while open; re-check their
+  status next review before drawing any conclusion.
+
+---
+
 # Act review — 2026-08-01 — cycles considered: issue_311, issue_316, issue_331, issue_340, issue_341, issue_359, issue_368, issue_375, issue_376
 
 First Act review of the instance — nine frozen bundles, all merged-wider.
