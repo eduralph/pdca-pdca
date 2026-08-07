@@ -716,6 +716,23 @@ cmd = "test -e ../pdca-harness/.git"
 hint = "git clone https://github.com/eduralph/pdca-harness.git ../pdca-harness"
 required = true
 
+# The T2 and T3 gates single-source on the TARGET's own checkers and test roots rather
+# than reimplementing them (issue #31 item 6), so a target reorganisation turns a green
+# gate red with a path error. These name the paths the gate scripts cd into.
+[[doctor.checks]]
+group = "target"
+id = "target docs checkers (T2 gate)"
+cmd = "test -f ../pdca-harness/docs/publishing/tools/lint_docs.py && test -f ../pdca-harness/docs/publishing/tools/render_site.py"
+hint = "engine/scripts/run-docs-check.sh runs the target's own checkers by path; if the target moved them, update the script to match"
+level = "WARN"
+
+[[doctor.checks]]
+group = "target"
+id = "target test roots (T3 gate)"
+cmd = "test -d ../pdca-harness/tests && test -d ../pdca-harness/template/tests"
+hint = "engine/scripts/run-suite.sh runs both suites per CONTRIBUTING.md — the root render/update-compat suite and template/tests; if the target moved either, update the script"
+level = "WARN"
+
 # Without copier the target's render/update suites SKIP themselves — a green T3
 # that tested nothing — so this row is required, not a WARN.
 [[doctor.checks]]
@@ -731,6 +748,31 @@ id = "docs-render deps (.venv)"
 cmd = ".venv/bin/python3 -c 'import markdown_it, yaml'"
 hint = "make install — extra_bootstrap provisions markdown-it-py[linkify] + PyYAML (T2 docs gate)"
 level = "WARN"
+
+# One row per gate dependency (issue #31 item 6). The rows above cover what the T2 and T3
+# gates import; these cover what the gate COMMANDS need in order to run at all. The class
+# of failure they preempt is the expensive one: a gate that cannot start reports as a red
+# on the patch, and the human spends a sign-off round discovering it was the environment.
+
+# T4 is GATING and runs again at publish, so an unresolvable CLI blocks a contribution
+# twice over. Required, not a WARN — it is also the row that proves the wrapper works
+# wherever this checkout is (a Do/Check worktree has no .venv of its own).
+[[doctor.checks]]
+group = "engine"
+id = "pdca CLI resolvable (T4 row)"
+cmd = "./scripts/pdca --help"
+hint = "make install — or point $PDCA_CLI at the CLI; ./scripts/pdca resolves venv -> src -> PATH for the T4 gate row"
+required = true
+
+# run-verify.sh reads the patch's file list with `mapfile`, a bash 4 builtin. macOS ships
+# bash 3.2, where the C4 gate dies before it reverts anything.
+[[doctor.checks]]
+group = "engine"
+id = "bash >= 4 (C4 gate uses mapfile)"
+cmd = "bash -c 'test \"${BASH_VERSINFO[0]}\" -ge 4'"
+hint = "install a modern bash (macOS: brew install bash) — engine/scripts/run-verify.sh uses mapfile, absent from bash 3.2"
+level = "WARN"
+
 
 # Deterministic Check gates (docs 04). Each check runs a shell command; it PASSES
 # iff the command exits 0. `scope = "repo"` runs against the working tree (and is
@@ -854,7 +896,12 @@ checks = [
   # already paid for it, and re-running a NONDETERMINISTIC reviewer after the human signed
   # off means a bundle green at Check can be refused at publish over a finding that did not
   # exist when §9 was recorded.
-  { id = "T4-contribution", tier = "T4", label = "PR body has a user-impact opener + tracker id in both artifacts", cmd = "pdca-pdca contribcheck", gating = true, scope = "bundle" },
+  # `./scripts/pdca` (issue #31 item 3), not a bare `pdca-pdca`: a gate row is a shell
+  # command, and the console script lives in the project venv — running it does not put
+  # its own directory on PATH. Reviewers kept getting 127 / "no pdca.toml found" here and
+  # read it as an absent gate rather than an unresolvable one (upstream #441). The wrapper
+  # resolves venv → source tree → PATH, so the row works in every documented layout.
+  { id = "T4-contribution", tier = "T4", label = "PR body has a user-impact opener + tracker id in both artifacts", cmd = "./scripts/pdca contribcheck", gating = true, scope = "bundle" },
 ]
 
 
