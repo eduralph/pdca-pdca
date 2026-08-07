@@ -319,7 +319,13 @@ interactive = false
 # Role prompt: canonical body agents/builder.md. Claude resolves it via the baked
 # `--agent builder`; codex (no agent flag) has it inlined into the prompt.
 agent = "builder"
-argv = ["claude", "-p", "--agent", "builder", "--permission-mode", "acceptEdits", "--allowedTools", "Read,Edit,Write,Bash,Grep,Glob"]
+# Model and effort PINNED (issue #31 item 8). Unpinned, Do ran on whatever the CLI happened
+# to default to that day, which makes two things impossible: comparing loop-telemetry across
+# cycles, and having an escalation ladder mean anything (escalating to opus is a no-op if the
+# base already resolved to opus). sonnet at `high` is the base tier; the ladder and the
+# difficulty route below both climb from here.
+effort = "high"
+argv = ["claude", "-p", "--agent", "builder", "--permission-mode", "acceptEdits", "--allowedTools", "Read,Edit,Write,Bash,Grep,Glob", "--model", "sonnet"]
 
 # Builder escalation ladder (issue #135) — optional. A bundle that fails Check and
 # iterates re-runs the builder; without escalation it re-fails with the same model until
@@ -328,9 +334,16 @@ argv = ["claude", "-p", "--agent", "builder", "--permission-mode", "acceptEdits"
 # can't loop forever on an underpowered executor). Each entry inherits any field it omits
 # from [leaves.builder]. Iterations-to-pass + which backend ran each pass land in the
 # bundle's loop-telemetry.json — the go/no-go metric for adopting a cheaper local builder.
-# [[leaves.builder_escalation]]
-# min_iteration = 2          # 2nd attempt onward → a stronger model
-# argv = ["claude", "-p", "--agent", "builder", "--model", "opus", "--permission-mode", "acceptEdits", "--allowedTools", "Read,Edit,Write,Bash,Grep,Glob"]
+#
+# LIVE (issue #31 item 8): from the 2nd attempt on, opus at `max` effort. It must outrank
+# every FIRST-attempt tier, including the difficulty auto-route (opus/xhigh) below —
+# otherwise a `high` bundle iterates onto the exact tier it just failed on. This is the same
+# backend as the `opus-max` pin, which is what keeps that invariant true by construction.
+# With `auto_iterate` on, this is the ladder the driver climbs unattended.
+[[leaves.builder_escalation]]
+min_iteration = 2
+effort = "max"
+argv = ["claude", "-p", "--agent", "builder", "--model", "opus", "--permission-mode", "acceptEdits", "--allowedTools", "Read,Edit,Write,Bash,Grep,Glob"]
 # Difficulty-routed builder variants (issue #134) — optional. Route the Do backend per
 # bundle from the brief's `Difficulty` field (the planner's blast-radius assessment, #133),
 # so a cheap local model handles easy bundles and a stronger one is reserved for the hard
@@ -343,10 +356,55 @@ argv = ["claude", "-p", "--agent", "builder", "--permission-mode", "acceptEdits"
 # `- **Do model:** <name>` (issue #167) — an explicit per-bundle choice that OVERRIDES the
 # `when` routing (e.g. force a privacy-sensitive bundle onto a local backend regardless of
 # difficulty); a `Do model` naming no variant `model` falls back to the `when` routing.
-# [[leaves.builder_variant]]
-# model = "frontier"
-# when = { field = "difficulty", substring = "high" }
-# argv = ["claude", "-p", "--agent", "builder", "--model", "opus", "--permission-mode", "acceptEdits", "--allowedTools", "Read,Edit,Write,Bash,Grep,Glob"]
+#
+# LIVE ROSTER (issue #31 item 8), cheapest first. A brief pins one explicitly with
+# `- **Do model:** <name>`; only the `opus` entry carries a `when`, so it is the sole
+# auto-route and the rest are pin-only. Each inherits any field it omits from
+# [leaves.builder]. NB the `model` key is the SELECTOR NAME a brief matches, not a CLI model
+# id — the CLI model always rides in argv (see leaves.py `_leaf_from_spec`).
+#
+# `substring` is a single string here, not a list: this instance's `_when_matches` does
+# `(when.get("substring") or "").lower()`, so a list raises. The brief vocabulary is
+# low/medium/high, so one word is enough.
+
+# sonnet — force the base tier even on a `high` bundle (overrides the difficulty route).
+[[leaves.builder_variant]]
+model = "sonnet"
+effort = "high"
+argv = ["claude", "-p", "--agent", "builder", "--permission-mode", "acceptEdits", "--allowedTools", "Read,Edit,Write,Bash,Grep,Glob", "--model", "sonnet"]
+
+# fable — the Claude 5 family builder, pin-only. A third first-attempt tier between sonnet
+# and opus, and a model-family change rather than a size change, so it is also the way to
+# retry a bundle whose failures look like one lineage's blind spot.
+[[leaves.builder_variant]]
+model = "fable"
+effort = "high"
+argv = ["claude", "-p", "--agent", "builder", "--permission-mode", "acceptEdits", "--allowedTools", "Read,Edit,Write,Bash,Grep,Glob", "--model", "fable"]
+
+# opus — the difficulty=high auto-route (first attempt), at xhigh effort. The one entry with
+# a `when`; it is deliberately BELOW the escalation ladder's opus/max.
+[[leaves.builder_variant]]
+model = "opus"
+effort = "xhigh"
+when = { field = "difficulty", substring = "high" }
+argv = ["claude", "-p", "--agent", "builder", "--permission-mode", "acceptEdits", "--allowedTools", "Read,Edit,Write,Bash,Grep,Glob", "--model", "opus"]
+
+# opus-max — the deepest tier, and the escalation target above, pinnable directly.
+[[leaves.builder_variant]]
+model = "opus-max"
+effort = "max"
+argv = ["claude", "-p", "--agent", "builder", "--model", "opus", "--permission-mode", "acceptEdits", "--allowedTools", "Read,Edit,Write,Bash,Grep,Glob"]
+
+# codex — cross-vendor builder, OPT-IN and BEST-EFFORT: codex is verified end-to-end here
+# only as the read-only reviewer, so a write-heavy codex builder is unsmoke-tested. Its CLI
+# model rides in argv (`-m`), NOT in the `model` key — that key is the selector name a brief
+# pins, so this is the one tier where the two meanings collide and only argv can carry it.
+[[leaves.builder_variant]]
+model = "codex"
+family = "codex"
+agent = "builder"
+effort = "high"
+argv = ["codex", "exec", "--sandbox", "workspace-write", "--skip-git-repo-check"]
 # Check reviewer (advisory; build-notes withheld via a sandbox). Cross-vendor
 # decorrelation is the default and the ideal — a DIFFERENT family from the builder
 # (INTEGRATION §4). `--agent reviewer` (same family as the builder) is the
@@ -414,6 +472,10 @@ agent = "reviewer"
 # writable root via the family's --add-dir grounding. The role prompt forbids writing the FIX.
 # --skip-git-repo-check: the reviewer's cwd is a temp SANDBOX (not a git repo), which codex
 # exec otherwise refuses to run in ("Not inside a trusted directory").
+# Effort PINNED (issue #31 item 8) rather than left to codex's own default, for the same
+# reason the builder's is: Check's verdict must not drift with a CLI default. Maps to
+# `-c model_reasoning_effort=high` via the codex family profile.
+effort = "high"
 argv = ["codex", "exec", "--sandbox", "workspace-write", "--skip-git-repo-check"]
 
 # Interactive leaves — the human-in-the-loop touch points (Plan, Sign-off, Publish,
@@ -533,13 +595,22 @@ argv = ["claude", "--remote-control", "--agent", "publisher", "--permission-mode
 # red→green evidence and the reviewer's verdict (defaults to "refuted" when uncertain),
 # gated to the highest blast-radius bundles via the Difficulty signal (#133). Advisory —
 # never gates; its `- NEEDS-HUMAN —` findings route into SUMMARY §6.
-# [[leaves.advisory]]
-# id = "adversary"
-# role = "refute the red→green evidence and the reviewer's verdict; find the input that breaks the fix"
-# mode = "stub"
-# family = "claude"
-# argv = ["claude", "-p", "--agent", "adversary", "--permission-mode", "acceptEdits", "--allowedTools", "Read,Bash,Grep,Glob"]
-# when = { field = "difficulty", substring = "high" }
+#
+# LIVE (issue #31 item 8). The prompt has shipped in agents/adversary.md since this instance
+# was rendered and was never invoked — the leaf existed on paper only. Decorrelated by ROLE
+# from the codex reviewer (adequacy vs refutation) rather than by vendor, which is why the
+# same `claude` family is right here and no separate codex advisory is needed. opus/xhigh:
+# refutation is the one review job where a weaker model reliably agrees with the verdict it
+# was asked to attack. Gated to difficulty=high, so it costs nothing on the ~80%.
+[[leaves.advisory]]
+id = "adversary"
+role = "refute the red→green evidence and the reviewer's verdict; find the input that breaks the fix"
+mode = "command"
+family = "claude"
+model = "opus"
+effort = "xhigh"
+argv = ["claude", "-p", "--agent", "adversary", "--permission-mode", "acceptEdits", "--allowedTools", "Read,Bash,Grep,Glob"]
+when = { field = "difficulty", substring = "high" }
 #
 # Advisory-selection policy (issue #64 default vs. issue #200). Unset ⇒ every advisory leaf
 # above whose `when` matches runs. Opt into `vendor-complement` to make cross-vendor
