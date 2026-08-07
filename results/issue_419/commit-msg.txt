@@ -1,0 +1,39 @@
+Materialize a git-writable reviewer target for the red→green re-run
+
+The review contract asks the sandboxed reviewer to independently re-run the
+bundle's red→green: stash the patch away, exercise the pre-fix state, unstash.
+The target it was handed could never host that. The per-cycle linked worktree's
+git metadata — its index included — lives under the PRIMARY checkout's
+.git/worktrees/<name>/, and stash writes objects into the shared .git/objects;
+both sit outside the granted directory and are read-only in the leaf's
+confinement. So every index-writing git operation failed, and on every cycle
+with a patch the verification claim fell to §6 NEEDS-HUMAN — the human re-ran
+the red→green by hand each time.
+
+For a bundle with a patch, the new _reviewer_repo materializes
+<sandbox>/target as a disposable, git-self-contained copy: `git archive HEAD`
+of the resolved target (HEAD is the pre-fix base; the patch sits uncommitted
+on top in the lane), extract, `git init` with pinned identity and signing
+disabled (stash commits, and the re-run must not depend on the operator's git
+config), one commit, then patch.diff applied uncommitted on top — exactly the
+state the reviewer must stash away, with its whole .git inside the sandbox
+cwd. Stash/unstash write nothing near the primary checkout, whose repository
+is only ever read (`archive`/`rev-parse`). Both the review and the advisory
+runners hand the copy as $PDCA_TARGET and withhold the grounding grant for it:
+the copy is under the sandbox cwd already, and granting the real checkout
+besides would hand a read+write family the shared lane worktree for no
+reviewer need. Materialization is best-effort — any failure degrades to the
+old read-only grounding with a stderr note, never an aborted Check. Patchless
+bundles keep grounding read-only on the real target: with nothing to stash
+there is no re-run, and full history serves citations better.
+
+Also make three driver tests hermetic against ambient PDCA_* variables. A
+project's suite gate runs this suite with the driver's inherited environment,
+and a lane-running driver exports PDCA_LANE into every gate's env — so tests
+asserting serial/default behavior (test_off_by_default,
+test_serial_path_sets_no_pdca_lane, test_lane_absent_when_serial) read the
+operator's shell instead of their fixture and fail with a red no patch caused.
+Their setUp now snapshots os.environ and strips PDCA_*, restored on cleanup;
+the new test guards itself the same way.
+
+Fixes #419

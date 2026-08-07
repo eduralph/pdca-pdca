@@ -1,0 +1,29 @@
+Recover the review an interrupted Check beat never ran
+
+Interrupting the driver (Ctrl-C, an OOM kill, a dropped session) in the
+window between the gate write and the reviewer leaf left a bundle in CHECKED
+with no review — and nothing could ever run the reviewer again for that
+round: check-gates.json is itself the CHECKED marker, so on resume the
+dispatch went straight to assembly, SUMMARY carried the missing-review
+placeholder, and the only escape was hand-deleting check-gates.json and
+re-paying the entire gate run (observed for real after the 19-hour gate
+hang of #368).
+
+The CHECKED dispatch now repairs the interruption before assembling. A
+reviewer or advisory leaf whose artifact AND error log are both absent
+never ran (#138's failed-leaf discriminator: a leaf that ran and failed
+wrote its error log; a successful run cleared it) and is run now, with the
+paid gate record preserved byte-for-byte. A leaf that ran and failed keeps
+today's behaviour — its error log stands and it is not re-run. On the two
+no-model paths (close disposition, dependency halt) the deterministic
+review stand-in note is rewritten instead; a model reviewer is never
+invoked there. The advisory-selection policy (#200) is re-applied before
+the missing check, so an unselected vendor-complement leaf is never
+promoted, and an uninterrupted cycle assembles byte-identically to before.
+
+The §6 missing-review wording now also distinguishes a reviewer that NEVER
+RAN (interrupted beat) from one that RAN AND FAILED (pointing at
+check-review.error.log, now the shared constant state.REVIEW_ERROR_LOG),
+so a skipped review can no longer read like a failed one.
+
+Fixes #369

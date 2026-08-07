@@ -1,0 +1,15 @@
+Review: issue 368 adds configured wall-clock bounds for gate commands, killing timed-out process groups and recording timed-out gates as unverifiable.
+
+| Item | Verdict | Basis |
+|------|---------|-------|
+| C1 Spec | PASS | The owed behavior is explicit: bound configured gates, kill the child process group, and route expiry to `unverifiable`, so acceptance can be judged against a concrete oracle (`brief.md:15`). |
+| C2 Reproduction (red pre-fix) | PASS | The pre-fix failure is reproduced by retaining the new tests while reverse-applying the production changes: `run_with_heartbeat(..., timeout=1)` errors and timeout gate rows stay pass, grounding the missing-bound symptom (`template/tests/test_progress.py:211`). |
+| C3 Change | PASS | The patch changes the bounded execution path and gate schema surface only; the decision is whether these are the right control points for a hung gate, and they are the callsite and parser named by the brief (`template/src/pdca_harness/gates.py:459`). |
+| C4 Verification (red→green) | PASS | Red→green is independently reproduced: reverse-production copy failed `tests.test_progress` with 3 errors/2 failures, while patched `$PDCA_TARGET` passed `PYTHONPATH=src python3 -m unittest tests.test_progress` with 26 tests (`template/tests/test_progress.py:281`). |
+| C5 Causal adequacy | PASS | The fix removes the unbounded wait by adding a deadline and process-group termination, not a capability probe or symptom guard; timeout rows become `unverifiable` rather than pass/fail (`template/src/pdca_harness/progress.py:157`). |
+| T1 Structure | N/A | No T1 gate is configured, and this patch does not introduce a new structural artifact boundary that needs a separate structure decision (`check-gates.json:51`). |
+| T2 Shape | NEEDS-HUMAN | The T2 wrapper named in the frozen gates (`./engine/scripts/run-docs-check.sh`) is absent in the target checkout, so the human must decide whether the recorded docs-link pass is sufficient or stale (`check-gates.json:60`). |
+| T3 Runtime | NEEDS-HUMAN | The exact T3 wrapper (`./engine/scripts/run-suite.sh`) is absent and the frozen row reports an advisory fail, while direct `PYTHONPATH=src python3 -m unittest discover -s tests` passed; decide whether the stale/missing wrapper failure matters for this patch (`check-gates.json:69`). |
+| T4 Contribution | NEEDS-HUMAN | The contribution artifacts needed to re-run `pdca-pdca contribcheck` are not among the provided review inputs, so the recorded pass cannot be independently confirmed (`check-gates.json:78`). |
+| T5 Judgment | NEEDS-HUMAN | Human sign-off must decide whether adding timeout knobs to the template gate policy is an acceptable contribution shape for instances, since no deterministic T5 gate is configured (`template/pdca.toml.jinja:866`). |
+| Validation — fitness-to-purpose | NEEDS-HUMAN | The human must decide whether the shipped timeout semantics satisfy the real 19h hung-gate operational problem without over-scoping into #370/#372 behavior (`brief.md:47`). |

@@ -70,3 +70,9 @@
 Draft only until Check sign-off. Pushing to a feature/draft branch and opening a
 draft PR MAY happen during the cycle (useful for CI feedback). The PR MUST NOT be
 marked ready before sign-off accepts.
+
+## Iteration 1 — carry-forward (from the previous attempt)
+- Sign-off rationale: Advisory C5 FAIL upheld by the human: the gate-log write failure must NOT be silent. Today `_write_gate_log` returns None on OSError and the row is emitted with no `log`/`duration_secs` and no other signal — the feature's own promise ("full basis reconstructable from bundle files alone") can silently not happen, echoing the original #370 defect. Keep the builder's invariant that evidence persistence never breaks the gate run or alters a verdict; but on a write failure, surface it visibly — e.g. an additive row key (`log_error` with the reason) and a stderr line — and cover the reproduced collision case (a file squatting on the `gate-logs` path) with a test. Everything else in the patch stood up well (C4 red→green, C1/C2/C3/T1 advisory PASS); this is a targeted rebuild, not a redesign.
+- Failing gate: T3 runtime: render/update-compat + offline driver suites (advisory) — /tmp/tmpwh2crglt/results/issue_500/split-proposal.md
+- Full previous attempt preserved in `iteration-v1/` (patch.diff, build-notes.md, SUMMARY.md, check-*).
+- Address the above; do NOT re-attempt the rejected approach unchanged. Satisfy the brief's Success criterion (the end result).

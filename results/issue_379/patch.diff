@@ -1,0 +1,260 @@
+diff --git a/template/agents/adversary.md.jinja b/template/agents/adversary.md.jinja
+index 1af001c..e515d5e 100644
+--- a/template/agents/adversary.md.jinja
++++ b/template/agents/adversary.md.jinja
+@@ -34,6 +34,19 @@ the builder's framing). Ground every cited `path:line` on the **target source at
+ `$PDCA_TARGET`** (read-only; the driver resolves and adds it); do not search other
+ checkouts. You have **no Write/Edit** — you cannot patch what you judge.
+ 
++## Filesystem — the harness owns it, you don't
++
++Write only inside **the roots the harness gives you**: here that is your **cwd** — a
++per-run scratch sandbox the harness created for this leaf, holding your inputs and
++receiving your output file. `$PDCA_TARGET` is grounding you read, never write. Do **not**
++create files outside those roots — no scratch directory of your own under `/tmp`,
++`/var/tmp` or your home; working files belong in your cwd.
++
++Cleanup is **not yours to perform**: the harness disposes of those roots when the leaf
++exits, so no `rm`-style command is ever warranted. Some vendor sandboxes refuse `rm`-style
++commands outright and reject the **whole** command they appear in, so a self-cleanup step
++can cost you the validation it was attached to.
++
+ ## Output — `check-advisory-adversary.md`
+ 
+ A short list of refutation attempts, each a Markdown bullet citing `path:line` and the
+diff --git a/template/agents/builder.md.jinja b/template/agents/builder.md.jinja
+index 80d7123..55ba9e4 100644
+--- a/template/agents/builder.md.jinja
++++ b/template/agents/builder.md.jinja
+@@ -40,6 +40,19 @@ This is a fork contribution — also follow `docs/fork-discipline.md`: a cross-v
+ cherry-pick must *remain correct* on the target, not just apply cleanly (§3).
+ {% endif %}
+ 
++## Filesystem — the harness owns it, you don't
++
++Write only inside **the roots the harness gives you**: the per-cycle git worktree at
++`$PDCA_WORKTREE` for every target-source edit, and the bundle directory the driver prompt
++names for your three artifacts. Do **not** create files outside those roots — not the
++host's primary checkout, not a scratch directory of your own under `/tmp`, `/var/tmp` or
++your home; working files belong inside the worktree.
++
++Cleanup is **not yours to perform**: the harness created those roots and reclaims them
++itself, so no `rm`-style command is ever warranted. Some vendor sandboxes refuse `rm`-style
++commands outright and reject the **whole** command they appear in, so a self-cleanup step
++can cost you the work it was attached to.
++
+ **When you reject an alternative on cost, show the cost** — a diff sketch or a concrete
+ line count someone can check, never an adjective ("heavier", "larger", "touches every
+ reader"). This matters most when your chosen fix *guards a symptom* (adds a probe/guard)
+diff --git a/template/agents/code-review.md.jinja b/template/agents/code-review.md.jinja
+index a7709a3..c2e69b6 100644
+--- a/template/agents/code-review.md.jinja
++++ b/template/agents/code-review.md.jinja
+@@ -17,6 +17,19 @@ on the builder's framing). Ground every cited `path:line` on the **target source
+ `$PDCA_TARGET`** (read-only; the driver resolves and adds it); do not search other
+ checkouts. You have **no Write/Edit** — you cannot patch what you judge.
+ 
++## Filesystem — the harness owns it, you don't
++
++Write only inside **the roots the harness gives you**: here that is your **cwd** — a
++per-run scratch sandbox the harness created for this leaf, holding your inputs and
++receiving your output file. `$PDCA_TARGET` is grounding you read, never write. Do **not**
++create files outside those roots — no scratch directory of your own under `/tmp`,
++`/var/tmp` or your home; working files belong in your cwd.
++
++Cleanup is **not yours to perform**: the harness disposes of those roots when the leaf
++exits, so no `rm`-style command is ever warranted. Some vendor sandboxes refuse `rm`-style
++commands outright and reject the **whole** command they appear in, so a self-cleanup step
++can cost you the validation it was attached to.
++
+ ## Output — `check-advisory-code-review.md`
+ 
+ A short list of findings, each a Markdown bullet citing `path:line`. For any finding a
+diff --git a/template/agents/plan-reviewer.md.jinja b/template/agents/plan-reviewer.md.jinja
+index 55959ce..88c7f5f 100644
+--- a/template/agents/plan-reviewer.md.jinja
++++ b/template/agents/plan-reviewer.md.jinja
+@@ -31,6 +31,19 @@ gets one revision pass over your findings; the human adjudicates anything left a
+ about the code on the **target source at `$PDCA_TARGET`** (read-only; the driver resolves
+ and adds it); do not search other checkouts. You have **no Write/Edit**.
+ 
++## Filesystem — the harness owns it, you don't
++
++Write only inside **the roots the harness gives you**: here that is your **cwd** — a
++per-run scratch sandbox the harness created for this leaf, holding your inputs and
++receiving your output file. `$PDCA_TARGET` is grounding you read, never write. Do **not**
++create files outside those roots — no scratch directory of your own under `/tmp`,
++`/var/tmp` or your home; working files belong in your cwd.
++
++Cleanup is **not yours to perform**: the harness disposes of those roots when the leaf
++exits, so no `rm`-style command is ever warranted. Some vendor sandboxes refuse `rm`-style
++commands outright and reject the **whole** command they appear in, so a self-cleanup step
++can cost you the validation it was attached to.
++
+ ## Output — `plan-advisory-plan-reviewer.md`
+ 
+ A short list of findings, each a Markdown bullet prefixed `- NEEDS-HUMAN — ` with the
+diff --git a/template/agents/reviewer.md.jinja b/template/agents/reviewer.md.jinja
+index 77944a0..0152a9d 100644
+--- a/template/agents/reviewer.md.jinja
++++ b/template/agents/reviewer.md.jinja
+@@ -19,6 +19,19 @@ Deterministic gates block; you annotate.
+ enforces this by not passing the file. You also have **no Write/Edit tool** — you
+ physically cannot patch what you judge.
+ 
++## Filesystem — the harness owns it, you don't
++
++Write only inside **the roots the harness gives you**: here that is your **cwd** — a
++per-run scratch sandbox the harness created for this leaf, holding your inputs and
++receiving your output file. `$PDCA_TARGET` is grounding you read, never write. Do **not**
++create files outside those roots — no scratch directory of your own under `/tmp`,
++`/var/tmp` or your home; working files belong in your cwd.
++
++Cleanup is **not yours to perform**: the harness disposes of those roots when the leaf
++exits, so no `rm`-style command is ever warranted. Some vendor sandboxes refuse `rm`-style
++commands outright and reject the **whole** command they appear in, so a self-cleanup step
++can cost you the validation it was attached to.
++
+ ## What you do
+ 
+ - Re-run the asserted evidence: stash the fix → confirm red; unstash → confirm
+diff --git a/template/tests/test_leaf_scratch_discipline.py b/template/tests/test_leaf_scratch_discipline.py
+new file mode 100644
+index 0000000..6ce3996
+--- /dev/null
++++ b/template/tests/test_leaf_scratch_discipline.py
+@@ -0,0 +1,134 @@
++"""Every headless leaf's role body states who owns its filesystem (issue #379).
++
++The harness owns the working files of these leaves *mechanically*: the reviewer and the
++advisory leaves run with their cwd set to a ``tempfile.TemporaryDirectory`` that is deleted
++when the leaf exits (``src/pdca_harness/leaves.py:1831`` ``pdca-review-``, ``:2145``
++``pdca-advisory-``, ``:2437`` ``pdca-plan-advisory-``), and the builder edits the per-cycle
++worktree the harness creates and reclaims (``:1290`` ``worktree.ensure`` plus
++``[driver].sweep_worktrees``), writing its artifacts into the bundle dir it is granted
++(``:1310-1315``).
++
++None of that was ever *said* in the role bodies, so a conscientious model invented an
++answer — creating scratch outside its cwd and then feeling obliged to delete it. codex
++``exec`` refuses ``rm``-style commands unconditionally in this mode, so the self-cleanup
++step got the whole compound command rejected before any of it ran
++(``rejected: rm -f style commands are not permitted``).
++
++This asserts the *property* per body, not one exact sentence: (a) a writable-roots
++statement phrased over the roots the **harness** gives (so a future harness-provided root
++is covered without rewording), naming that leaf's roots, plus the prohibition on writing
++outside them; and (b) a cleanup statement — the harness disposes of those roots, so the
++leaf never runs one. In the template checkout the bodies must render for *every* instance,
++so the statement must also sit outside any ``{% if %}`` block.
++
++Unlike ``test_role_prompts.py`` (which compares the rendered ``.claude/`` wrappers and so
++skips in the template checkout), this suite resolves the body path posture-aware and runs
++non-vacuously in BOTH the template checkout and a rendered instance.
++"""
++
++from __future__ import annotations
++
++import re
++import unittest
++from pathlib import Path
++
++TEMPLATE = Path(__file__).resolve().parents[1]
++AGENTS = TEMPLATE / "agents"
++
++# The headless leaves whose working files the harness creates AND disposes of, mapped to
++# the roots each one is given. The sandboxed leaves share one shape (their cwd); the
++# builder's differs — it must keep writing patch.diff / the test / build-notes.md into the
++# bundle dir, so a blanket "never write outside your cwd" would be wrong for it.
++SANDBOX_ROOTS = (r"\bcwd\b|\bworking director", )
++AGENT_ROOTS = {
++    "reviewer": SANDBOX_ROOTS,
++    "adversary": SANDBOX_ROOTS,
++    "code-review": SANDBOX_ROOTS,
++    "plan-reviewer": SANDBOX_ROOTS,
++    "builder": (r"\$PDCA_WORKTREE", r"\bbundle\b"),
++}
++
++# (a) the roots are the HARNESS's to give — the phrasing #422 can extend without a rewrite.
++GRANTED = re.compile(r"(?i)\broots?\b[^.]{0,60}\bharness\b|\bharness\b[^.]{0,60}\bgives? you\b")
++WRITABLE = re.compile(r"(?i)\bwrit(e|es|ing|able)\b")
++OUTSIDE = re.compile(r"(?i)\b(never|not|no|don't)\b[^.]{0,140}\boutside\b")
++# (b) cleanup belongs to the harness, so no rm-style command is ever warranted.
++DISPOSES = re.compile(r"(?i)\bharness\b[^.]{0,140}\b(delete|dispos|remov|reclaim|clean)")
++NOT_THE_LEAF_S = re.compile(
++    r"(?i)\b(clean-?up|cleaning|reclaim\w*|disposal)\b[^.]{0,80}\b(never|not)\b[^.]{0,40}"
++    r"\b(you|your|yours|the leaf)"
++    r"|\b(never|no|not)\b[^.]{0,80}`?\brm\b")
++
++
++def body_path(agent: str) -> Path:
++    """``agents/<agent>.md.jinja`` in the template checkout, ``agents/<agent>.md`` in a
++    rendered instance — the posture-aware pick mirrored from
++    ``tests/test_remote_control_docs.py:22-24``, so this suite runs in both."""
++    return next(AGENTS / n for n in (f"{agent}.md.jinja", f"{agent}.md")
++                if (AGENTS / n).is_file())
++
++
++def paragraphs(text: str) -> list[tuple[int, str]]:
++    """(offset, whitespace-normalized paragraph) for each blank-line-separated block."""
++    out, pos = [], 0
++    for block in text.split("\n\n"):
++        out.append((pos, " ".join(block.split())))
++        pos += len(block) + 2
++    return [(off, p) for off, p in out if p]
++
++
++def inside_a_conditional(text: str, offset: int) -> bool:
++    """True when ``offset`` falls inside a ``{% if %} … {% endif %}`` block: text there
++    renders for only some instances, and this statement must reach every vendor."""
++    head = text[:offset]
++    return len(re.findall(r"{%-?\s*if\b", head)) > len(re.findall(r"{%-?\s*endif\b", head))
++
++
++class LeafScratchDiscipline(unittest.TestCase):
++    def test_every_harness_owned_leaf_states_its_writable_roots(self) -> None:
++        for agent, roots in AGENT_ROOTS.items():
++            with self.subTest(agent=agent):
++                path = body_path(agent)
++                text = path.read_text(encoding="utf-8")
++                hits = [(off, p) for off, p in paragraphs(text)
++                        if GRANTED.search(p) and WRITABLE.search(p)]
++                self.assertTrue(
++                    hits,
++                    f"{path.name}: no statement of which roots the harness gives this leaf "
++                    f"to write in — the leaf is left to invent its own filesystem")
++                hits = [(off, p) for off, p in hits
++                        if all(re.search(pattern, p) for pattern in roots)]
++                self.assertTrue(
++                    hits,
++                    f"{path.name}: the writable-roots statement never names this leaf's own "
++                    f"roots ({', '.join(roots)}), so it does not describe THIS leaf")
++                hits = [(off, p) for off, p in hits if OUTSIDE.search(p)]
++                self.assertTrue(
++                    hits,
++                    f"{path.name}: the roots are named but nothing forbids creating files "
++                    f"outside them")
++                self.assertFalse(
++                    all(inside_a_conditional(text, off) for off, _ in hits),
++                    f"{path.name}: the ownership statement sits inside a {{% if %}} block, "
++                    f"so it renders for only some instances")
++
++    def test_every_harness_owned_leaf_states_cleanup_is_not_its_job(self) -> None:
++        for agent in AGENT_ROOTS:
++            with self.subTest(agent=agent):
++                path = body_path(agent)
++                text = path.read_text(encoding="utf-8")
++                hits = [(off, p) for off, p in paragraphs(text)
++                        if DISPOSES.search(p) and NOT_THE_LEAF_S.search(p)]
++                self.assertTrue(
++                    hits,
++                    f"{path.name}: nothing says the harness disposes of these roots and the "
++                    f"leaf therefore never runs a cleanup — so an invented rm-style command "
++                    f"stays plausible (and codex `exec` rejects the command it rides on)")
++                self.assertFalse(
++                    all(inside_a_conditional(text, off) for off, _ in hits),
++                    f"{path.name}: the cleanup statement sits inside a {{% if %}} block, "
++                    f"so it renders for only some instances")
++
++
++if __name__ == "__main__":
++    unittest.main()

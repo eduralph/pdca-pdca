@@ -1,0 +1,31 @@
+feat(gates): per-gate wall-clock timeout; expiry is unverifiable
+
+A gate command previously had no bound anywhere in the chain:
+run_with_heartbeat had no timeout parameter and the [[gates.checks]] schema
+had no field to configure one, so a hung gate stalled the Check beat
+indefinitely while the heartbeat printed "… still working" — measured: an
+advisory row held a Check beat for 19h 16m until a human interrupted it. The
+mechanism built so a slow gate would not look hung is what kept a genuinely
+hung gate from looking hung.
+
+run_with_heartbeat now accepts a keyword-only timeout (seconds). On expiry
+the child's whole process group is terminated (SIGTERM, then SIGKILL after a
+short grace) — gates run shell=True, so the real work is a grandchild of the
+shell, and killing only the shell would orphan it, still burning the very
+wall-clock the bound caps. The returncode slot carries the sentinel
+TIMEOUT_RC, outside anything a real child can produce, so callers can route
+"the oracle did not answer" without any change to the existing return shape.
+The child is sessionized only when a bound exists; timeout=None (the
+default) is byte-identical to today.
+
+A [[gates.checks]] row may carry timeout_secs, with a [gates]
+default_timeout_secs fallback; timeout_secs = 0 opts one long row out of a
+configured default. A row that times out is recorded unverifiable — not a
+pass/fail verdict the command never reached — with the bound named in the
+evidence line ("gate exceeded its Ns timeout"). It stays out of the gating
+verdict and rides the existing unverifiable channel to SUMMARY §6
+NEEDS-HUMAN, where sign-off sees it. Nothing configured anywhere leaves gate
+behaviour unchanged. The new keys are documented in pdca.toml.jinja's
+[gates] section.
+
+Fixes #368

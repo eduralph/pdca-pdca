@@ -1,0 +1,37 @@
+feat(gates): persist each gate's full output as bundle evidence logs
+
+A gate run used to leave only the last line of each command's output,
+truncated to 120 characters, in check-gates.json/.md — and nothing else.
+For a gating red that parks a bundle, that one line was the entire record:
+in a measured incident a transient CI gate red recorded only
+"xtask: … failed with exit status: 101", and which test failed was
+unrecoverable after the fact. That breaks the state-is-files doctrine:
+the full basis of a recorded verdict was not reconstructable from the
+bundle.
+
+A bundle-scoped gate run now writes gate-logs/<rule_id>.log into the
+bundle: a small header (command, cwd, PDCA_WORKTREE, start time,
+duration, exit code / outcome) followed by the combined stdout+stderr
+verbatim — one file per rule id, overwritten per Check run (a check
+removed from config leaves no stale log). Each row additively gains
+`log` (the bundle-relative path) and `duration_secs`; every existing
+key and consumer is unchanged, and the 120-char evidence line stays as
+the summary. On a timeout (the #368 bound) the partial capture is
+attached, so a hung gate's log shows where it hung instead of nothing.
+The iterate archive moves gate-logs/ with the round's other artifacts,
+so each iteration-v<N>/ keeps the full basis of its own verdict.
+
+Evidence persistence is best-effort — it never breaks the gate run or
+alters a verdict — but a write failure is never silent: the row carries
+`log_error` with the reason and a stderr line names the gate, so a run
+where the promised evidence could not be written is visible in both the
+live output and the recorded rows. A non-directory squatting on the
+gate-logs path is deliberately not deleted to make room: the harness
+never creates that path as a file, so it is someone else's data, and
+the loud log_error is safer than silently destroying it.
+
+Repo-scoped runs (pdca gates --working-tree) keep today's behaviour,
+and a dry re-gate (pdca revalidate) writes no logs — gate-logs/ is the
+frozen evidence behind a frozen verdict and must not be overwritten.
+
+Fixes #370

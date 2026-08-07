@@ -1,0 +1,29 @@
+fix(publish): scope the --no-issue T4 amnesty to the tracker id only
+
+`publish --no-issue` states one fact: the tracker id is not assigned
+yet. But a failed T4 contribution gate was relaxed to a printed FLAGGED
+notice whenever that flag was set, because the gate was never told
+which mode it ran in — so the amnesty covered the whole checker, and a
+PR body with no `**User impact:**` opener or a broken commit message
+was waved through as "pending id" and pushed.
+
+Now the gate runs in the mode the publish is actually in: `_t4_passes`
+exports $PDCA_PENDING_ID derived from this run's flag (an inherited
+ambient value is scrubbed, never honoured), and `contribcheck` honours
+it as `--no-issue` — the checker's existing narrow mode that drops
+exactly the tracker-id requirement. Every other contribution rule
+blocks the push in both modes; the blanket relax branch is deleted.
+The mode travels through the environment rather than an edit to the
+registered `T4-contribution` row's cmd line, which would conflict on
+`copier update` for any instance that appended a row beside it
+(tests/test_update_compat.py). The `id_pending` recording and the
+"add the id and re-gate before ready" discipline are unchanged.
+
+Also restores the immediate pre-run announce before the first T4
+gate's heartbeat, dropped in
+a2c25ac1355ee4f1a5d839897239892d22c381f1 (#338): the first tick is a
+full interval away, so publish's first action after its guards read as
+a hang. The heartbeat label is now unprefixed — the announce already
+says "T4 gate".
+
+Fixes #384

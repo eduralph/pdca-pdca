@@ -1,0 +1,28 @@
+Add `pdca record`: commit terminal-finished bundles as one batch
+
+The driver's state is the files in the bundle directory, so an uncommitted
+terminal bundle is provenance that exists on one machine only — and the
+forgetting is silent. Observed: four bundles uncommitted for five days, one
+of them DISCONTINUED with its sign-off record the sole provenance for an
+open upstream PR.
+
+`pdca record [<ids>…]` selects the bundles whose cycle is over —
+`state.state` in the new `state.TERMINAL` set (COMPLETE, DISCONTINUED,
+RESOLVED; never a bundle in motion or one halted for a human) — and commits
+the batch to the instance repo as ONE commit with the configured
+conventional subject. `[records] mode = "pr"` additionally branches, pushes
+and opens one draft PR for the whole batch; publish also triggers a
+best-effort recording, strictly after it writes publish.json, so a
+bookkeeping failure never fails a completed publish. The default
+`mode = "off"` changes nothing anywhere — including for instances that do
+not version results/ — and an unknown mode fails closed to "off", loudly.
+
+The terminal set is defined in state.py next to the state names it selects
+on, and the new module consumes it rather than re-enumerating states: an
+instance script re-implementing the classification and drifting is exactly
+the failure this replaces. An explicit id never overrides the predicate — a
+non-terminal id is reported and excluded, not frozen into the repo
+mid-cycle. Re-running is idempotent: an already-recorded batch is a quiet
+success, not a failing `git commit`.
+
+Fixes #317

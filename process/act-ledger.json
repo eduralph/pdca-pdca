@@ -30,5 +30,61 @@
     "status": "open",
     "applied_date": null,
     "location": "Two halves (second 2026-08-02 Act review). (a) STRUCTURAL: a genuine test-only/docs-only patch has no production hunk to revert, so C4 cannot go red\u2192green and #165 routes it to \u00a76 by design \u2014 no delta possible. (b) DEFECT: the marker is matched anywhere in captured output, so a bundle that merely MENTIONS `PDCA-UNVERIFIABLE:` has a green gating C4 flipped to unverifiable \u2014 filed upstream as https://github.com/eduralph/pdca-harness/issues/428 (evidence: results/issue_387/check-gates.json C4 row). Close when #428 lands."
+  },
+  {
+    "signal": "t3 runtime \u2014 decide how to treat the",
+    "raw": "T3 Runtime \u2014 Decide how to treat the gate discrepancy: `check-gates.json` records an advisory T3 failure at a transient split-proposal path, while `PYTHONPATH=src python3 -m unittest discover -s tests` passed locally and the recorded temp path is not inspectable (`check-gates.json:69`).",
+    "first_seen": "2026-08-05",
+    "status": "applied",
+    "applied_date": "2026-08-02",
+    "location": "Pre-fix records only (2026-08-05 review): the split-proposal decoy path comes from cycles frozen before the 2026-08-02 verdict-line stopgap (engine/scripts/run-suite.sh:19-49). Decoy absent from all 7 cycles frozen since \u2014 stopgap CONFIRMED EFFECTIVE. Upstream fix (#402, PDCA-EVIDENCE marker) merged to main 2026-08-05; revert the stopgap once v0.57.0 is consumed."
+  },
+  {
+    "signal": "t2 shape \u2014 decide whether to rely on",
+    "raw": "T2 Shape \u2014 Decide whether to rely on the recorded docs-check result: `check-gates.json` reports T2 pass, but no `run-docs-check.sh` exists in this target checkout to rerun the link audit here.",
+    "first_seen": "2026-08-05",
+    "status": "open",
+    "applied_date": null,
+    "location": "Reviewer-oracle reachability \u2014 upstream #403, CLOSED on main 2026-08-05 (this instance's issue_403 cycle) but not in any release; instance is rendered from v0.56.0. Expect the class to clear after v0.57.0 + copier update; recurrence after that is the signal."
+  },
+  {
+    "signal": "t2 shape \u2014 decide whether to accept the",
+    "raw": "T2 Shape \u2014 Decide whether to accept the recorded site-render pass or rerun with network/a local `MERMAID_JS` asset \u2014 lint and shell/Python syntax passed locally, but the renderer could not complete its Mermaid fetch, so its link audit was not independently reproduced (`docs/publishing/tools/render_site.py:403`).",
+    "first_seen": "2026-08-05",
+    "status": "open",
+    "applied_date": null,
+    "location": "One-off environmental (issue_376, pre-network-grant): the reviewer sandbox now has network (PR #25), so the Mermaid fetch should succeed on future site-render reviews. No delta; re-check only if it recurs post-grant."
+  },
+  {
+    "signal": "c4 verification (red\u2192green) \u2014 the owed decision is",
+    "raw": "C4 Verification (red\u2192green) \u2014 The owed decision is whether to accept the driver C4 row despite local harness non-reproduction: the named unittest is red\u2192green locally, but the recorded oracle `./engine/scripts/run-verify.sh` is absent at target root and the only found script is a driver skeleton requiring `PDCA_BUNDLE` (`check-gates.json:33`, `template/engine/scripts/run-verify.sh:48`).",
+    "first_seen": "2026-08-05",
+    "status": "open",
+    "applied_date": null,
+    "location": "Two upstream causes, both open: #419 (read-only reviewer git index blocks stash red\u2192green) and the target's run-verify.sh being a skeleton in the template checkout (the reviewer's target is the template, whose C4 wrapper is intentionally unimplemented). Related new filing: #441 (per-gate runner scaffolding/validation). Re-check next review."
+  },
+  {
+    "signal": "t3 runtime \u2014 the owed decision is whether",
+    "raw": "T3 Runtime \u2014 The owed decision is whether the recorded runtime-suite failure is environmental/unrelated or release-relevant: `check-gates.json` reports a non-gating fail at `/tmp/tmp02bdzheb/results/issue_500/split-proposal.md`, but `./engine/scripts/run-suite.sh` is not present in this target to reproduce (`check-gates.json:69`).",
+    "first_seen": "2026-08-05",
+    "status": "applied",
+    "applied_date": "2026-08-02",
+    "location": "Same class as the other split-proposal signal: pre-fix records only. Covered by the 2026-08-02 run-suite.sh verdict-line stopgap (confirmed effective over the 7 cycles since) + upstream #402 (merged to main 2026-08-05, awaiting v0.57.0)."
+  },
+  {
+    "signal": "t2 shape \u2014 decide whether to accept shape",
+    "raw": "T2 Shape \u2014 Decide whether to accept shape without the configured docs wrapper: `./engine/scripts/run-docs-check.sh` was unavailable at `$PDCA_TARGET` root, so its recorded pass could not be independently re-run (`check-gates.json:29`).",
+    "first_seen": "2026-08-06",
+    "status": "open",
+    "applied_date": null,
+    "location": ""
+  },
+  {
+    "signal": "t4 contribution \u2014 decide whether to rely on",
+    "raw": "T4 Contribution \u2014 Decide whether to rely on the recorded contribution PASS \u2014 the PR-body artifacts and contribcheck oracle were not among the reviewer inputs, so tracker/opener compliance could not be independently reproduced; issue linkage is present in the test at `template/tests/test_verify_red_leg.py:2`.",
+    "first_seen": "2026-08-06",
+    "status": "open",
+    "applied_date": null,
+    "location": ""
   }
 ]

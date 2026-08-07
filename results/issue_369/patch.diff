@@ -1,0 +1,499 @@
+diff --git a/template/src/pdca_harness/assemble.py b/template/src/pdca_harness/assemble.py
+index 219406f..fe3617a 100644
+--- a/template/src/pdca_harness/assemble.py
++++ b/template/src/pdca_harness/assemble.py
+@@ -14,7 +14,7 @@ import re
+ from pathlib import Path
+ from typing import NamedTuple
+ 
+-from . import brief, doctor, size_signal
++from . import brief, doctor, size_signal, state
+ from .config import Config
+ from .gates import canonical_elements
+ 
+@@ -182,7 +182,7 @@ def collect_needs_human(d: Path, cfg: Config) -> list[NeedsHumanItem]:
+     gates_json = json.loads((d / "check-gates.json").read_text(encoding="utf-8"))
+     review_path = d / "check-review.md"
+     review_text = (review_path.read_text(encoding="utf-8")
+-                   if review_path.exists() else _missing_review_text())
++                   if review_path.exists() else _missing_review_text(d))
+     advisory_texts = [p.read_text(encoding="utf-8")
+                       for p in sorted(d.glob("check-advisory-*.md"))]
+ 
+@@ -258,7 +258,7 @@ def assemble_summary(d: Path, cfg: Config) -> None:
+     review_text = (
+         review_path.read_text(encoding="utf-8")
+         if review_path.exists()
+-        else _missing_review_text()
++        else _missing_review_text(d)
+     )
+     # Optional advisory reviewers (issue #64): each check-advisory-<id>.md is folded into
+     # §5 and its NEEDS-HUMAN findings into §6, exactly like the main reviewer.
+@@ -391,13 +391,32 @@ def _failed_gating_items(gates: dict) -> list[NeedsHumanItem]:
+     ]
+ 
+ 
+-def _missing_review_text() -> str:
++def _missing_review_text(d: Path) -> str:
+     """Placeholder when ``check-review.md`` is absent — flags a §6 NEEDS-HUMAN so the
+-    bundle assembles and reaches sign-off but cannot be accepted without a review."""
++    bundle assembles and reaches sign-off but cannot be accepted without a review.
++
++    Two wordings (#369), split on the error log — the engine's failed-leaf
++    discriminator (#138: a reviewer that ran and FAILED wrote
++    ``state.REVIEW_ERROR_LOG``; a successful run removed any stale one). Without the
++    split, a reviewer that NEVER RAN (the beat died between the gate write and the
++    leaf) read exactly like one that ran and failed, and the record could not
++    distinguish "not yet run" from "ran and yielded nothing".
++    """
++    if (d / state.REVIEW_ERROR_LOG).exists():
++        return (
++            "# Advisory review MISSING — the reviewer RAN AND FAILED\n\n"
++            "- NEEDS-HUMAN — no check-review.md was produced: the reviewer leaf ran "
++            f"and FAILED (see `{state.REVIEW_ERROR_LOG}` in this bundle for the "
++            "captured error). Fix the cause, then re-run the Check reviewer before "
++            "accepting.\n"
++        )
+     return (
+-        "# Advisory review MISSING\n\n"
+-        "- NEEDS-HUMAN — no check-review.md was produced (the reviewer leaf failed or "
+-        "its model connection dropped). Re-run the Check reviewer before accepting.\n"
++        "# Advisory review MISSING — the reviewer NEVER RAN\n\n"
++        "- NEEDS-HUMAN — no check-review.md was produced and no "
++        f"`{state.REVIEW_ERROR_LOG}` exists: the reviewer leaf NEVER RAN (the Check "
++        "beat was interrupted before it), it did not run-and-fail. The driver "
++        "recovers a never-ran reviewer on the next `advance` (#369); if this text "
++        "persists, re-run the Check reviewer before accepting.\n"
+     )
+ 
+ 
+diff --git a/template/src/pdca_harness/dependency_halt.py b/template/src/pdca_harness/dependency_halt.py
+index fe7a514..66adee5 100644
+--- a/template/src/pdca_harness/dependency_halt.py
++++ b/template/src/pdca_harness/dependency_halt.py
+@@ -214,6 +214,17 @@ def load(d: Path) -> dict | None:
+     return data if isinstance(data, dict) else None
+ 
+ 
++def recorded_verdicts(d: Path) -> list[Verdict]:
++    """The recorded verdicts, reconstructed to the :class:`Verdict` shape — for a
++    consumer that needs them again after the beat that produced them (#369: the
++    CHECKED-resume rewrites :func:`blocked_review_note` when a death between the N/A
++    gate write and the note left a halted bundle with no review artifact). Tolerant
++    like :func:`load`: a malformed row is skipped, never a crash."""
++    rec = load(d)
++    return [Verdict(**{f: v.get(f) for f in Verdict._fields})
++            for v in (rec or {}).get("verdicts", []) if isinstance(v, dict)]
++
++
+ def refuted_items(d: Path) -> list[str]:
+     """§6 texts for every REFUTED declaration — how the refutation reaches the human and
+     ``pdca act index`` (both read SUMMARY §6, not a bundle-local json). The caller tags
+diff --git a/template/src/pdca_harness/driver.py b/template/src/pdca_harness/driver.py
+index b260e5f..a3f927a 100644
+--- a/template/src/pdca_harness/driver.py
++++ b/template/src/pdca_harness/driver.py
+@@ -114,6 +114,18 @@ def advance(d: Path, cfg: Config) -> None:
+                 _say(f"→ {d.name}: Check — advisory reviewers ({len(cfg.advisory_leaves)})…")
+                 leaves.run_advisory_leaves(d, cfg)
+     elif s == state.CHECKED:
++        # Trap-door recovery (#369): `check-gates.json` IS the CHECKED marker
++        # (state.state), but the BUILT branch above runs gates → reviewer → advisory
++        # leaves as ONE indivisible step. A death in the window between the gate write
++        # and a model leaf (Ctrl-C, OOM, a killed session) landed the bundle HERE with
++        # that leaf never run — and nothing ever ran it again: assemble filled the
++        # missing-review placeholder and the only escape was hand-deleting
++        # check-gates.json, re-paying the entire gate run. Recover the never-ran leaf
++        # (artifact AND error log both absent — the #138 failed-leaf discriminator)
++        # before assembly, preserving the paid gate record; a leaf that ran and FAILED
++        # left its error log and is NOT re-run. An uninterrupted cycle has every
++        # artifact in place, so this is a no-op there.
++        _resume_interrupted_check(d, cfg, close)
+         _say(f"→ {d.name}: assembling SUMMARY…")
+         assemble.assemble_summary(d, cfg)  # pure code → SUMMARY.md §1–8
+     elif s == state.ITERATE_DO:
+@@ -129,6 +141,40 @@ def advance(d: Path, cfg: Config) -> None:
+     # UNPLANNED / AWAITING_SIGNOFF / COMPLETE / DISCONTINUED: nothing for the driver to do.
+ 
+ 
++def _resume_interrupted_check(d: Path, cfg: Config, close: str) -> None:
++    """Recover a Check leaf the interrupted BUILT beat never ran (#369) — see the
++    CHECKED dispatch in :func:`advance`.
++
++    Three shapes, matching the three BUILT branches. A close-class or
++    dependency-halted bundle never runs model leaves — its reviewer stand-in note is
++    deterministic (``_close_review_note`` / ``dependency_halt.blocked_review_note``),
++    so a note the death window swallowed is simply rewritten. A normal bundle gets the
++    reviewer leaf back iff it NEVER RAN (``leaves.review_never_ran`` — no artifact,
++    no error log) and each configured advisory leaf back under the same discriminator
++    (``only_missing``); a leaf that ran and failed left its error log (#138) and is
++    left alone — today's behaviour for a failed leaf is unchanged.
++    """
++    if close:
++        if not (d / "check-review.md").exists():
++            _say(f"→ {d.name}: close-disposition review note missing (beat was "
++                 "interrupted before it was written) — rewriting it…")
++            _close_review_note(d, close)
++        return
++    rec = dependency_halt.load(d)
++    if rec is not None and rec.get("halted") is True:
++        if not (d / "check-review.md").exists():
++            _say(f"→ {d.name}: dependency-halt review note missing (beat was "
++                 "interrupted before it was written) — rewriting it…")
++            dependency_halt.blocked_review_note(d, dependency_halt.recorded_verdicts(d))
++        return
++    if leaves.review_never_ran(d):
++        _say(f"→ {d.name}: Check — reviewer never ran (beat was interrupted after the "
++             f"gate write); recovering it{_headless_note(cfg.reviewer)}…")
++        leaves.run_review(d, cfg)
++    if cfg.advisory_leaves:
++        leaves.run_advisory_leaves(d, cfg, only_missing=True)
++
++
+ def run_issue(d: Path, cfg: Config) -> str:
+     """Advance until the bundle halts OR a pre-dispatch policy holds it; return its state.
+ 
+diff --git a/template/src/pdca_harness/leaves.py b/template/src/pdca_harness/leaves.py
+index 2be2cf6..41315b1 100644
+--- a/template/src/pdca_harness/leaves.py
++++ b/template/src/pdca_harness/leaves.py
+@@ -1492,6 +1492,19 @@ def run_review(d: Path, cfg: Config) -> None:
+     _stub_review(d, cfg)
+ 
+ 
++def review_never_ran(d: Path) -> bool:
++    """True iff the reviewer leaf NEVER RAN for this Check round (#369).
++
++    The error log is the engine's failed-leaf discriminator (#138): a reviewer that ran
++    and FAILED wrote ``state.REVIEW_ERROR_LOG`` (and a §6 placeholder review); a
++    successful run removed any stale log. So *both* artifacts absent means the beat
++    died in the window between the gate write and the reviewer leaf — "not yet run",
++    never "ran and failed" — and the leaf is safe (and necessary) to run now.
++    """
++    return (not (d / "check-review.md").exists()
++            and not (d / state.REVIEW_ERROR_LOG).exists())
++
++
+ def _seed_sandbox_agents(cfg: Config, sandbox: Path) -> None:
+     """Copy the project's ``.claude/agents`` into the sandbox so a leaf running there can
+     resolve ``--agent <name>`` (issue #161).
+@@ -1840,7 +1853,7 @@ def _run_review_sandboxed(d: Path, cfg: Config) -> None:
+         # The confinement flag rides on `seeded` (a file that is not there must not cost
+         # the leaf its ambient sandbox, #290); the codex network grant does not (#291).
+         extra_argv += _sandbox_argv(cfg, profile, seeded=seeded)
+-        error_log = d / "check-review.error.log"
++        error_log = d / state.REVIEW_ERROR_LOG
+         # A transient (no-output) reviewer failure is retried with backoff before it
+         # degrades to a §6 placeholder; the failed attempts' stderr lands in error_log.
+         err = _invoke_leaf_resilient(
+@@ -1998,6 +2011,13 @@ def advisory_artifact(d: Path, leaf_id: str) -> Path:
+     return d / f"check-advisory-{leaf_id}.md"
+ 
+ 
++def advisory_error_log(d: Path, leaf_id: str) -> Path:
++    """The captured-error tail an advisory leaf leaves when it ran and FAILED (#138) —
++    named beside :func:`advisory_artifact` so the writer and the CHECKED-resume
++    discriminator (#369, ``only_missing`` below) share one spelling."""
++    return d / f"check-advisory-{leaf_id}.error.log"
++
++
+ def _advisory_applies(spec: dict, d: Path) -> bool:
+     """True iff this advisory leaf should run for bundle ``d``. Its ``when`` ({field,
+     substring}) matches a brief field case-insensitively; absent ⇒ always run. Delegates to
+@@ -2090,14 +2110,26 @@ def _select_advisory(specs: list[dict], d: Path, cfg: Config) -> list[dict]:
+     return [chosen]
+ 
+ 
+-def run_advisory_leaves(d: Path, cfg: Config) -> None:
++def run_advisory_leaves(d: Path, cfg: Config, *, only_missing: bool = False) -> None:
+     """Run each configured advisory reviewer that applies (issue #64), after the
+     advisory-selection policy narrows the list (issue #200). Each writes
+     check-advisory-<id>.md; failures degrade to a §6 NEEDS-HUMAN placeholder, never crash
+-    the cycle (advisory, like the main reviewer)."""
++    the cycle (advisory, like the main reviewer).
++
++    ``only_missing`` (#369) is the CHECKED-resume mode: a leaf whose artifact OR error
++    log already exists is skipped, so only a leaf the interrupted BUILT beat never
++    reached is run (a leaf that ran and FAILED left its error log + placeholder, #138,
++    and is not re-run). The selection policy is re-applied FIRST — under
++    ``vendor-complement`` (#200) only one of the pool runs, so an unselected leaf's
++    absent artifact is legitimate, never "missing"; filtering the pool by absence
++    before selecting would instead promote an excluded leaf. On an uninterrupted
++    bundle every selected leaf's artifact exists, so this mode is a no-op."""
+     applicable = [spec for spec in cfg.advisory_leaves if _advisory_applies(spec, d)]
+     for spec in _select_advisory(applicable, d, cfg):
+         leaf_id = spec.get("id") or "advisory"
++        if only_missing and (advisory_artifact(d, leaf_id).exists()
++                             or advisory_error_log(d, leaf_id).exists()):
++            continue
+         leaf = LeafConfig(mode=spec.get("mode", "stub"), family=spec.get("family", ""),
+                           argv=list(spec.get("argv", [])), agent=spec.get("agent", ""),
+                           model=spec.get("model", ""), effort=spec.get("effort", ""))
+@@ -2129,7 +2161,7 @@ def _run_advisory_sandboxed(d: Path, cfg: Config, leaf: LeafConfig, spec: dict,
+                  if target and profile.grounding_flag else [])
+         extra += _sandbox_argv(cfg, profile, seeded=seeded)   # see _run_review_sandboxed
+         out = sandbox / f"check-advisory-{leaf_id}.md"
+-        error_log = d / f"check-advisory-{leaf_id}.error.log"
++        error_log = advisory_error_log(d, leaf_id)
+         err = _invoke_leaf_resilient(
+             leaf, sandbox,
+             _advisory_prompt(spec, leaf_id, rubric_mod.for_reviewer(d, cfg)),
+diff --git a/template/src/pdca_harness/state.py b/template/src/pdca_harness/state.py
+index c325389..8b2f52b 100644
+--- a/template/src/pdca_harness/state.py
++++ b/template/src/pdca_harness/state.py
+@@ -58,6 +58,14 @@ DEPENDENCY_ADJUDICATION = "dependency-adjudication.json"
+ # attempt via DOWNSTREAM_OF_BRIEF below.
+ SESSION_CARRY = "session-carry-forward"
+ 
++# The reviewer leaf's captured-error tail (#138): written when the reviewer RAN AND
++# FAILED (retries exhausted), removed at the start of a successful run — which makes it
++# the discriminator (#369) between a reviewer that ran-and-failed and one that NEVER ran
++# (an interrupted beat), since neither leaves a check-review.md. Named here (like
++# CLOSE_MARKER) so the writer (``leaves``), the CHECKED-resume check (``driver``) and
++# the §6 wording split (``assemble``) share one spelling.
++REVIEW_ERROR_LOG = "check-review.error.log"
++
+ # The per-rule gate evidence logs (issue #370): ``gate-logs/<rule_id>.log`` — the full
+ # combined output behind each ``check-gates.json`` row, written by a bundle-scoped
+ # ``gates.run_gates``. Named here (like CLOSE_MARKER / SESSION_CARRY) so ``gates`` (the
+diff --git a/template/tests/test_check_resume.py b/template/tests/test_check_resume.py
+new file mode 100644
+index 0000000..63629a1
+--- /dev/null
++++ b/template/tests/test_check_resume.py
+@@ -0,0 +1,234 @@
++"""CHECKED-state trap-door recovery (issue #369; stdlib unittest — no deps).
++
++Run from the project root:  PYTHONPATH=src python -m unittest discover -s tests
++
++`check-gates.json` IS the CHECKED marker (state.state), but the BUILT branch runs
++gates → reviewer → advisory leaves as ONE indivisible step (driver.advance). A death
++in the window between the gate write and a model leaf (Ctrl-C, OOM, a killed session)
++used to land the bundle in CHECKED with that leaf never run — and nothing ever ran it
++again: assemble filled the missing-review placeholder and the only escape was
++hand-deleting check-gates.json, re-paying the entire gate run (observed for real:
++wyrd issue_635). These tests build the interrupted states ON DISK — exactly what a
++resumed driver sees — and assert `advance`:
++
++* runs a NEVER-RAN reviewer/advisory leaf (artifact AND error log both absent — the
++  #138 failed-leaf discriminator) before assembling, preserving the paid gate record;
++* does NOT re-run a leaf that RAN AND FAILED (error log present) — today's behaviour;
++* words §6 so a skipped reviewer never reads like a failed one;
++* is a strict no-op on an uninterrupted bundle (artifacts byte-identical).
++"""
++
++from __future__ import annotations
++
++import json
++import shutil
++import tempfile
++import unittest
++from pathlib import Path
++
++from pdca_harness import assemble, dependency_halt, driver, gates, state
++from pdca_harness.config import Config, LeafConfig
++
++TOY_BRIEF = Path(__file__).resolve().parents[1] / "examples" / "toy" / "brief.md"
++
++
++def _stub_config(root: Path) -> Config:
++    return Config(
++        root=root,
++        bundle_root=root / "results",
++        process_dir=root / "process",
++        templates_dir=root / "templates",
++        default_branch="main",
++        tracker_system="github",
++        tracker_url="",
++        issue_id_example="#1",
++        builder=LeafConfig(mode="stub", family="claude"),
++        reviewer=LeafConfig(mode="stub", family="codex"),
++    )
++
++
++class CheckResumeBase(unittest.TestCase):
++    def setUp(self) -> None:
++        self.tmp = Path(tempfile.mkdtemp())
++        self.cfg = _stub_config(self.tmp)
++        self.d = self.cfg.bundle("TRAP")
++        self.d.mkdir(parents=True)
++        shutil.copyfile(TOY_BRIEF, self.d / "brief.md")
++
++    def tearDown(self) -> None:
++        shutil.rmtree(self.tmp, ignore_errors=True)
++
++    def _trapdoor(self) -> None:
++        """The interrupted-beat state on disk: brief + patch + a PAID gate record,
++        but NO review artifacts — the beat died between the gate write and the
++        reviewer leaf. `state.state` reads it as CHECKED (the defect's premise)."""
++        (self.d / "patch.diff").write_text("--- a/f\n+++ b/f\n", encoding="utf-8")
++        gates.run_gates(self.d, self.cfg)  # the real gate artifact the beat writes
++        self.assertEqual(state.state(self.d), state.CHECKED)
++        self.assertFalse((self.d / "check-review.md").exists())
++        self.assertFalse((self.d / state.REVIEW_ERROR_LOG).exists())
++
++
++class NeverRanReviewerIsRecovered(CheckResumeBase):
++    """Success criterion (a): a never-ran reviewer is run on the next `advance`,
++    before assemble — the paid gate record is preserved, the missing leaf recovered."""
++
++    def test_advance_runs_the_reviewer_before_assembling(self) -> None:
++        self._trapdoor()
++        gates_bytes = (self.d / "check-gates.json").read_bytes()
++        driver.advance(self.d, self.cfg)
++        # The (stubbed) reviewer leaf RAN: a real verdict table, not a placeholder.
++        review = self.d / "check-review.md"
++        self.assertTrue(review.exists(), "reviewer leaf was not recovered at CHECKED")
++        self.assertIn("Per-item verdicts", review.read_text(encoding="utf-8"))
++        # …and assemble consumed the REAL review, not the missing-review placeholder.
++        summary = (self.d / "SUMMARY.md").read_text(encoding="utf-8")
++        self.assertNotIn("no check-review.md was produced", summary)
++        # The expensive gate record was preserved, byte-for-byte — Option A's point.
++        self.assertEqual((self.d / "check-gates.json").read_bytes(), gates_bytes)
++
++    def test_never_ran_advisory_leaf_is_recovered_too(self) -> None:
++        # The death window can also fall between the reviewer and the advisory leaves:
++        # check-review.md landed, the configured advisory leaf's artifact did not.
++        self.cfg.advisory_leaves = [{"id": "code-review", "role": "x", "mode": "stub"}]
++        self._trapdoor()
++        (self.d / "check-review.md").write_text("# real review\n", encoding="utf-8")
++        driver.advance(self.d, self.cfg)
++        self.assertTrue((self.d / "check-advisory-code-review.md").exists(),
++                        "never-ran advisory leaf was not recovered at CHECKED")
++        # The already-produced reviewer artifact was NOT re-run / overwritten.
++        self.assertEqual((self.d / "check-review.md").read_text(encoding="utf-8"),
++                         "# real review\n")
++
++
++class RanAndFailedIsNotRerun(CheckResumeBase):
++    """Success criterion (b): an error log (#138) means the leaf RAN and FAILED —
++    today's degrade-to-§6 behaviour is unchanged, no silent re-run."""
++
++    def test_failed_reviewer_is_not_rerun(self) -> None:
++        self._trapdoor()
++        (self.d / state.REVIEW_ERROR_LOG).write_text(
++            "----- attempt 1 — exit 1 -----\nboom\n", encoding="utf-8")
++        driver.advance(self.d, self.cfg)
++        # The stub reviewer would have written a verdict table; it must not have run.
++        self.assertFalse((self.d / "check-review.md").exists(),
++                         "a ran-and-failed reviewer was re-run")
++
++    def test_failed_advisory_leaf_is_not_rerun(self) -> None:
++        self.cfg.advisory_leaves = [{"id": "code-review", "role": "x", "mode": "stub"}]
++        self._trapdoor()
++        (self.d / "check-review.md").write_text("# real review\n", encoding="utf-8")
++        (self.d / "check-advisory-code-review.error.log").write_text(
++            "----- attempt 1 — exit 1 -----\nboom\n", encoding="utf-8")
++        driver.advance(self.d, self.cfg)
++        self.assertFalse((self.d / "check-advisory-code-review.md").exists(),
++                         "a ran-and-failed advisory leaf was re-run")
++
++
++class Section6DistinguishesSkippedFromFailed(CheckResumeBase):
++    """Success criterion (c): the record can tell a reviewer that NEVER RAN from one
++    that RAN AND FAILED — the sharp edge the issue names. Assembled directly (not via
++    `advance`), because the wording is what covers any path that still reaches
++    assemble with the review absent."""
++
++    def test_never_ran_wording(self) -> None:
++        self._trapdoor()
++        assemble.assemble_summary(self.d, self.cfg)
++        summary = (self.d / "SUMMARY.md").read_text(encoding="utf-8")
++        self.assertIn("NEVER RAN", summary)
++        self.assertNotIn("RAN AND FAILED", summary)
++
++    def test_ran_and_failed_wording_points_at_the_error_log(self) -> None:
++        self._trapdoor()
++        (self.d / state.REVIEW_ERROR_LOG).write_text("boom\n", encoding="utf-8")
++        assemble.assemble_summary(self.d, self.cfg)
++        summary = (self.d / "SUMMARY.md").read_text(encoding="utf-8")
++        self.assertIn("RAN AND FAILED", summary)
++        self.assertIn(state.REVIEW_ERROR_LOG, summary)
++        self.assertNotIn("NEVER RAN", summary)
++
++
++class UninterruptedCycleIsUntouched(CheckResumeBase):
++    """Success criterion (d): a bundle whose beat completed normally assembles
++    exactly as today — no leaf re-runs, artifacts byte-identical."""
++
++    def test_complete_artifacts_are_not_rewritten(self) -> None:
++        self.cfg.advisory_leaves = [{"id": "code-review", "role": "x", "mode": "stub"}]
++        self._trapdoor()
++        (self.d / "check-review.md").write_text("# sentinel review\n", encoding="utf-8")
++        (self.d / "check-advisory-code-review.md").write_text(
++            "# sentinel advisory\n", encoding="utf-8")
++        driver.advance(self.d, self.cfg)
++        # The stubs would have overwritten both with different content had they run.
++        self.assertEqual((self.d / "check-review.md").read_text(encoding="utf-8"),
++                         "# sentinel review\n")
++        self.assertEqual(
++            (self.d / "check-advisory-code-review.md").read_text(encoding="utf-8"),
++            "# sentinel advisory\n")
++        self.assertTrue((self.d / "SUMMARY.md").exists())
++
++    def test_vendor_complement_unselected_leaf_is_not_promoted(self) -> None:
++        # Under vendor-complement (#200) exactly ONE of the pool runs, so the
++        # unselected leaf's absent artifact is legitimate — resume must re-apply the
++        # selection, not read every absence as "missing" (which would run a leaf the
++        # policy excluded on every uninterrupted advance).
++        self.cfg.advisory_leaves = [
++            {"id": "claude-lens", "family": "claude", "role": "x", "mode": "stub"},
++            {"id": "codex-lens", "family": "codex", "role": "x", "mode": "stub"},
++        ]
++        self.cfg.advisory_selection = {"mode": "vendor-complement"}
++        self._trapdoor()
++        (self.d / "loop-telemetry.json").write_text(
++            json.dumps({"attempts": [{"family": "claude"}]}), encoding="utf-8")
++        (self.d / "check-review.md").write_text("# real review\n", encoding="utf-8")
++        # The selected complement (codex-lens) completed before the interruption…
++        (self.d / "check-advisory-codex-lens.md").write_text("# done\n", encoding="utf-8")
++        driver.advance(self.d, self.cfg)
++        # …so nothing is missing: the unselected same-vendor leaf must not run now.
++        self.assertFalse((self.d / "check-advisory-claude-lens.md").exists(),
++                         "resume promoted a leaf the selection policy excluded")
++        self.assertEqual((self.d / "check-advisory-codex-lens.md")
++                         .read_text(encoding="utf-8"), "# done\n")
++
++
++class DeterministicStandInNotesAreRecovered(unittest.TestCase):
++    """The same death window exists on the two no-model BUILT branches (close
++    disposition #60, dependency halt #341): N/A gates land, the deterministic
++    review stand-in note does not. Resume rewrites the NOTE — it must never run a
++    model reviewer over a bundle those paths deliberately kept away from one."""
++
++    def setUp(self) -> None:
++        self.tmp = Path(tempfile.mkdtemp())
++        self.cfg = _stub_config(self.tmp)
++        self.d = self.cfg.bundle("TRAP")
++        self.d.mkdir(parents=True)
++
++    def tearDown(self) -> None:
++        shutil.rmtree(self.tmp, ignore_errors=True)
++
++    def test_close_bundle_gets_its_note_back_not_a_reviewer(self) -> None:
++        shutil.copyfile(TOY_BRIEF, self.d / "brief.md")
++        (self.d / state.CLOSE_MARKER).write_text("likely-close\n", encoding="utf-8")
++        gates.run_close_gates(self.d, self.cfg)  # died before _close_review_note
++        self.assertEqual(state.state(self.d), state.CHECKED)
++        driver.advance(self.d, self.cfg)
++        review = (self.d / "check-review.md").read_text(encoding="utf-8")
++        self.assertIn("SKIPPED (close disposition)", review)   # the note, rewritten
++        self.assertNotIn("Per-item verdicts", review)          # never a model review
++
++    def test_dependency_halted_bundle_gets_its_note_back_not_a_reviewer(self) -> None:
++        shutil.copyfile(TOY_BRIEF, self.d / "brief.md")
++        (self.d / "patch.diff").write_text("--- a/f\n+++ b/f\n", encoding="utf-8")
++        dependency_halt.record(self.d, [dependency_halt.Verdict(
++            "protoc", dependency_halt.CONFIRMED, "registered", "protoc --version",
++            127, "apt install protobuf-compiler", "detect cmd exited 127")])
++        gates.run_close_gates(self.d, self.cfg)  # died before blocked_review_note
++        self.assertEqual(state.state(self.d), state.CHECKED)
++        driver.advance(self.d, self.cfg)
++        review = (self.d / "check-review.md").read_text(encoding="utf-8")
++        self.assertIn("`protoc` confirmed absent", review)     # the note, rewritten
++        self.assertNotIn("Per-item verdicts", review)          # never a model review
++
++
++if __name__ == "__main__":
++    unittest.main()

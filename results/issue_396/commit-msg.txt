@@ -1,0 +1,27 @@
+Stop a trailing optional-value flag from swallowing the seed prompt
+
+Following the Remote Control doc verbatim — "append the flag to the argv
+line", with the shipped example showing `--remote-control` as the last
+token — broke the very leaf it was meant to help: the driver seeds every
+interactive leaf by appending the prompt as the final positional, and
+`--remote-control` takes an optional [name] value, so as the last token it
+consumed the entire seed as the session name. Remote Control then failed to
+start ("check the debug log") and the session opened with no seed.
+
+Two-part fix:
+
+- Docs: the pdca.toml example and both family branches of the INTEGRATION
+  Remote Control section now place the flag non-last and state the rule —
+  no flag with an optional value may sit last in an interactive leaf's
+  argv, because the seed is appended as a positional after it.
+- Driver: the interactive spawn inserts the family's end-of-options
+  separator between the configured argv and the seed (claude: `--`, POSIX
+  Utility Syntax Guideline 10; verified on claude 2.1.222 and 2.1.223),
+  declared as a data field on the family profile. Families without a
+  verified separator keep the byte-identical bare-positional spawn. With
+  the separator in place, no trailing optional-value flag can swallow the
+  seed, whatever argv an instance configures.
+
+The headless path is untouched: its prompt rides stdin, not argv.
+
+Fixes #396

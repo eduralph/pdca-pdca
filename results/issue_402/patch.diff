@@ -1,0 +1,392 @@
+diff --git a/template/PCDA/quality-cycle/04-validation-tooling.md b/template/PCDA/quality-cycle/04-validation-tooling.md
+index 5569612..75aa207 100644
+--- a/template/PCDA/quality-cycle/04-validation-tooling.md
++++ b/template/PCDA/quality-cycle/04-validation-tooling.md
+@@ -80,6 +80,8 @@ Three observations the matrix makes explicit:
+ > declared with a prefix (`echo "C4: PDCA-UNVERIFIABLE: …"`), move the marker to the front of the
+ > line — that is the declaration form.
+ 
++**Gate evidence line — declare your summary.** Every row also carries one line of **evidence** (`path_line`, truncated to 120 characters), and it must be output the gate emitted **as its verdict** — never a line it merely *relayed* from something it ran. A gate declares that summary the same way it declares `unverifiable`: print a line whose first text is **`PDCA-EVIDENCE: <summary>`** (leading whitespace ignored). The **last** such line wins — a wrapper with several legs declares per leg and its final word summarises the run — and it is what the row records **whatever the command prints afterwards**. Unlike `PDCA-UNVERIFIABLE:` this marker never changes a `result`: the exit code alone still decides `pass`/`fail`, so a declaring gate that exits non-zero fails, with its own declaration as the evidence. A gate that declares nothing keeps the older rule — the command's **last output line** — which is the gate's verdict only by luck: the runner captures **one merged stdout+stderr stream**, so a wrapper that shells out to a test suite files whatever that suite's *children* flushed last. That is not hypothetical: a green C4 wrapper whose last `echo` was `C4 PASS: red without the fix, green with it` was frozen with `/tmp/…/results/issue_500/split-proposal.md` — a scratch path in a sandbox that no longer exists — as the whole recorded basis of a **passing** gate, and readers escalated the green row to §6 NEEDS-HUMAN in cycle after cycle. Such an evidence line satisfies neither half of the evidence-sufficiency invariant ("the verdict's whole basis must be **reconstructable** from bundle files alone"). Declaring is the only way a gate author can be certain what gets filed; the full capture remains in `gate-logs/<rule_id>.log` (`row["log"]`) either way, so nothing is lost by declaring — only the *summary* is chosen deliberately instead of by buffering order. Adding the marker to an existing gate is safe and purely additive: nothing else about its verdict changes, and a gate that never prints it behaves exactly as before.
++
+ ## Single-sourcing — one implementation, multiple invocations
+ 
+ The connection to [03 - Cycle Automation](03-cycle-automation.md) §Where it runs is load-bearing: the gates that run locally during the cycle MUST be the same gates that re-run in CI as the merge-gate. This is enforced not by policy but by **single-sourcing the implementation**:
+diff --git a/template/src/pdca_harness/gates.py b/template/src/pdca_harness/gates.py
+index c023b18..3e2819c 100644
+--- a/template/src/pdca_harness/gates.py
++++ b/template/src/pdca_harness/gates.py
+@@ -26,6 +26,17 @@ not a verdict the gate declared (#428). When
+ ``[[gates.checks]]`` is empty the driver falls back to all-PASS stub rows, so the
+ offline vertical slice still runs.
+ 
++The row's **evidence line** follows the same declaration rule (issue #402): a gate states
++its verdict summary by printing a line that STARTS with :data:`EVIDENCE_MARKER`
++(``PDCA-EVIDENCE: <summary>``), and that summary — the LAST such line, a gate's final word
++— becomes the row's ``path_line`` whatever the command relays afterwards. Without a
++declaration the evidence falls back to the command's last output line, which is only ever
++the gate's verdict by luck: the capture is one merged stdout+stderr stream, so a wrapper
++that shells out to a suite files whatever that suite's children happened to flush last
++(a scratch ``/tmp`` path from a since-deleted sandbox is not a reconstructable basis). The
++marker declares evidence only — it never changes a verdict; the exit code alone decides
++pass/fail, and ``PDCA-UNVERIFIABLE`` stays the one marker that can change a ``result``.
++
+ A row: {check, result, oracle, rule_id, path_line, gating}. A row produced by a
+ bundle-scoped :func:`run_gates` additionally carries ``log`` (the bundle-relative path of
+ its full-output evidence log, ``gate-logs/<rule_id>.log``) and ``duration_secs`` (issue
+@@ -60,6 +71,11 @@ from .config import Config
+ UNVERIFIABLE_RC = 77
+ UNVERIFIABLE_MARKER = "PDCA-UNVERIFIABLE:"
+ 
++# A gate states the summary that goes into the row's `path_line` the same way it declares
++# `unverifiable`: a line that STARTS with this marker (issue #402). Anything else in the
++# capture is output the gate RELAYED from what it ran, and must not be filed as its verdict.
++EVIDENCE_MARKER = "PDCA-EVIDENCE:"
++
+ # The bundle directory holding one full-output evidence log per gate rule (issue #370).
+ # Defined in `state` (next to the archive list that moves it per round) — re-exported
+ # here because gates is the writer.
+@@ -596,22 +612,44 @@ def _write_gate_log(log_dir: Path, chk: dict, *, cmd: str, cwd: Path,
+     return f"{GATE_LOGS_DIR}/{name}", None
+ 
+ 
+-def _declared_unverifiable(output: str) -> str | None:
+-    """The gate's OWN ``unverifiable`` declaration in ``output`` — its reason — or ``None``.
++def _declarations(output: str, marker: str) -> list[str]:
++    """Every line of ``output`` the gate **declared** with ``marker``, in order — the text
++    after the marker (possibly empty).
+ 
+-    A **declaration** is a line whose first text is :data:`UNVERIFIABLE_MARKER` (leading
+-    whitespace ignored) — how every documented emitter writes it: the shipped advisory check
++    A **declaration** is a line whose first text is the marker (leading whitespace ignored)
++    — how every documented emitter writes it: the shipped advisory check
+     (``scripts/checks/test_exercises_production.py``) prints ``f"{UNVERIFIABLE} {reason}"``,
+-    and the gate wrappers ``echo`` the marker at the start of the line. The reason is the
+-    text after the marker, possibly empty.
++    and the gate wrappers ``echo`` the marker at the start of the line.
+ 
+     A mid-line occurrence is NOT a declaration: it is text the gate merely **relayed** from
+-    something it ran (#428) — see :func:`_classify`."""
++    something it ran (#428) — see :func:`_classify`. One notion of "the gate said this",
++    shared by both markers (#402)."""
++    out: list[str] = []
+     for line in output.splitlines():
+         stripped = line.strip()
+-        if stripped.startswith(UNVERIFIABLE_MARKER):
+-            return stripped[len(UNVERIFIABLE_MARKER):].strip()
+-    return None
++        if stripped.startswith(marker):
++            out.append(stripped[len(marker):].strip())
++    return out
++
++
++def _declared_unverifiable(output: str) -> str | None:
++    """The gate's OWN ``unverifiable`` declaration in ``output`` — its reason — or ``None``.
++
++    The FIRST declaration wins: the reason a gate gives for deferring is the one it gave
++    when it stopped being able to verify, and later output cannot retract it."""
++    declared = _declarations(output, UNVERIFIABLE_MARKER)
++    return declared[0] if declared else None
++
++
++def _declared_evidence(output: str) -> str | None:
++    """The gate's OWN verdict summary in ``output`` — the row's evidence line — or ``None``.
++
++    The LAST non-empty declaration wins (issue #402): a wrapper with several legs declares
++    per leg, and its final word is the summary of the run as a whole — where the last
++    *output* line is merely whatever flushed last, usually a child's. A bare
++    ``PDCA-EVIDENCE:`` with no text is no summary and falls back with the undeclared case."""
++    declared = [text for text in _declarations(output, EVIDENCE_MARKER) if text]
++    return declared[-1] if declared else None
+ 
+ 
+ def _classify(rc: int, output: str) -> tuple[str, list[str]]:
+@@ -619,7 +657,22 @@ def _classify(rc: int, output: str) -> tuple[str, list[str]]:
+ 
+     ``unverifiable`` (issue #46) lets a gate that did NOT fail defer to the human: it may
+     exit 0 and still declare the marker. The text after the marker is the reason; otherwise
+-    the evidence is the command's last output line (as for pass/fail).
++    the evidence is the gate's declared summary, and failing that the command's last output
++    line (as for pass/fail).
++
++    The evidence line obeys the same declaration rule as the verdict (#402): the row records
++    what the gate declared with :data:`EVIDENCE_MARKER`, and only where it declared nothing
++    does it fall back to ``output``'s last line. That fallback is what made a GREEN gate's
++    frozen record read like a failure path: the capture is one merged stdout+stderr stream
++    (``progress.run_with_heartbeat``), so a wrapper that shells out to a test suite files
++    whatever that suite's children flushed last — a ``/tmp`` scratch path from a sandbox
++    that no longer exists was recorded as a passing C4's whole evidence, which is neither
++    the *basis* of the verdict nor *reconstructable* (the invariant :func:`_write_gate_log`
++    exists to keep, #370). Declaring is the only way a gate can be sure what gets filed, so
++    the marker is the convention gate authors write to (docs 04 §Gate result vocabulary);
++    the undeclared fallback stays defined, and the full basis stays in ``row["log"]``.
++    The evidence marker never changes the verdict — a declaring gate that exits non-zero
++    still FAILS, with its declaration as the evidence.
+ 
+     The marker is honoured only for an exit code that is not a failure — 0, or the dedicated
+     ``UNVERIFIABLE_RC``. A gate that exits non-zero FAILED, whatever its output happens to
+@@ -646,10 +699,12 @@ def _classify(rc: int, output: str) -> tuple[str, list[str]]:
+         reason = _declared_unverifiable(output)
+         if reason is not None:
+             return "unverifiable", [reason or "gate declared itself unverifiable"]
+-    last = output.strip().splitlines()[-1:] or [""]
++    evidence = _declared_evidence(output)
++    if evidence is None:
++        evidence = (output.strip().splitlines()[-1:] or [""])[0]
+     if rc == UNVERIFIABLE_RC:
+-        return "unverifiable", [last[0] or f"gate exited unverifiable (rc {UNVERIFIABLE_RC})"]
+-    return ("pass" if rc == 0 else "fail"), last
++        return "unverifiable", [evidence or f"gate exited unverifiable (rc {UNVERIFIABLE_RC})"]
++    return ("pass" if rc == 0 else "fail"), [evidence]
+ 
+ 
+ def _merged_env(extra: dict | None) -> dict | None:
+diff --git a/template/tests/test_gate_logs.py b/template/tests/test_gate_logs.py
+index 02b5fec..2f3ffcb 100644
+--- a/template/tests/test_gate_logs.py
++++ b/template/tests/test_gate_logs.py
+@@ -17,6 +17,14 @@ a verdict's full basis is reconstructable from bundle files alone, per round):
+   and (iteration 2) a log-write FAILURE is never silent: the row carries `log_error`
+   with the reason and a stderr line names it — while the verdict stays unchanged.
+ 
++And (issue #402) the other half of the same invariant: the one line the row DOES keep must
++be the gate's own verdict, not a line it relayed. The capture is one merged stdout+stderr
++stream, so "the last line" is whatever a child process flushed last — a green C4 wrapper
++was recorded with a scratch `/tmp` path from a since-deleted sandbox as its whole evidence,
++which is neither the verdict's *basis* nor *reconstructable* from bundle files. A gate now
++declares its summary with `PDCA-EVIDENCE:` (the #428 declaration form — first text on the
++line) and that is what the row files, whatever follows it.
++
+ Deterministic real gate commands — no Claude / Docker. Run from the project root:
+ PYTHONPATH=src python -m unittest discover -s tests
+ """
+@@ -94,6 +102,8 @@ class GateEvidenceLogs(unittest.TestCase):
+         # The body: the combined output VERBATIM — every line, in order, not just the
+         # last one the 120-char evidence summary keeps.
+         self.assertIn("first-line\nmiddle-line\nlast-line\n", text)
++        # `_MULTI` declares nothing, so the documented FALLBACK applies (#402): the last
++        # output line. The declared case is pinned in GateEvidenceIsTheGatesOwnVerdict.
+         self.assertEqual(self._gate_row(result)["path_line"], "last-line")
+ 
+     # -- (b) the row keys, additive ---------------------------------------------------
+@@ -140,7 +150,7 @@ class GateEvidenceLogs(unittest.TestCase):
+         # The verdict is untouched — persistence failure never alters a gate result …
+         self.assertEqual(row["result"], "pass")
+         self.assertEqual(result["overall"], "pass")
+-        self.assertEqual(row["path_line"], "last-line")
++        self.assertEqual(row["path_line"], "last-line")  # undeclared ⇒ fallback (#402)
+         # … but the failure is recorded IN the row (additive), with the reason …
+         self.assertNotIn("log", row)
+         self.assertIn("gate-logs/C4-log.log", row["log_error"])
+@@ -207,5 +217,92 @@ class GateEvidenceLogs(unittest.TestCase):
+                          "the next round would inherit the previous round's evidence")
+ 
+ 
++class GateEvidenceIsTheGatesOwnVerdict(unittest.TestCase):
++    """(issue #402) The recorded evidence is what the GATE declared — never a line it
++    merely relayed from a child process.
++
++    Reproduced verbatim from the shipped defect: `run-verify.sh` ends with
++    `echo "C4 PASS: red without the fix, green with it"`, exits 0, and the merged
++    stdout+stderr capture then carries block-buffered stdout the offline suite leaked from
++    the code it drove. `_classify` took the last line, so a GREEN gate was frozen with
++    `/tmp/…/results/issue_500/split-proposal.md` — a path in a sandbox that no longer
++    exists — as its whole evidence, and readers escalated it to §6 NEEDS-HUMAN.
++    """
++
++    # The gate's own summary, then trailing child stdout — the shipped shape.
++    _SUMMARY = "C4 PASS: red without the fix, green with it"
++    _RELAYED = "/tmp/tmpy_ulekwf/results/issue_500/split-proposal.md"
++
++    def setUp(self) -> None:
++        self.tmp = Path(tempfile.mkdtemp())
++        self.cfg = _stub_config(self.tmp)
++        self.n = 0
++
++    def tearDown(self) -> None:
++        shutil.rmtree(self.tmp, ignore_errors=True)
++
++    def _row(self, cmd: str) -> dict:
++        """Run one real gate command through the production path and return its row."""
++        self.n += 1
++        d = self.cfg.bundle(f"EV{self.n}")
++        d.mkdir(parents=True)
++        (d / "brief.md").write_text("- **Slug:** ev\n", encoding="utf-8")
++        (d / "patch.diff").write_text("--- a\n+++ b\n", encoding="utf-8")
++        self.cfg.gates_checks = [{**_GATE, "cmd": cmd}]
++        self.result = gates.run_gates(d, self.cfg)
++        self.bundle = d
++        return next(r for r in self.result["rows"] if r["rule_id"] == "C4-log")
++
++    def test_declared_summary_survives_trailing_child_output(self) -> None:
++        row = self._row(f"echo '{gates.EVIDENCE_MARKER} {self._SUMMARY}'; "
++                        f"echo {self._RELAYED}")
++        self.assertEqual(row["result"], "pass")
++        self.assertEqual(row["path_line"], self._SUMMARY,
++                         "the row filed a line the gate relayed instead of its own verdict")
++        self.assertNotIn("/tmp/", row["path_line"])
++        # The full basis is untouched — the relayed line is still in the evidence log.
++        log = (self.bundle / row["log"]).read_text(encoding="utf-8")
++        self.assertIn(self._RELAYED, log)
++
++    def test_the_last_declaration_wins(self) -> None:
++        """A wrapper declares per leg; its final word summarises the run."""
++        row = self._row(f"echo '{gates.EVIDENCE_MARKER} leg 1 of 2 green'; "
++                        f"echo relayed-noise; "
++                        f"echo '{gates.EVIDENCE_MARKER} both legs green'; "
++                        f"echo {self._RELAYED}")
++        self.assertEqual(row["path_line"], "both legs green")
++
++    def test_a_declaring_gate_that_exits_non_zero_still_fails(self) -> None:
++        """The evidence marker declares EVIDENCE, never a verdict — the #329 hazard
++        (a marker laundering a red into something that does not gate) must not reappear."""
++        row = self._row(f"echo '{gates.EVIDENCE_MARKER} C4 FAIL: green without the fix'; "
++                        f"echo {self._RELAYED}; exit 1")
++        self.assertEqual(row["result"], "fail")
++        self.assertEqual(row["path_line"], "C4 FAIL: green without the fix")
++        self.assertEqual(self.result["overall"], "fail")  # a gating red still gates
++
++    def test_a_mid_line_marker_is_relayed_text_not_a_declaration(self) -> None:
++        """Same rule as #428: a gate that quotes the marker (a child's log, this test file
++        read back) has not declared anything — the undeclared fallback applies."""
++        row = self._row(f"echo 'suite log: write \"{gates.EVIDENCE_MARKER} x\" to declare'; "
++                        f"echo real-last-line")
++        self.assertEqual(row["path_line"], "real-last-line")
++
++    def test_an_undeclared_gate_keeps_the_documented_fallback(self) -> None:
++        row = self._row("echo first; echo second-and-last")
++        self.assertEqual(row["path_line"], "second-and-last")
++        # … and a bare marker with no summary is no declaration, so it falls back too.
++        row = self._row(f"echo {gates.EVIDENCE_MARKER}; echo second-and-last")
++        self.assertEqual(row["path_line"], "second-and-last")
++
++    def test_unverifiable_declaration_still_wins_the_result(self) -> None:
++        """#428's marker decides the RESULT and its own reason; #402's decides the evidence
++        of a pass/fail row. One notion of "the gate said this", two channels."""
++        row = self._row(f"echo '{gates.UNVERIFIABLE_MARKER} test-only patch'; "
++                        f"echo '{gates.EVIDENCE_MARKER} summary'; echo {self._RELAYED}")
++        self.assertEqual(row["result"], "unverifiable")
++        self.assertEqual(row["path_line"], "test-only patch")
++
++
+ if __name__ == "__main__":
+     unittest.main()
+diff --git a/template/tests/test_split.py b/template/tests/test_split.py
+index 967a5b5..c2111dc 100644
+--- a/template/tests/test_split.py
++++ b/template/tests/test_split.py
+@@ -178,7 +178,8 @@ class Accepting(unittest.TestCase):
+         rewrite were wrong, `compute_waves` would see dangling references and this is where
+         it shows.
+         """
+-        leaves.do_split(self.parent, self.cfg)          # stub writes a 2-child proposal
++        with redirect_stdout(io.StringIO()):            # the leaf prints the proposal path
++            leaves.do_split(self.parent, self.cfg)      # stub writes a 2-child proposal
+         created = split.accept(self.parent, ["601", "602"], self.cfg)
+         self.assertEqual(len(waves.compute_waves(self.cfg, created)), 2,
+                          "a declared dependency did not stack the children")
+@@ -213,12 +214,16 @@ class SplitterLeaf(unittest.TestCase):
+         """Asserted on the directory listing, not just the file's presence: "propose seams,
+         never cut them" means no bundles, no branches, no edits to brief.md."""
+         before = {p.name for p in self.d.iterdir()}
+-        self.assertEqual(leaves.do_split(self.d, self.cfg), 0)
++        with redirect_stdout(io.StringIO()):            # the leaf prints the proposal path
++            rc = leaves.do_split(self.d, self.cfg)
++        self.assertEqual(rc, 0)
+         self.assertEqual({p.name for p in self.d.iterdir()} - before, {split.PROPOSAL})
+ 
+     def test_a_bundle_with_no_brief_is_refused(self) -> None:
+         (self.d / "brief.md").unlink()
+-        self.assertEqual(leaves.do_split(self.d, self.cfg), 1)
++        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
++            rc = leaves.do_split(self.d, self.cfg)
++        self.assertEqual(rc, 1)
+ 
+     def test_the_shipped_template_parses(self) -> None:
+         """The template teaches the format, so it must BE the format — a template whose own
+@@ -308,7 +313,9 @@ class ReviewFixes(unittest.TestCase):
+         (self.parent / "SUMMARY.md").write_text(
+             "## 9. Sign-off\n\nOutcome: accepted\n", encoding="utf-8")
+         if state.state(self.parent) == state.COMPLETE:
+-            self.assertEqual(leaves.do_split(self.parent, self.cfg), 1)
++            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
++                rc = leaves.do_split(self.parent, self.cfg)
++            self.assertEqual(rc, 1)
+ 
+     def test_split_is_not_a_close_disposition_token(self) -> None:
+         """`close_class` SUBSTRING-matches, so a generic "split" token would send
+@@ -583,9 +590,11 @@ class AcceptIsSafe(unittest.TestCase):
+             default_branch="main", tracker_system="github", tracker_url="",
+             issue_id_example="#1",
+             builder=LeafConfig(mode="stub"), reviewer=LeafConfig(mode="stub"))
+-        leaves.do_split(self.parent, cfg)
+-        rc = cli._split(cfg, SimpleNamespace(issue_id="500", accept=True,
+-                                             ids="issue_601, #602"))
++        # Both print — the leaf its proposal path, the CLI the child ids (cli.py:786-787).
++        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
++            leaves.do_split(self.parent, cfg)
++            rc = cli._split(cfg, SimpleNamespace(issue_id="500", accept=True,
++                                                 ids="issue_601, #602"))
+         self.assertEqual(rc, 0)
+         self.assertTrue(cfg.bundle("601").is_dir())
+         self.assertTrue(cfg.bundle("602").is_dir())
+diff --git a/template/tests/test_suite_output_hygiene.py b/template/tests/test_suite_output_hygiene.py
+new file mode 100644
+index 0000000..a701fef
+--- /dev/null
++++ b/template/tests/test_suite_output_hygiene.py
+@@ -0,0 +1,55 @@
++"""Suite output hygiene — a test suite's output is its own report (issue #402).
++
++`unittest` writes its report to STDERR. Anything a suite writes to STDOUT is therefore
++output it leaked from the production code it drives — and under a pipe (which is how every
++gate captures a command: one merged `stdout=PIPE, stderr=STDOUT` stream,
++`progress.run_with_heartbeat`) block-buffered stdout flushes LAST, so those leaked lines
++land after `OK` and become what a reader — or a gate's evidence line — sees as the run's
++verdict. `tests/test_split.py` drives two production printers, `leaves.do_split`
++(`print(f"{d / split.PROPOSAL}")`) and `cli._split` (`print(child)`), and on paths that did
++not apply the file's own `redirect_stdout(io.StringIO())` convention it published five
++`/tmp/…` scratch paths that outlived nothing; a green C4 gate was frozen with one of them
++as its whole recorded evidence.
++
++Kept in its own module on purpose: it runs `tests.test_split` in a SUBPROCESS, and a suite
++that shelled out to the module it is a part of would recurse.
++
++Run from the project root: PYTHONPATH=src python -m unittest discover -s tests
++"""
++
++from __future__ import annotations
++
++import os
++import subprocess
++import sys
++import unittest
++from pathlib import Path
++
++# tests/ lives directly under the project root; `src/` is its sibling.
++ROOT = Path(__file__).resolve().parents[1]
++
++# The module this issue names. Deliberately explicit rather than a sweep over every
++# module: the suite-wide hygiene sweep is a separate, much larger slice.
++LEAKY_CANDIDATE = "tests.test_split"
++
++
++class SuiteWritesNothingToStdout(unittest.TestCase):
++    def test_test_split_leaks_no_driven_stdout(self) -> None:
++        env = {**os.environ, "PYTHONPATH": "src"}
++        proc = subprocess.run(
++            [sys.executable, "-m", "unittest", LEAKY_CANDIDATE],
++            cwd=ROOT, env=env, capture_output=True, text=True, timeout=300,
++        )
++        # The suite itself must be green, or "no stdout" would be vacuous.
++        self.assertEqual(proc.returncode, 0,
++                         f"{LEAKY_CANDIDATE} is not green:\n{proc.stderr}")
++        self.assertIn("OK", proc.stderr, "the unittest report is not on stderr")
++        self.assertEqual(
++            proc.stdout, "",
++            f"{LEAKY_CANDIDATE} leaked the output of the code it drives onto stdout — "
++            f"under a gate's merged capture these lines flush after the report and are "
++            f"read as the run's result:\n{proc.stdout}")
++
++
++if __name__ == "__main__":
++    unittest.main()

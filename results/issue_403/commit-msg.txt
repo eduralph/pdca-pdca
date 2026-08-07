@@ -1,0 +1,38 @@
+fix(check): seed the round's gate logs into the review sandbox
+
+The advisory review of a fix runs in a temp directory holding only patch.diff,
+brief.md and check-gates.json. Since
+f262fb04f6594b15a31e79f3d40e7fa33ec95ade every gate row in that file also
+carries a `log` key naming `gate-logs/<rule_id>.log` — the gate's full output
+plus a header giving the exact cmd, cwd and worktree it ran under — and that
+directory was never copied in. So the one artifact that lets a reviewer
+adjudicate a gate it cannot re-run itself was referenced by a path that resolved
+nowhere, and the promise those logs were introduced under — a verdict's whole
+basis must be reconstructable from the bundle's files alone — did not hold for
+the step that needs it most.
+
+The reviewer's own instructions compounded it: they asserted the sandbox holds
+ONLY those three files, never mentioned the evidence, and told the reviewer to
+escalate an unrepeatable gate to the human. Since the wrappers a row's `oracle`
+names are instance-root scripts that are not runnable from the grounding
+checkout at all, that escalation fired on ordinary rounds: in one project's
+frozen bundles the same two rows came back as "the oracle named in
+check-gates.json is absent in this target checkout — decide by hand" on seven
+bundles and cleared on an eighth, with nothing different between them but the
+reviewer's choice. Every such row cost a human a manual re-run of a gate whose
+output was already recorded.
+
+The round's `gate-logs/` is now copied into the reviewer's sandbox and the
+advisory leaves' sandbox, best-effort like the agent and settings seeds: no
+directory (an older bundle, a stub round) or a failed copy degrades to a note on
+stderr and the leaf runs exactly as before — a copy error must never abort a
+check round. The driver prompts, the vendored reviewer role body and the docs
+now describe what is actually in the sandbox, send a gate the leaf cannot re-run
+to its log, and reserve the escalation for a row that has no log at all (no
+`log` key, a `log_error`, or a file that is not there).
+
+Independence is untouched: a gate log is the gate's own output, never the
+builder's rationale, so build-notes.md stays out of both sandboxes and the input
+list that encodes that contract is unchanged.
+
+Fixes #403

@@ -1,0 +1,15 @@
+Reviewing issue 403: make frozen `gate-logs/` evidence resolve inside reviewer and advisory sandboxes without exposing `build-notes.md`.
+
+| Item | Verdict | Basis |
+|------|---------|-------|
+| C1 Spec | PASS | The owed behavior is explicit: every frozen gate-row log must resolve in the leaf sandbox while `build-notes.md` stays absent, so the review target is clear (`brief.md:24`). |
+| C2 Reproduction (red pre-fix) | PASS | Red is reproducible without the `leaves.py` production hunk: in a temp copy, reversing only that hunk made the focused tests fail on unresolved `gate-logs/T3-log.log` and stale prompt text (`template/tests/test_driver_slice.py:459`). |
+| C3 Change | PASS | The implementation covers the decision point: both reviewer and advisory sandboxes now seed `state.GATE_LOGS_DIR`, with best-effort failure handling and no change to `REVIEWER_INPUTS`/`build-notes.md` inclusion (`template/src/pdca_harness/leaves.py:1601`, `template/src/pdca_harness/leaves.py:1939`, `template/src/pdca_harness/leaves.py:2256`). |
+| C4 Verification (red→green) | PASS | Direct rerun showed red→green: the temp-copy red leg failed 3/5 focused tests after reversing only `leaves.py`, and `cd template && PYTHONPATH=src python3 -m unittest tests.test_driver_slice` passed 84 tests with the patch applied (`template/tests/test_driver_slice.py:444`). |
+| C5 Causal adequacy | PASS | The causal question is whether the sandbox receives the bundle-relative evidence that `gates.py` records; the fix copies that directory rather than adding a probe that masks an eager/load-time side effect (`template/src/pdca_harness/gates.py:544`, `template/src/pdca_harness/leaves.py:1623`). |
+| T1 Structure | PASS | The change stays within the briefed surfaces: reviewer prompt, advisory prompt, sandbox seeding, docs, and tests; no unrelated files are touched (`brief.md:56`). |
+| T2 Shape | NEEDS-HUMAN | Decide whether to rely on the recorded T2 pass without independent replay: `./engine/scripts/run-docs-check.sh` is absent from `$PDCA_TARGET`, no `gate-logs/` were bundled here, and the brief says target-local wrappers are out of scope (`brief.md:64`). |
+| T3 Runtime | NEEDS-HUMAN | Decide how to treat the recorded non-gating T3 failure: I could run the direct Python suite green, but not the exact `./engine/scripts/run-suite.sh` oracle, and no row log was available to inspect (`brief.md:80`). |
+| T4 Contribution | NEEDS-HUMAN | Decide whether the contribution artifacts satisfy the opener/tracker-id rule: the recorded contribcheck pass has no bundled log or PR artifacts in this review sandbox to re-run or inspect. |
+| T5 Judgment | NEEDS-HUMAN | Human sign-off owes the overall contribution judgment: the patch appears scoped and causal, but final acceptability of the contract/prompt wording is a human review call (`template/agents/reviewer.md.jinja:52`). |
+| Validation — fitness-to-purpose | NEEDS-HUMAN | Human must confirm the product-level fit: seeded gate logs are gate evidence rather than builder rationale, so independence is preserved in practice for this workflow (`template/agents/reviewer.md.jinja:17`). |

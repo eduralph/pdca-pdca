@@ -1,0 +1,32 @@
+size-signal: stop charging environment-lost rounds to the slice
+
+The rounds rule — the size backstop's strongest signal (76% precision that a
+third round follows) — counted every iteration archive after the last re-plan
+boundary without asking what a round was spent on. A round lost to an
+environment fault (a stale host CLI, an absent oracle, a sandbox that cannot
+bind loopback) was charged to the slice like any other. Observed downstream: a
+66 KB / 4-file patch fired the backstop on the rounds rule alone and the
+sign-off item recommended splitting the slice, when at least one round had
+demonstrably been burned by a too-old cargo-deny; the human overrode it twice.
+That is churn evidence about the host presented as evidence about the slice —
+a measurement bug, not a threshold one, so no retune can fix it.
+
+`iteration_rounds` now opens each counted archive's own evidence (the
+per-round check-gates.json and review record the driver archives with the
+attempt) and excludes a round only when an environment fault was the SOLE
+recorded driver of that iterate: (a) no plain gating fail, (b) at least one
+gating row recorded `unverifiable` or bearing a truthy `flaky` key — the
+consumer side of the #371 confirm-once contract, dormant until its recorder
+lands — and (c) an archived review that drove nothing of its own. Mixed-cause
+rounds (an environmental row alongside a real finding), plain fails, and
+all-green reviewer-driven rounds still count. Ambiguous, missing, or
+unreadable evidence counts the round: over-counting keeps the backstop, and
+silent shrinkage is the failure mode the recorded signal already refuses.
+
+This extends the boundary f616bc9cedef34faeeac9dc334fa19d8008bab99 landed
+(rounds attributable to the CURRENT brief) with a second one: attributable to
+the slice, not the host. Because scripts/size-calibrate imports the same
+`iteration_rounds`, the miner inherits the attribution with no second
+implementation — the runtime and the calibration corpus measure one quantity.
+
+Fixes #436

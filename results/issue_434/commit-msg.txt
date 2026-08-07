@@ -1,0 +1,36 @@
+fix: don't let a C4 gate pass a fix whose test never ran
+
+The per-fix correctness gate proves a change twice: the test must pass with the
+fix applied and fail with it taken back out, and that second run is the whole
+point — it shows the test really catches the reported bug. The instructions this
+project publishes tell a project to decide that run from the test runner's exit
+code alone. But a runner exits non-zero for two unrelated reasons: the test ran
+and failed (the proof we want), or no test ran at all because it failed to
+compile, import or collect, or the runner itself died. Those are
+indistinguishable from the outside, so a change whose test never executed is
+recorded as proof that its test catches the bug, and a fix nobody has actually
+verified reaches review carrying a green gate.
+
+That is an everyday shape rather than a corner case: taking the fix back out
+also removes any symbol the fix introduced, so a test that calls one cannot even
+build on exactly the run that is supposed to go red. It has already happened in
+a project rendered from this template, which had to patch its own copy of the
+gate.
+
+The harness never runs anyone's gate — it publishes the instructions each
+project writes its gate from — so the instructions are what changes here. The
+C4 outline now says to judge every leg by two facts, the runner's exit code and
+a count of tests that actually executed, parsed from the runner's own report and
+never inferred from the exit code. It states all four outcomes as a table, so
+the bad row is data rather than a caveat a reader can skim past: a run in which
+nothing executed is UNVERIFIABLE — exit 77, routed to SUMMARY §6 for a human —
+never a pass and never a fail. The two "nothing ran" causes stay distinguishable
+in the reason a gate prints, because the person reading §6 needs different
+things from each. The engine README carries the longer explanation and the same
+table, and a new test holds both in place so the wording cannot quietly rot.
+
+The rule is published for every verification step the harness gives instructions
+for, not just this one leg of one script: a gate never turns "no evidence" into
+a verdict.
+
+Fixes #434

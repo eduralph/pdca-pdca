@@ -29,6 +29,232 @@
 - The next Do phases should not recreate <specific issue>. Watch the next K cycles.
 -->
 
+# Act review — 2026-08-06 — cycles considered: issue_384, issue_396, issue_419, issue_436, issue_442
+
+Fifth Act review — five bundles frozen since the 2026-08-05 review (the index
+carried all 31; the 26 previously reviewed were considered only for
+effectiveness follow-up). All five merged-wider at sign-off; all five upstream
+PRs (#444–#447, #450) are still open drafts awaiting the human's ready/merge.
+At the human's direction this review additionally ran a **cross-instance
+comparison against getwyrd/wyrd-pdca** (rendered from the same template
+v0.56.0) as a calibration input.
+
+## What the cycles' records exposed
+- **New recurring signal — an unclassifiable T3 driver-suite red in 5 of 5
+  cycles.** Every frozen T3 row is the identical `== T3: root suite OK, driver
+  suite FAILED (rc 1)` with no test name. Unreproducible everywhere: issue_384
+  §10 records five sign-off reruns green *including the exact oracle*; the
+  reviewers on 419/436/442 ran the driver suite green. Gate-record timestamps
+  show 384/396 were written 0.5 s apart (concurrent flows — the §10
+  interference hypothesis), but 442 (03:56), 436 (15:03) and 419 (19:29) hit
+  the same red running **alone**, so concurrency cannot be the sole cause. The
+  red is unclassifiable for a compounding reason: the 2026-08-02 verdict-line
+  stopgap keeps only the last output line, and this instance's v0.56.0
+  `gates.py` retains no gate log. Third occurrence of the issue_420 §10 class,
+  now at wave scale.
+- **The release pipe is still the bottleneck — and now blocks strictly more.**
+  Progress since 2026-08-05: prerequisite drafts #438/#439/#440 are merged
+  (plus #443), so upstream main now carries every previously-routed fix *and*
+  native gate-log retention *and* leaf memory bounding. But v0.57.0 is still
+  uncut, the instance still renders from v0.56.0, and this wave added five new
+  open drafts. The familiar §6 classes (T2/T3 oracle absent, T4 artifacts
+  withheld, C4 marker mid-line match) recur exactly as the previous entry
+  predicted — expected, not evidence of anything new.
+- **issue_442's garbled §6 C4 "unverifiable" line** is the #428 mid-line
+  marker match via this instance's stale local `src/pdca_harness/gates.py:443`
+  — already ledgered 2026-08-05, cured by the update; no new delta.
+- **issue_436's size backstop fired** (2 rounds / threshold 2) and sign-off
+  merged anyway — fittingly, that cycle *is* the fix that stops charging
+  environment-lost rounds (like these T3 flake rounds) to the slice.
+- **Effectiveness confirmations:** T5 network grant (PR #25) — 0/5
+  network-unreachable classes, stays confirmed. T3 verdict-line stopgap — 0/5
+  decoy paths, stays confirmed; but its last-line-only nature is precisely
+  what makes the new T3 red unclassifiable.
+
+## Cross-instance comparison (wyrd-pdca, same template v0.56.0)
+- Same agent roster, same sandbox network grant — **every difference is
+  instance-authored configuration.** Gaps in this instance that map directly
+  onto its recurring §6/§10 pain: lane-safe gate scripts (`$PDCA_LANE`
+  scoping — wyrd's `run-verify.sh` is explicitly lane-safe, ours are not,
+  see finding 1); retained gate logs; gate-row CLI resolvability (wyrd's
+  `scripts/pdca` wrapper vs our bare `pdca-pdca` T4 row the reviewer cannot
+  run — the issue_402 §10 / upstream #441 class, solvable instance-side
+  today); `[gates] default_timeout_secs` (this instance *built the knob
+  upstream* in issue_368 and never set it locally; wyrd: 7200);
+  `confirm_gating_fail = true`; doctor coverage (3 rows vs 19, incl. hygiene
+  probes); `run-verify.sh` hardening (zero-tests-ran + red-leg-failed-without-
+  a-test guards — the #439 class); leaf model/effort policy (per-leaf pins,
+  builder escalation ladder, variant roster, difficulty-conditional adversary
+  leaf that we ship in `agents/` but never invoke). Gate-depth gaps of design
+  scale: gating repo-scoped CI via a `[gates] runner` wrapper, mechanical C5
+  (mutation testing over `patch.diff`), gating batched pre-PR rubric review,
+  a standing review rubric written into the target repo. Checked non-gaps:
+  `[[plan.source]] role="tracker"` already covers wyrd's `notes_cmd` seam;
+  Rust-specific doctor rows don't transfer.
+- **Meta-insight (agreed with the human):** two instances rendered from the
+  same template version landed in different operational safety classes because
+  the setup instructions never surface these knobs and nothing validates a
+  setup before it runs — this instance ran ~31 real cycles under-configured,
+  and the harness never noticed. That is itself the process gap, and it was
+  routed upstream (below) rather than patched quietly here.
+
+## Process deltas
+- **None applied in-beat — deliberate.** At the human's direction, every
+  agreed change (including the previously-proposed `run-suite.sh` gate-log
+  tee) is recorded as tracked work instead, so the instance hardening lands
+  through the normal Plan→Do→Check cycle with its own gates rather than as an
+  Act side-edit: the full located change list is
+  https://github.com/eduralph/pdca-pdca/issues/31 (8 concrete changes +
+  design-scale follow-ups).
+
+## Follow-ups routed (not process deltas — work handed to an owner)
+- Another bug (this repo — instance config values/scripts per the
+  template-vs-instance boundary): the wyrd-pdca-derived hardening list —
+  lane-safe gates, T3 log-retention tee, CLI-resolver wrapper for gate rows,
+  timeout, confirm-once, doctor coverage, run-verify guards, leaf policy →
+  filed https://github.com/eduralph/pdca-pdca/issues/31
+- Harness/driver issue (upstream, template setup docs): feed these insights
+  back into the setup instructions — a production-instance checklist
+  enumerating each knob with when-you-need-it guidance → filed
+  https://github.com/eduralph/pdca-harness/issues/451 (Milestone 0.60.0)
+- Harness/driver issue (upstream): **setup validation** — render-time gate
+  scaffolding, doctor form-validation of the setup itself, and `flow`
+  refusing (or demanding an explicit waiver) on an under-configured instance;
+  "this shouldn't have been running without everything properly configured" →
+  filed https://github.com/eduralph/pdca-harness/issues/452 (supersets #441;
+  Milestone 0.60.0). All three cross-linked.
+- Design issues (named for the human to schedule, outside the cycle; listed
+  as follow-ups in #31, no briefs authored): gating repo-scoped CI runner
+  wrapper; mechanical C5 mutation gate; batched pre-PR rubric review;
+  standing review rubric in the target repo.
+- Open Act item (carried, updated): the v0.57.0 chain — prerequisites now
+  merged upstream; the release cut now additionally waits on this wave's
+  drafts #444–#447/#450 getting ready/merge; then `copier update`, then
+  revert the `engine/scripts/run-suite.sh:19-49` stopgap **and** #31's tee
+  (item 2) per the standing criterion.
+- Open Act item (new): classify the recurring T3 driver-suite red
+  (concurrent-lane interference vs environment) once #31 item 2 retains the
+  first failing log — issue_384 §10's question, unanswerable until then.
+- Open Act item (carried from 2026-08-01, unchanged): triage rubric should
+  state five buckets explicitly (issue_316 §10) → owner: next triage brief
+  author; still no triage-class brief this interval.
+
+## How effectiveness will be judged
+- #31: once its lane-safety + log-retention changes land, the next T3 red must
+  carry a failing test name — and the concurrency question becomes decidable.
+  If the red never recurs after lane-scoping alone, interference is confirmed
+  retroactively.
+- #451/#452: judged at the next instance render or `copier update` — an
+  under-configured setup should be impossible to run silently. Recurrence of
+  a "ran N cycles without knob X" discovery after they land is the signal.
+- v0.57.0 chain: unchanged criterion from 2026-08-05 — recurrence of the
+  T2/T3/T4/C4 oracle classes *after* the update lands is the signal;
+  recurrence before it is expected and not evidence of anything.
+
+---
+
+# Act review — 2026-08-05 — cycles considered: issue_401, issue_402, issue_403, issue_411, issue_420, issue_428, issue_434
+
+Fourth Act review — seven bundles frozen since the second 2026-08-02 review (the
+index carried all 26; the 19 previously reviewed were considered only for
+effectiveness follow-up, not re-reviewed). All seven merged-wider. Four of the
+seven (401, 402, 403, 428) are this instance **fixing its own previously-routed
+upstream issues** — pdca-harness #401, #402, #403 and #428 were all closed on
+2026-08-05 by these cycles' PRs.
+
+## What the cycles' records exposed
+- **The template→instance return pipe is now the bottleneck, not any open defect.**
+  The fixes for #401 (T4 `deferred` at Check), #402 (`PDCA-EVIDENCE` verdict line),
+  #403 (reviewer oracle reachability / gate-log seeding) and #428 (line-start
+  marker matching) are merged to upstream **main**, but the latest release is
+  still **v0.56.0** (2026-07-28) — exactly what this instance is rendered from
+  (`.copier-answers.yml: _commit: v0.56.0`). Every one of the recurring §6
+  classes in these seven cycles (T2/T3 oracle unreproducible, T4 vacuous green,
+  C4 oracle skeleton) traces to a fix that exists upstream and has not reached
+  here. Two §10 candidates are direct casualties of that gap: issue_434's "sync
+  this project's `gates.py`" (verified: `src/pdca_harness/gates.py:443` here
+  still matches the marker mid-line — the exact defect #428 fixed, and it turned
+  #434's rc-0 C4 PASS into a false `unverifiable` **on 2026-08-05**, three months
+  of nothing but the release lag) and issue_420's "retain failing gate output"
+  (upstream main already writes `gate-logs/<rule_id>.log` rows; not in v0.56.0).
+- **The 2026-08-02 T3 verdict-line stopgap is CONFIRMED EFFECTIVE.** The
+  `/tmp/…/issue_500/split-proposal.md` decoy appears in **0 of the 7** new
+  cycles' §6, and where T3 was genuinely red the evidence now names the failing
+  suite (issue_411's record: "the recorded `./engine/scripts/run-suite.sh`
+  driver suite exited 1"). The prior entry's criterion is met. What remains
+  unresolved on a T3 red is *classification* — no retained log (issue_420 §10,
+  twice on one bundle, unreproducible both times; reviewer ran the driver suite
+  green) — which is the gate-log retention fix above, awaiting release.
+- **The T5 network grant (PR #25) stays effective.** No "could not reach
+  `api.github.com`" class in any of the seven. issue_420's T5 item is a
+  *different* complaint (prior art unsettleable "from the three supplied
+  artifacts" — artifact-set completeness, not network) — read per the #429
+  policy, not string-matched into the old class.
+- **Three of these cycles' upstream PRs are still open drafts** — #438
+  (issue_411), #439 (issue_434), #440 (issue_420) — awaiting the human's
+  ready/merge, which also blocks cutting the release that closes the pipe.
+- **§10 one-offs confirmed still live upstream and routed below:** issue_401's
+  stale `gates.py` doc sentence ("the one marker that can change a `result`" —
+  verified still on main at line 38, directly above the `PDCA-DEFERRED`
+  paragraph that contradicts it); issue_402's "every 5/5/1 gate should have a
+  runner script, and nothing checks it" (T4's `contribcheck` is a driver
+  subcommand with no runner script, read by the reviewer as an absent gate);
+  issue_411's "retarget instead of refuse" merge-mode follow-up (upstream #411
+  still open, no comment carried it).
+
+## Process deltas
+- None to this repo's spec template, ruleset, gates, or agent skills — agreed
+  with the human. Every recurring class is covered by a closed upstream fix
+  awaiting release; a local change would duplicate copier-managed machinery the
+  next `copier update` delivers (and did bite issue_434 precisely because the
+  local copy is stale — the cure is the update, not more local divergence).
+- Ledger: the five driver-appended recurring signals annotated — the two
+  split-proposal T3 signals marked **applied** (pre-stopgap records only;
+  stopgap confirmed effective), the T2 oracle signal tied to #403-awaiting-
+  release, the Mermaid-fetch signal marked one-off pre-network-grant, the C4
+  run-verify-skeleton signal tied to open #419 + new #441
+  (process/act-ledger.json).
+
+## Follow-ups routed (not process deltas — work handed to an owner)
+- Open Act item (human-owned, agreed at this review): once the open bugs are
+  resolved, upstream cuts **v0.57.0** and this instance consumes it via
+  `copier update`. That single chain delivers #401/#402/#403/#428 + gate-log
+  retention, retires issue_420's and issue_434's §10 items, and should collapse
+  the recurring T2/T3/T4/C4 §6 oracle classes. Prerequisite: drafts #438/#439/
+  #440 get the human's ready/merge. **Then revert the `engine/scripts/
+  run-suite.sh:19-49` stopgap** per the standing 2026-08-02 criterion.
+- Harness/driver issue (upstream, comment on open #411): merge mode should
+  *retarget* a wrong-based PR to the real shared base (`gh pr edit --base`) and
+  only refuse if the retarget fails — issue_411 §10 →
+  https://github.com/eduralph/pdca-harness/issues/411#issuecomment-5198287452
+- Harness/driver issue (upstream, new): nothing checks that every configured
+  5/5/1 gate has a runner — setup helper at render + doctor-style form
+  validation — issue_402 §10 → filed
+  https://github.com/eduralph/pdca-harness/issues/441
+- Harness/driver issue (upstream, new): `gates.py` module doc still calls
+  `PDCA-UNVERIFIABLE` "the one marker that can change a `result`", false since
+  `PDCA-DEFERRED` — issue_401 §10 → filed
+  https://github.com/eduralph/pdca-harness/issues/442
+- Open Act item (carried from 2026-08-01, unchanged): triage rubric should
+  state five buckets explicitly (issue_316 §10) → owner: next triage brief
+  author; still no triage-class brief this interval, so nothing to judge yet.
+
+## How effectiveness will be judged
+- After v0.57.0 + `copier update`: the T2/T3/T4 oracle-unreproducible and
+  C4-false-unverifiable §6 classes should stop recurring, T4 Check rows should
+  read `deferred` instead of a vacuous PASS, and a T3 red should carry an
+  inspectable `gate-logs/` file. Recurrence **after** the update lands is the
+  signal; recurrence before it is expected and not evidence of anything.
+- The run-suite.sh stopgap revert (post-update): confirm the upstream
+  `PDCA-EVIDENCE` line alone keeps T3 evidence meaningful — if the decoy path
+  reappears, reopen upstream #402 rather than re-adding the stopgap.
+- #441/#442 and the #411 retarget comment: continued §6/§10 recurrence of their
+  classes is expected while open; check their state next review.
+- T5 network grant and the T3 verdict-line stopgap: both now confirmed
+  effective; re-open only on recurrence.
+
+---
+
 # Act review — 2026-08-02 (second review of the day) — cycles considered: issue_356, issue_379, issue_380, issue_386, issue_387
 
 Third Act review — five bundles frozen since the earlier 2026-08-02 review (the

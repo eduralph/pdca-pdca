@@ -1,0 +1,37 @@
+fix(gates): record the gate's own verdict as the row's evidence
+
+Every gate row keeps one line of evidence, and until now that line was
+whatever the gate's command happened to print last. A gate's output is
+captured as a single merged stdout+stderr stream, so "the last line" really
+means "whatever a child process flushed last": a passing C4 wrapper whose
+own final word was "C4 PASS: red without the fix, green with it" was frozen
+with a /tmp scratch path from a sandbox that no longer exists as its entire
+recorded evidence. Anyone reading that record later saw a green check whose
+only stated basis was an unreachable path, could not reconstruct why it
+passed, and escalated the row for human review — repeatedly, across many
+cycles.
+
+A gate can now say which line is its verdict: print a line whose first text
+is "PDCA-EVIDENCE: <summary>" and that summary is what the row records,
+whatever the command relays afterwards. The last declaration wins, so a
+wrapper with several legs may declare per leg and let its final word
+summarise the run. The marker declares evidence only and never a verdict:
+the exit code alone still decides pass/fail, and PDCA-UNVERIFIABLE remains
+the one marker that can change a result. A gate that declares nothing keeps
+today's last-line rule, and the full capture stays in
+gate-logs/<rule_id>.log either way, so adopting the marker is purely
+additive for existing instances. The convention is stated where the gate
+contract is written (PCDA/quality-cycle/04-validation-tooling.md, Gate
+result vocabulary) so wrappers can be written against it, and it reuses the
+declaration form settled for #428 — first text on the line, a mid-line
+mention being text the gate merely relayed — so there is one notion of "the
+gate said this" for both markers.
+
+The offline suite also stops leaking the output of the code it drives:
+tests/test_split.py exercised two production printers on paths that had not
+applied the file's own redirect_stdout convention, publishing five /tmp
+scratch paths onto stdout after the unittest report. Those were the exact
+lines the misread rows kept filing, and a new regression module runs that
+suite in a subprocess and asserts it writes nothing to stdout.
+
+Fixes #402

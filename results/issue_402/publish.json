@@ -1,0 +1,11 @@
+{
+  "mode": "stacked-pr",
+  "branch": "fix/402-gate-evidence-not-leaked-stdout",
+  "pr_url": "https://github.com/eduralph/pdca-harness/pull/432",
+  "base": "pdca-integration/main",
+  "repo": "eduralph/pdca-harness",
+  "by": "Eduard Ralph",
+  "date": "2026-08-02",
+  "id_pending": false,
+  "stacks_on": []
+}

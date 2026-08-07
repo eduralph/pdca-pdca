@@ -1,0 +1,33 @@
+Add a checked exit contract for the interactive leaves
+
+Ending an interactive session (Plan, sign-off, publish, Act) used to be an
+unchecked event: the driver's entire completion signal was process exit, so
+"the human pressed Ctrl-D" and "the leaf discharged its contract" were the
+same thing. A missing or malformed artifact only surfaced later, far from the
+cause, and whatever the session established but never wrote down was lost
+entirely.
+
+Each interactive leaf now gets a checked boundary:
+
+- A rendered `/handoff <issue_id>` command verifies the current leaf's
+  contract for one named id and reports PASS/FAIL. Ids are required — there
+  is no scan mode — and the verdict is exit status plus a report; nothing is
+  written into the bundle.
+- A project-level Stop hook (`.claude/hooks/handoff_guard.py`) makes the
+  check non-optional: a session may not end with a missing or malformed
+  contract artifact. A typed escape hatch (`--abandon "<why>"`) records a
+  deliberate abandonment, which the driver reports when it reaps the
+  session. The hook is inert outside driver-spawned leaf sessions, so ad-hoc
+  work in an instance is never blocked.
+- The sign-off session's full multi-line rationale is captured live, before
+  the decision file is unlinked, and merged into the next attempt's brief on
+  an iterate — previously only a single flattened line survived.
+
+Which contract applies is derived from the render (the `interactive = true`
+leaves), never a hardcoded leaf list, and the publisher check reuses the
+instance's own deterministic contribution lint, so the gate and the /handoff
+verdict cannot drift apart. The Stop-hook enforcement is Claude-family only
+(codex has no hook surface); the contract still binds at the artifacts for
+every family.
+
+Fixes #331

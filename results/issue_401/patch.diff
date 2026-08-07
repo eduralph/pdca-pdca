@@ -1,0 +1,654 @@
+diff --git a/docs/05-check.md b/docs/05-check.md
+index 0f070da..ae29c2a 100644
+--- a/docs/05-check.md
++++ b/docs/05-check.md
+@@ -394,7 +394,12 @@ can also come back **`unverifiable`** — it genuinely couldn't run its check
+ (a missing fixture, a skipped environment) rather than having run and failed —
+ which is neither pass nor fail; it routes to §6 like a judgment cell would,
+ because "we don't know" and "we checked and it's wrong" need different
+-responses from you.
++responses from you. And it can come back **`deferred`** — it ran, but the thing
++it audits doesn't exist yet (the contribution check lints the PR body and commit
++message, which get drafted at publish, after Check). That one is *not* routed to
++§6: its real verdict is owed to the gate that re-runs the row before anything is
++pushed, not to you, so it shows in the matrix and §5 with its reason and nothing
++lands on your checklist.
+ 
+ The three mechanisms — gates, reviewer, assembly — run in that order, next.
+ 
+diff --git a/template/PCDA/quality-cycle/02-cycle-artifacts.md b/template/PCDA/quality-cycle/02-cycle-artifacts.md
+index aae5c94..329bdfe 100644
+--- a/template/PCDA/quality-cycle/02-cycle-artifacts.md
++++ b/template/PCDA/quality-cycle/02-cycle-artifacts.md
+@@ -105,7 +105,7 @@ Correctness chain + conformance Tiers 1–4:
+ | T3 runtime | pass / fail | find_spec / deps-absent run | log |
+ | T4 contribution | pass / fail | commit-msg hook / branch-target / version-bump | path:line |
+ 
+-A deterministic FAIL with auto-fixable cause (lint, format, genuinely-red test) may be auto-fixed and re-run; a deterministic FAIL that needs a decision stops and surfaces to NEEDS-HUMAN. A gate that genuinely *cannot run* its check (vs. running and failing) returns a third result, **`unverifiable`** — it does not fail `overall` but is routed to §6 NEEDS-HUMAN for the human to clear (see [04 - Validation Tooling](04-validation-tooling.md) §Gate result vocabulary and C5a/C6).
++A deterministic FAIL with auto-fixable cause (lint, format, genuinely-red test) may be auto-fixed and re-run; a deterministic FAIL that needs a decision stops and surfaces to NEEDS-HUMAN. A gate that genuinely *cannot run* its check (vs. running and failing) returns a third result, **`unverifiable`** — it does not fail `overall` but is routed to §6 NEEDS-HUMAN for the human to clear. A gate that *did* run but whose subject does not exist yet — the contribution check, before publish drafts the artifacts it lints — records a fourth result, **`deferred`**: also outside `overall`, and deliberately *not* routed to §6, because its verdict is owed to the later gate that re-runs it, not to the human (see [04 - Validation Tooling](04-validation-tooling.md) §Gate result vocabulary and C5a/C5b/C6).
+ 
+ ### `check-review.md` — advisory reviewer (decorrelated)
+ 
+diff --git a/template/PCDA/quality-cycle/04-validation-tooling.md b/template/PCDA/quality-cycle/04-validation-tooling.md
+index 75aa207..ff59e66 100644
+--- a/template/PCDA/quality-cycle/04-validation-tooling.md
++++ b/template/PCDA/quality-cycle/04-validation-tooling.md
+@@ -64,7 +64,11 @@ Three observations the matrix makes explicit:
+ 
+ **Hands-on tooling for the judgment path.** For a validation-act or visual/GUI/manual-repro item the human can't settle by reading — one where you have to *run the patched build* — the driver provides `pdca try <id>`. It launches the project's `[manual_test].cmd` (e.g. `python -m gramps`) from the bundle's per-cycle worktree (the patched tree the gates and reviewer used), handing the human the terminal to drive the app, and exports the same `PDCA_*` env a gate command gets. It is **advisory and read-only** over the harness's state (it decides nothing, mutates no bundle state, imposes no timeout); the human records the outcome in a Manual-verification note and signs off in §9. It complements the `unverifiable` mechanism below — where a gate defers a mechanical check to §6, `pdca try` is how the human then discharges the run-it-yourself part.
+ 
+-**Gate result vocabulary.** A gate-path row's `result` is one of `pass` / `fail` / `unverifiable` / `none`. A gate **passes** iff its command exits 0 and **fails** on any other exit. A gate may instead declare itself **`unverifiable`** when it genuinely *cannot run* its mechanical check (as opposed to running and failing) — exit code **77** (the automake SKIP convention) **or** *declare* it by printing a line that **starts with** **`PDCA-UNVERIFIABLE: <reason>`** (leading whitespace ignored) *while exiting 0 or 77* (the text after the marker is the recorded reason). The marker lets a gate that did **not** fail defer to the human; it is **ignored on any other exit code**, because a gate that exited non-zero has failed whatever it happened to print, and **ignored mid-line**, because the verdict is the gate's to *declare* — the marker anywhere but the front of a line is text the gate merely **relayed** from what it ran. Relying on the marker as a plain substring was unsafe in both directions: a suite in which one check deferred and a *different* test failed carried both the marker and a non-zero exit, and the whole gate was recorded `unverifiable` — which does not count toward `overall`, so a red gate read green; and a gate that exited **0** while relaying a line that merely *quotes* the marker (a child's log, an assertion diff, a source comment a test read back — including the contract sentence in this document) was recorded `unverifiable` too, so a genuine green stopped counting as verified and a genuine red would equally have been laundered into "defer to the human". A gate with no possible verdict has its own channel (exit 77) and must use it rather than piggy-backing on a failure or on something it printed on another process's behalf. An `unverifiable` row does **not** count toward `overall` — it neither silently passes nor hard-fails — and the driver routes it into `SUMMARY.md` §6 NEEDS-HUMAN, where the **C6** accept-guard ([06 - Quality-Cycle Guidelines](06-quality-cycle-guidelines.md) §C6) makes the human clear it before accept. This is the mechanism behind "a green mechanical check is not a correctness verification": a gate with nothing to verify says so rather than manufacturing a green. (`none` is the separate non-gating matrix-alignment cell decided on the judgment path.)
++**Gate result vocabulary.** A gate-path row's `result` is one of `pass` / `fail` / `unverifiable` / `deferred` / `none`. A gate **passes** iff its command exits 0 and **fails** on any other exit. A gate may instead declare itself **`unverifiable`** when it genuinely *cannot run* its mechanical check (as opposed to running and failing) — exit code **77** (the automake SKIP convention) **or** *declare* it by printing a line that **starts with** **`PDCA-UNVERIFIABLE: <reason>`** (leading whitespace ignored) *while exiting 0 or 77* (the text after the marker is the recorded reason). The marker lets a gate that did **not** fail defer to the human; it is **ignored on any other exit code**, because a gate that exited non-zero has failed whatever it happened to print, and **ignored mid-line**, because the verdict is the gate's to *declare* — the marker anywhere but the front of a line is text the gate merely **relayed** from what it ran. Relying on the marker as a plain substring was unsafe in both directions: a suite in which one check deferred and a *different* test failed carried both the marker and a non-zero exit, and the whole gate was recorded `unverifiable` — which does not count toward `overall`, so a red gate read green; and a gate that exited **0** while relaying a line that merely *quotes* the marker (a child's log, an assertion diff, a source comment a test read back — including the contract sentence in this document) was recorded `unverifiable` too, so a genuine green stopped counting as verified and a genuine red would equally have been laundered into "defer to the human". A gate with no possible verdict has its own channel (exit 77) and must use it rather than piggy-backing on a failure or on something it printed on another process's behalf. An `unverifiable` row does **not** count toward `overall` — it neither silently passes nor hard-fails — and the driver routes it into `SUMMARY.md` §6 NEEDS-HUMAN, where the **C6** accept-guard ([06 - Quality-Cycle Guidelines](06-quality-cycle-guidelines.md) §C6) makes the human clear it before accept. This is the mechanism behind "a green mechanical check is not a correctness verification": a gate with nothing to verify says so rather than manufacturing a green. (`none` is the separate non-gating matrix-alignment cell decided on the judgment path.)
++
++**`deferred` — the gate ran, its subject does not exist yet, and its verdict is owed later.** A gate declares **`deferred`** by printing a line that **starts with** **`PDCA-DEFERRED: <reason>`** *while exiting 0* (same declaration rule: leading whitespace ignored, a mid-line occurrence is relayed text, not a declaration). It is the honest record for a check that is **default-open by design** because the artifacts it audits are drafted *after* Check — the bundle-scoped T4 contribution row, whose `commit-msg.txt` / `pr-description.md` do not exist until `publish` writes them. Like `unverifiable` it does **not** count toward `overall` — neither a green nor a gating red. **Unlike** `unverifiable` it is **not** routed to `SUMMARY.md` §6 NEEDS-HUMAN, and that difference is the whole point: `unverifiable` means *nobody has an answer, so a human must decide*, while `deferred` means *this row's substantive audit runs later, at a gate that cannot be skipped* — there is nothing for the human to clear. Recorded as a plain `pass`, that non-event asserted a green the reviewer is contractually required to reproduce and structurally cannot (the artifacts the row names are not among its inputs), so it escalated to §6 on **every** cycle — 9 of 9 frozen bundles in one instance — and a §6 item cleared unread every time trains the human to tick §6 boxes, which is the guard **C6** depends on. **A deferral is a hand-off, never a waiver:** the marker is honoured only for a row something genuinely re-runs later — one selected by the publish re-gate (a bundle-scoped T4 row, or an explicit `at_publish = true`) — so a row nothing re-gates keeps its `pass`/`fail` and no audit can be dropped by declaring. The substantive verdict is unchanged and still hard-gates the push. `unverifiable` wins if a gate declares both (it is the channel that stops for a human), and, exactly as above, a **non-zero** exit is a failure whatever the gate printed. A `deferred` row still appears in `SUMMARY.md` §5 with its reason, so what is owed at publish stays visible.
++
++> **Upgrading an existing instance — `deferred`.** Nothing rewrites a frozen `check-gates.json`, and no reader that tests for `fail` / `unverifiable` changes behaviour (a `deferred` row is neither). Two visible consequences: a `pdca revalidate` of an older COMPLETE bundle will report its T4 contribution row as `pass → deferred` — a true statement about the current engine, not a regression (`regression` stays reserved for a gating `pass → fail`) — and an instance whose T4 checker is its own script keeps today's behaviour until that script declares the marker. Nothing regresses for an instance that declares nothing.
+ 
+ > **Upgrading an existing instance.** The exit-code and line-position requirements above are both
+ > tightenings: before them, the marker was honoured on *any* exit code and *anywhere* in a line.
+diff --git a/template/PCDA/quality-cycle/06-quality-cycle-guidelines.md b/template/PCDA/quality-cycle/06-quality-cycle-guidelines.md
+index 35c43f4..9f1764a 100644
+--- a/template/PCDA/quality-cycle/06-quality-cycle-guidelines.md
++++ b/template/PCDA/quality-cycle/06-quality-cycle-guidelines.md
+@@ -227,6 +227,12 @@ When a *gating* gate genuinely cannot run its mechanical check (e.g. a C4 red→
+ 
+ *Rationale.* The standing rule "a green mechanical check is not a correctness verification" cuts both ways: a gate with nothing to verify must not paint itself green, and the cycle must not force a green into existence. `unverifiable` is the honest third outcome — escalate to the human via the seam (§6) the design already has, instead of inventing scaffolding to satisfy a mechanic that does not apply.
+ 
++### C5b. A gate whose subject does not exist YET MUST declare `deferred`, not pass — and only where a later gate re-runs it
++
++When a gate *runs* and finds its subject **absent by design** — the artifacts it audits are drafted later in the cycle, as the T4 contribution check's `commit-msg.txt` / `pr-description.md` are drafted at publish — it MUST declare **`deferred`**: a line it *starts* with `PDCA-DEFERRED: <reason>` while exiting 0 ([04 - Validation Tooling](04-validation-tooling.md) §Gate result vocabulary). NOT `pass`, which asserts a verdict the gate never reached, and NOT `unverifiable`, which routes to §6 for a human who has nothing to decide. A row MAY record `deferred` **only** if it is genuinely re-run later (the publish re-gate); a row nothing re-gates has no later verdict to defer to and MUST keep its `pass`/`fail`.
++
++*Rationale.* Same invariant as C5a — a gate row records only a verdict the gate actually reached — with the opposite routing, because the two conditions differ in *who owes the answer*. C5a's answer is owed to the human, so §6 is right. A deferral's answer is owed to a later gate that cannot be skipped, so §6 is wrong: the item fires on 100% of cycles, is cleared unread every time, and trains the human to tick §6 boxes — degrading C6, the guard that makes §6 mean anything. The "only where a later gate re-runs it" clause is what keeps `deferred` from becoming a way to opt out of scrutiny.
++
+ ### C6. §6 NEEDS-HUMAN MUST be empty before sign-off can accept
+ 
+ Check sign-off (§9) MUST NOT record an *accept* outcome while §6 contains unresolved items. Each NEEDS-HUMAN item is cleared by the human or routed to iterate-to-Plan / iterate-to-Do before accept is available.
+diff --git a/template/PCDA/quality-cycle/08-glossary.md b/template/PCDA/quality-cycle/08-glossary.md
+index 6530075..4bd2042 100644
+--- a/template/PCDA/quality-cycle/08-glossary.md
++++ b/template/PCDA/quality-cycle/08-glossary.md
+@@ -154,6 +154,13 @@ status: active
+   whatever it printed, and a marker quoted mid-line is text the gate relayed, not a declaration).
+   Not a pass, not a fail: routed to §6 NEEDS-HUMAN so C6 makes the human clear it
+   (docs 04 §Gate result vocabulary, 06 §C5a).
++- **Deferred** — a gate result for a check that *ran* and found its subject **absent by
++  design**, its substantive verdict owed to a later gate (a line the gate *starts* with
++  `PDCA-DEFERRED:` while exiting 0 — the Check-time T4 contribution row, whose artifacts
++  `publish` drafts afterwards). Not a pass, not a fail, and — the one difference from
++  *unverifiable* — **not** routed to §6: nothing is owed to the human, so no checkbox.
++  Permitted only for a row the publish re-gate actually re-runs, so a deferral is a
++  hand-off, never a waiver (docs 04 §Gate result vocabulary, 06 §C5b).
+ - **Advisory** — a non-blocking signal (the reviewer, and anything `gating = false`); it
+   annotates, never gates.
+ - **Judgment cell** — C5, T5, and Validation — the three cells no gate can decide; they
+diff --git a/template/agents/reviewer.md.jinja b/template/agents/reviewer.md.jinja
+index 64018b6..e142c2e 100644
+--- a/template/agents/reviewer.md.jinja
++++ b/template/agents/reviewer.md.jinja
+@@ -65,6 +65,14 @@ can cost you the validation it was attached to.
+   missing CLI, a sandbox without the toolchain — the log's header and output usually say
+   which) is a *host caveat*, not the patch's fault: flag it for the human, don't propagate
+   it as a defect (issue #236).
++- **A `deferred` row is not a green to reproduce, and not a finding.** That result means
++  the gate *ran* and found its subject **absent by design** — the artifacts it audits
++  (`commit-msg.txt` / `pr-description.md`) are drafted after Check, so they are not among
++  your inputs — and its substantive verdict is owed to the gate that **re-runs the row at
++  publish**, which cannot be skipped; the row's evidence line says so. Record it **`N/A`**
++  with that reason. Do **not** escalate it to `NEEDS-HUMAN`: there is nothing for the human
++  to clear, and a §6 item that fires on every cycle is what trains a reader to tick §6
++  boxes unread (issue #401).
+ - Emit per item `PASS / FAIL / NEEDS-HUMAN` + one-line rationale + path:line.
+ 
+ ## Always emit the complete 5/5/1 verdict table
+diff --git a/template/pdca.toml.jinja b/template/pdca.toml.jinja
+index 6ced654..1bf2acb 100644
+--- a/template/pdca.toml.jinja
++++ b/template/pdca.toml.jinja
+@@ -922,9 +922,11 @@ checks = [
+   # T4 Contribution — lint the publisher's two artifacts before they are pushed: the PR body
+   # must open with a `**User impact:**` line (the user-visible effect, before Root cause) and
+   # both commit-msg.txt + pr-description.md must carry the tracker id. `contribcheck` reads
+-  # $PDCA_BUNDLE and is default-open before the artifacts are drafted (so Check-time gates
+-  # pass); `{{ cli_name }} publish` hard-gates T4 after drafting them (relaxed to a flag under
+-  # --no-issue). Gating is right here — this audits THIS cycle's own contribution artifacts,
++  # $PDCA_BUNDLE; before the artifacts are drafted it has nothing to lint, so it DECLARES the
++  # deferral (`PDCA-DEFERRED:`, exit 0) and the Check row records `deferred — re-gated at
++  # publish` rather than a green nobody can reproduce (issue #401; docs 04 §Gate result
++  # vocabulary). `{{ cli_name }} publish` then hard-gates T4 after drafting them — the
++  # substantive verdict, unchanged (relaxed to a flag under --no-issue). Gating is right here — this audits THIS cycle's own contribution artifacts,
+   # not pre-existing code, so the usual "T4 advisory" caveat (below) does not apply.
+   # `at_publish` (issue #339) — whether `{{ cli_name }} publish` re-runs this row before pushing.
+   # Defaults from `scope`: a BUNDLE-scoped T4 row is about the bundle's own contribution
+diff --git a/template/src/pdca_harness/assemble.py b/template/src/pdca_harness/assemble.py
+index fe3617a..f029ea2 100644
+--- a/template/src/pdca_harness/assemble.py
++++ b/template/src/pdca_harness/assemble.py
+@@ -360,7 +360,19 @@ def _gate_lines(gates: dict, *, prefix: str) -> str:
+ 
+ def _unverifiable_items(gates: dict) -> list[str]:
+     """Gate rows the mechanic couldn't run (``result == "unverifiable"``) → §6 items, so
+-    the C6 accept-guard forces the human to clear them before accept (issue #46)."""
++    the C6 accept-guard forces the human to clear them before accept (issue #46).
++
++    ``unverifiable`` ONLY — a ``deferred`` row (issue #401) is deliberately NOT lifted, the
++    single difference between the two gate-declared, non-gating results. ``unverifiable``
++    means "nobody has an answer, so a human must decide"; ``deferred`` means "this row's
++    substantive audit runs later, at a gate that cannot be skipped"
++    (``gates._deferrable`` → ``publish.publish_gates``) — there is nothing for the human to
++    clear. Lifting it anyway is the defect this closes: the Check-time T4 contribution row is
++    default-open by design (its artifacts are drafted at publish), and its vacuous green fired
++    a §6 NEEDS-HUMAN on 9 of 9 frozen bundles, cleared unread every time — which trains the
++    human to tick §6 boxes, the very guard C6 depends on. The row stays visible in §5
++    evidence (:func:`_gate_lines`) with its reason, so what is owed at publish is still read.
++    """
+     return [
+         f"{r['check']} unverifiable — {r['path_line'] or r['oracle'] or 'no reason given'}"
+         for r in gates["rows"]
+diff --git a/template/src/pdca_harness/cli.py b/template/src/pdca_harness/cli.py
+index 54d6ad3..9d98b52 100644
+--- a/template/src/pdca_harness/cli.py
++++ b/template/src/pdca_harness/cli.py
+@@ -1064,7 +1064,17 @@ def _contribcheck(cfg: Config, args: argparse.Namespace) -> int:
+     ticket — the tracker id is absent from either ``commit-msg.txt`` or ``pr-description.md``
+     (the two are linted INDEPENDENTLY, so a ticketed fix needs the id in BOTH). The bundle is
+     the ``issue_id`` arg or ``$PDCA_BUNDLE`` (set by the gate runner). No patch (close/no-fix)
+-    ⇒ pass (default-open, like an unconfigured gate)."""
++    ⇒ pass (default-open, like an unconfigured gate).
++
++    **Artifacts not drafted yet ⇒ a declared deferral, not a bare pass** (issue #401). This
++    row is registered for Check *and* re-run by ``publish`` (``publish.publish_gates``), and
++    at Check time the two artifacts it lints do not exist — publish drafts them later. The
++    exit code stays 0 (nothing failed), but the gate now DECLARES that its substantive audit
++    has no subject yet (``gates.DEFERRED_MARKER``), so the matrix records ``deferred`` with
++    the reason instead of a green the reviewer cannot reproduce — the artifacts the row names
++    are not among its inputs, which is why every cycle escalated this by-design condition to
++    SUMMARY §6 NEEDS-HUMAN. The substantive verdict is unchanged and still hard-gates the
++    push (``publish._t4_passes``)."""
+     if args.issue_id:
+         d = cfg.bundle(args.issue_id)
+     elif os.environ.get("PDCA_BUNDLE"):
+@@ -1076,7 +1086,12 @@ def _contribcheck(cfg: Config, args: argparse.Namespace) -> int:
+     if not patch.is_file() or not patch.read_text(encoding="utf-8").strip():
+         return 0  # close / no-fix bundle: nothing contributed
+     if not (d / publish.PR_BODY).is_file():
+-        return 0  # artifacts not drafted yet (Check-time gate, pre-publish) — nothing to lint
++        # Artifacts not drafted yet (Check-time gate, pre-publish): the gate ran and found
++        # its subject absent BY DESIGN. Declare the deferral (#401) rather than exit 0 mute,
++        # so the row records `deferred — re-gated at publish` instead of a vacuous green.
++        print(f"{gates.DEFERRED_MARKER} {publish.PR_BODY} not drafted yet — the substantive "
++              "T4 audit of the contribution artifacts runs at publish")
++        return 0
+     problems = contribution_problems(d, no_issue=args.no_issue)
+     for p in problems:
+         print(f"contribcheck: {p}", file=sys.stderr)
+diff --git a/template/src/pdca_harness/gates.py b/template/src/pdca_harness/gates.py
+index 3e2819c..b6ae62c 100644
+--- a/template/src/pdca_harness/gates.py
++++ b/template/src/pdca_harness/gates.py
+@@ -43,11 +43,24 @@ its full-output evidence log, ``gate-logs/<rule_id>.log``) and ``duration_secs``
+ #370) — additive keys, existing consumers unchanged. When that evidence log could NOT be
+ written, the row instead carries ``log_error`` (the reason) so a persistence failure is
+ never silent — the verdict itself is unaffected either way. ``result`` ∈
+-``pass`` / ``fail`` / ``unverifiable`` / ``none``. A ``none`` row is a judgment cell
+-decided by the reviewer + human (docs 04 §judgment cell); it is listed for matrix
+-alignment and never gates. An ``unverifiable`` row does **not** count toward
++``pass`` / ``fail`` / ``unverifiable`` / ``deferred`` / ``none``. A ``none`` row is a
++judgment cell decided by the reviewer + human (docs 04 §judgment cell); it is listed for
++matrix alignment and never gates. An ``unverifiable`` row does **not** count toward
+ ``overall`` (it is not a failure); the driver routes it into SUMMARY §6 NEEDS-HUMAN,
+ where the C6 accept-guard forces the human to clear it before sign-off.
++
++A **``deferred``** row (issue #401) is the fourth member: the gate RAN and found its
++subject **absent by design**, because the artifacts it audits are drafted later — the
++Check-time run of a bundle-scoped T4 contribution row, whose ``commit-msg.txt`` /
++``pr-description.md`` do not exist until publish. It is declared the same way
++``unverifiable`` is — a line the gate STARTS with :data:`DEFERRED_MARKER`
++(``PDCA-DEFERRED: <reason>``) while exiting 0 — and, like ``unverifiable``, it does not
++count toward ``overall``. Unlike ``unverifiable`` it is **not** lifted into SUMMARY §6:
++the condition is by-design and its substantive verdict is owed to a later gate, so a §6
++checkbox on every cycle trains the human to tick §6 unread — the guard C6 depends on.
++The deferral is honoured only for a row that is genuinely **re-gated later**
++(:func:`_deferrable` → ``publish.publish_gates``); a row nothing re-runs has no later
++verdict to defer to and keeps its pass/fail.
+ """
+ 
+ from __future__ import annotations
+@@ -76,6 +89,14 @@ UNVERIFIABLE_MARKER = "PDCA-UNVERIFIABLE:"
+ # capture is output the gate RELAYED from what it ran, and must not be filed as its verdict.
+ EVIDENCE_MARKER = "PDCA-EVIDENCE:"
+ 
++# A gate that ran and found its subject ABSENT BY DESIGN — the audit it performs has no
++# subject yet, because the artifacts it lints are drafted later — declares the deferral
++# with this marker while exiting 0 (issue #401). Same declaration rule as the two above:
++# only at the start of a line, never a mid-line quotation the gate relayed (#428). Neither
++# a pass nor a failure (see _finalize), and NOT routed to §6 (see assemble): the verdict is
++# owed to the later gate that re-runs the row (see _deferrable).
++DEFERRED_MARKER = "PDCA-DEFERRED:"
++
+ # The bundle directory holding one full-output evidence log per gate rule (issue #370).
+ # Defined in `state` (next to the archive list that moves it per round) — re-exported
+ # here because gates is the writer.
+@@ -520,6 +541,10 @@ def _run_one(chk: dict, *, cfg: Config, cwd: Path, bundle: Path | None, runner:
+         env = {**(env or {}), "PDCA_LANE": str(lane_id)}
+     watch = bundle or cwd
+     bound = _gate_timeout(chk, default_timeout)
++    # May this row declare itself `deferred` (issue #401)? Only if a later gate re-runs it,
++    # so the deferred verdict is genuinely owed rather than waived — resolved here, where
++    # both the row and the config are in hand (`_classify` sees neither).
++    deferrable = _deferrable(chk, cfg)
+     print(f"  · gate {label} (a Docker-backed gate can take minutes)…", file=sys.stderr, flush=True)
+     started = datetime.now(timezone.utc).isoformat(timespec="seconds")
+     t0 = time.monotonic()
+@@ -540,7 +565,7 @@ def _run_one(chk: dict, *, cfg: Config, cwd: Path, bundle: Path | None, runner:
+             # gating verdict), never a pass/fail verdict the command did not reach.
+             result, evidence = "unverifiable", [f"gate exceeded its {bound}s timeout"]
+         else:
+-            result, evidence = _classify(rc, output)
++            result, evidence = _classify(rc, output, deferrable=deferrable)
+     except Exception as exc:  # command not found, etc. — a failing gate, surfaced
+         result, evidence = "fail", [str(exc)]
+         output = f"{exc}\n"  # the exception IS the run's whole output — log it (#370)
+@@ -652,7 +677,33 @@ def _declared_evidence(output: str) -> str | None:
+     return declared[-1] if declared else None
+ 
+ 
+-def _classify(rc: int, output: str) -> tuple[str, list[str]]:
++def _declared_deferred(output: str) -> str | None:
++    """The gate's OWN ``deferred`` declaration in ``output`` — the reason its substantive
++    audit is owed later — or ``None`` (issue #401).
++
++    The FIRST declaration wins, as for :func:`_declared_unverifiable`: the reason a gate
++    gives when it finds its subject absent is the one it gave at that moment."""
++    declared = _declarations(output, DEFERRED_MARKER)
++    return declared[0] if declared else None
++
++
++def _deferrable(chk: dict, cfg: Config) -> bool:
++    """True iff ``chk`` is **re-gated later**, so a ``deferred`` row has a later verdict to
++    defer to (issue #401).
++
++    Deferral is legitimate only where the substantive audit actually happens afterwards:
++    the row must be one ``publish`` re-runs before it pushes anything
++    (:func:`publish.publish_gates` — a bundle-scoped T4 row, or an explicit
++    ``at_publish = true``). A row nothing re-gates owes its verdict to nobody, so its
++    declaration is ignored and it keeps today's ``pass``/``fail``. This is the guard that
++    keeps ``PDCA-DEFERRED:`` from becoming a way for any gate to opt out of scrutiny: a
++    deferral is a *hand-off* to a named later gate, not a waiver.
++    """
++    from . import publish  # lazy: publish imports leaves→gates; avoid an import cycle
++    return any(c is chk or c == chk for c in publish.publish_gates(cfg))
++
++
++def _classify(rc: int, output: str, *, deferrable: bool = False) -> tuple[str, list[str]]:
+     """Map a gate command's exit code + output to (result, evidence-lines).
+ 
+     ``unverifiable`` (issue #46) lets a gate that did NOT fail defer to the human: it may
+@@ -694,11 +745,27 @@ def _classify(rc: int, output: str) -> tuple[str, list[str]]:
+     whose tests exercise this machinery: a green C4 whose captured output quoted the
+     documented contract line (``... Emit `PDCA-UNVERIFIABLE: <reason>` and exit 77 ...``) was
+     recorded ``unverifiable``, so a real green stopped counting toward ``overall`` and a real
+-    red would equally have been laundered into "defer to the human"."""
++    red would equally have been laundered into "defer to the human".
++
++    ``deferred`` (issue #401) is the same family with a different addressee: the gate RAN,
++    found its subject absent BY DESIGN, and owes its substantive verdict to a later gate —
++    a bundle-scoped T4 contribution row at Check time, whose ``pr-description.md`` publish
++    has not drafted yet. Recording that non-event as ``pass`` asserted a green no reviewer
++    could reproduce (the artifacts the row names are not among its inputs), so every cycle
++    escalated the by-design condition to §6 NEEDS-HUMAN; recording it ``unverifiable``
++    would route it to §6 too. It is honoured only on exit **0** — 77 is the ``unverifiable``
++    channel and a non-zero exit is a failure whatever the gate printed (#329) —
++    ``unverifiable`` wins when both are declared (the safer channel: it stops for a human),
++    and only when ``deferrable`` says a later gate actually re-runs this row
++    (:func:`_deferrable`)."""
+     if rc in (0, UNVERIFIABLE_RC):
+         reason = _declared_unverifiable(output)
+         if reason is not None:
+             return "unverifiable", [reason or "gate declared itself unverifiable"]
++        if rc == 0 and deferrable:
++            owed = _declared_deferred(output)
++            if owed is not None:
++                return "deferred", [owed or "substantive audit runs at publish"]
+     evidence = _declared_evidence(output)
+     if evidence is None:
+         evidence = (output.strip().splitlines()[-1:] or [""])[0]
+@@ -716,6 +783,9 @@ def _merged_env(extra: dict | None) -> dict | None:
+ 
+ # ----------------------------------------------------------------------------
+ def _finalize(rows: list[dict], *, name: str, write_to: Path | None) -> dict:
++    # Only a hard `fail` gates. `unverifiable` (#46) and `deferred` (#401) are verdicts the
++    # gate did NOT reach — neither a green nor a gating red — so neither counts toward
++    # `overall`; each has its own downstream route (§6 NEEDS-HUMAN / the later re-gate).
+     gating_fail = any(r["gating"] and r["result"] == "fail" for r in rows)
+     result = {"issue_dir": name, "overall": "fail" if gating_fail else "pass", "rows": rows}
+     if write_to is not None:
+diff --git a/template/src/pdca_harness/leaves.py b/template/src/pdca_harness/leaves.py
+index 6b5efd7..4bc9178 100644
+--- a/template/src/pdca_harness/leaves.py
++++ b/template/src/pdca_harness/leaves.py
+@@ -1483,7 +1483,11 @@ _REVIEW_PROMPT = (
+     "it; the oracle being absent from the target checkout is expected and is not by "
+     "itself a finding. Reserve the 'gate not reproducible / oracle missing' NEEDS-HUMAN "
+     "for a row that has NO log (no `log` key, a `log_error`, or a file that is not "
+-    "there). Write check-review.md: open it "
++    "there). A row whose `result` is `deferred` is NOT a green to reproduce and NOT a "
++    "finding: the gate ran, found its subject absent BY DESIGN (the artifacts it audits "
++    "are drafted later), and its substantive verdict is owed to a gate that re-runs it at "
++    "publish — the row's evidence line says which. Record it `N/A` with that reason and do "
++    "NOT escalate it to NEEDS-HUMAN. Write check-review.md: open it "
+     "with a one-line outline of the task under review (the bug to fix / functionality to "
+     "implement), then a complete verdict table — one row for EVERY element of the "
+     "5/5/1 matrix, in order:\n"
+diff --git a/template/tests/test_gate_deferred.py b/template/tests/test_gate_deferred.py
+new file mode 100644
+index 0000000..90a688d
+--- /dev/null
++++ b/template/tests/test_gate_deferred.py
+@@ -0,0 +1,282 @@
++"""Offline slice for the `deferred` gate-result class (issue #401, stdlib unittest).
++
++A gate that RAN and found its subject **absent by design** — the artifacts it audits are
++drafted later in the cycle — declares `deferred` (a line it STARTS with the
++`PDCA-DEFERRED:` marker while exiting 0) instead of a green nobody can reproduce. The case
++that motivates it: the bundle-scoped T4 contribution row runs at Check, where
++`pr-description.md` / `commit-msg.txt` do not exist yet (publish drafts them), so
++`pdca contribcheck` was default-open and the matrix recorded a plain PASS — with an empty
++evidence line. The reviewer, contractually required to reproduce every recorded green,
++structurally cannot (those artifacts are not among its inputs), so it marked the row
++provisional and T4 landed in SUMMARY §6 NEEDS-HUMAN on 9 of 9 frozen bundles, cleared
++unread every time — which degrades C6, the guard §6 exists for.
++
++Proves, with real gate commands and real bundle directories (no Claude / Docker / network):
++
++* the gate runner classifies the declaration as `deferred`, which does NOT count toward
++  `overall` — neither a green nor a gating red (`gates._classify` / `_finalize`);
++* it is honoured ONLY for a row something re-runs later (`gates._deferrable` →
++  `publish.publish_gates`): a deferral is a hand-off, never a waiver;
++* the declaration rules are the marker family's (#329/#428): a non-zero exit fails whatever
++  it printed, a mid-line quotation is relayed text, `unverifiable` wins when both declare;
++* `assemble` does NOT lift it into §6 (the one deliberate difference from `unverifiable`)
++  while §5 still shows it with its reason — so sign-off can accept without a checkbox
++  nobody can act on;
++* end to end: the REAL `cli._contribcheck`, run as the gate command over a bundle that has
++  `patch.diff` and no `pr-description.md`, produces a `deferred` row whose evidence names
++  the publish re-gate — while a bundle whose artifacts ARE drafted still records the
++  substantive `pass`/`fail` exactly as before, and publish still selects the row to
++  hard-gate the push.
++
++Run from the project root:  PYTHONPATH=src python -m unittest discover -s tests
++"""
++
++from __future__ import annotations
++
++import io
++import shlex
++import shutil
++import sys
++import tempfile
++import unittest
++from contextlib import redirect_stdout
++from pathlib import Path
++from types import SimpleNamespace
++
++from pdca_harness import assemble, cli, gates, publish, signoff, state
++from pdca_harness.config import Config, LeafConfig
++
++_U = gates.UNVERIFIABLE_MARKER
++# Composed from the production constant, so this module never emits the marker at a
++# *declaring* position in its own captured output (#428's lesson) and cannot flip the row of
++# the gate that runs it. The literal fallback keeps the module IMPORTABLE against an engine
++# without the constant, so a red→green verifier that reverts the production hunks measures
++# the BEHAVIOUR (a `pass` recorded where `deferred` is owed) rather than collecting an
++# ImportError — a crash proves the constant is absent, not that the record lies.
++_D = getattr(gates, "DEFERRED_MARKER", "PDCA-DEFERRED:")
++
++# The shipped registration's shape in the fields that decide selection: a BUNDLE-scoped T4
++# row, which `publish.publish_gates` re-runs before the push — so it may defer.
++_T4 = {"id": "T4-contribution", "tier": "T4", "label": "contribution artifacts",
++       "scope": "bundle", "gating": True}
++_T4_DEFERS = {**_T4, "cmd": f"echo '{_D} pr-description.md not drafted yet — audited at publish'"}
++# Rows NOTHING re-gates: a repo-scoped T4 (at_publish defaults off) and a C4 verifier.
++_T4_REPO_DEFERS = {**_T4_DEFERS, "scope": "repo"}
++_C4_DEFERS = {"id": "C4-verify", "tier": "C4", "label": "verify", "scope": "bundle",
++              "gating": True, "cmd": _T4_DEFERS["cmd"]}
++# The marker family's rules, on the row that IS allowed to defer.
++_T4_DEFERS_AND_FAILS = {**_T4, "cmd": f"echo '{_D} nothing to lint'; echo 'boom'; exit 1"}
++_T4_RELAYS = {**_T4, "cmd": f"echo 'the contract reads: {_D} <reason> while exiting 0'; "
++                            "echo 'lint OK'"}
++_T4_DEFERS_AND_UNVERIFIABLE = {**_T4, "cmd": f"echo '{_U} no linter on PATH'; "
++                                             f"echo '{_D} nothing to lint'"}
++
++# The REAL T4 checker, driven the way the gate runner drives it: a subprocess that reads
++# $PDCA_BUNDLE (exported by `_run_one`) and returns `cli._contribcheck`'s own exit code.
++# `cfg` is unused on that path — the bundle comes from the environment, as under `pdca
++# contribcheck` — so this is the production function, not a re-implementation of it.
++_SRC = str(Path(cli.__file__).resolve().parents[1])  # the src/ this suite imported cli from
++_CONTRIBCHECK = (
++    f"{shlex.quote(sys.executable)} -c "
++    + shlex.quote(f"import sys; sys.path.insert(0, {_SRC!r}); "
++                  "from types import SimpleNamespace as N; from pdca_harness import cli; "
++                  "raise SystemExit(cli._contribcheck(None, N(issue_id=None, no_issue=False)))")
++)
++_T4_CONTRIBCHECK = {**_T4, "cmd": _CONTRIBCHECK}
++
++_GOOD_PR = ("## Summary\n**User impact:** users saw a crash on save.\n\n"
++            "## Root cause\nx.\n\nFixes #266\n")
++_GOOD_COMMIT = "Fix the save crash\n\nBody under eighty.\n\nFixes #266\n"
++
++
++def _stub_config(root: Path) -> Config:
++    return Config(
++        root=root,
++        bundle_root=root / "results",
++        process_dir=root / "process",
++        templates_dir=root / "templates",
++        default_branch="main",
++        tracker_system="github",
++        tracker_url="",
++        issue_id_example="#1",
++        builder=LeafConfig(mode="stub", family="claude"),
++        reviewer=LeafConfig(mode="stub", family="codex"),
++    )
++
++
++class _GateCase(unittest.TestCase):
++    def setUp(self) -> None:
++        self.tmp = Path(tempfile.mkdtemp())
++        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
++        self.cfg = _stub_config(self.tmp)
++
++    def _bundle(self, iid: str) -> Path:
++        """A Check-time bundle: a patch, no publish artifacts (they are drafted later)."""
++        d = self.cfg.bundle(iid)
++        d.mkdir(parents=True)
++        (d / "brief.md").write_text("- **Slug:** deferred\n", encoding="utf-8")
++        (d / "patch.diff").write_text("--- a\n+++ b\n", encoding="utf-8")
++        return d
++
++    def _gated(self, iid: str, gate: dict) -> tuple[Path, dict]:
++        d = self._bundle(iid)
++        self.cfg.gates_checks = [gate]
++        return d, gates.run_gates(d, self.cfg)
++
++    def _row(self, result: dict, element: str = "T4") -> dict:
++        return next(r for r in result["rows"] if r["element"] == element)
++
++
++class DeferredIsAGateDeclaredNonGatingResult(_GateCase):
++    """`_classify` / `_finalize`: the vocabulary member itself."""
++
++    def test_declared_deferral_is_recorded_with_its_reason(self) -> None:
++        _d, result = self._gated("DEF", _T4_DEFERS)
++        row = self._row(result)
++        self.assertEqual(row["result"], "deferred")
++        self.assertNotIn(row["result"], ("pass", "unverifiable"))
++        self.assertIn("audited at publish", row["path_line"])  # the reason, not an empty cell
++
++    def test_deferred_does_not_count_toward_overall(self) -> None:
++        # A gating row, yet neither a green nor a gating red: the gate reached no verdict.
++        _d, result = self._gated("OVR", _T4_DEFERS)
++        self.assertTrue(self._row(result)["gating"])
++        self.assertEqual(result["overall"], "pass")
++
++    def test_the_matrix_shows_deferred_with_its_reason(self) -> None:
++        d, result = self._gated("MD", _T4_DEFERS)
++        md = (d / "check-gates.md").read_text(encoding="utf-8")
++        self.assertIn("| deferred |", md)
++        self.assertIn("audited at publish", md)
++
++    # -- the guard: a deferral is a hand-off, never a waiver -------------------------
++
++    def test_a_row_nothing_re_gates_keeps_its_pass(self) -> None:
++        """Design point 3: `deferred` is legitimate only where the substantive audit
++        actually runs later. A repo-scoped T4 row is not selected by `publish_gates`, so it
++        has no later verdict to defer to and keeps today's behaviour."""
++        self.assertEqual([c["id"] for c in publish.publish_gates(
++            _stub_config(self.tmp))], [])  # sanity: selection is by the row, not the tier
++        _d, result = self._gated("NOREGATE", _T4_REPO_DEFERS)
++        self.assertEqual(self._row(result)["result"], "pass")
++
++    def test_a_c4_row_cannot_defer_itself_out_of_scrutiny(self) -> None:
++        """The verifier nothing re-runs: were the marker honoured here, any gate could
++        opt out of its own audit by printing one line."""
++        _d, result = self._gated("C4DEF", _C4_DEFERS)
++        self.assertEqual(self._row(result, "C4")["result"], "pass")
++
++    # -- the marker family's rules apply unchanged (#329 / #428) ---------------------
++
++    def test_a_non_zero_exit_fails_whatever_it_declared(self) -> None:
++        _d, result = self._gated("FAILDEF", _T4_DEFERS_AND_FAILS)
++        self.assertEqual(self._row(result)["result"], "fail")
++        self.assertEqual(result["overall"], "fail")
++
++    def test_a_relayed_marker_is_not_a_declaration(self) -> None:
++        _d, result = self._gated("RELAY", _T4_RELAYS)
++        row = self._row(result)
++        self.assertEqual(row["result"], "pass")
++        self.assertEqual(row["path_line"], "lint OK")
++
++    def test_unverifiable_wins_when_a_gate_declares_both(self) -> None:
++        """`unverifiable` stops for a human; `deferred` does not. When a gate says both,
++        the channel that escalates must win — never the one that quietly stands down."""
++        _d, result = self._gated("BOTH", _T4_DEFERS_AND_UNVERIFIABLE)
++        self.assertEqual(self._row(result)["result"], "unverifiable")
++
++
++class DeferredIsNotLiftedIntoSection6(_GateCase):
++    """The one deliberate difference from `unverifiable` — and the point of the change."""
++
++    def _assembled(self, iid: str, gate: dict) -> Path:
++        d, _result = self._gated(iid, gate)
++        # A clean advisory review, so §6 is fed only by the gates (as in the #46 slice).
++        (d / "check-review.md").write_text("All advisory items PASS.\n", encoding="utf-8")
++        assemble.assemble_summary(d, self.cfg)
++        return d
++
++    def test_no_needs_human_item_and_accept_is_not_blocked(self) -> None:
++        d = self._assembled("S6", _T4_DEFERS)
++        open_items = signoff.open_needs_human(d / "SUMMARY.md")
++        self.assertFalse([it for it in open_items if "deferred" in it or "T4" in it],
++                         f"a deferred row must not reach §6: {open_items}")
++        # C6 therefore has nothing to block on: accept succeeds with no box to tick.
++        accept = SimpleNamespace(issue_id="S6", accept=True, iterate_do=False,
++                                 iterate_plan=False, discontinue=False, by="t", delta="")
++        self.assertEqual(cli._signoff(self.cfg, accept), 0)
++        self.assertEqual(state.state(d), state.COMPLETE)
++
++    def test_the_row_is_still_visible_in_section_5_with_its_reason(self) -> None:
++        """Not lifted is not hidden: the human still reads WHAT is owed at publish."""
++        d = self._assembled("S5", _T4_DEFERS)
++        summary = (d / "SUMMARY.md").read_text(encoding="utf-8")
++        self.assertIn("deferred", summary)
++        self.assertIn("audited at publish", summary)
++
++    def test_an_unverifiable_row_still_reaches_section_6(self) -> None:
++        """The #46 route is untouched for every other class — only the by-design condition
++        stops producing a checkbox."""
++        d = self._assembled("UV", {**_T4, "cmd": f"echo '{_U} no linter on PATH'"})
++        self.assertTrue([it for it in signoff.open_needs_human(d / "SUMMARY.md")
++                         if "unverifiable" in it])
++
++
++class ContribcheckDeclaresTheDeferral(_GateCase):
++    """End to end through the REAL T4 checker (`cli._contribcheck`) — the success criterion."""
++
++    def _artifacts(self, d: Path, *, pr: str = _GOOD_PR, commit: str = _GOOD_COMMIT) -> None:
++        (d / "pr-description.md").write_text(pr, encoding="utf-8")
++        (d / "commit-msg.txt").write_text(commit, encoding="utf-8")
++
++    def test_check_time_row_with_a_patch_and_no_pr_body_is_deferred(self) -> None:
++        d, result = self._gated("266", _T4_CONTRIBCHECK)
++        self.assertFalse((d / "pr-description.md").exists())  # the fault IS the fixture
++        row = self._row(result)
++        self.assertEqual(row["result"], "deferred")
++        self.assertIn("publish", row["path_line"])  # names where the audit actually runs
++        self.assertEqual(result["overall"], "pass")
++
++    def test_drafted_artifacts_still_record_the_substantive_pass(self) -> None:
++        d = self._bundle("266p")
++        self._artifacts(d)
++        self.cfg.gates_checks = [_T4_CONTRIBCHECK]
++        self.assertEqual(self._row(gates.run_gates(d, self.cfg))["result"], "pass")
++
++    def test_drafted_artifacts_still_record_the_substantive_fail(self) -> None:
++        d = self._bundle("266f")
++        self._artifacts(d, pr="## Summary\nno user-impact opener.\n\nFixes #266f\n")
++        self.cfg.gates_checks = [_T4_CONTRIBCHECK]
++        result = gates.run_gates(d, self.cfg)
++        self.assertEqual(self._row(result)["result"], "fail")
++        self.assertEqual(result["overall"], "fail")
++
++    def test_the_checker_declares_the_marker_at_the_start_of_a_line(self) -> None:
++        """The declaration form itself (a mid-line mention would be relayed text, #428)."""
++        d = self._bundle("266d")
++        out = io.StringIO()
++        with redirect_stdout(out):
++            rc = cli._contribcheck(self.cfg, SimpleNamespace(issue_id=d.name.removeprefix("issue_"),
++                                                             no_issue=False))
++        self.assertEqual(rc, 0)  # exit code unchanged: nothing failed
++        declared = [ln for ln in out.getvalue().splitlines() if ln.startswith(_D)]
++        self.assertEqual(len(declared), 1, out.getvalue())
++        self.assertIn("publish", declared[0])
++
++    def test_a_close_bundle_with_no_patch_still_just_passes(self) -> None:
++        """Nothing was contributed, so nothing is owed later — not a deferral."""
++        d = self._bundle("266c")
++        (d / "patch.diff").write_text("", encoding="utf-8")
++        self.cfg.gates_checks = [_T4_CONTRIBCHECK]
++        self.assertEqual(self._row(gates.run_gates(d, self.cfg))["result"], "pass")
++
++    def test_publish_still_hard_gates_the_row_before_any_push(self) -> None:
++        """The substantive verdict is unchanged and still blocks the push: the same row the
++        Check matrix deferred is the one publish re-runs (`publish._t4_passes`)."""
++        self.cfg.gates_checks = [_T4_CONTRIBCHECK]
++        self.assertEqual([c["id"] for c in publish.publish_gates(self.cfg)],
++                         ["T4-contribution"])
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/template/tests/test_publish_slice.py b/template/tests/test_publish_slice.py
+index afac3e6..43898c1 100644
+--- a/template/tests/test_publish_slice.py
++++ b/template/tests/test_publish_slice.py
+@@ -912,8 +912,19 @@ class ContribCheck(unittest.TestCase):
+ 
+     def test_default_open_before_artifacts_are_drafted(self) -> None:
+         # Run as a Check-time bundle gate before publish: no PR body yet ⇒ nothing to lint.
++        # Exit code unchanged (0 — nothing failed), but the gate now DECLARES the deferral
++        # instead of exiting mute, so the Check matrix records `deferred` rather than a
++        # vacuous green (issue #401; the row's classification is pinned in
++        # tests/test_gate_deferred.py). Marker composed from the production constant so this
++        # module never emits it at a declaring position in its own captured output (#428).
+         _bundle(self.cfg, "266", brief_body=_FIX_BRIEF, accepted=True)
+-        self.assertEqual(self._run("266"), (0, ""))
++        out = io.StringIO()
++        with redirect_stdout(out):
++            self.assertEqual(self._run("266"), (0, ""))  # no problems on stderr
++        declared = [ln for ln in out.getvalue().splitlines()
++                    if ln.startswith(gates.DEFERRED_MARKER)]
++        self.assertEqual(len(declared), 1, out.getvalue())
++        self.assertIn("publish", declared[0])
+ 
+     def test_close_disposition_bundle_passes(self) -> None:
+         d = _bundle(self.cfg, "266", brief_body=_FIX_BRIEF, accepted=True)

@@ -1,0 +1,11 @@
+{
+  "mode": "stacked-pr",
+  "branch": "fix/420-bound-leaf-subprocess-memory",
+  "pr_url": "https://github.com/eduralph/pdca-harness/pull/440",
+  "base": "pdca-integration/main",
+  "repo": "eduralph/pdca-harness",
+  "by": "Eduard Ralph",
+  "date": "2026-08-05",
+  "id_pending": false,
+  "stacks_on": []
+}

@@ -1,0 +1,772 @@
+diff --git a/template/pdca.toml.jinja b/template/pdca.toml.jinja
+index eb24bca..e26e81e 100644
+--- a/template/pdca.toml.jinja
++++ b/template/pdca.toml.jinja
+@@ -168,6 +168,20 @@ sweep_worktrees = "clean"
+ # most edited in this table) lands as a git conflict marker in pdca.toml — after which
+ # every `pdca` command dies at config load. Add new keys here, away from the contested ones.
+ size_guard = "off"
++# Do-exit halt on a BUILDER-declared unmet external dependency (#341) — opt-in, default
++# off (byte-identical while off). The builder contract makes an honest builder declare a
++# dependency it could not build/verify against (`NEEDS-HUMAN external dependency: …` in
++# build-notes.md, plus a proposed [[doctor.checks]] row in a fenced ```toml block). With
++# this on, the driver ADJUDICATES that claim deterministically at BUILT: the named
++# dependency must resolve to a [[doctor.checks]] row (registered here, else the builder's
++# proposed row) AND that row's detect cmd must exit non-zero. Confirmed ⇒ the bundle takes
++# the close fast path to sign-off (N/A gates, no reviewer/adversary spent on a patch
++# already stated to be unverifiable) and stays RESUMABLE — install the dependency and
++# answer iterate-do; sign-off still owns every terminal state. Refuted (the cmd exits 0)
++# or unresolvable/malformed ⇒ full Check runs unchanged, with the refutation recorded
++# into §6 — a self-report can never skip review on its own say-so. STRICT boolean:
++# write `dependency_halt = true` unquoted, or it stays off.
++# dependency_halt = true
+ 
+ 
+ # A-priori size-estimate weights + cutoffs (issues #320/#359). [driver.sizing] tunes the
+diff --git a/template/src/pdca_harness/assemble.py b/template/src/pdca_harness/assemble.py
+index 61c3852..219406f 100644
+--- a/template/src/pdca_harness/assemble.py
++++ b/template/src/pdca_harness/assemble.py
+@@ -200,6 +200,14 @@ def collect_needs_human(d: Path, cfg: Config) -> list[NeedsHumanItem]:
+     if build_notes.exists():
+         items += [NeedsHumanItem(t, HUMAN)
+                   for t in _declared_external_deps(build_notes.read_text(encoding="utf-8"))]
++    # The Do-exit adjudication record (#341): a declaration the detect-cmd probe REFUTED
++    # proceeded to full Check, and the refutation must reach the human — and `pdca act
++    # index`, which reads §6 — rather than stay a bundle-local json only the driver saw.
++    # HUMAN, never IMPL: a rebuild cannot fix a mis-declaration. Local import, because
++    # dependency_halt delegates its marker parsing to `_declared_external_deps` above
++    # (one parser for "did the builder declare a dependency").
++    from . import dependency_halt
++    items += [NeedsHumanItem(t, HUMAN) for t in dependency_halt.refuted_items(d)]
+     items += [NeedsHumanItem(t, HUMAN)
+               for t in _unregistered_dependency_items(d / "brief.md", cfg)]
+     # Plan-advisory findings (#301 + review): folded into §6 individually, exactly like
+diff --git a/template/src/pdca_harness/config.py b/template/src/pdca_harness/config.py
+index c523f44..f1181da 100644
+--- a/template/src/pdca_harness/config.py
++++ b/template/src/pdca_harness/config.py
+@@ -358,6 +358,17 @@ class Config:
+     # adding one: the same condition already refuses `signoff --accept` through the C6
+     # guard.
+     dependency_guard: str = "hold"
++    # Do-exit halt on a BUILDER-declared unmet external dependency
++    # ([driver].dependency_halt, #341): when build-notes.md carries the builder-contract
++    # marker `NEEDS-HUMAN external dependency:` AND the claim is confirmed
++    # deterministically — the named [[doctor.checks]] row (registered, or parsed from
++    # the builder's proposed fenced TOML block) has a detect cmd that exits non-zero —
++    # the driver reroutes BUILT through the close fast path to sign-off instead of
++    # spending gates + reviewer + adversary adjudicating a patch already stated to be
++    # unverifiable. A refuted or unresolvable claim runs full Check unchanged (fail
++    # toward review). STRICT boolean, default False: opt-in for one release, and while
++    # off the beat is byte-identical to today.
++    dependency_halt: bool = False
+     close_dispositions: list[str] = field(
+         default_factory=lambda: list(DEFAULT_CLOSE_DISPOSITIONS))
+     # Family-profile overrides ([families.<name>] in pdca.toml): per-vendor CLI
+@@ -602,6 +613,16 @@ class Config:
+         size_signal = dict(driver_cfg.get("size_signal", {}))
+         size_guard = str(driver_cfg.get("size_guard", "off"))
+         dependency_guard = str(driver_cfg.get("dependency_guard", "hold"))
++        # Do-exit dependency halt (#341) — STRICT boolean, like [leaves.sandbox]
++        # network_access (PR #292): this setting lets a confirmed claim skip the
++        # reviewer, so a non-boolean (`dependency_halt = "false"` is a truthy string)
++        # must fail CLOSED — feature off, full Check runs — and be reported, not guessed.
++        _halt = driver_cfg.get("dependency_halt", False)
++        if not isinstance(_halt, bool):
++            print(f"config: [driver].dependency_halt must be a boolean, got {_halt!r} — "
++                  "treating it as FALSE (full Check runs). Write "
++                  "`dependency_halt = true`, unquoted.", file=sys.stderr)
++        dependency_halt = _halt is True
+ 
+         return cls(
+             root=root,
+@@ -668,6 +689,7 @@ class Config:
+             size_signal=size_signal,
+             size_guard=size_guard,
+             dependency_guard=dependency_guard,
++            dependency_halt=dependency_halt,
+             families={k.strip().lower(): dict(v)
+                       for k, v in data.get("families", {}).items()},
+             doctor_checks=list(data.get("doctor", {}).get("checks", [])),
+diff --git a/template/src/pdca_harness/dependency_halt.py b/template/src/pdca_harness/dependency_halt.py
+new file mode 100644
+index 0000000..fe7a514
+--- /dev/null
++++ b/template/src/pdca_harness/dependency_halt.py
+@@ -0,0 +1,259 @@
++"""Do-exit halt on a builder-declared unmet external dependency (issue #341).
++
++The builder contract (agents/builder.md) makes an honest builder declare a dependency it
++could not build or verify against with a marker line in ``build-notes.md`` —
++
++    NEEDS-HUMAN external dependency: <dependency> — <what it blocks>
++
++— plus a fenced ``[[doctor.checks]]`` TOML block proposing the detect row Plan should
++have registered. Before #341 the declaration changed nothing: BUILT unconditionally
++bought the full Check beat (gates, cross-vendor reviewer, adversary) to adjudicate a
++patch already *stated* to be unverifiable — so the honest and dishonest builder paths
++proceeded identically, with the dishonest bundle looking better at Check.
++
++This module is the deterministic adjudicator between them. The self-report NEVER decides
++on its own (the inverse failure #332 documents — a statement driving control flow with
++nothing checking it): the named dependency must resolve to a ``[[doctor.checks]]`` row —
++registered in ``pdca.toml``, else parsed from the builder's proposed fenced block — and
++that row's detect ``cmd`` must actually exit non-zero, probed exactly the way the
++Plan-exit guard probes (#340, :func:`doctor.probe`). Three verdicts:
++
++* **confirmed** — a row resolved AND its detect cmd exited non-zero. The driver routes
++  the bundle through the existing close fast path (N/A matrix via
++  ``gates.run_close_gates``; no reviewer, no adversary) to AWAITING_SIGNOFF — never to a
++  terminal state: sign-off alone owns COMPLETE/DISCONTINUED, and the bundle stays
++  RESUMABLE (install the dependency, answer iterate-do).
++* **refuted** — the detect cmd exited 0: the dependency is present and the claim does
++  not excuse Check. Full Check runs unchanged; the refutation is recorded here and
++  lifted into SUMMARY §6 (``assemble.collect_needs_human``), where the human — and
++  ``pdca act index``, which reads §6 — can see it.
++* **unconfirmed** — no registered row and no parseable proposed row names the
++  dependency (a malformed TOML block lands here too). Fail toward review, never toward
++  skipping it: full Check runs.
++
++Config-gated opt-in (``[driver].dependency_halt``, a STRICT boolean, default false):
++while off nothing here runs — not even a detect cmd is spawned — so the beat is
++byte-identical to today.
++"""
++
++from __future__ import annotations
++
++import json
++import re
++import tomllib
++from pathlib import Path
++from typing import NamedTuple
++
++from . import doctor, state
++
++CONFIRMED = "confirmed"
++REFUTED = "refuted"
++UNCONFIRMED = "unconfirmed"
++
++
++class Verdict(NamedTuple):
++    """The deterministic adjudication of ONE declared dependency."""
++
++    dependency: str
++    verdict: str            # CONFIRMED | REFUTED | UNCONFIRMED
++    source: str             # "registered" | "proposed" | "" (no row resolved)
++    cmd: str                # the detect cmd that ran ("" when none resolved)
++    exit_code: int | None   # None when no cmd ran
++    hint: str               # the row's install hint, for the sign-off human
++    detail: str             # one line of why, for the record / review note
++
++
++# The marker's remainder after ``assemble._declared_external_deps`` strips `NEEDS-HUMAN`:
++# "external dependency: <dependency> — <what it blocks>". The <dependency> part is what
++# must match a [[doctor.checks]] row id (case-insensitively, like `doctor.registered_ids`).
++_AFTER_MARKER_RE = re.compile(r"external\s+dependency\s*[:—–-]*\s*(.*)$", re.IGNORECASE)
++# The contract separates the name from "what it blocks" with a dash surrounded by spaces.
++_BLOCKS_SPLIT_RE = re.compile(r"\s+(?:—|–|--|-)\s+")
++# The fenced block the builder contract mandates for the proposed row.
++_TOML_FENCE_RE = re.compile(r"```\s*toml[^\n]*\n(.*?)```", re.DOTALL | re.IGNORECASE)
++
++
++def declared_dependencies(text: str) -> list[str]:
++    """The dependency names the builder declared, in order, deduped case-insensitively.
++
++    Delegates the marker match to ``assemble._declared_external_deps`` (#250) — ONE
++    parser for "did the builder declare a dependency", so the §6 item and this
++    adjudication can never disagree on that question. Local import: ``assemble`` reads
++    this module's record back into §6, so a top-level import would be a cycle.
++    """
++    from . import assemble  # local: assemble imports this module (record → §6)
++    names: list[str] = []
++    seen: set[str] = set()
++    for item in assemble._declared_external_deps(text):
++        m = _AFTER_MARKER_RE.search(item)
++        rest = m.group(1) if m else item
++        name = _BLOCKS_SPLIT_RE.split(rest, maxsplit=1)[0].strip().strip("`'\"").strip()
++        if name and name.lower() not in seen:
++            seen.add(name.lower())
++            names.append(name)
++    return names
++
++
++def proposed_rows(text: str) -> tuple[list[dict], bool]:
++    """``[[doctor.checks]]`` rows from the fenced ```toml blocks in ``text``, plus
++    whether ANY block failed to parse.
++
++    A malformed block contributes no rows, so the dependency it would have resolved
++    stays UNCONFIRMED — a broken proposal fails toward review, never toward skipping it.
++    """
++    rows: list[dict] = []
++    malformed = False
++    for block in _TOML_FENCE_RE.findall(text):
++        try:
++            data = tomllib.loads(block)
++        except tomllib.TOMLDecodeError:
++            malformed = True
++            continue
++        rows += [r for r in data.get("doctor", {}).get("checks", [])
++                 if isinstance(r, dict)]
++    return rows, malformed
++
++
++def _resolve(name: str, registered: list[dict],
++             proposed: list[dict]) -> tuple[dict | None, str]:
++    """The ``[[doctor.checks]]`` row ``name`` resolves to, and where it came from.
++
++    Registered rows win — they are human-blessed config; the builder's proposed row is
++    consulted only when no registered row matches, which turns an existing prompt
++    requirement into a load-bearing artifact (the builder supplies the detect command,
++    the harness runs it, the exit code decides). Matching mirrors
++    ``doctor.registered_ids``: the row's ``id`` (default: its ``cmd``),
++    case-insensitive; a row with no ``cmd`` cannot detect anything so it never counts.
++    """
++    for rows, source in ((registered, "registered"), (proposed, "proposed")):
++        for row in rows:
++            cmd = str(row.get("cmd") or "").strip()
++            if not cmd:
++                continue
++            rid = str(row.get("id") or cmd).strip()
++            if rid.lower() == name.lower():
++                return row, source
++    return None, ""
++
++
++def adjudicate(d: Path, cfg) -> list[Verdict] | None:
++    """Adjudicate the builder's declarations deterministically, or ``None`` when there
++    is nothing to adjudicate — the feature is off, or ``build-notes.md`` is absent /
++    unreadable / carries no marker. ``None`` means the beat is byte-identical to today:
++    no detect cmd is even spawned.
++
++    Registered rows come from ``Config.current_doctor_checks`` — ``pdca.toml`` as it is
++    on disk NOW, not the run's snapshot — for the same reason the Plan-exit probe reads
++    it (#340): rows are registered mid-cycle. Each resolved row's cmd runs through
++    :func:`doctor.probe`, the one probe implementation every consumer shares.
++    """
++    if getattr(cfg, "dependency_halt", False) is not True:
++        return None
++    notes = d / "build-notes.md"
++    if not notes.exists():
++        return None
++    try:
++        text = notes.read_text(encoding="utf-8")
++    except OSError:
++        return None
++    names = declared_dependencies(text)
++    if not names:
++        return None
++    proposed, malformed = proposed_rows(text)
++    registered = cfg.current_doctor_checks()
++    verdicts: list[Verdict] = []
++    for name in names:
++        row, source = _resolve(name, registered, proposed)
++        if row is None:
++            why = "no registered [[doctor.checks]] row and no parseable proposed row names it"
++            if malformed:
++                why += " (a proposed ```toml block failed to parse)"
++            verdicts.append(Verdict(name, UNCONFIRMED, "", "", None, "", why))
++            continue
++        cmd = str(row.get("cmd")).strip()
++        hint = str(row.get("hint") or "").strip()
++        rc = doctor.probe(cmd, cfg)
++        if rc != 0:
++            verdicts.append(Verdict(name, CONFIRMED, source, cmd, rc, hint,
++                                    f"detect cmd exited {rc} — absent on this host"))
++        else:
++            verdicts.append(Verdict(name, REFUTED, source, cmd, 0, hint,
++                                    "detect cmd exited 0 — present on this host; the "
++                                    "declaration does not excuse Check"))
++    return verdicts
++
++
++def confirmed(verdicts: list[Verdict] | None) -> bool:
++    """True iff at least one declaration survived its probe: the bundle is genuinely
++    blocked on that dependency however the other declarations fared, and spending the
++    Check beat on the rest would still adjudicate an unverifiable patch."""
++    return any(v.verdict == CONFIRMED for v in verdicts or [])
++
++
++def record(d: Path, verdicts: list[Verdict]) -> None:
++    """Persist the adjudication (``state.DEPENDENCY_ADJUDICATION``) — on BOTH outcomes,
++    so a refuted or unconfirmed claim leaves the same audit trail a confirmed one does.
++    Downstream of Do (``state.DOWNSTREAM_OF_BRIEF``), so an iterate archives it with its
++    attempt and a rebuilt attempt is adjudicated fresh."""
++    payload = {"halted": confirmed(verdicts),
++               "verdicts": [v._asdict() for v in verdicts]}
++    (d / state.DEPENDENCY_ADJUDICATION).write_text(
++        json.dumps(payload, indent=2) + "\n", encoding="utf-8")
++
++
++def load(d: Path) -> dict | None:
++    """The bundle's adjudication record, or ``None`` if absent/unreadable — the same
++    tolerant contract as every other bundle-file read (testbed #3)."""
++    p = d / state.DEPENDENCY_ADJUDICATION
++    if not p.exists():
++        return None
++    try:
++        data = json.loads(p.read_text(encoding="utf-8"))
++    except (ValueError, OSError):
++        return None
++    return data if isinstance(data, dict) else None
++
++
++def refuted_items(d: Path) -> list[str]:
++    """§6 texts for every REFUTED declaration — how the refutation reaches the human and
++    ``pdca act index`` (both read SUMMARY §6, not a bundle-local json). The caller tags
++    them HUMAN, never IMPL: a rebuild cannot fix a mis-declaration."""
++    rec = load(d)
++    if not rec:
++        return []
++    return [
++        f"builder-declared external dependency `{v.get('dependency', '?')}` was REFUTED "
++        f"deterministically — its detect cmd (`{v.get('cmd', '')}`) exited 0, so the "
++        "dependency is present and full Check ran (#341); weigh the builder's claim "
++        "against the review before accept"
++        for v in rec.get("verdicts", [])
++        if isinstance(v, dict) and v.get("verdict") == REFUTED
++    ]
++
++
++def blocked_review_note(d: Path, verdicts: list[Verdict]) -> None:
++    """Stand in for the reviewer leaf on a dependency-blocked bundle — the same shape as
++    ``driver._close_review_note``: no honest review exists for a patch whose declared
++    dependency is confirmed absent, but the human must still consciously disposition it.
++    The ``- NEEDS-HUMAN —`` bullets parse into SUMMARY §6 (``assemble._needs_human``),
++    so the C6 accept-guard blocks accept until the human decides: provide the dependency
++    and iterate-do (the iterate archives this attempt and reruns the full band), or
++    discontinue — both at sign-off, which alone sets a terminal state."""
++    lines = [
++        "# Advisory review — SKIPPED (builder-declared external dependency "
++        "confirmed, #341)\n",
++        "The builder declared an unmet external dependency in build-notes.md and the "
++        "claim was CONFIRMED deterministically (the named [[doctor.checks]] row's "
++        "detect cmd exited non-zero), so the Check beat was not spent adjudicating a "
++        "patch already stated to be unverifiable. Gates are recorded N/A; no reviewer "
++        "or adversary ran. The bundle is resumable.\n",
++    ]
++    for v in verdicts:
++        if v.verdict != CONFIRMED:
++            continue
++        hint = f" Install hint: {v.hint}." if v.hint else ""
++        lines.append(
++            f"- NEEDS-HUMAN — External dependency `{v.dependency}` confirmed absent "
++            f"(detect cmd `{v.cmd}` exited {v.exit_code}).{hint} Provide it and answer "
++            "iterate-do to resume the full Do+Check band, or discontinue at sign-off.")
++    (d / "check-review.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+diff --git a/template/src/pdca_harness/doctor.py b/template/src/pdca_harness/doctor.py
+index 718f443..1100180 100644
+--- a/template/src/pdca_harness/doctor.py
++++ b/template/src/pdca_harness/doctor.py
+@@ -303,6 +303,15 @@ def _expand_checks(specs: list[dict], lanes: int) -> list[dict]:
+     return rows
+ 
+ 
++def probe(cmd: str, cfg) -> int:
++    """Run ONE detect ``cmd`` exactly the way :func:`run` runs a ``[[doctor.checks]]``
++    row — shell, project root, exit 0 ⇒ present. The single probe implementation every
++    consumer shares (:func:`run`, the Plan-exit guard's :func:`failing_dependencies`
++    (#340), the Do-exit adjudication in :mod:`~pdca_harness.dependency_halt` (#341)),
++    so "what it means to probe a row" cannot drift apart."""
++    return subprocess.run(cmd, shell=True, capture_output=True, cwd=cfg.root).returncode
++
++
+ def registered_ids(cfg: Config) -> set[str]:
+     """Lower-cased ids of ``[[doctor.checks]]`` rows that would actually **run** (issue #263).
+ 
+@@ -392,7 +401,7 @@ def failing_dependencies(brief_path, cfg) -> list[str]:
+         rid = str(row.get("id") or cmd).strip()
+         if rid.lower() not in wanted:
+             continue  # ONLY the rows the brief names run (#340's definition of done)
+-        rc = subprocess.run(cmd, shell=True, capture_output=True, cwd=cfg.root).returncode
++        rc = probe(cmd, cfg)
+         if rc != 0:
+             hint = str(row.get("hint") or "").strip() or "the row has no hint — add one"
+             failed.append(f"external dependency `{rid}` is registered but absent on this "
+@@ -451,9 +460,9 @@ def run(cfg: Config, *, strict: bool = False) -> int:
+         if not _have(binary):
+             r.row(MISSING, label, f"install '{binary}' — [leaves.{role}] runs it")
+             continue
+-        probe = _auth_probe(leaf.family)
+-        if probe:
+-            r.row(probe[0], label, probe[1])
++        auth = _auth_probe(leaf.family)  # not `probe` — that name is the row-cmd runner
++        if auth:
++            r.row(auth[0], label, auth[1])
+         else:
+             r.row(OK, label)
+ 
+@@ -536,8 +545,7 @@ def run(cfg: Config, *, strict: bool = False) -> int:
+                 print()
+                 print(f"== {group} ==")
+                 last_group = group
+-            rc = subprocess.run(row["cmd"], shell=True, capture_output=True,
+-                                cwd=cfg.root).returncode
++            rc = probe(row["cmd"], cfg)
+             fail_status = row.get("level", MISSING)  # WARN for optional rows
+             r.row(OK if rc == 0 else fail_status, row["id"],
+                   "" if rc == 0 else row.get("hint", ""),
+diff --git a/template/src/pdca_harness/driver.py b/template/src/pdca_harness/driver.py
+index 42f1eb3..c09741d 100644
+--- a/template/src/pdca_harness/driver.py
++++ b/template/src/pdca_harness/driver.py
+@@ -16,7 +16,8 @@ import shutil
+ import sys
+ from pathlib import Path
+ 
+-from . import assemble, brief, gates, leaves, plan_policy, signoff, size_signal, state
++from . import (assemble, brief, dependency_halt, gates, leaves, plan_policy, signoff,
++               size_signal, state)
+ from .config import Config
+ 
+ 
+@@ -73,10 +74,32 @@ def advance(d: Path, cfg: Config) -> None:
+             _say(f"→ {d.name}: Do — builder writing patch.diff + test{_headless_note(cfg.builder)}…")
+             leaves.do_build(d, cfg)  # leaf 1 — Do
+     elif s == state.BUILT:
++        # Do-exit adjudication (#341): a builder that honestly declared an unmet external
++        # dependency (`NEEDS-HUMAN external dependency:` in build-notes.md, the builder-
++        # contract marker) must not buy the full Check beat — gates, cross-vendor
++        # reviewer, adversary — for a patch it already STATED is unverifiable; and a
++        # dishonest claim must not skip review. `adjudicate` is None unless the opt-in
++        # `[driver].dependency_halt` is on AND the marker is present; only a claim its
++        # detect-cmd probe CONFIRMS (non-zero exit) reroutes the beat. The verdict is
++        # recorded on BOTH outcomes, so a refutation reaches §6 / `pdca act index` too.
++        verdicts = None if close else dependency_halt.adjudicate(d, cfg)
++        if verdicts is not None:
++            dependency_halt.record(d, verdicts)
+         if close:
+             _say(f"→ {d.name}: close disposition — recording N/A gates, skipping reviewer leaf…")
+             gates.run_close_gates(d, cfg)  # deterministic N/A matrix, no gate subprocess
+             _close_review_note(d, close)   # stand-in for leaf 2 — close-confirm → §6
++        elif dependency_halt.confirmed(verdicts):
++            # The existing close fast path, one beat later: N/A matrix + a review
++            # stand-in whose NEEDS-HUMAN bullets route to §6, then CHECKED → assemble →
++            # AWAITING_SIGNOFF. Never a terminal state — sign-off owns those — and the
++            # bundle is resumable: iterate-do archives this attempt (the adjudication
++            # record and this note are DOWNSTREAM_OF_BRIEF) and reruns the full band.
++            _say(f"→ {d.name}: builder-declared external dependency confirmed absent — "
++                 "recording N/A gates, skipping reviewer leaf (provide it, then "
++                 "iterate-do to resume)…")
++            gates.run_close_gates(d, cfg)  # deterministic N/A matrix, no gate subprocess
++            dependency_halt.blocked_review_note(d, verdicts)  # stand-in for leaf 2 → §6
+         else:
+             _say(f"→ {d.name}: Check — running gates…")
+             gates.run_gates(d, cfg)  # deterministic gates
+diff --git a/template/src/pdca_harness/state.py b/template/src/pdca_harness/state.py
+index 9233c76..4341ebb 100644
+--- a/template/src/pdca_harness/state.py
++++ b/template/src/pdca_harness/state.py
+@@ -35,6 +35,12 @@ HALTED = {UNPLANNED, AWAITING_SIGNOFF, COMPLETE, DISCONTINUED, RESOLVED}
+ # symmetric stand-in for patch.diff — so the state machine reads it as "past Do".
+ CLOSE_MARKER = "close-disposition"
+ 
++# Do-exit dependency adjudication record (issue #341): how the driver adjudicated a
++# builder-declared unmet external dependency at BUILT (confirmed ⇒ the beat rerouted to
++# the close fast path; refuted ⇒ full Check ran, the refutation lifted into §6). Named
++# here, like CLOSE_MARKER, so `dependency_halt` and the archive list share one spelling.
++DEPENDENCY_ADJUDICATION = "dependency-adjudication.json"
++
+ # Everything Do and Check write, i.e. everything downstream of brief.md. Includes the
+ # close marker (issue #60) so an iterate archives it too — reopening a close bundle to a
+ # fix path then clears the marker and runs the real Do+Check band.
+@@ -61,6 +67,11 @@ DOWNSTREAM_OF_BRIEF = [
+     # the very numbers that justified rejecting it. Not in CYCLE_EVIDENCE_ONLY: unlike the
+     # auto-iterate budget it does not accumulate, it is rewritten wholesale each Check.
+     "size-signal.json",
++    # The Do-exit dependency adjudication (#341). A Do/Check-era verdict about THIS
++    # attempt's build-notes.md, so an iterate archives it with the attempt and the
++    # rebuild is adjudicated fresh — a stale record left behind would describe a
++    # declaration the new build-notes.md may no longer make.
++    DEPENDENCY_ADJUDICATION,
+ ]
+ 
+ # Cycle artifacts matched by pattern rather than name. ONE definition, read by both
+diff --git a/template/tests/test_builder_dependency_halt.py b/template/tests/test_builder_dependency_halt.py
+new file mode 100644
+index 0000000..d67bc92
+--- /dev/null
++++ b/template/tests/test_builder_dependency_halt.py
+@@ -0,0 +1,282 @@
++"""A builder-declared unmet external dependency halts the Do beat — when CONFIRMED (#341).
++
++Before this, the honest declaration (`NEEDS-HUMAN external dependency:` in
++build-notes.md, the builder-contract marker) changed nothing: BUILT unconditionally
++bought the full Check beat — gates, cross-vendor reviewer, adversary — to adjudicate a
++patch already *stated* to be unverifiable (`driver.advance` ran `gates.run_gates` →
++`leaves.run_review` → `run_advisory_leaves` regardless of anything the builder wrote).
++The honest and dishonest paths proceeded identically, and the dishonest bundle looked
++better at Check.
++
++The halt is earned, never self-reported (the inverse failure #332 documents): the named
++dependency must resolve to a `[[doctor.checks]]` row — registered in pdca.toml, else
++parsed from the fenced TOML block the builder contract already requires it to propose —
++AND that row's detect cmd must exit non-zero (#340's probe, one beat later). Confirmed ⇒
++the close fast path to AWAITING_SIGNOFF (N/A gates, no reviewer, resumable via
++iterate-do — never DISCONTINUED: sign-off alone owns terminal states). Refuted or
++unresolvable ⇒ full Check, byte-identical, with the refutation recorded into §6 where
++`pdca act index` reads. Opt-in via `[driver].dependency_halt`; off is byte-identical.
++"""
++
++from __future__ import annotations
++
++import json
++import shutil
++import tempfile
++import unittest
++from pathlib import Path
++from types import SimpleNamespace
++
++from pdca_harness import dependency_halt, driver, signoff, state
++from pdca_harness.config import Config, LeafConfig
++
++_BRIEF = ("- **Slug:** dep-halt\n"
++          "- **Defect:** the builder hit an unmet external dependency\n"
++          "- **Success criterion:** the claim is adjudicated deterministically\n"
++          "- **Test file:** test_stub.py\n")
++
++_MARKER_NOTES = ("Chose approach X; could not verify the fix.\n\n"
++                 "NEEDS-HUMAN external dependency: protoc — the generated stubs cannot "
++                 "be compiled, so the fix is unverifiable on this host.\n")
++
++_PROPOSED_BLOCK = ('\n```toml\n'
++                   '[[doctor.checks]]\n'
++                   'id    = "protoc"\n'
++                   'cmd   = "false"\n'
++                   'hint  = "apt install protobuf-compiler"\n'
++                   'level = "MISSING"\n'
++                   '```\n')
++
++# The stub reviewer's artifact opens with this — its presence proves leaf 2 ran.
++_STUB_REVIEW_HEAD = "Cross-vendor reviewer"
++
++
++def _cfg(root: Path, *, halt: bool = True, rows: list[dict] | None = None,
++         gate_cmd: str = "true") -> Config:
++    cfg = Config(
++        root=root, bundle_root=root / "results", process_dir=root / "process",
++        templates_dir=root / "templates", default_branch="main",
++        tracker_system="github", tracker_url="", issue_id_example="#1",
++        builder=LeafConfig(mode="stub", family="claude"),
++        reviewer=LeafConfig(mode="stub", family="codex"),
++    )
++    cfg.dependency_halt = halt
++    cfg.doctor_checks = list(rows or [])
++    # An OBSERVABLE gate: its side effect proves whether any gate subprocess ran.
++    cfg.gates_checks = [{"id": "C4", "tier": "C4", "label": "verify", "scope": "bundle",
++                         "gating": True, "cmd": gate_cmd}]
++    return cfg
++
++
++class _Base(unittest.TestCase):
++    def setUp(self) -> None:
++        self.tmp = Path(tempfile.mkdtemp())
++        (self.tmp / "results").mkdir(parents=True)
++        self.gate_marker = self.tmp / "gate-ran"
++
++    def tearDown(self) -> None:
++        shutil.rmtree(self.tmp, ignore_errors=True)
++
++    def _bundle(self, notes: str = _MARKER_NOTES) -> Path:
++        """A bundle at BUILT: the builder shipped a patch AND declared the dependency."""
++        d = self.tmp / "results" / "issue_1"
++        d.mkdir(parents=True, exist_ok=True)
++        (d / "brief.md").write_text(_BRIEF, encoding="utf-8")
++        (d / "patch.diff").write_text("--- a\n+++ b\n", encoding="utf-8")
++        (d / "build-notes.md").write_text(notes, encoding="utf-8")
++        self.assertEqual(state.state(d), state.BUILT)
++        return d
++
++    def _gate_cmd(self) -> str:
++        return f"touch {self.gate_marker}"
++
++
++class ConfirmedClaimHalts(_Base):
++    """Criterion (a): marker + confirmed claim ⇒ the close fast path to sign-off."""
++
++    def test_confirmed_claim_skips_reviewer_and_halts_at_signoff(self) -> None:
++        """RED on current main: BUILT runs gates + reviewer unconditionally, so the
++        reviewer artifact is the stub review and the observable gate cmd runs."""
++        d = self._bundle()
++        cfg = _cfg(self.tmp, rows=[{"id": "protoc", "cmd": "false",
++                                    "hint": "apt install protobuf-compiler"}],
++                   gate_cmd=self._gate_cmd())
++        final = driver.run_issue(d, cfg)
++
++        # Halts for the human — never a terminal state set by a leaf (criterion e).
++        self.assertEqual(final, state.AWAITING_SIGNOFF)
++        self.assertNotEqual(state.state(d), state.DISCONTINUED)
++
++        review = (d / "check-review.md").read_text(encoding="utf-8")
++        self.assertNotIn(_STUB_REVIEW_HEAD, review, "the reviewer leaf was invoked")
++        self.assertIn("SKIPPED", review)
++        self.assertIn("protoc", review)
++        self.assertFalse(self.gate_marker.exists(),
++                         "a gate subprocess ran — the matrix must be the N/A close one")
++
++        # §6 carries the _declared_external_deps item (#250) so C6 blocks accept.
++        open_items = signoff.open_needs_human(d / "SUMMARY.md")
++        self.assertTrue(any("protoc" in it for it in open_items), open_items)
++
++        rec = json.loads((d / state.DEPENDENCY_ADJUDICATION).read_text(encoding="utf-8"))
++        self.assertTrue(rec["halted"])
++        self.assertEqual(rec["verdicts"][0]["verdict"], dependency_halt.CONFIRMED)
++        self.assertEqual(rec["verdicts"][0]["source"], "registered")
++
++    def test_confirmed_via_the_builders_proposed_row(self) -> None:
++        """No registered row: the fenced [[doctor.checks]] block the builder contract
++        mandates is the resolution — the builder supplies the detect command, the
++        harness runs it, the exit code decides (the proposal-driven reading)."""
++        d = self._bundle(_MARKER_NOTES + _PROPOSED_BLOCK)
++        cfg = _cfg(self.tmp, rows=[], gate_cmd=self._gate_cmd())
++        self.assertEqual(driver.run_issue(d, cfg), state.AWAITING_SIGNOFF)
++        review = (d / "check-review.md").read_text(encoding="utf-8")
++        self.assertNotIn(_STUB_REVIEW_HEAD, review)
++        self.assertFalse(self.gate_marker.exists())
++        rec = json.loads((d / state.DEPENDENCY_ADJUDICATION).read_text(encoding="utf-8"))
++        self.assertEqual(rec["verdicts"][0]["source"], "proposed")
++
++    def test_blocked_bundle_is_resumable_via_iterate_do(self) -> None:
++        """The blocked halt is blocked-resume-when-provided, not deliberately-abandoned:
++        iterate-do archives the attempt (adjudication record included) and reruns the
++        FULL Do+Check band — the fresh build-notes carry no marker, so the reviewer runs."""
++        from pdca_harness import cli
++        d = self._bundle()
++        cfg = _cfg(self.tmp, rows=[{"id": "protoc", "cmd": "false", "hint": "h"}])
++        self.assertEqual(driver.run_issue(d, cfg), state.AWAITING_SIGNOFF)
++
++        args = SimpleNamespace(issue_id="1", accept=False, iterate_do=True,
++                               iterate_plan=False, discontinue=False, by="t", delta="",
++                               no_publish=True)
++        cli._signoff(cfg, args)
++
++        arch = d / "iteration-v1"
++        self.assertTrue((arch / state.DEPENDENCY_ADJUDICATION).exists(),
++                        "the adjudication record must be archived with its attempt")
++        self.assertTrue((arch / "check-review.md").exists())
++        self.assertEqual(state.state(d), state.AWAITING_SIGNOFF)
++        self.assertIn(_STUB_REVIEW_HEAD,
++                      (d / "check-review.md").read_text(encoding="utf-8"),
++                      "the resumed attempt must run the real review band")
++
++
++class RefutedClaimCannotSkipReview(_Base):
++    """Criterion (d): a claim whose detect cmd exits 0 buys the builder nothing."""
++
++    def test_refuted_claim_runs_full_check(self) -> None:
++        d = self._bundle()
++        cfg = _cfg(self.tmp, rows=[{"id": "protoc", "cmd": "true", "hint": "h"}],
++                   gate_cmd=self._gate_cmd())
++        self.assertEqual(driver.run_issue(d, cfg), state.AWAITING_SIGNOFF)
++        review = (d / "check-review.md").read_text(encoding="utf-8")
++        self.assertIn(_STUB_REVIEW_HEAD, review, "the reviewer leaf must run")
++        self.assertTrue(self.gate_marker.exists(), "the real gates must run")
++        rec = json.loads((d / state.DEPENDENCY_ADJUDICATION).read_text(encoding="utf-8"))
++        self.assertFalse(rec["halted"])
++        self.assertEqual(rec["verdicts"][0]["verdict"], dependency_halt.REFUTED)
++
++    def test_refutation_is_recorded_in_section6_for_act(self) -> None:
++        """Criterion (b): the refutation reaches SUMMARY §6 — which is what `pdca act
++        index` extracts — not just a bundle-local json only the driver saw."""
++        d = self._bundle()
++        cfg = _cfg(self.tmp, rows=[{"id": "protoc", "cmd": "true", "hint": "h"}])
++        driver.run_issue(d, cfg)
++        open_items = signoff.open_needs_human(d / "SUMMARY.md")
++        self.assertTrue(any("REFUTED" in it and "protoc" in it for it in open_items),
++                        open_items)
++
++    def test_a_registered_row_beats_the_builders_proposed_row(self) -> None:
++        """A builder cannot out-vote the instance's own registration with a bogus
++        always-failing proposed row: the human-blessed registered row is probed first."""
++        d = self._bundle(_MARKER_NOTES + _PROPOSED_BLOCK)  # proposed cmd = "false"
++        cfg = _cfg(self.tmp, rows=[{"id": "protoc", "cmd": "true", "hint": "h"}],
++                   gate_cmd=self._gate_cmd())
++        self.assertEqual(driver.run_issue(d, cfg), state.AWAITING_SIGNOFF)
++        self.assertIn(_STUB_REVIEW_HEAD,
++                      (d / "check-review.md").read_text(encoding="utf-8"))
++        rec = json.loads((d / state.DEPENDENCY_ADJUDICATION).read_text(encoding="utf-8"))
++        self.assertEqual(rec["verdicts"][0]["source"], "registered")
++        self.assertEqual(rec["verdicts"][0]["verdict"], dependency_halt.REFUTED)
++
++
++class UnconfirmedFailsTowardReview(_Base):
++    """Criterion (c): unresolvable ⇒ full Check — never toward skipping it."""
++
++    def test_no_row_and_no_proposal_runs_full_check(self) -> None:
++        d = self._bundle()
++        cfg = _cfg(self.tmp, rows=[], gate_cmd=self._gate_cmd())
++        self.assertEqual(driver.run_issue(d, cfg), state.AWAITING_SIGNOFF)
++        self.assertIn(_STUB_REVIEW_HEAD,
++                      (d / "check-review.md").read_text(encoding="utf-8"))
++        self.assertTrue(self.gate_marker.exists())
++        rec = json.loads((d / state.DEPENDENCY_ADJUDICATION).read_text(encoding="utf-8"))
++        self.assertEqual(rec["verdicts"][0]["verdict"], dependency_halt.UNCONFIRMED)
++
++    def test_malformed_proposed_block_runs_full_check(self) -> None:
++        malformed = _MARKER_NOTES + '\n```toml\n[[doctor.checks\nid = "protoc"\n```\n'
++        d = self._bundle(malformed)
++        cfg = _cfg(self.tmp, rows=[], gate_cmd=self._gate_cmd())
++        self.assertEqual(driver.run_issue(d, cfg), state.AWAITING_SIGNOFF)
++        self.assertIn(_STUB_REVIEW_HEAD,
++                      (d / "check-review.md").read_text(encoding="utf-8"))
++        self.assertTrue(self.gate_marker.exists())
++        rec = json.loads((d / state.DEPENDENCY_ADJUDICATION).read_text(encoding="utf-8"))
++        self.assertEqual(rec["verdicts"][0]["verdict"], dependency_halt.UNCONFIRMED)
++        self.assertIn("failed to parse", rec["verdicts"][0]["detail"])
++
++
++class OffIsByteIdentical(_Base):
++    """Criterion (f): opt-in for one release — off, nothing changes and nothing runs."""
++
++    def test_off_never_probes_and_writes_no_record(self) -> None:
++        probe_marker = self.tmp / "probed"
++        d = self._bundle()
++        cfg = _cfg(self.tmp, halt=False,
++                   rows=[{"id": "protoc", "cmd": f"touch {probe_marker}; exit 1",
++                          "hint": "h"}])
++        self.assertEqual(driver.run_issue(d, cfg), state.AWAITING_SIGNOFF)
++        self.assertFalse(probe_marker.exists(), "off must not spawn a detect cmd")
++        self.assertFalse((d / state.DEPENDENCY_ADJUDICATION).exists())
++        self.assertIn(_STUB_REVIEW_HEAD,
++                      (d / "check-review.md").read_text(encoding="utf-8"))
++
++    def test_config_defaults_off_and_is_a_strict_boolean(self) -> None:
++        """A quoted "true" is a truthy string; this setting can skip the reviewer, so a
++        non-boolean fails CLOSED (feature off), the [leaves.sandbox] network_access
++        lesson (PR #292)."""
++        base = '[paths]\nbundle_root = "results"\n[driver]\n'
++        for body, expected in ((base, False),
++                               (base + 'dependency_halt = true\n', True),
++                               (base + 'dependency_halt = "true"\n', False),
++                               (base + 'dependency_halt = "false"\n', False)):
++            with self.subTest(body=body.splitlines()[-1]):
++                (self.tmp / "pdca.toml").write_text(body, encoding="utf-8")
++                self.assertIs(Config.load(self.tmp).dependency_halt, expected)
++
++
++class DeclarationParsing(unittest.TestCase):
++    """The name/row extraction feeding the adjudication."""
++
++    def test_names_from_marker_lines(self) -> None:
++        text = ("NEEDS-HUMAN external dependency: protoc — blocks the proto build\n"
++                "- needs-human External Dependency: `docker` — the gates need a daemon\n"
++                "prose mentioning NEEDS-HUMAN but no dependency marker\n")
++        self.assertEqual(dependency_halt.declared_dependencies(text),
++                         ["protoc", "docker"])
++
++    def test_duplicate_declarations_collapse(self) -> None:
++        text = ("NEEDS-HUMAN external dependency: protoc — one\n"
++                "NEEDS-HUMAN external dependency: Protoc — two\n")
++        self.assertEqual(dependency_halt.declared_dependencies(text), ["protoc"])
++
++    def test_proposed_rows_and_the_malformed_flag(self) -> None:
++        rows, malformed = dependency_halt.proposed_rows(_PROPOSED_BLOCK)
++        self.assertFalse(malformed)
++        self.assertEqual(rows[0]["id"], "protoc")
++        rows, malformed = dependency_halt.proposed_rows("```toml\n[[broken\n```\n")
++        self.assertEqual(rows, [])
++        self.assertTrue(malformed)
++
++
++if __name__ == "__main__":
++    unittest.main()

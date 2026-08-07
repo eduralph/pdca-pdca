@@ -1,0 +1,11 @@
+{
+  "mode": "stacked-pr",
+  "branch": "fix/372-straggler-sweep-on-normal-exit",
+  "pr_url": "https://github.com/eduralph/pdca-harness/pull/418",
+  "base": "pdca-integration/main",
+  "repo": "eduralph/pdca-harness",
+  "by": "Eduard Ralph",
+  "date": "2026-08-01",
+  "id_pending": false,
+  "stacks_on": []
+}

@@ -1,0 +1,51 @@
+diff --git a/template/src/pdca_harness/gates.py b/template/src/pdca_harness/gates.py
+index b6ae62c..39d8052 100644
+--- a/template/src/pdca_harness/gates.py
++++ b/template/src/pdca_harness/gates.py
+@@ -35,7 +35,8 @@ the gate's verdict by luck: the capture is one merged stdout+stderr stream, so a
+ that shells out to a suite files whatever that suite's children happened to flush last
+ (a scratch ``/tmp`` path from a since-deleted sandbox is not a reconstructable basis). The
+ marker declares evidence only — it never changes a verdict; the exit code alone decides
+-pass/fail, and ``PDCA-UNVERIFIABLE`` stays the one marker that can change a ``result``.
++pass/fail, and only the ``PDCA-UNVERIFIABLE``/``PDCA-DEFERRED`` declarations can change
++a ``result``.
+ 
+ A row: {check, result, oracle, rule_id, path_line, gating}. A row produced by a
+ bundle-scoped :func:`run_gates` additionally carries ``log`` (the bundle-relative path of
+diff --git a/template/tests/test_gate_deferred.py b/template/tests/test_gate_deferred.py
+index 90a688d..aab09d3 100644
+--- a/template/tests/test_gate_deferred.py
++++ b/template/tests/test_gate_deferred.py
+@@ -278,5 +278,32 @@ class ContribcheckDeclaresTheDeferral(_GateCase):
+                          ["T4-contribution"])
+ 
+ 
++class ModuleDocNamesEveryResultChangingMarker(unittest.TestCase):
++    """The module doc's evidence-marker paragraph is normative (issue #442): #401 made
++    `deferred` a second result-changing declaration, so the paragraph's exclusivity claim
++    for ``PDCA-UNVERIFIABLE`` ("the one marker that can change a ``result``") became false
++    the moment :data:`gates.DEFERRED_MARKER` landed twenty lines below it."""
++
++    # The docstring hard-wraps its sentences; collapse whitespace so the assertions span
++    # the wrap points instead of pinning the current line layout.
++    _DOC = " ".join((gates.__doc__ or "").split())
++    # Marker NAMES as the prose cites them (no trailing colon), composed from the
++    # production constants like `_D` above — never a second spelling that can drift.
++    _CLAIM = (f"only the ``{_U.removesuffix(':')}``/``{_D.removesuffix(':')}`` "
++              "declarations can change a ``result``")
++
++    def test_the_exclusivity_claim_is_gone(self) -> None:
++        self.assertNotIn(
++            "the one marker", self._DOC,
++            "gates.__doc__ still claims a SINGLE result-changing marker — false since "
++            "#401 added the deferred declaration")
++
++    def test_the_result_changing_claim_names_both_declarations(self) -> None:
++        self.assertIn(
++            self._CLAIM, self._DOC,
++            "gates.__doc__ must name BOTH result-changing declarations in the "
++            "evidence-marker paragraph's claim")
++
++
+ if __name__ == "__main__":
+     unittest.main()

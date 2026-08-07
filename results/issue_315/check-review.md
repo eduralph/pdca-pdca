@@ -1,0 +1,15 @@
+Task under review: add an optional pre-publish review stage to `publish.py` that runs configurable parallel reviewer passes before any git/PR publish step and boundedly re-enters Do for BUG-class findings.
+
+| Item | Verdict | Basis |
+|------|---------|-------|
+| C1 Spec | PASS | The decision is whether the patch targets the requested publish-boundary stage; the implementation is wired after T4 and before git mechanics at `template/src/pdca_harness/publish.py:222`, with config parsed at `template/src/pdca_harness/config.py:635`. |
+| C2 Reproduction (red pre-fix) | PASS | The decision is whether the old code lacked the stage; reversing `patch.diff` made `tests.test_prepublish_review` unavailable/red, while the applied patch's test states the missing seam at `template/tests/test_prepublish_review.py:23`. |
+| C3 Change | PASS | The decision is whether one coherent feature was added without unrelated churn; the diff adds config, reviewer-pass leaf reuse, publish-stage orchestration, docs, and focused tests around `template/src/pdca_harness/publish.py:886`. |
+| C4 Verification (red→green) | NEEDS-HUMAN | The exact C4 gate is not independently reproducible here: `template/engine/scripts/run-verify.sh` is a skeleton that exits 1, although direct reversal/reapply ran red then 15 green `unittest` cases from `template/tests/test_prepublish_review.py:185`. |
+| C5 Causal adequacy | NEEDS-HUMAN | The decision owed is whether the added `getattr` capability probe should remain or the config invariant should make it unnecessary; the probe is at `template/src/pdca_harness/publish.py:800` and triggers the C5 symptom-guard review. |
+| T1 Structure | PASS | The decision is whether the feature sits in existing ownership boundaries; reviewer invocation is shared through `template/src/pdca_harness/leaves.py:1788` and publish policy stays in `template/src/pdca_harness/publish.py:886`. |
+| T2 Shape | NEEDS-HUMAN | The docs/shape gate could not be rerun from this checkout because the asserted `run-docs-check.sh` wrapper is absent; inspect the generated docs/check environment before relying on the claimed T2 pass. |
+| T3 Runtime | NEEDS-HUMAN | The runtime suite row is already red in `check-gates.json`, but I could not reproduce the suite because `run-suite.sh` is absent and `python3 -m pytest` is unavailable; `compileall` passed for `template/src` and `template/tests/test_prepublish_review.py`. |
+| T4 Contribution | NEEDS-HUMAN | The decision owed is whether the contribution artifacts satisfy the project contribcheck; the asserted `pdca-pdca contribcheck` pass was not runnable from the provided artifacts, so the green row remains provisional. |
+| T5 Judgment | NEEDS-HUMAN | The decision owed is whether to accept with provisional wrapper evidence and the C5 probe question unresolved; affected-file prior art checked `origin/main -- template/src/pdca_harness/publish.py` and no `#315` commit was found. |
+| Validation — fitness-to-purpose | NEEDS-HUMAN | Human sign-off must decide whether the configured review stage is fit for the project despite stubbed/offline reviewer evidence and unavailable live wrapper gates. |

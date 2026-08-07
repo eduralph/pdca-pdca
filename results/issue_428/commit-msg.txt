@@ -1,0 +1,33 @@
+fix(gates): honour only a gate's own `unverifiable` declaration
+
+A gate result was recorded as `unverifiable` whenever the literal
+`PDCA-UNVERIFIABLE:` appeared anywhere in the gate's captured output — at any
+position, on any line. That treats text the gate merely *relayed* from what it
+ran (a child process's log, an assertion diff, a source comment a test read
+back, even the sentence in this repo's own docs that defines the marker) as if
+the gate itself had declared it could not verify anything.
+
+The damage is worst where it is least visible. `unverifiable` counts toward
+neither pass nor fail, so a gate that really passed stops counting as verified
+in `overall`, and a gate that really failed is quietly converted into "defer to
+the human" instead of blocking. Any project whose tests exercise the gate
+machinery meets this structurally — this repo's own suite does — and a shipped
+cycle recorded a genuinely green C4 as `unverifiable`, with a fragment of a
+shell comment block as its stated reason.
+
+The verdict is now the gate's to declare: only a line whose first text is the
+marker (leading whitespace ignored) is a declaration; an occurrence anywhere
+else on a line is relayed text, and the gate's real exit-code verdict stands.
+Both documented deferral channels keep working — exit 77, and an exit-0 line
+that starts with the marker — and every emitter in the tree already writes it
+that way, so no real deferral changes meaning. The normative statements of the
+contract are updated to match, with an upgrade note for the one case that does
+change: a gate that prefixed its declaration with a label rather than starting
+the line with the marker now records its real pass/fail, and should move the
+marker to the front of the line to keep deferring.
+
+This is the exit-0 half of the hole
+c6784ec14ae0836360f01b8d3ad5dc5261ae2792 closed for non-zero exits; that
+earlier narrowing is unchanged and still covered by its own test.
+
+Fixes #428
