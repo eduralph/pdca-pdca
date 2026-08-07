@@ -74,7 +74,7 @@ cycle's own contribution artifacts, so the advisory caveat does not apply).
 | T1 structure | `copier.yml` + render-check rationale (no orphan `.jinja`, valid rendered TOML, answers file recorded) | target `tests/test_render_and_run.py` | (asserted inside the T3 run) | [built — via T3] |
 | T2 shape | target docs conventions (`docs/publishing/tools/lint_docs.py` docstring: Obsidian syntax, internal links) | `engine/scripts/run-docs-check.sh` → the target's own checkers | `./engine/scripts/run-docs-check.sh` | advisory, bundle |
 | T3 runtime | CONTRIBUTING.md "keep the offline suite green" + render-check.yml | `engine/scripts/run-suite.sh` | `./engine/scripts/run-suite.sh` | advisory, bundle |
-| T4 contribution | CONTRIBUTING.md (DCO sign-off, one change per PR) + target branch protection (require-linked-issue) + PR-body template | `pdca-pdca contribcheck` + the target's own CI | `pdca-pdca contribcheck` | gating, bundle |
+| T4 contribution | CONTRIBUTING.md (DCO sign-off, one change per PR) + target branch protection (require-linked-issue) + PR-body template | `./scripts/pdca contribcheck` + the target's own CI | `./scripts/pdca contribcheck` | gating, bundle |
 | T5 judgment | reviewer contract below | Check reviewer + sign-off | (model) | [built] |
 
 C4 (per-fix correctness, **gating**): `./engine/scripts/run-verify.sh` — red with
@@ -152,7 +152,9 @@ Contract-tested by `engine/tests/test_run_verify.py`.
   tracker trailer `Fixes #{id}` (`[tracker].issue_trailer`).
 - **PR description format:** see `templates/pr-description.md.tpl` (opens with
   `**User impact:**`, then Root cause / Fix / Verified against / Test) — the shape
-  `pdca-pdca contribcheck` (T4) lints.
+  `./scripts/pdca contribcheck` (T4) lints. The wrapper — not a bare `pdca-pdca` —
+  is what a gate row names: it resolves this checkout's CLI in any install layout
+  (venv, source tree, PATH), so the row runs for a reviewer too.
 - **Enforcement mechanism:** target branch protection (PR required,
   `require-linked-issue` check, conversation resolution, enforce-admins) + DCO
   expectation from CONTRIBUTING.md + the T4 gate at Check and publish + human review.
