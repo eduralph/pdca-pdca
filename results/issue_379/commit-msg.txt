@@ -1,0 +1,33 @@
+Tell each headless leaf the harness owns its working files
+
+The role bodies of the reviewer, the two advisory reviewers, the plan
+advisory and the builder never said where those leaves may write, or who
+cleans up afterwards. The harness has always owned that lifecycle: the
+review sandboxes are temporary directories it deletes when the leaf exits,
+and the builder's worktree is created and reclaimed by the driver. Left
+unstated, a careful model fills the gap itself — it makes a scratch
+directory somewhere outside the space it was given, and then feels obliged
+to delete it again.
+
+That guess costs real runs. A vendor sandbox that refuses rm-style commands
+rejects the entire command such a cleanup step rides on, before any of it
+executes, so the validation the model attached it to is lost and has to be
+retried; when the model gives up instead, the invented directory is left
+behind under /tmp or /var/tmp.
+
+Each of the five bodies now states its own filesystem contract: which roots
+the harness gives it to write in, that it must not create files anywhere
+else, and that reclaiming those roots is the harness's job — so no rm-style
+command is ever warranted. The roots are phrased as "the roots the harness
+gives you" and then enumerated, so a root the harness may hand out later is
+covered without the wording having to change or contradict itself. No
+persistent or cached scratch location is named, promised, or implied.
+
+The two shapes differ on purpose: the sandboxed leaves are told their cwd
+(with the target source read-only), while the builder is told its worktree
+and the bundle directory it is granted, because it must keep writing its
+artifacts there. The text lives in the vendor-neutral bodies under
+agents/, so every vendor inherits it, and sits outside every conditional so
+it renders for every instance.
+
+Fixes #379

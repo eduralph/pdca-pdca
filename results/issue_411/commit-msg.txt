@@ -1,0 +1,42 @@
+fix(publish): refuse a merge-mode PR aimed at a run's own branch
+
+With `[driver].wave_mode = "merge"` the driver merges each accepted bundle's PR
+into whatever base that PR happens to carry, unattended and mid-run. Nothing
+checked what that base was, so a fix could be merged into another bundle's fix
+branch instead of the shared target: the wave still reported success, the next
+wave built on a base that never received the work, and the change was quietly
+missing from where it was supposed to land. The failure mode is a silent
+success — the operator finds out later, by noticing the fix isn't there.
+
+Two routes put another bundle's branch under a PR. The legacy `Stacks on:`
+wiring falls back to the prereq's own fix branch when no integration branch was
+recorded — and merge mode never records one, so in merge mode that fallback is
+the only thing choosing the base. Separately, a brief whose `Repo + branch
+target` names a predecessor's branch (the right practice under the default
+`"stack"` mode, and the one chained batches are documented to use) resolves to
+that branch as its own target base, so comparing the PR base against the target
+base sees nothing wrong.
+
+Publish now refuses both, before anything is fetched, pushed or opened: in
+merge mode a bundle may only target a base that exists independently of this
+run. The refusal returns non-zero and prints one message naming both the branch
+the PR would have targeted and the target base it should have used, plus how to
+recover — repoint the brief's target at the shared base, or stay on the default
+`"stack"` mode, where chaining onto a predecessor is correct because nothing is
+merged for you. Detecting the second route needs no network: the batch's own
+`publish.json` records say which branch each bundle produced.
+
+Refusing at publish time rather than at merge time is deliberate. Publish is
+interactive, with a person present who can correct the brief on the spot, while
+the wave merge runs unattended in the middle of a flow — a stop there is a stop
+nobody is at. And a PR never opened against a run-produced branch leaves the
+merge nothing wrong to merge. The harness refuses; it never retargets a PR for
+you.
+
+Stack mode — the default — is untouched, including its stacked-PR chaining and
+briefs that target a predecessor's branch. Ordinary bundles publish exactly as
+before in either mode. Known gap: a PR published by an *earlier* run (say under
+stack mode, before a project switched to merge) never passes through publish
+again, so a later merge-mode run can still merge it as-is.
+
+Fixes #411

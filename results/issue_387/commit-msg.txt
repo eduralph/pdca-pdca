@@ -1,0 +1,34 @@
+fix(gates): supply the base ladder's last rung as $PDCA_BRIEF_BASE
+
+The harness publishes a base-resolution ladder to every project's per-fix verify
+gate — which branch to reset to before applying patch.diff — and that ladder
+ended in "the brief's `Repo + branch target`", a rung the driver never supplied.
+Every project filling in the C4 skeleton therefore re-derived the field's parse
+in shell, from a comment that stated the precedence but not the parsing rule.
+
+That parse is subtle: a backticked ref counts only when it STARTS the field, so
+a base written "main (feature branch `feat/x-slice`)" is main, not feat/x-slice.
+It has been got wrong and fixed twice in Python already
+(a5f1c092f7cba5cf198e658edc39035ba2095746 for #235, pinned by
+52683e5b52092208da744e8fcb4d453a08290c66 for #262) while the shell
+re-derivations still carry the pre-#235 unanchored rule — so for exactly the
+briefs that need the base most, the gate tests one branch and publish opens the
+PR against another. The gate then either false-fails "patch does not apply —
+the bundle is stale" on a sound fix, or measures red→green against a tree
+lacking the prerequisite; a re-derivation that yields a bare branch name also
+composes into the nonexistent `origin/origin/main`.
+
+The driver now resolves that base itself and exports it as `$PDCA_BRIEF_BASE`,
+fully qualified `<remote>/<branch>` like the other two rungs, so a gate script
+uses whichever variable is set — interchangeably, as-is — and never parses
+brief.md. Exactly one of PDCA_BASE / PDCA_VERIFY_BASE / PDCA_BRIEF_BASE is now
+set for every bundle-scoped gate invocation: the mutual exclusion #54 requires,
+made total instead of leaving the ordinary bundle with no base at all.
+
+The parse itself moves to `brief`, beside the other per-field accessors, and
+`publish` calls it — one implementation, no copy and no alias, so publish's
+resolved values are byte-identical and #235/#262 stay fixed. The C4 skeleton's
+guidance now terminates the ladder in the export and states plainly that this
+must not be re-derived in shell.
+
+Fixes #387

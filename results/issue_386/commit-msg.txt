@@ -1,0 +1,28 @@
+fix(template): keep the Remote Control test green when enabled
+
+`template/tests/test_remote_control_docs.py` ships into every rendered instance,
+but one of its checks asserted a template-only default: that every line
+mentioning `--remote-control` is commented out. An instance that turns the seam
+on — which is the whole point of documenting it in
+a641742beb48d2db5ba7dac182fac443fc4f30af — therefore inherited a permanently
+failing test and had to carry a local edit to a shipped suite forever,
+re-applying it after each template update.
+
+The property actually worth protecting was never asserted in its own right.
+`--remote-control` starts an *interactive* Claude session, so a headless leaf
+(builder, reviewer, any advisory leaf) carrying it hangs the flow with nobody to
+answer it. That case failed only by accident, as a side effect of the blanket
+comment check — so scoping that check, which every enrolled instance has to do
+one way or another, silently took the protection with it.
+
+The suite now asserts the property that holds in every posture the template
+sanctions: `--remote-control` may ride only a leaf declared `interactive = true`.
+The off-by-default check is kept and scoped to the unrendered template, where it
+is true, mirroring the file's existing precedent for posture-bound assertions.
+New regression cases build both rendered postures as synthetic configs in a temp
+directory and run this very file against them, so "an enrolled instance is
+green" and "a headless leaf carrying the flag is red" are checked, not assumed.
+
+Tests only; the template's Remote Control guidance itself is untouched.
+
+Fixes #386

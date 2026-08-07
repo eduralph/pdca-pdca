@@ -1,0 +1,1859 @@
+diff --git a/docs/07-crosscutting.md b/docs/07-crosscutting.md
+index 5a13563..a7caf2e 100644
+--- a/docs/07-crosscutting.md
++++ b/docs/07-crosscutting.md
+@@ -266,14 +266,21 @@ Every implementation defect the reviewer catches — a logic slip, a weak test,
+ red gate — parks a bundle at `AWAITING_SIGNOFF` and asks a human to press
+ `iterate-do`, which is a decision the driver is often positioned to make itself.
+ `[driver].auto_iterate` (default `false` — opt in) lets it: when Check's §6 has
+-**at least one mechanically-checkable ("IMPL") finding and nothing else you'd
+-need to see first**, the driver writes `iterate-do` and rebuilds, unattended.
++**at least one mechanically-checkable ("IMPL") finding**, the driver writes
++`iterate-do` and rebuilds, unattended. A HUMAN finding *beside* the IMPL ones no
++longer vetoes the rebuild (#332): it is **deferred** to a loss-proof ledger
++(`deferred-human.json`, which survives the iteration archive) and merged back
++into §6 on every assemble — so it still reaches you at handover, and the C6
++guard still blocks accept on it. A HUMAN-only set halts immediately (nothing
++for a rebuild to fix), and the size backstop (#324) always halts the loop.
+ 
+ The eligibility split rides on the same `input | gate | judgment` tag every §6
+ item already carries: the `gate` cells (C2 reproduction, C4 verification,
+ T1–T4 conformance) are IMPL — a rebuild can plausibly fix them; the `judgment`
+ cells (C5 causal adequacy, T5, the validation act) and the `input` cells (C1
+-spec, C3 change) stay HUMAN. One exception makes this fire at all in practice:
++spec, C3 change) stay HUMAN — unless the reviewer *states* builder-fixability
++with a `NEEDS-HUMAN [impl]` verdict on C5/T5 (#332; honoured only there, and an
++untagged verdict stays HUMAN). One exception makes this fire at all in practice:
+ the reviewer's `Validation — fitness-to-purpose` row is hard-coded to
+ NEEDS-HUMAN on *every* cycle by design, so it's a constant, carries no signal,
+ and doesn't veto a rebuild — though it's still rendered in §6 and you still have
+@@ -287,11 +294,14 @@ Three guarantees hold by construction, worth knowing before you flip it on:
+ - **It never ticks a §6 box.** An auto-iterate archives the whole SUMMARY,
+   unticked, into `iteration-v<N>/`; the rebuild produces a fresh §6 from
+   scratch.
+-- **It's bounded.** `[driver].max_auto_iters` (default `3`) automatic rounds per
+-  bundle, tracked in `auto-iterate.json` — deliberately *not* archived, so the
+-  count survives across rebuilds instead of resetting every iterate. On
+-  exhaustion the bundle halts at `AWAITING_SIGNOFF` for you, same as always,
+-  never dropped.
++- **It's bounded, twice.** `[driver].max_auto_iters` (default `3`) automatic
++  rounds per bundle, tracked in `auto-iterate.json` — deliberately *not*
++  archived, so the count survives across rebuilds instead of resetting every
++  iterate. `[driver].soft_auto_iters` (#332, unset ⇒ equal to the hard budget)
++  adds a soft window: rounds past it fire only while the open IMPL count is not
++  increasing — a converging loop earns its extra rounds, a churning one hands
++  over early. On exhaustion the bundle halts at `AWAITING_SIGNOFF` for you,
++  same as always, never dropped.
+ 
+ gramps runs `auto_iterate = true` with the default `max_auto_iters = 3`.
+ 
+diff --git a/template/agents/adversary.md.jinja b/template/agents/adversary.md.jinja
+index 1af001c..da67181 100644
+--- a/template/agents/adversary.md.jinja
++++ b/template/agents/adversary.md.jinja
+@@ -43,12 +43,14 @@ human must adjudicate, prefix the bullet `- NEEDS-HUMAN — ` (the harness lifts
+ didn't touch. If you genuinely cannot refute the fix after a real attempt, say so:
+ "attempted to refute X, Y, Z; could not" is a strong signal, not a non-answer.
+ 
+-**Mark the implementation defects (issue #264).** When the refutation lands on something the
++**Tag every finding (issues #264, #332).** When the refutation lands on something the
+ **builder can fix by iterating** — a concrete failing case, a logic slip, a test that
+-wouldn't have gone red, a conformance nit — prefix that bullet `- NEEDS-HUMAN [impl] — `
+-instead. The driver then routes it straight back to Do without spending the human's
+-attention. Keep the plain `- NEEDS-HUMAN — ` form when the finding demands a human
+-**architectural / scope / fitness-to-purpose** decision — the fix targets a symptom rather
+-than the cause, the brief asked for the wrong thing, the toolchain was unavailable so the
+-verdict is provisional. **When in doubt, omit `[impl]`**: an unmarked finding always reaches
+-the human, a mismarked one buys a wasted rebuild.
++wouldn't have gone red, a conformance nit — prefix that bullet `- NEEDS-HUMAN [impl] — `.
++The driver then routes it straight back to Do without spending the human's attention.
++Use `- NEEDS-HUMAN [human] — ` when the finding demands a human **architectural / scope /
++fitness-to-purpose** decision — the fix targets a symptom rather than the cause, the brief
++asked for the wrong thing, the toolchain was unavailable so the verdict is provisional.
++An **untagged** finding is treated as `[human]` — the fail-safe: it always reaches the
++human, never a rebuild — but state your judgment explicitly rather than leaning on the
++fail-safe: the tag is exactly the statement the driver cannot infer for you, and a
++mismarked `[impl]` buys a wasted rebuild.
+diff --git a/template/agents/code-review.md.jinja b/template/agents/code-review.md.jinja
+index a7709a3..eb5a94b 100644
+--- a/template/agents/code-review.md.jinja
++++ b/template/agents/code-review.md.jinja
+@@ -21,5 +21,9 @@ checkouts. You have **no Write/Edit** — you cannot patch what you judge.
+ 
+ A short list of findings, each a Markdown bullet citing `path:line`. For any finding a
+ human must adjudicate, prefix the bullet `- NEEDS-HUMAN — ` (the harness lifts those into
+-`SUMMARY.md` §6). Scope each finding to **this diff** — don't file pre-existing debt the
++`SUMMARY.md` §6), and tag it (issue #332): `- NEEDS-HUMAN [impl] — ` for an implementation
++defect the builder can fix by iterating (the driver routes it straight back to Do),
++`- NEEDS-HUMAN [human] — ` for an architectural / scope / fitness call only the human can
++make. An untagged finding is treated as `[human]` (the fail-safe), but tag deliberately.
++Scope each finding to **this diff** — don't file pre-existing debt the
+ patch didn't touch. If the diff is clean on both lenses, say so explicitly.
+diff --git a/template/agents/reviewer.md.jinja b/template/agents/reviewer.md.jinja
+index 77944a0..8a4a895 100644
+--- a/template/agents/reviewer.md.jinja
++++ b/template/agents/reviewer.md.jinja
+@@ -67,6 +67,12 @@ Basis |`. This is the canonical order the gates assemble; mirror it exactly:
+ | T5 Judgment | … | … |
+ | Validation — fitness-to-purpose | NEEDS-HUMAN | … |
+ 
++Write each Item cell **exactly** as above — the parser also tolerates a leading
++`<element-id> — ` prefix (`V — Validation — fitness-to-purpose`) and ASCII `--`
++for `—`, and nothing else. Any other addition to the Item cell (a suffix like
++`: patches the wrong layer`) makes the row a distinct finding rather than the
++matrix row.
++
+ Verdict is `PASS / FAIL / NEEDS-HUMAN / N/A`; Basis is the one line you
+ re-derived (cite `path:line` where you can). **State the decision owed, not the
+ implementation:** the Basis names the *context and impact* the verdict turns on —
+@@ -76,6 +82,15 @@ matters>", not a description of the code. Use `N/A` with a reason when an elemen
+ does not apply — **do not drop the row.** The harness lifts every NEEDS-HUMAN row
+ into `SUMMARY.md` §6, so a row you omit is a verdict the human never sees.
+ 
++**Say it when a judgment concern is builder-fixable (issue #332).** A NEEDS-HUMAN
++verdict on **C5 (causal adequacy)** or **T5 (judgment)** that in truth describes an
++IMPLEMENTATION defect — a logic slip, a missed case, a weak test — should carry the
++verdict `NEEDS-HUMAN [impl]`: the driver then routes it straight back to Do instead
++of spending the human's attention. Keep the plain `NEEDS-HUMAN` for a genuine
++architectural / scope / fitness call. The tag is honoured **only on C5/T5** — never
++on C1/C3 or the Validation row — and an untagged verdict always goes to the human
++(the fail-safe), so tag only what you positively know a rebuild can address.
++
+ ## Emit NEEDS-HUMAN by design on
+ 
+ Validation fitness-to-purpose; contested symptom-vs-root-cause; semantic
+diff --git a/template/pdca.toml.jinja b/template/pdca.toml.jinja
+index 92e4cdf..867aa3a 100644
+--- a/template/pdca.toml.jinja
++++ b/template/pdca.toml.jinja
+@@ -54,12 +54,16 @@ max_passes = 20
+ # with implementation defects the reviewer or the adversary catches — a logic slip, a weak
+ # test, a red gate. Each of those parks the bundle at AWAITING_SIGNOFF and asks you to press
+ # "iterate-do", which is the decision the driver could have made itself. With this on, when
+-# the reviewer has found implementation defects and NOTHING you must see first, the driver
+-# records `iterate-do` and rebuilds, unattended — so Do→Check iterates while the reviewer keeps
+-# finding things only Do can fix, and hands over once they are gone. Your judgment is still
+-# required — and the bundle still halts — for anything architectural: a REAL concern on a
+-# judgment cell (C5 causal adequacy, T5 judgment), a gate that could not run, an external
+-# dependency, an unmarked advisory finding, or a §6 item it cannot classify.
++# the reviewer has found at least one implementation defect, the driver records `iterate-do`
++# and rebuilds, unattended — so Do→Check iterates while the reviewer keeps finding things
++# only Do can fix, and hands over once they are gone. A human finding found BESIDE the
++# implementation defects — a real concern on a judgment cell (C5 causal adequacy, T5
++# judgment), a gate that could not run, an external dependency, an untagged advisory
++# finding — no longer vetoes the rebuild (#332): it is DEFERRED to a loss-proof ledger
++# (deferred-human.json, which survives the iteration archive) and merged back into §6 on
++# every assemble, so it still reaches you at handover and still blocks accept until you
++# clear it. A HUMAN-ONLY finding set halts immediately as before (there is nothing for a
++# rebuild to fix), and so does the empirical size backstop below.
+ #
+ # One exception, and it is why this works at all: the reviewer's `Validation —
+ # fitness-to-purpose` row is emitted NEEDS-HUMAN on EVERY cycle by design (validation is your
+@@ -72,6 +76,12 @@ max_passes = 20
+ # bundle halts for you as before. `PDCA_AUTO_ITERATE=1` / `--auto-iterate` override.
+ auto_iterate = false
+ max_auto_iters = 3
++# The SOFT round budget (#332). Rounds up to it always fire; past it and up to
++# `max_auto_iters` a round fires only while the loop is converging — the count of open
++# implementation findings (recorded per round in auto-iterate.json) did not increase since
++# the previous round; past `max_auto_iters`, never. Unset ⇒ soft = max_auto_iters, i.e. the
++# hard-only behaviour, unchanged. `PDCA_SOFT_AUTO_ITERS` overrides for one run.
++# soft_auto_iters = 3
+ # Worktree isolation (issue #94). A cycle's Do/Check run in a dedicated git worktree off
+ # the target's base, so the host's primary checkout is NEVER mutated in place. The harness
+ # creates/resets it per cycle (per lane slot) and exposes its path as `$PDCA_WORKTREE` —
+diff --git a/template/src/pdca_harness/assemble.py b/template/src/pdca_harness/assemble.py
+index 219406f..5ec9a2b 100644
+--- a/template/src/pdca_harness/assemble.py
++++ b/template/src/pdca_harness/assemble.py
+@@ -50,21 +50,61 @@ class NeedsHumanItem(NamedTuple):
+ _GATE_ELEMENTS = frozenset(e for e, _label, kind, _oracle in canonical_elements()
+                            if kind == "gate")
+ 
++# The judgment cells a reviewer-STATED `[impl]` verdict tag may promote to IMPL (#332):
++# judgment-kind minus V. The reviewer raises C5/T5 only on a REAL concern, and it is the
++# one party positioned to say "this concern is in truth builder-fixable" — the taxonomy
++# cell was only ever a proxy for that statement (91% of vetoes were untagged bullets).
++# V is never promotable: its row is the signal-free STANDING constant (#293), and the
++# validation act is the human's by definition. Input cells (C1/C3) and every
++# deterministic §6 source — a gate that could not run, a declared / unregistered external
++# dependency, the size backstop — are never promotable either: those never pass through
++# the verdict-tag parse at all.
++_PROMOTABLE_ELEMENTS = frozenset(e for e, _label, kind, _oracle in canonical_elements()
++                                 if kind == "judgment" and e != "V")
++
+ # A §6 item's leading 5/5/1 element id, when the reviewer's table row carries one.
+ _ELEMENT_RE = re.compile(r"^(C[1-5]|T[1-5]|V)\b")
+ 
+ # An advisory leaf tags a builder-fixable finding `- NEEDS-HUMAN [impl] — …`. Unmarked
+ # findings stay HUMAN, so a legacy advisory file can never trigger an auto-iteration.
+ _IMPL_MARKER_RE = re.compile(r"^\[impl\]\s*[—:-]*\s*", re.IGNORECASE)
++# …and the explicit counterpart (#332): `- NEEDS-HUMAN [human] — …`. The tag pair is now
++# REQUIRED by the advisory prompts; `[human]` classifies exactly like the untagged
++# fail-safe, so the only thing it changes is that the leaf said it on purpose.
++_HUMAN_MARKER_RE = re.compile(r"^\[human\]\s*[—:-]*\s*", re.IGNORECASE)
+ 
+ # The one STANDING row (#293) — recognised by the canonical label, not a hardcoded string, so
+ # it cannot drift from the matrix the reviewer's table mirrors. `V` is the only element the
+ # reviewer's prompt hard-codes to NEEDS-HUMAN on every cycle; C5/T5 are judgment too, but the
+ # reviewer raises those only when it has an actual concern, so they stay situational HUMAN.
+ _V_LABEL = next(label for e, label, _kind, _oracle in canonical_elements() if e == "V")
++
++# An optional leading `<element-id> —` prefix on an Item cell (#332). The review prompt
++# lists the matrix as "V — Validation — fitness-to-purpose", so real reviewers copy that
++# form into the Item column; production also shows the ASCII `--` spelling of the em dash.
++_ELEMENT_PREFIX_RE = re.compile(r"^(?:C[1-5]|T[1-5]|V)\s*(?:—|--)\s*")
++
++
++def _normalize_item_label(cell: str) -> str:
++    """An Item cell normalized for comparison against the canonical 5/5/1 labels (#332).
++
++    Exactly two tolerated variations, both observed in production reviews: an optional
++    leading ``<element-id> —`` prefix (``V — Validation — fitness-to-purpose``) and ASCII
++    ``--`` for the em dash (``Validation -- fitness-to-purpose``). The comparison stays
++    EXACT after normalization — #294's rule stands: a *prefix* match let a real objection
++    wear the template's clothes, so any other addition to the cell (a suffix like
++    ``: patches the wrong layer``) still makes it a real finding, never the constant.
++    """
++    s = _ELEMENT_PREFIX_RE.sub("", cell.strip(), count=1)
++    return " ".join(s.replace("--", "—").split()).casefold()
++
++
++_V_LABEL_NORM = _normalize_item_label(_V_LABEL)
+ # Every 5/5/1 Item cell, used to recognise the MANDATED verdict table itself — the row alone was
+ # never enough (PR #294 review, local pass): a "## Concerns" table can carry the exact same label.
+-_CANONICAL_LABELS = frozenset(label.strip().casefold()
++# Normalized with the same rule as the row match, so a table written in the prefixed / ASCII
++# form is still recognised as the mandated table (else its V row could never be STANDING).
++_CANONICAL_LABELS = frozenset(_normalize_item_label(label)
+                               for _e, label, _kind, _oracle in canonical_elements())
+ 
+ # Leaf-status marker (issue #278). When a reviewer / advisory leaf could not produce a
+@@ -125,8 +165,9 @@ def _item(value: str) -> str:
+     return "\n".join([first] + [f"  {line}" if line else "" for line in rest])
+ 
+ 
+-def _classify_finding(text: str, *, standing: bool = False) -> NeedsHumanItem:
+-    """Classify one reviewer / advisory §6 item, stripping any `[impl]` marker.
++def _classify_finding(text: str, *, standing: bool = False,
++                      impl_tag: bool = False) -> NeedsHumanItem:
++    """Classify one reviewer / advisory §6 item, stripping any `[impl]` / `[human]` marker.
+ 
+     Three kinds. IMPL — a rebuild can address it. STANDING — the reviewer's `Validation` row,
+     which its prompt emits NEEDS-HUMAN on every cycle whatever it finds, so its presence proves
+@@ -138,6 +179,13 @@ def _classify_finding(text: str, *, standing: bool = False) -> NeedsHumanItem:
+     prefix test on the text is what let a real objection wear the template's clothes, and two
+     sources of truth for "is this the constant row" is what produced that bug (PR #294 review).
+ 
++    ``impl_tag`` (#332) says the reviewer wrote the VERDICT cell as ``NEEDS-HUMAN [impl]`` —
++    a *stated* builder-fixability the taxonomy cell used to have to guess. Honoured only for
++    the promotable judgment elements (C5/T5, :data:`_PROMOTABLE_ELEMENTS`), and checked
++    AFTER ``standing``: a tagged V row stays STANDING (the constant is the constant, and V
++    is never promotable). A tag on C1/C3/V, or on a row with no recognisable element, is
++    ignored — the fail-safe direction is unchanged.
++
+     Fail safe throughout: an item we cannot map to a gate element — an unmarked advisory bullet,
+     a reviewer row whose Item cell doesn't start with a canonical id, the missing-review
+     placeholder — is HUMAN. Auto-iterate only ever fires on findings we positively know a
+@@ -147,11 +195,17 @@ def _classify_finding(text: str, *, standing: bool = False) -> NeedsHumanItem:
+     stripped = _IMPL_MARKER_RE.sub("", text, count=1)
+     if stripped != text:
+         return NeedsHumanItem(stripped.strip(), IMPL)
++    stripped = _HUMAN_MARKER_RE.sub("", text, count=1)
++    if stripped != text:
++        return NeedsHumanItem(stripped.strip(), HUMAN)  # explicit == the fail-safe (#332)
+     if standing:
+         return NeedsHumanItem(text, STANDING)   # emitted every cycle ⇒ carries no signal (#293)
+     m = _ELEMENT_RE.match(text)
+-    if m and m.group(1) in _GATE_ELEMENTS:
++    elem = m.group(1) if m else ""
++    if elem in _GATE_ELEMENTS:
+         return NeedsHumanItem(text, IMPL)
++    if impl_tag and elem in _PROMOTABLE_ELEMENTS:
++        return NeedsHumanItem(text, IMPL)       # reviewer-stated fixability on C5/T5 (#332)
+     return NeedsHumanItem(text, HUMAN)
+ 
+ 
+@@ -166,8 +220,8 @@ def _items_from_artifact(text: str, *, allow_standing: bool = False) -> list[Nee
+     and forced to HUMAN: there is no finding for a rebuild to fix, so an infra-empty must
+     never be auto-iterated (#264). A real artifact is unaffected."""
+     label = _LEAF_STATUS_LABEL.get(leaf_status(text), "")
+-    items = [_classify_finding(t, standing=allow_standing and is_standing)
+-             for t, is_standing in _needs_human(text)]
++    items = [_classify_finding(t, standing=allow_standing and is_standing, impl_tag=tag)
++             for t, is_standing, tag in _needs_human(text)]
+     if not label:
+         return items
+     return [NeedsHumanItem(f"{label} — {it.text}", HUMAN) for it in items]
+@@ -221,16 +275,25 @@ def collect_needs_human(d: Path, cfg: Config) -> list[NeedsHumanItem]:
+     for ptext in [p.read_text(encoding="utf-8")
+                   for p in sorted(d.glob("plan-advisory-*.md"))]:
+         items += _items_from_artifact(ptext)
+-    # The empirical size backstop (#324). HUMAN, never IMPL — and that tag is the whole
+-    # mechanism: `autoiterate.eligible()` requires every item be IMPL or STANDING, so this
+-    # DISQUALIFIES auto-iterate, which is what should happen to a bundle behaving
+-    # oversized. Tagged IMPL it would instead count as a reason to rebuild, turning the
++    # The empirical size backstop (#324). HUMAN, never IMPL — and since #332 it is the ONE
++    # HUMAN item `autoiterate.eligible()` still refuses to defer: an ordinary HUMAN finding
++    # now rides the deferral ledger while the rebuild proceeds, but this item is evidence
++    # that further rebuilds are the wrong move, so it must STOP the loop, not be filed for
++    # later. Tagged IMPL it would instead count as a reason to rebuild, turning the
+     # backstop into an accelerator for the very failure it exists to stop.
+     # `current`, not `read`: the recorded file wins, but its ABSENCE must not read as
+     # "measured and small". A failed write would otherwise delete the backstop.
+     size_reasons = size_signal.oversize_reasons(size_signal.current(d, cfg), cfg)
+     if size_reasons:
+         items += [NeedsHumanItem(size_signal.needs_human_text(size_reasons), HUMAN)]
++    # The deferred-HUMAN ledger (#332): findings a fired auto-round put aside instead of
++    # letting them veto the rebuild. Merged (deduped, normalized compare) on EVERY
++    # assemble, so a finding deferred in round 1 is still a `- [ ]` here at handover and
++    # the C6 accept-guard blocks on it — deferral is a delay, never a loss. Local import:
++    # `autoiterate` imports this module at top level, so the other direction must be lazy.
++    from . import autoiterate
++    items += [NeedsHumanItem(t, HUMAN)
++              for t in autoiterate.deferred_items(d, [it.text for it in items])]
+     return items
+ 
+ 
+@@ -267,8 +330,9 @@ def assemble_summary(d: Path, cfg: Config) -> None:
+ 
+     # §6 is fed by the reviewer's NEEDS-HUMAN verdicts, the advisory reviewers', any gate
+     # that declared itself unverifiable (issue #46), any gating gate that hard-FAILED
+-    # (issue #166), a builder-declared external dependency Plan didn't list (#250), and a
+-    # declared dependency with no registered doctor row (#263) — all become `- [ ]` items
++    # (issue #166), a builder-declared external dependency Plan didn't list (#250), a
++    # declared dependency with no registered doctor row (#263), and the deferred-HUMAN
++    # ledger of past auto-rounds (#332) — all become `- [ ]` items
+     # the C6 guard makes the human clear before accept. `collect_needs_human` is the single
+     # source (it also tags each item IMPL/HUMAN for the auto-iterate decision, #264).
+     needs_human = [it.text for it in collect_needs_human(d, cfg)]
+@@ -401,16 +465,19 @@ def _missing_review_text() -> str:
+     )
+ 
+ 
+-def _needs_human(review_text: str) -> list[tuple[str, bool]]:
+-    """Every reviewer NEEDS-HUMAN → ``(text, from_table)``, order-preserving and deduped.
++def _needs_human(review_text: str) -> list[tuple[str, bool, bool]]:
++    """Every reviewer NEEDS-HUMAN → ``(text, standing, impl_tag)``, order-preserving, deduped.
+ 
+     The reviewer always emits the 5/5/1 verdict table (see leaves._REVIEW_PROMPT);
+     a table row whose verdict cell is NEEDS-HUMAN becomes a §6 item (Item — Basis).
+     Legacy ``- NEEDS-HUMAN — …`` bullet lines are still honoured.
+ 
+     The second element says whether the item IS the canonical standing row — the one the prompt
+-    hard-codes every cycle. It demands an **exact** match on the row's *Item cell* against the
+-    5/5/1's own label, which is the only thing that identifies the template row:
++    hard-codes every cycle. It demands an **exact** match of the row's *Item cell* against the
++    5/5/1's own label — after :func:`_normalize_item_label`, which folds exactly the two
++    variations production reviews are observed to write (a leading ``<id> —`` prefix, ASCII
++    ``--``) and nothing else — because the cell is the only thing that identifies the template
++    row:
+ 
+     * a **legacy bullet** never qualifies — it is free prose the reviewer chose to write, so
+       "Validation — fitness-to-purpose: patches the wrong layer" is a real objection.
+@@ -418,18 +485,22 @@ def _needs_human(review_text: str) -> list[tuple[str, bool]]:
+       for the same reason. Keying on "came from a table" was still too wide, and keying on the
+       text's *prefix* let a real objection wear the template's clothes (PR #294 review).
+ 
++    The third element (#332) says the VERDICT cell carried an ``[impl]`` tag — the reviewer
++    stating a judgment finding is builder-fixable. Only :func:`_classify_finding` decides
++    whether that promotes anything (C5/T5 only, STANDING first).
++
+     Everything else keeps its signal.
+     """
+-    items: list[tuple[str, bool]] = []
++    items: list[tuple[str, bool, bool]] = []
+     seen: set[str] = set()
+     lines = review_text.splitlines()
+     verdict_table = _verdict_table_lines(lines)
+ 
+-    def add(text: str, *, standing: bool) -> None:
++    def add(text: str, *, standing: bool, impl_tag: bool = False) -> None:
+         text = text.strip()
+         if text and text.lower() not in seen:
+             seen.add(text.lower())
+-            items.append((text, standing))
++            items.append((text, standing, impl_tag))
+ 
+     for i, line in enumerate(lines):
+         s = line.strip()
+@@ -444,14 +515,15 @@ def _needs_human(review_text: str) -> list[tuple[str, bool]]:
+             basis = cells[vi + 1] if vi + 1 < len(cells) else ""
+             add(f"{label} — {basis}" if basis else label,
+                 standing=(i in verdict_table
+-                          and label.strip().casefold() == _V_LABEL.casefold()))
++                          and _normalize_item_label(label) == _V_LABEL_NORM),
++                impl_tag="[impl]" in cells[vi].casefold())
+ 
+     # FAIL CLOSED on ambiguity. The template row is a CONSTANT — it occurs exactly once. If two
+     # survive (a second verdict-shaped table, a duplicated row), at least one of them is not the
+     # constant, and we cannot tell which. Grant STANDING to neither, so the bundle halts for the
+     # human rather than risk archiving a real objection.
+-    if sum(1 for _t, standing in items if standing) > 1:
+-        return [(t, False) for t, _s in items]
++    if sum(1 for _t, standing, _tag in items if standing) > 1:
++        return [(t, False, tag) for t, _s, tag in items]
+     return items
+ 
+ 
+@@ -466,9 +538,10 @@ def _verdict_table_lines(lines: list[str]) -> set[int]:
+     what the justification was always about.
+ 
+     A contiguous run of ``|``-rows is the verdict table when **two or more** of its Item cells
+-    exactly match canonical 5/5/1 labels — the mandated table carries all eleven, while an
+-    ad-hoc concerns table carries its own prose. Two, not one, so a lone Validation row in a
+-    stray table cannot nominate itself.
++    exactly match canonical 5/5/1 labels (after :func:`_normalize_item_label`, so a table
++    written with the prompt's ``<id> —`` prefix or ASCII ``--`` is still recognised, #332) —
++    the mandated table carries all eleven, while an ad-hoc concerns table carries its own
++    prose. Two, not one, so a lone Validation row in a stray table cannot nominate itself.
+     """
+     out: set[int] = set()
+     i = 0
+@@ -480,7 +553,8 @@ def _verdict_table_lines(lines: list[str]) -> set[int]:
+         while j < len(lines) and lines[j].strip().startswith("|"):
+             j += 1
+         block = range(i, j)
+-        labels = {lines[k].strip().strip("|").split("|")[0].strip().casefold() for k in block}
++        labels = {_normalize_item_label(lines[k].strip().strip("|").split("|")[0])
++                  for k in block}
+         if len(labels & _CANONICAL_LABELS) >= 2:
+             out.update(block)
+         i = j
+diff --git a/template/src/pdca_harness/autoiterate.py b/template/src/pdca_harness/autoiterate.py
+index 226ed5d..b7b09eb 100644
+--- a/template/src/pdca_harness/autoiterate.py
++++ b/template/src/pdca_harness/autoiterate.py
+@@ -11,12 +11,19 @@ check cells ``input | gate | judgment``. The ``gate`` cells (C2 reproduction, C4
+ verification, T1..T4) are mechanically checkable, so a rebuild can address them; the
+ ``judgment`` cells (C5 causal adequacy, T5 judgment, V validation) and the ``input`` cells
+ (C1 spec, C3 change) are the human's. ``assemble.collect_needs_human`` tags every §6 item
+-IMPL or HUMAN from exactly that source.
++IMPL or HUMAN from exactly that source — and, since #332, the reviewer can *state*
++builder-fixability on a judgment cell with a ``NEEDS-HUMAN [impl]`` verdict instead of the
++taxonomy cell having to guess it.
+ 
+-So: when a bundle reaches ``AWAITING_SIGNOFF`` with at least one IMPL item and nothing the
+-human must see first, the driver writes an ``iterate-do`` decision and re-drives Do. Anything
+-else — an empty §6 (a clean bundle awaiting a human accept), a situational HUMAN item, an
+-exhausted budget — halts as before.
++So: when a bundle reaches ``AWAITING_SIGNOFF`` with at least one IMPL item, the driver
++writes an ``iterate-do`` decision and re-drives Do. A HUMAN finding no longer vetoes the
++rebuild outright (#332 — measured: 199 of 230 eligible-checked attempts were vetoed, so
++the round budget almost never became the actual bound): it is **deferred** to a loss-proof
++ledger (:data:`LEDGER_FILE`) that survives the iteration archive and is merged back into
++§6 at every assemble, so every deferred finding still reaches the human at handover under
++the C6 accept-guard. What still halts immediately: an empty §6 (a clean bundle awaiting a
++human *accept*), a HUMAN-only finding set (nothing for a rebuild to fix), the size
++backstop (#324 — evidence that further rebuilds are the wrong move), an exhausted budget.
+ 
+ One item is deliberately NOT "something the human must see first": the reviewer's
+ ``Validation — fitness-to-purpose`` row, which its prompt hard-codes to NEEDS-HUMAN on EVERY
+@@ -30,11 +37,16 @@ Three properties hold by construction:
+   decision goes through the same C6-guarded ``flow._apply_decision`` a human sign-off uses,
+   so §9 stays authored solely by ``signoff.record``.
+ * **It never clears a §6 box.** An ``iterate-do`` archives the whole SUMMARY, unticked, into
+-  ``iteration-v<N>/``; the rebuild produces a fresh §6.
+-* **It is bounded.** ``[driver].max_auto_iters`` automatic rounds per bundle, counted in
+-  ``auto-iterate.json`` (deliberately NOT in ``driver.DOWNSTREAM_OF_BRIEF``, so the archive
+-  step doesn't move it and the count accumulates across rebuilds). On exhaustion the bundle
+-  is left at ``AWAITING_SIGNOFF`` for the human — never dropped.
++  ``iteration-v<N>/``; the rebuild produces a fresh §6 — and the deferred ledger re-seeds it
++  with every finding a past round put aside, so deferral is never loss.
++* **It is bounded, twice.** ``[driver].max_auto_iters`` automatic rounds per bundle
++  (the HARD budget), counted in ``auto-iterate.json`` (deliberately NOT in
++  ``driver.DOWNSTREAM_OF_BRIEF``, so the archive step doesn't move it and the count
++  accumulates across rebuilds). ``[driver].soft_auto_iters`` (#332) is the SOFT budget:
++  rounds past it are allowed only while the loop is converging — the open IMPL count,
++  recorded per round in the same file, did not increase. Unset it equals the hard budget,
++  so a rendered instance reproduces the hard-only behaviour exactly. On exhaustion the
++  bundle is left at ``AWAITING_SIGNOFF`` for the human — never dropped.
+ 
+ Opt-in: ``[driver].auto_iterate = false`` by default.
+ """
+@@ -44,34 +56,47 @@ from __future__ import annotations
+ import json
+ from pathlib import Path
+ 
+-from .assemble import IMPL, STANDING, NeedsHumanItem
++from .assemble import HUMAN, IMPL, NeedsHumanItem
+ from .leaves import SIGNOFF_DECISION
+ 
+ BUDGET_FILE = "auto-iterate.json"
+ 
++#: The deferred-HUMAN ledger (#332): every HUMAN finding a fired auto-round put aside,
++#: kept OUT of ``driver.DOWNSTREAM_OF_BRIEF`` and listed in ``state.CYCLE_EVIDENCE_ONLY``
++#: (like the budget file: it must survive the iteration archive, or deferral is loss).
++#: ``assemble.collect_needs_human`` merges it (deduped) into §6 on every assemble, so a
++#: finding deferred in round 1 is still a `- [ ]` the C6 guard blocks on at handover.
++LEDGER_FILE = "deferred-human.json"
++
+ # The only token this module is ever allowed to write.
+ DECISION = "iterate-do"
+ 
+ 
+ def eligible(items: list[NeedsHumanItem]) -> bool:
+-    """True iff a rebuild is the right next step: at least one IMPL finding, and nothing
+-    else the human must see *first*.
++    """True iff a rebuild is the right next step: at least one IMPL finding (#332).
+ 
+     An **empty** §6 is deliberately not eligible — that is a clean bundle awaiting a human
+-    *accept*, and auto-iterate must never accept. A situational HUMAN item still disqualifies
+-    the whole bundle: the human has to look at it anyway, so there is nothing to save by
+-    rebuilding first.
+-
+-    But a **STANDING** item does not. The reviewer's prompt hard-codes `Validation —
+-    fitness-to-purpose` to NEEDS-HUMAN on EVERY cycle regardless of what it found, so that row
+-    is a constant, and a constant is not evidence that a human must look right now. Requiring
+-    `all(IMPL)` therefore made this function unreachable in production: every real review
+-    artifact carries that row, so auto-iterate never fired once (#293). The bundle still halts
+-    for the human as soon as the implementation findings are gone — which is the whole point:
+-    iterate Do→Check while the reviewer keeps finding defects only Do can fix, then hand over.
++    *accept*, and auto-iterate must never accept. A HUMAN-only set halts too: there is
++    nothing a rebuild can fix, so the bundle goes straight to the human.
++
++    A HUMAN finding *beside* IMPL findings no longer vetoes the rebuild (#332). The old
++    rule — every item IMPL or STANDING — made the taxonomy cell a proxy veto: measured
++    over 230 eligible-checked attempts, 199 were vetoed and auto-iterate fired on 13.5%,
++    so the round budget almost never became the actual bound. Now the HUMAN finding is
++    **deferred**, not dropped: :func:`write_decision` records it in :data:`LEDGER_FILE`,
++    the ledger survives the archive, and ``assemble.collect_needs_human`` merges it back
++    into §6 every round — so it reaches the human at handover under the C6 guard.
++
++    One HUMAN item still vetoes: the empirical size backstop (#324). It is not a finding
++    to adjudicate but *evidence that further rebuilds are the wrong move* (76% of bundles
++    at two rounds go on to a third) — deferring it would turn the backstop into an
++    accelerator for the exact spiral it exists to break. The STANDING `Validation` row
++    (#293) neither vetoes nor defers — it is re-emitted every cycle anyway.
+     """
+-    return (any(item.kind == IMPL for item in items)
+-            and all(item.kind in (IMPL, STANDING) for item in items))
++    from . import size_signal  # local: size_signal imports this module (count) lazily too
++    if any(item.kind == HUMAN and size_signal.is_size_item(item.text) for item in items):
++        return False
++    return any(item.kind == IMPL for item in items)
+ 
+ 
+ def count(d: Path) -> int:
+@@ -83,35 +108,244 @@ def count(d: Path) -> int:
+         return 0
+ 
+ 
+-def bump(d: Path) -> int:
+-    """Spend one automatic iteration; return the new count."""
++def impl_counts(d: Path) -> list[int]:
++    """The per-round open-IMPL counts recorded by :func:`bump` (#332), oldest first.
++
++    Tolerant of the pre-#332 file shape (``{"count": n}`` only) and of a missing /
++    garbled file — both read as "no history", never a crash. The soft budget fails
++    toward the human on missing history (:func:`budget_verdict`)."""
++    try:
++        vals = json.loads((d / BUDGET_FILE).read_text(encoding="utf-8"))["impl_counts"]
++        return [int(v) for v in vals] if isinstance(vals, list) else []
++    except (OSError, ValueError, KeyError, TypeError):
++        return []
++
++
++def bump(d: Path, *, impl_count: int = 0) -> int:
++    """Spend one automatic iteration; record this round's open-IMPL count; return the
++    new spend. The count history is what lets the soft budget (#332) tell a converging
++    loop (IMPL count falling) from a churning one (IMPL count rising)."""
+     n = count(d) + 1
+-    (d / BUDGET_FILE).write_text(json.dumps({"count": n}) + "\n", encoding="utf-8")
++    payload = {"count": n, "impl_counts": impl_counts(d) + [int(impl_count)]}
++    (d / BUDGET_FILE).write_text(json.dumps(payload) + "\n", encoding="utf-8")
+     return n
+ 
+ 
++def soft_budget(cfg) -> int:
++    """The resolved soft round budget (#332): ``[driver].soft_auto_iters``, defaulting to
++    the hard budget — so an instance that never set it reproduces the hard-only behaviour
++    exactly. Clamped into ``[1, max_auto_iters]`` (a soft budget past the hard one is
++    meaningless). ``getattr`` so a minimal test double lacking the field means "unset"."""
++    soft = getattr(cfg, "soft_auto_iters", None)
++    hard = cfg.max_auto_iters
++    if soft is None:
++        return hard
++    try:
++        return max(1, min(int(soft), hard))
++    except (TypeError, ValueError):
++        return hard
++
++
++def budget_verdict(d: Path, cfg, *, impl_count: int) -> str:
++    """Why the NEXT auto round may not fire, or ``""`` when it may (#332).
++
++    Worked example (``soft_auto_iters = 3``, ``max_auto_iters = 5``): rounds 1–3 always
++    fire; rounds 4–5 fire only if the open IMPL count did not increase since the previous
++    round (the loop is converging, so the extra rounds are being earned); round 6 never.
++    ``soft_auto_iters`` unset ⇒ soft == hard ⇒ the hard-only behaviour, unchanged.
++
++    Fail toward the human inside the soft window: no recorded per-round history (an
++    old-shape ``auto-iterate.json``) cannot prove convergence, so it declines rather than
++    guessing — the bundle halts at AWAITING_SIGNOFF exactly as an exhausted budget does.
++    """
++    hard = cfg.max_auto_iters
++    spent = count(d)
++    if spent >= hard:
++        return (f"auto-iterate budget spent ({spent}/{hard}); "
++                "handing the implementation findings to the human")
++    soft = soft_budget(cfg)
++    if spent >= soft:
++        history = impl_counts(d)
++        prev = history[-1] if history else None
++        if prev is None:
++            return (f"auto-iterate soft budget spent ({spent}/{soft}) and no per-round "
++                    "IMPL count is recorded to prove the loop is converging; handing "
++                    "the findings to the human")
++        if impl_count > prev:
++            return (f"auto-iterate soft budget spent ({spent}/{soft}) and the open IMPL "
++                    f"count rose ({prev} → {impl_count}) — the loop is not converging; "
++                    "handing the findings to the human")
++    return ""
++
++
+ def rationale(items: list[NeedsHumanItem], *, attempt: int) -> str:
+     """The §9 "Iteration delta" line, which the driver folds into the brief's carry-forward
+     so the next Do iteration isn't blind about why it was rejected.
+ 
+-    IMPL items ONLY. The STANDING `Validation` row rides along in ``items`` (it does not veto
+-    the rebuild, #293), but it is not a finding and no builder can act on it — carrying it
+-    forward would hand the next Do a human-only judgment call as though it were a defect to fix,
+-    under a sentence claiming the set is "implementation-level items only" (PR #294 review).
++    Names the IMPL findings ONLY, and the *count* of deferred HUMAN findings — never their
++    texts. The line reaches the builder's carry-forward, and carrying a deferred judgment
++    call there would hand the next Do a human-only decision as though it were a defect to
++    fix (the #294 property; same reason the STANDING `Validation` row is excluded). The
++    deferred findings themselves are not lost: they live in :data:`LEDGER_FILE` and re-enter
++    §6 at every assemble, which is the channel that reaches the *human*, not the builder.
+     """
+     findings = "; ".join(item.text for item in items if item.kind == IMPL)
+-    return (f"Auto-iterate (round {attempt}): Check found implementation-level items only, "
+-            f"no architectural judgment required — {findings}")
++    deferred = sum(1 for item in items if item.kind == HUMAN)
++    tail = (f" Deferred {deferred} human finding(s) to the sign-off ledger "
++            "(kept in §6 for the human at handover — not for the builder)." if deferred
++            else "")
++    return (f"Auto-iterate (round {attempt}): addressing implementation-level findings — "
++            f"{findings}.{tail}")
++
++
++# ----------------------------------------------------------------------------
++# The deferred-HUMAN ledger (#332) and its retirement (#335, folded in by design).
++# ----------------------------------------------------------------------------
++def _norm(text: str) -> str:
++    """Whitespace-collapsed, casefolded — the EXACT tier of both matchers below."""
++    return " ".join(str(text).split()).casefold()
++
++
++def _same_finding(a: str, b: str) -> bool:
++    """The ONE fuzzy relation both retirement sides use (#335): normalized equality, or
++    one normalized text containing the other — which tolerates the human annotating a §6
++    row (a prefix / suffix note) without breaking the link back to the ledger entry.
++
++    Deliberately shared verbatim between the tick match and the still-open protection:
++    the guard is only as strong as the weaker of its two matchers, and every edit shape
++    this tolerates in a *tick* must also protect when left *open* (the #335 field report:
++    four instance hardening rounds each tightened one side without the other)."""
++    na, nb = _norm(a), _norm(b)
++    return bool(na) and bool(nb) and (na == nb or na in nb or nb in na)
++
++
++def ledger_entries(d: Path) -> list[str]:
++    """The deferred findings, oldest first. Missing / garbled file ⇒ empty, never a crash
++    (the same tolerant contract as every other bundle-file read, testbed #3)."""
++    try:
++        vals = json.loads((d / LEDGER_FILE).read_text(encoding="utf-8"))["deferred"]
++        return [str(v) for v in vals] if isinstance(vals, list) else []
++    except (OSError, ValueError, KeyError, TypeError):
++        return []
++
++
++def _write_ledger(d: Path, entries: list[str]) -> None:
++    (d / LEDGER_FILE).write_text(
++        json.dumps({"deferred": entries}, indent=2) + "\n", encoding="utf-8")
++
++
++def defer(d: Path, items: list[NeedsHumanItem]) -> list[str]:
++    """Record the HUMAN findings of a firing round in the ledger, deduped; return what was
++    newly added. HUMAN only: IMPL findings go to the builder via the carry-forward, and
++    the STANDING row is re-emitted every cycle so persisting it would only duplicate it."""
++    entries = ledger_entries(d)
++    seen = {_norm(e) for e in entries}
++    added: list[str] = []
++    for item in items:
++        if item.kind == HUMAN and _norm(item.text) not in seen:
++            seen.add(_norm(item.text))
++            added.append(item.text)
++    if added:
++        _write_ledger(d, entries + added)
++    return added
++
++
++def deferred_items(d: Path, existing_texts: list[str]) -> list[str]:
++    """The ledger entries not already present in ``existing_texts`` (normalized compare) —
++    what ``assemble.collect_needs_human`` appends to §6, so a finding re-raised fresh this
++    round renders once, and a finding only the ledger remembers still renders at all."""
++    seen = {_norm(t) for t in existing_texts}
++    return [e for e in ledger_entries(d) if _norm(e) not in seen]
++
++
++def _section6_rows(summary_path: Path) -> tuple[list[str], list[str]]:
++    """``(ticked, still_open)`` §6 row texts, checkbox stripped. Same lenient §6 scoping
++    as ``signoff.open_needs_human`` (a missing heading scans the whole document — finding
++    MORE rows here can only protect harder / retire on explicit ticks, both fail-safe)."""
++    from . import signoff  # local: signoff is import-light, keep module deps minimal
++    if not summary_path.exists():
++        return [], []
++    section = signoff._section(summary_path.read_text(encoding="utf-8"),
++                               signoff.NEEDS_HUMAN_HEADING, whole_on_missing=True)
++    ticked: list[str] = []
++    still_open: list[str] = []
++    for line in section.splitlines():
++        s = line.strip()
++        if s.startswith("- [x]") or s.startswith("- [X]"):
++            ticked.append(s[len("- [x]"):].strip())
++        elif s.startswith("- [ ]"):
++            still_open.append(s[len("- [ ]"):].strip())
++    return ticked, still_open
++
++
++def retire_cleared(d: Path) -> None:
++    """Drop the ledger entries the human's ticked §6 rows adjudicated — and ONLY those
++    (#335, the retirement defect the instance shipped with, fixed here by design).
++
++    Both sides are **exact-first, two-tier**, and the relation between them is the
++    contract (not either matcher alone):
++
++    * **Protection** is computed once, before the tick loop, as a ``protected`` index set
++      over the still-open rows. An open row *verbatim equal* (normalized-exact) to a
++      ledger entry protects that entry ALONE — so a still-open near-twin cannot shield its
++      exactly-ticked neighbour, and near-twin pairs still drain. An *edited* open row
++      (verbatim owner of nothing) protects EVERY entry it :func:`_same_finding`-matches —
++      even against an exact tick — because we can no longer tell which entry it is, and
++      the failure directions are asymmetric: a lingering finding is visible in §6 forever,
++      a lost one is unrecoverable.
++    * **A tick** retires its unique hit (exact hits first, else fuzzy) only if that hit is
++      not protected — "when a ticked row and an open row both claim one entry, the open
++      row wins". Ambiguity (two hits) retires nothing: fail closed.
++
++    NOT the flat symmetric-fuzzy exclusion (``any(_same_finding(entry, o) for o in
++    still_open)``): that re-creates the permanently-unclearable pair — an exactly-ticked
++    entry whose near-twin stays open retires nothing, every round, forever
++    (getwyrd/wyrd-pdca#193, commit e4fdf3b).
++
++    Best-effort: any read/write failure leaves the ledger as it was (lingering > lost).
++    """
++    entries = ledger_entries(d)
++    if not entries:
++        return
++    ticked, still_open = _section6_rows(d / "SUMMARY.md")
++    if not ticked:
++        return
++    norm_entries = [_norm(e) for e in entries]
++
++    protected: set[int] = set()
++    for o in still_open:
++        no = _norm(o)
++        exact = [i for i, ne in enumerate(norm_entries) if ne == no]
++        if exact:
++            protected.update(exact)          # verbatim owner: protects that entry alone
++        else:
++            protected.update(i for i, e in enumerate(entries) if _same_finding(e, o))
++
++    retired: set[int] = set()
++    for t in ticked:
++        nt = _norm(t)
++        exact = [i for i, ne in enumerate(norm_entries) if ne == nt]
++        hits = exact or [i for i, e in enumerate(entries) if _same_finding(e, t)]
++        if len(hits) == 1 and hits[0] not in protected:
++            retired.add(hits[0])
++    if not retired:
++        return
++    try:
++        _write_ledger(d, [e for i, e in enumerate(entries) if i not in retired])
++    except OSError:
++        pass  # lingering is visible; losing the write must not break the iterate
+ 
+ 
+ def write_decision(d: Path, items: list[NeedsHumanItem]) -> None:
+-    """Write the ``iterate-do`` decision + rationale, and spend one round of the budget.
++    """Write the ``iterate-do`` decision + rationale, defer the HUMAN findings to the
++    ledger, and spend one round of the budget.
+ 
+     Guarded: refuses to write anything for an ineligible item set, so no caller can turn
+     this into an auto-accept.
+     """
+     if not eligible(items):
+         raise ValueError("auto-iterate: refusing to decide on a non-implementation finding set")
+-    attempt = bump(d)
++    defer(d, items)  # loss-proof BEFORE the archive: the ledger survives it (#332)
++    attempt = bump(d, impl_count=sum(1 for item in items if item.kind == IMPL))
+     (d / SIGNOFF_DECISION).write_text(
+         f"{DECISION}\n{rationale(items, attempt=attempt)}\n", encoding="utf-8")
+diff --git a/template/src/pdca_harness/cli.py b/template/src/pdca_harness/cli.py
+index e62c0a0..2a15ab7 100644
+--- a/template/src/pdca_harness/cli.py
++++ b/template/src/pdca_harness/cli.py
+@@ -177,7 +177,7 @@ def main(argv: list[str] | None = None) -> int:
+     p_flow.add_argument("--by", default="", help="who signed off (recorded in §9)")
+     p_flow.add_argument("--lanes", type=int, help="unattended Do+Check worker-pool size (docs 09; overrides [driver].lanes / PDCA_LANES)")
+     p_flow.add_argument("--max-passes", type=int, help="sign-off pass budget before the driver stops driving a bundle (#260; overrides [driver].max_passes / PDCA_MAX_PASSES)")
+-    p_flow.add_argument("--auto-iterate", action="store_true", help="rebuild without stopping when every Check finding is implementation-level; a judgment finding still halts (#264; overrides [driver].auto_iterate / PDCA_AUTO_ITERATE)")
++    p_flow.add_argument("--auto-iterate", action="store_true", help="rebuild without stopping while Check finds implementation-level defects; human findings beside them are deferred to §6's ledger, a human-only set still halts (#264/#332; overrides [driver].auto_iterate / PDCA_AUTO_ITERATE)")
+     p_flow.add_argument("--no-inhibit", action="store_true", help="don't hold a suspend inhibitor for the run (also PDCA_NO_INHIBIT=1) — for CI/containers where it's unavailable or unwanted (#244)")
+ 
+     p_size = sub.add_parser("size",
+diff --git a/template/src/pdca_harness/config.py b/template/src/pdca_harness/config.py
+index 644c3b4..76aeb27 100644
+--- a/template/src/pdca_harness/config.py
++++ b/template/src/pdca_harness/config.py
+@@ -263,17 +263,26 @@ class Config:
+     # NAMED on stderr with a resume hint — never silently dropped. ``[driver].max_passes``;
+     # ``PDCA_MAX_PASSES`` overrides for one run; ``--max-passes`` overrides both.
+     max_passes: int = 20
+-    # Auto-iterate (issue #264): when every open SUMMARY §6 item is implementation-level
+-    # (a `gate` cell of the 5/5/1 — C2/C4/T1..T4), let the driver record `iterate-do` and
+-    # rebuild instead of stopping for a human. A judgment cell (C5/T5/validation), an
+-    # unverifiable gate, an external dependency, or an unmarked advisory finding still
+-    # halts. It never auto-accepts. OFF by default. ``[driver].auto_iterate``;
+-    # ``PDCA_AUTO_ITERATE`` / ``--auto-iterate`` override.
++    # Auto-iterate (issues #264, #332): when SUMMARY §6 carries at least one
++    # implementation-level item (a `gate` cell of the 5/5/1 — C2/C4/T1..T4, a tagged
++    # advisory finding, or a reviewer-tagged C5/T5 verdict), let the driver record
++    # `iterate-do` and rebuild instead of stopping for a human. A HUMAN finding beside
++    # them is deferred to the loss-proof ledger and stays in §6; a HUMAN-only set, the
++    # size backstop, or an empty §6 still halts. It never auto-accepts. OFF by default.
++    # ``[driver].auto_iterate``; ``PDCA_AUTO_ITERATE`` / ``--auto-iterate`` override.
+     auto_iterate: bool = False
+     # The per-bundle cap on those automatic rounds; on exhaustion the bundle halts at
+     # AWAITING_SIGNOFF for the human. Clamped below ``max_passes`` so a wave's pass budget
+     # can't run out mid-auto-iteration (which #260 would then report as abandoned).
+     max_auto_iters: int = 3
++    # The SOFT round budget (#332): rounds ≤ it always fire; past it and up to
++    # ``max_auto_iters`` a round fires only while the loop is converging — the open IMPL
++    # count (recorded per round in auto-iterate.json) did not increase. ``None`` (unset)
++    # ⇒ equals ``max_auto_iters``, so a rendered instance that never set it reproduces
++    # the hard-only behaviour exactly. ``[driver].soft_auto_iters``;
++    # ``PDCA_SOFT_AUTO_ITERS`` overrides for one run. Clamped into [1, max_auto_iters]
++    # at load (``autoiterate.soft_budget`` re-clamps for directly-constructed configs).
++    soft_auto_iters: int | None = None
+     # Worktree isolation (issue #94): run a cycle's Do/Check in a dedicated git worktree
+     # off the target's base, so the host's primary checkout is never mutated in place.
+     # On by default; ``[driver].worktree = false`` disables (then Do/Check edit the
+@@ -599,6 +608,18 @@ class Config:
+         if os.environ.get("PDCA_MAX_AUTO_ITERS"):
+             max_auto_iters = max(1, int(os.environ["PDCA_MAX_AUTO_ITERS"]))
+         max_auto_iters = min(max_auto_iters, max(1, max_passes - 1))
++        # The soft round budget (#332). Unset / non-numeric ⇒ None ⇒ soft == hard, the
++        # exact pre-#332 behaviour; clamped into [1, max_auto_iters] AFTER the hard
++        # budget's own clamps so the resolved pair is always coherent.
++        raw_soft = driver_cfg.get("soft_auto_iters")
++        if os.environ.get("PDCA_SOFT_AUTO_ITERS"):
++            raw_soft = os.environ["PDCA_SOFT_AUTO_ITERS"]
++        try:
++            soft_auto_iters = None if raw_soft is None else max(1, int(raw_soft))
++        except (TypeError, ValueError):
++            soft_auto_iters = None
++        if soft_auto_iters is not None:
++            soft_auto_iters = min(soft_auto_iters, max_auto_iters)
+         worktree = bool(driver_cfg.get("worktree", True))  # issue #94; on by default
+         overflow = max(0, int(driver_cfg.get("overflow", 0)))  # issue #226; 0 ⇒ heal in place
+         lane_preflight = driver_cfg.get("lane_preflight", "")  # issue #213
+@@ -689,6 +710,7 @@ class Config:
+             max_passes=max_passes,
+             auto_iterate=auto_iterate,
+             max_auto_iters=max_auto_iters,
++            soft_auto_iters=soft_auto_iters,
+             worktree=worktree,
+             overflow=overflow,
+             lane_preflight=lane_preflight,
+diff --git a/template/src/pdca_harness/driver.py b/template/src/pdca_harness/driver.py
+index 3219695..cc7763b 100644
+--- a/template/src/pdca_harness/driver.py
++++ b/template/src/pdca_harness/driver.py
+@@ -16,8 +16,8 @@ import shutil
+ import sys
+ from pathlib import Path
+ 
+-from . import (assemble, brief, dependency_halt, gates, leaves, plan_policy, signoff,
+-               size_signal, state)
++from . import (assemble, autoiterate, brief, dependency_halt, gates, leaves, plan_policy,
++               signoff, size_signal, state)
+ from .config import Config
+ 
+ 
+@@ -119,11 +119,13 @@ def advance(d: Path, cfg: Config) -> None:
+     elif s == state.ITERATE_DO:
+         n = _next_iteration_no(d)
+         _say(f"→ {d.name}: iterate-to-Do — archiving the attempt to iteration-v{n}/, rebuilding…")
++        _retire_deferred(d)  # ticked §6 rows retire their deferred-ledger entries (#332)
+         _carry_forward_into_brief(d, n)  # fold prior insight into the surviving brief
+         _archive_iteration(d, n, include_brief=False)  # rebuild against the annotated brief
+     elif s == state.ITERATE_PLAN:
+         n = _next_iteration_no(d)
+         _say(f"→ {d.name}: iterate-to-Plan — archiving the attempt to iteration-v{n}/, re-planning…")
++        _retire_deferred(d)  # same adjudication read as iterate-do (#332)
+         _carry_forward_into_brief(d, n)  # appended to the brief, archived with it
+         _archive_iteration(d, n, include_brief=True)  # brief archived too → UNPLANNED
+     # UNPLANNED / AWAITING_SIGNOFF / COMPLETE / DISCONTINUED: nothing for the driver to do.
+@@ -265,6 +267,21 @@ def _next_iteration_no(d: Path) -> int:
+     return len(list(d.glob("iteration-v*"))) + 1
+ 
+ 
++def _retire_deferred(d: Path) -> None:
++    """Retire the deferred-ledger entries the human's ticked §6 rows adjudicated (#332).
++
++    Run at the iterate transitions — the one moment a human-reviewed SUMMARY is still at
++    the top level with its ticks readable, before the archive moves it. An auto-iterate
++    round never ticks a box, so it retires nothing here by construction. Best-effort like
++    the carry-forward: the ledger fails toward LINGERING (visible in §6), and a read/write
++    hiccup must never break the transition.
++    """
++    try:
++        autoiterate.retire_cleared(d)
++    except Exception:  # noqa: BLE001 — retirement is advisory; never break the iterate
++        pass
++
++
+ # ----------------------------------------------------------------------------
+ # Iterate carry-forward — persist the WHY into the one input the next beat reads.
+ # ----------------------------------------------------------------------------
+diff --git a/template/src/pdca_harness/flow.py b/template/src/pdca_harness/flow.py
+index 7a8a01d..15bdf66 100644
+--- a/template/src/pdca_harness/flow.py
++++ b/template/src/pdca_harness/flow.py
+@@ -221,12 +221,16 @@ def _signoff_and_apply(
+ def _maybe_auto_iterate(
+     cfg: Config, d: Path, *, by: str, today: str, apply_now: bool
+ ) -> bool:
+-    """Rebuild without asking, when Check found only implementation defects (issue #264).
++    """Rebuild without asking, when Check found implementation defects (issue #264, #332).
+ 
+     Returns True iff the bundle was routed to ITERATE_DO. Every other outcome — auto-iterate
+-    off, the bundle not halted at AWAITING_SIGNOFF, an empty §6, any HUMAN-kind finding, or
+-    the per-bundle budget spent — returns False and leaves the bundle exactly where it was,
+-    for the human.
++    off, the bundle not halted at AWAITING_SIGNOFF, an empty §6, a HUMAN-only finding set,
++    the size backstop, or the round budget (hard, or soft with a rising IMPL count) spent —
++    returns False and leaves the bundle exactly where it was, for the human.
++
++    Since #332 a HUMAN finding *beside* IMPL findings no longer vetoes the rebuild: it is
++    deferred to the loss-proof ledger (``autoiterate.LEDGER_FILE``) and re-enters §6 every
++    assemble, so it still reaches the human at handover under the C6 guard.
+ 
+     Deliberately routed through the existing ``_apply_decision`` rather than calling
+     ``signoff.record`` directly: §9 then stays authored solely by ``signoff.record``, and the
+@@ -263,14 +267,21 @@ def _maybe_auto_iterate(
+                       file=sys.stderr)
+                 break
+         return False
+-    spent = autoiterate.count(d)
+-    if spent >= cfg.max_auto_iters:
+-        print(f"flow: {d.name} — auto-iterate budget spent ({spent}/{cfg.max_auto_iters}); "
+-              f"handing the implementation findings to the human", file=sys.stderr)
++    impl_now = sum(1 for item in items if item.kind == assemble.IMPL)
++    # The soft/hard round gating (#332): hard cap first, then — inside the soft window —
++    # only while the open IMPL count is not rising. One verdict function so the flow and
++    # the tests read the same rule.
++    reason = autoiterate.budget_verdict(d, cfg, impl_count=impl_now)
++    if reason:
++        print(f"flow: {d.name} — {reason}", file=sys.stderr)
+         return False
++    spent = autoiterate.count(d)
++    deferred = sum(1 for item in items if item.kind == assemble.HUMAN)
+     autoiterate.write_decision(d, items)
+     print(f"flow: {d.name} — auto-iterate {spent + 1}/{cfg.max_auto_iters}: "
+-          f"{len(items)} implementation-level finding(s), no human judgment needed",
++          f"{impl_now} implementation-level finding(s)"
++          + (f"; {deferred} human finding(s) deferred to §6's ledger" if deferred else
++             ", no human judgment needed"),
+           file=sys.stderr)
+     return _apply_decision(cfg, d, by="auto-iterate", today=today,
+                            apply_now=apply_now) == "iterate-do"
+@@ -654,8 +665,8 @@ def _drive_wave(cfg: Config, wave: list[Path], *, by: str, today: str,
+     for _ in range(max_passes):
+         before = [state.state(d) for d in wave]
+         _build_all(cfg, wave)
+-        # Before the human sees the queue, take the bundles whose findings are purely
+-        # implementation-level off it (#264): they become ITERATE_DO, drop out of
++        # Before the human sees the queue, take the bundles with implementation-level
++        # findings off it (#264/#332): they become ITERATE_DO, drop out of
+         # `awaiting_signoff`, and the next pass's build-all rebuilds them — exactly as a
+         # deferred human `iterate-do` would. Isolated: an auto-iterate that raises must not
+         # kill the sweep.
+diff --git a/template/src/pdca_harness/leaves.py b/template/src/pdca_harness/leaves.py
+index 2be2cf6..a02d2af 100644
+--- a/template/src/pdca_harness/leaves.py
++++ b/template/src/pdca_harness/leaves.py
+@@ -1424,13 +1424,21 @@ _REVIEW_PROMPT = (
+     "5/5/1 matrix, in order:\n"
+     + "\n".join(f"  {elem} — {label}" for elem, label, _kind, _oracle in gates.canonical_elements())
+     + "\nFormat it as a Markdown table `| Item | Verdict | Basis |`, the Item column "
+-    "carrying the element label above, the Verdict one of PASS / FAIL / NEEDS-HUMAN / "
++    "carrying the element label above EXACTLY (a leading `<element-id> — ` prefix and "
++    "ASCII `--` for `—` are tolerated; anything else added to the Item cell turns the "
++    "row into a distinct finding), the Verdict one of PASS / FAIL / NEEDS-HUMAN / "
+     "N/A, the Basis a one-line reason you re-derived yourself (cite path:line where "
+     "you can) — state the DECISION OWED (the context + impact the verdict turns on, "
+     "what the human must decide and why), not a restatement of the implementation, "
+     "especially for NEEDS-HUMAN rows. Emit NEEDS-HUMAN for the always-human items (validation "
+     "fitness-to-purpose, contested root-cause, ambiguous scope) — each NEEDS-HUMAN "
+-    "row becomes a §6 item the human must clear. Do not omit a row; use N/A with a "
++    "row becomes a §6 item the human must clear. When a NEEDS-HUMAN verdict on C5 "
++    "(causal adequacy) or T5 (judgment) describes an IMPLEMENTATION defect the builder "
++    "can fix by iterating — a logic slip, a missed case, a weak test — write the Verdict "
++    "as `NEEDS-HUMAN [impl]` so the driver routes it back to Do; keep the plain "
++    "NEEDS-HUMAN for a genuine architectural / scope / fitness call (the tag is honoured "
++    "ONLY on C5/T5, never on C1/C3 or the Validation row, and an untagged verdict always "
++    "goes to the human). Do not omit a row; use N/A with a "
+     "reason when an element does not apply. For a visual / manual-repro NEEDS-HUMAN row, "
+     "verify what you can yourself — where feasible, exercise the change with the patch "
+     "applied at $PDCA_TARGET (run the relevant test, or start/drive the app if the runner "
+@@ -2015,13 +2023,15 @@ def _advisory_prompt(spec: dict, leaf_id: str, rubric: str = "") -> str:
+         "cited path:line on the target source at $PDCA_TARGET, never other checkouts. "
+         f"Write check-advisory-{leaf_id}.md: a short list of findings, each a Markdown "
+         "bullet with a path:line. For any finding a human must adjudicate, prefix the "
+-        "bullet '- NEEDS-HUMAN — ' (it becomes a SUMMARY §6 item). If the finding is an "
+-        "IMPLEMENTATION defect the builder can fix by iterating — a logic bug, a missed "
+-        "case, a weak or incorrect test, a conformance nit — prefix it "
+-        "'- NEEDS-HUMAN [impl] — ' instead, so the driver can route it straight back to Do "
+-        "without spending the human's attention (issue #264). Keep the plain "
+-        "'- NEEDS-HUMAN — ' form for anything needing a human ARCHITECTURAL / scope / "
+-        "fitness-to-purpose decision; when in doubt, OMIT '[impl]'. You are ADVISORY — you "
++        "bullet '- NEEDS-HUMAN — ' (it becomes a SUMMARY §6 item), and TAG EVERY such "
++        "finding (issue #332): '- NEEDS-HUMAN [impl] — ' when it is an IMPLEMENTATION "
++        "defect the builder can fix by iterating — a logic bug, a missed case, a weak or "
++        "incorrect test, a conformance nit — so the driver routes it straight back to Do "
++        "without spending the human's attention (issue #264); '- NEEDS-HUMAN [human] — ' "
++        "when it needs a human ARCHITECTURAL / scope / fitness-to-purpose decision. An "
++        "untagged finding is treated as [human] (the fail-safe: it always reaches the "
++        "human, never a rebuild) — but tag deliberately rather than leaning on that. "
++        "You are ADVISORY — you "
+         "never gate; the human decides at sign-off. If you find nothing, say so explicitly."
+     ) + rubric
+ 
+diff --git a/template/src/pdca_harness/size_signal.py b/template/src/pdca_harness/size_signal.py
+index bf79f0b..38117f2 100644
+--- a/template/src/pdca_harness/size_signal.py
++++ b/template/src/pdca_harness/size_signal.py
+@@ -38,11 +38,14 @@ item** and the human decides — the same disposition #321 reached, on better ev
+ 
+ ## The tag is the mechanism, and getting it wrong inverts the feature
+ 
+-The item is **HUMAN**, never IMPL. ``autoiterate.eligible()`` requires every item to be
+-IMPL or STANDING, so a HUMAN item **disqualifies auto-iterate** — which is precisely what
+-should happen to a bundle that is behaving oversized. Tagged IMPL it would instead *count
+-as a reason to rebuild*, turning the backstop into an accelerator for the failure it exists
+-to stop: more rounds burned re-implementing a slice that needs splitting.
++The item is **HUMAN**, never IMPL — and it is the ONE HUMAN item
++``autoiterate.eligible()`` still refuses to defer (#332): an ordinary HUMAN finding now
++rides the deferral ledger while the rebuild proceeds, but this item is *evidence that
++further rebuilds are the wrong move*, so it **disqualifies auto-iterate** outright —
++which is precisely what should happen to a bundle that is behaving oversized. Tagged IMPL
++it would instead *count as a reason to rebuild*, turning the backstop into an accelerator
++for the failure it exists to stop: more rounds burned re-implementing a slice that needs
++splitting.
+ 
+ ## It recommends iterate-plan, not iterate-do
+ 
+diff --git a/template/src/pdca_harness/state.py b/template/src/pdca_harness/state.py
+index b9b547b..2c9036c 100644
+--- a/template/src/pdca_harness/state.py
++++ b/template/src/pdca_harness/state.py
+@@ -96,16 +96,21 @@ DOWNSTREAM_GLOBS = ("check-advisory-*.md", "*.error.log")
+ # and "what proves a cycle ran" deliberately differ, so it is deliberately NOT read by
+ # `_archive_iteration`.
+ #
+-# Both files accumulate ACROSS rebuilds by design, and archiving either breaks the
++# These files accumulate ACROSS rebuilds by design, and archiving any of them breaks the
+ # feature that depends on the accumulation:
+-#   auto-iterate.json   — the round budget; archive it and the count resets every
+-#                         iterate, so auto-iterate never terminates.
+-#   loop-telemetry.json — `leaves._record_loop_attempt`: "The file persists across
+-#                         iterations (it is not archived), so it accumulates."
+-# Yet a bundle cannot hold either without having run a cycle, so both are unambiguous
++#   auto-iterate.json    — the round budget (+ per-round IMPL counts, #332); archive it
++#                          and the count resets every iterate, so auto-iterate never
++#                          terminates.
++#   deferred-human.json  — the auto-iterate deferral ledger (#332): HUMAN findings a
++#                          fired round put aside instead of halting. Archive it and the
++#                          deferral becomes a LOSS — the finding never re-enters §6, so
++#                          it never reaches the human at handover.
++#   loop-telemetry.json  — `leaves._record_loop_attempt`: "The file persists across
++#                          iterations (it is not archived), so it accumulates."
++# Yet a bundle cannot hold any of them without having run a cycle, so all are unambiguous
+ # evidence. Adding them to DOWNSTREAM_OF_BRIEF instead would fix the misclassification
+-# below and break termination, which is the worse bug.
+-CYCLE_EVIDENCE_ONLY = ("auto-iterate.json", "loop-telemetry.json")
++# below and break termination / the loss-proof deferral, which are the worse bugs.
++CYCLE_EVIDENCE_ONLY = ("auto-iterate.json", "deferred-human.json", "loop-telemetry.json")
+ 
+ # §9 outcome token → bundle state. state owns the state names, so the mapping
+ # lives here; signoff knows only the tokens (no import cycle).
+diff --git a/template/tests/test_autoiterate.py b/template/tests/test_autoiterate.py
+index bad104f..37f98ac 100644
+--- a/template/tests/test_autoiterate.py
++++ b/template/tests/test_autoiterate.py
+@@ -1,19 +1,25 @@
+-"""Auto-iterate on implementation-only Check findings (issue #264, stdlib unittest).
+-
+-The driver may rebuild a bundle unattended when EVERY open SUMMARY §6 item is an
+-implementation defect — a `gate` cell of the 5/5/1 (C2/C4/T1..T4), or an advisory finding
+-the leaf tagged `[impl]`. Anything architectural (a `judgment` cell C5/T5/V, an `input` cell
+-C1/C3), a gate that could not run, an external dependency, an unmarked advisory bullet, or a
+-row it cannot classify still halts for the human.
++"""Auto-iterate on implementation Check findings (issues #264, #332; stdlib unittest).
++
++The driver may rebuild a bundle unattended when SUMMARY §6 carries at least one
++implementation defect — a `gate` cell of the 5/5/1 (C2/C4/T1..T4), an advisory finding the
++leaf tagged `[impl]`, or (since #332) a C5/T5 judgment verdict the REVIEWER tagged
++`NEEDS-HUMAN [impl]`. A HUMAN finding beside the implementation ones no longer vetoes the
++rebuild: it is DEFERRED to a loss-proof ledger (`deferred-human.json`) that survives the
++iteration archive and re-enters §6 on every assemble, so it still reaches the human at
++handover under the C6 guard. What still halts: an empty §6 (never auto-accept), a
++HUMAN-only set (nothing for a rebuild to fix), the size backstop, and the round budget —
++hard (`max_auto_iters`), plus a soft window (`soft_auto_iters`) whose extra rounds fire
++only while the recorded per-round IMPL count is not rising.
+ 
+ Load-bearing negatives, each its own test: it must never auto-accept, never tick a §6 box,
+-never iterate past a judgment finding, and never run past its budget. Offline: stub leaves,
+-real gate commands, no Claude.
++never lose a deferred finding (the #335 retirement fold), and never run past its budget.
++Offline: stub leaves, real gate commands, no Claude.
+ """
+ 
+ from __future__ import annotations
+ 
+ import io
++import json
+ import os
+ import shutil
+ import tempfile
+@@ -32,6 +38,14 @@ _UNVERIFIABLE = {**_GATE, "cmd": "echo 'PDCA-UNVERIFIABLE: no prod file'; exit 0
+ 
+ _CLEAN_REVIEW = "All advisory items PASS.\n"
+ 
++# The #332 production shape: a builder-fixable finding BESIDE a real judgment concern.
++# Pre-#332 the C5 row vetoed the rebuild outright; now it defers to the ledger.
++_MIXED_REVIEW = ("# Review\n\n| Item | Verdict | Basis |\n|---|---|---|\n"
++                 "| C4 Verification (red→green) | NEEDS-HUMAN | off-by-one |\n"
++                 "| C5 Causal adequacy | NEEDS-HUMAN | guards the symptom, not the cause |\n"
++                 "| Validation — fitness-to-purpose | NEEDS-HUMAN | fitness is the human's call |\n")
++_MIXED_C5_TEXT = "C5 Causal adequacy — guards the symptom, not the cause"
++
+ 
+ # The reviewer's prompt (agents/reviewer.md.jinja) hard-codes this row to NEEDS-HUMAN on EVERY
+ # cycle — validation is the human's call by definition. So EVERY real `check-review.md` carries
+@@ -178,17 +192,21 @@ class TheStandingValidationRow(_Base):
+         self.assertFalse(self._try(d))
+         self._assert_halted(d)
+ 
+-    def test_a_situational_judgment_concern_beside_it_still_halts(self) -> None:
+-        # The distinction that makes this safe: C5/T5 are judgment cells too, but the reviewer
+-        # raises them only on a REAL concern — so they carry signal and must still stop the
+-        # bundle, standing row or not.
++    def test_a_situational_judgment_concern_beside_impl_defers_not_halts(self) -> None:
++        # #332: C5/T5 carry signal, so they are never ARCHIVED-AND-FORGOTTEN — but beside a
++        # builder-fixable finding they no longer veto the rebuild either. The concern is
++        # deferred to the ledger (asserted here) and re-enters §6 every assemble, so the
++        # human still adjudicates it at handover (DeferredFindings covers the round trip).
+         review = ("# Review\n\n| Item | Verdict | Basis |\n|---|---|---|\n"
+                   "| C4 Verification (red→green) | NEEDS-HUMAN | off-by-one |\n"
+                   "| C5 Causal adequacy | NEEDS-HUMAN | guards the symptom, not the cause |\n"
+                   f"{_STANDING_ROW}\n")
+         d = self._bundle("SV3", review=review)
+-        self.assertFalse(self._try(d), "a real judgment concern must still halt")
+-        self._assert_halted(d)
++        self.assertTrue(self._try(d), "an IMPL finding beside a judgment concern rebuilds")
++        self.assertEqual(
++            autoiterate.ledger_entries(d),
++            ["C5 Causal adequacy — guards the symptom, not the cause"],
++            "the judgment concern is deferred — never dropped, never carried to the builder")
+ 
+     def test_an_advisory_fitness_objection_is_never_standing(self) -> None:
+         """PR #294 review (codex). STANDING is the PRIMARY review's privilege, and nothing
+@@ -207,8 +225,15 @@ class TheStandingValidationRow(_Base):
+                     "design\n")
+         d = self._bundle("SV5", review=_review_table("C4 Verification (red→green)"),
+                          advisory=advisory)
+-        self.assertFalse(self._try(d), "a real fitness objection must halt, not be archived")
+-        self._assert_halted(d)
++        # #332: beside an IMPL finding the objection defers rather than halting — but its
++        # presence in the LEDGER is exactly the proof it was classified HUMAN, not STANDING
++        # (a STANDING item is never deferred): it re-enters §6 every round, so it reaches
++        # the human instead of being archived away, which is the #294 property.
++        self.assertTrue(self._try(d))
++        self.assertIn("Validation — fitness-to-purpose: this patches the wrong layer; the "
++                      "success criterion cannot be met by this design",
++                      autoiterate.ledger_entries(d),
++                      "a real fitness objection must be deferred to the human, never archived")
+ 
+     def test_a_legacy_validation_bullet_in_the_review_is_never_standing(self) -> None:
+         """PR #294 review (codex), second pass. Scoping STANDING to the primary ARTIFACT was
+@@ -225,8 +250,13 @@ class TheStandingValidationRow(_Base):
+                   f"{_STANDING_ROW}\n"
+                   "- NEEDS-HUMAN — Validation — fitness-to-purpose: patches the wrong layer\n")
+         d = self._bundle("SV6", review=review)
+-        self.assertFalse(self._try(d), "a legacy fitness bullet is a finding — it must halt")
+-        self._assert_halted(d)
++        # #332: it defers beside the IMPL row — and landing in the LEDGER is the proof it
++        # was a finding (HUMAN), not the constant (STANDING is never deferred). It re-enters
++        # §6 every assemble, so the human still sees it at handover.
++        self.assertTrue(self._try(d))
++        self.assertIn("Validation — fitness-to-purpose: patches the wrong layer",
++                      autoiterate.ledger_entries(d),
++                      "a legacy fitness bullet is a finding — deferred, never archived away")
+ 
+     def test_a_second_table_never_earns_the_standing_exemption(self) -> None:
+         """PR #294 review (codex), third pass. Keying on "came from a table" was STILL too wide.
+@@ -245,8 +275,11 @@ class TheStandingValidationRow(_Base):
+                   "| Validation — fitness-to-purpose: patches the wrong layer | NEEDS-HUMAN "
+                   "| the criterion cannot be met by this design |\n")
+         d = self._bundle("SV7", review=review)
+-        self.assertFalse(self._try(d), "a concerns-table objection must halt, not be archived")
+-        self._assert_halted(d)
++        self.assertTrue(self._try(d))     # #332: defers beside the IMPL row
++        self.assertIn("Validation — fitness-to-purpose: patches the wrong layer — the "
++                      "criterion cannot be met by this design",
++                      autoiterate.ledger_entries(d),
++                      "a concerns-table objection is a finding — deferred, never archived away")
+ 
+     def test_a_concerns_table_with_the_EXACT_label_still_halts(self) -> None:
+         """PR #294, local codex pass. The fourth scoping of the same rule, and the one that
+@@ -269,21 +302,30 @@ class TheStandingValidationRow(_Base):
+                   "\n## Concerns\n\n| Item | Verdict | Basis |\n|---|---|---|\n"
+                   "| Validation — fitness-to-purpose | NEEDS-HUMAN | patches the wrong layer |\n")
+         d = self._bundle("SV9", review=review)
+-        self.assertFalse(self._try(d), "an exact-label concerns row is still a real objection")
+-        self._assert_halted(d)
++        # #332: the concerns row is HUMAN (not the constant), so it defers — proof: it is
++        # in the ledger, which STANDING never enters, and re-enters §6 for the human.
++        self.assertTrue(self._try(d))
++        self.assertIn("Validation — fitness-to-purpose — patches the wrong layer",
++                      autoiterate.ledger_entries(d),
++                      "an exact-label concerns row is still a real objection — deferred")
+ 
+     def test_two_standing_candidates_fail_closed(self) -> None:
+         # The template row is a CONSTANT — it occurs once. If two survive (a duplicated row, a
+         # second verdict-shaped table), at least one is not the constant and we cannot tell
+         # which. Grant STANDING to neither and halt, rather than risk archiving a real objection.
+         review = ("# Review\n\n| Item | Verdict | Basis |\n|---|---|---|\n"
+-                  "| C4 Verification (red→green) | NEEDS-HUMAN | [impl] off-by-one |\n"
+                   "| C5 Causal adequacy | PASS | ok |\n"
+                   f"{_STANDING_ROW}\n"
+                   "| Validation — fitness-to-purpose | NEEDS-HUMAN | and again, differently |\n")
+         d = self._bundle("SV10", review=review)
++        # Fail closed = STANDING granted to neither ⇒ both are ordinary HUMAN findings.
++        # With nothing IMPL beside them the bundle halts outright (#332's HUMAN-only rule);
++        # beside an IMPL finding they would defer to the ledger — reaching the human either
++        # way, never archived as the constant.
+         self.assertFalse(self._try(d), "ambiguous standing rows must fail closed")
+         self._assert_halted(d)
++        kinds = {i.kind for i in assemble.collect_needs_human(d, self.cfg)}
++        self.assertNotIn(assemble.STANDING, kinds)
+ 
+     def test_the_standing_row_is_never_carried_forward_to_the_builder(self) -> None:
+         """PR #294 review (codex). STANDING rides along in `items` so it cannot veto the rebuild
+@@ -326,30 +368,38 @@ class HaltsForTheHuman(_Base):
+                 self.assertFalse(self._try(d))
+                 self._assert_halted(d)
+ 
+-    def test_one_judgment_item_disqualifies_the_whole_bundle(self) -> None:
++    def test_a_judgment_item_beside_impl_now_defers_instead_of_vetoing(self) -> None:
++        # The #332 inversion of the old rule: one HUMAN finding no longer disqualifies the
++        # whole bundle — it rides the ledger while the rebuild addresses the IMPL finding.
++        # The two carry-forward channels stay distinct (asserted in DeferredFindings):
++        # IMPL → builder via the brief; deferred HUMAN → human via ledger + §6.
+         review = ("# Review\n\n| Item | Verdict | Basis |\n|---|---|---|\n"
+                   "| C4 Verification (red→green) | NEEDS-HUMAN | off-by-one |\n"
+                   "| C5 Causal adequacy | NEEDS-HUMAN | guards the symptom |\n")
+         d = self._bundle("MIXED", review=review)
+-        self.assertFalse(self._try(d))
+-        self._assert_halted(d)
++        self.assertTrue(self._try(d))
++        self.assertEqual(autoiterate.ledger_entries(d),
++                         ["C5 Causal adequacy — guards the symptom"])
+ 
+     def test_unverifiable_gate_halts(self) -> None:
+         # A gate that COULD NOT RUN is a gate-kind element, but rebuilding can't fix a
+-        # missing mechanic — it would spin. Forced HUMAN.
++        # missing mechanic — it would spin. Forced HUMAN (never promotable, #332) — and
++        # with nothing IMPL beside it, HUMAN-only halts.
+         d = self._bundle("UNVER", gate=_UNVERIFIABLE)
+         self.assertFalse(self._try(d))
+         self._assert_halted(d)
+ 
+     def test_declared_external_dependency_halts(self) -> None:
+-        d = self._bundle("EXTDEP", gate=_FAIL,
++        # HUMAN-only: the declared dependency is the sole §6 item (never IMPL, never
++        # promotable — a rebuild cannot install protoc), so the bundle halts outright.
++        d = self._bundle("EXTDEP",
+                          build_notes="NEEDS-HUMAN external dependency: protoc — cannot compile\n")
+         self.assertFalse(self._try(d))
+         self._assert_halted(d)
+ 
+     def test_unregistered_dependency_halts(self) -> None:
+         self.cfg.doctor_checks = []
+-        d = self._bundle("UNREG", gate=_FAIL,
++        d = self._bundle("UNREG",
+                          brief_body="- **Slug:** ai\n- **External dependencies:** `protoc` (build)\n")
+         self.assertFalse(self._try(d))
+         self._assert_halted(d)
+@@ -375,7 +425,9 @@ class HaltsForTheHuman(_Base):
+         self.assertNotEqual(signoff.outcome_token(d / "SUMMARY.md"), "merged-wider")
+ 
+     def test_missing_review_halts(self) -> None:
+-        d = self._bundle("NOREV", gate=_FAIL)
++        # The missing-review placeholder is HUMAN, and with nothing IMPL beside it the
++        # HUMAN-only rule halts the bundle until a real review exists.
++        d = self._bundle("NOREV")
+         (d / "check-review.md").unlink()
+         assemble.assemble_summary(d, self.cfg)
+         self.assertFalse(self._try(d))
+@@ -609,11 +661,25 @@ class DecisionModule(unittest.TestCase):
+     def _items(self, *kinds: str) -> list[assemble.NeedsHumanItem]:
+         return [assemble.NeedsHumanItem(f"finding {i}", k) for i, k in enumerate(kinds)]
+ 
+-    def test_eligible_only_when_nonempty_and_all_impl(self) -> None:
++    def test_eligible_needs_at_least_one_impl(self) -> None:
++        # #332: "≥1 IMPL" — a HUMAN finding beside IMPL no longer vetoes (it defers).
+         self.assertTrue(autoiterate.eligible(self._items(assemble.IMPL, assemble.IMPL)))
++        self.assertTrue(autoiterate.eligible(self._items(assemble.IMPL, assemble.HUMAN)))
+         self.assertFalse(autoiterate.eligible([]))                                 # never accept
+-        self.assertFalse(autoiterate.eligible(self._items(assemble.IMPL, assemble.HUMAN)))
+-        self.assertFalse(autoiterate.eligible(self._items(assemble.HUMAN)))
++        self.assertFalse(autoiterate.eligible(self._items(assemble.HUMAN)))        # nothing to fix
++        self.assertFalse(autoiterate.eligible(self._items(assemble.STANDING)))     # the constant
++        self.assertFalse(autoiterate.eligible(self._items(assemble.HUMAN, assemble.STANDING)))
++
++    def test_the_size_backstop_is_the_one_human_item_never_deferred(self) -> None:
++        # #324's invariant survives the #332 deferral: the size item is evidence that
++        # further rebuilds are the wrong move, so it stops the loop rather than riding
++        # the ledger. (test_size_signal.py asserts the same from the backstop's side.)
++        from pdca_harness import size_signal
++        size_item = assemble.NeedsHumanItem(
++            size_signal.needs_human_text(["patch is 253 KB (threshold 100 KB)"]),
++            assemble.HUMAN)
++        self.assertFalse(autoiterate.eligible(
++            self._items(assemble.IMPL) + [size_item]))
+ 
+     def test_write_decision_only_ever_writes_iterate_do(self) -> None:
+         autoiterate.write_decision(self.tmp, self._items(assemble.IMPL))
+@@ -639,6 +705,22 @@ class DecisionModule(unittest.TestCase):
+         self.assertIn("finding 0", r)
+         self.assertIn("finding 1", r)
+ 
++    def test_rationale_states_the_deferral_but_never_the_deferred_texts(self) -> None:
++        # Criterion (3): what was addressed and what was deferred — but the rationale is
++        # the line the driver folds into the BUILDER's carry-forward, so a deferred
++        # judgment call must never appear in it as though it were a defect to fix (the
++        # #294 property). The count states the deferral; the ledger + §6 carry the texts
++        # to the HUMAN.
++        items = [assemble.NeedsHumanItem("off-by-one at x.py:3", assemble.IMPL),
++                 assemble.NeedsHumanItem("guards the symptom, not the cause", assemble.HUMAN),
++                 assemble.NeedsHumanItem("Validation — fitness-to-purpose", assemble.STANDING)]
++        r = autoiterate.rationale(items, attempt=1)
++        self.assertNotIn("\n", r)
++        self.assertIn("off-by-one at x.py:3", r)                    # addressed, named
++        self.assertIn("Deferred 1 human finding(s)", r)             # deferred, counted
++        self.assertNotIn("guards the symptom", r)                   # …but never the text
++        self.assertNotIn("Validation — fitness-to-purpose", r)      # STANDING never rides
++
+ 
+ class Classification(unittest.TestCase):
+     """The impl/human split is taken from the canonical 5/5/1, not re-invented."""
+@@ -670,7 +752,7 @@ class Classification(unittest.TestCase):
+             table = ("| Item | Verdict | Basis |\n|---|---|---|\n"
+                      "| C1 Spec | PASS | ok |\n"
+                      f"| {label} | NEEDS-HUMAN | some basis |\n")
+-            [(text, standing)] = assemble._needs_human(table)
++            [(text, standing, _tag)] = assemble._needs_human(table)
+             got = assemble._classify_finding(text, standing=standing).kind
+             want = assemble.STANDING if elem == "V" else assemble.HUMAN
+             self.assertEqual(got, want, f"{elem} ({label})")
+@@ -687,13 +769,13 @@ class Classification(unittest.TestCase):
+         bullet = TBL + "- NEEDS-HUMAN — Validation — fitness-to-purpose: patches the wrong layer\n"
+         lone = "| Validation — fitness-to-purpose | NEEDS-HUMAN | the human's call |\n"
+ 
+-        [(_t, standing)] = assemble._needs_human(canonical)
++        [(_t, standing, _tag)] = assemble._needs_human(canonical)
+         self.assertTrue(standing, "the canonical row of the MANDATED table IS the constant")
+-        [(_t, standing)] = assemble._needs_human(objection)
++        [(_t, standing, _tag)] = assemble._needs_human(objection)
+         self.assertFalse(standing, "a longer Item cell is a real objection, not the template")
+-        [(_t, standing)] = assemble._needs_human(bullet)
++        [(_t, standing, _tag)] = assemble._needs_human(bullet)
+         self.assertFalse(standing, "free prose is never the template row")
+-        [(_t, standing)] = assemble._needs_human(lone)
++        [(_t, standing, _tag)] = assemble._needs_human(lone)
+         self.assertFalse(standing, "a lone row in a stray table cannot nominate itself")
+ 
+     def test_the_classifier_never_re_derives_standing_from_the_text(self) -> None:
+@@ -719,6 +801,415 @@ class Classification(unittest.TestCase):
+         self.assertEqual(assemble._failed_gating_items(rows)[0].kind, assemble.HUMAN)
+ 
+ 
++class VRowForms(_Base):
++    """Criterion (4) of #332: the STANDING match accepts the three observed production
++    forms of the Validation Item cell — normalize (an optional leading `<element-id> — `
++    prefix; ASCII `--` for `—`), then compare EXACT. #294's rule stands: anything ELSE
++    added to the cell makes it a real objection, never the constant."""
++
++    FORMS = ("Validation — fitness-to-purpose",
++             "V — Validation — fitness-to-purpose",
++             "Validation -- fitness-to-purpose")
++
++    def test_each_production_form_is_standing_in_the_mandated_table(self) -> None:
++        for form in self.FORMS:
++            with self.subTest(form=form):
++                table = ("| Item | Verdict | Basis |\n|---|---|---|\n"
++                         "| C1 Spec | PASS | ok |\n"
++                         f"| {form} | NEEDS-HUMAN | the human's call |\n")
++                [(text, standing, _tag)] = assemble._needs_human(table)
++                self.assertTrue(standing, form)
++                self.assertEqual(assemble._classify_finding(text, standing=standing).kind,
++                                 assemble.STANDING)
++
++    def test_a_fully_prefixed_table_is_still_the_mandated_table(self) -> None:
++        # The review prompt lists the matrix as "<id> — <label>", and a real reviewer
++        # copies that whole form into the Item column — every cell carries the prefix,
++        # so the ≥2-canonical-cells table detection must normalize too, or the V row of
++        # a prefixed table could never be STANDING.
++        table = ("| Item | Verdict | Basis |\n|---|---|---|\n"
++                 "| C1 — C1 Spec | PASS | ok |\n"
++                 "| C4 — C4 Verification (red→green) | PASS | ok |\n"
++                 "| V — Validation — fitness-to-purpose | NEEDS-HUMAN | the human's call |\n")
++        [(_text, standing, _tag)] = assemble._needs_human(table)
++        self.assertTrue(standing)
++
++    def test_comparison_is_exact_after_normalization_never_prefix_matching(self) -> None:
++        for cell in ("Validation — fitness-to-purpose: patches the wrong layer",
++                     "V — Validation — fitness-to-purpose: patches the wrong layer",
++                     "Re Validation — fitness-to-purpose"):
++            with self.subTest(cell=cell):
++                table = ("| Item | Verdict | Basis |\n|---|---|---|\n"
++                         "| C1 Spec | PASS | ok |\n"
++                         f"| {cell} | NEEDS-HUMAN | x |\n")
++                [(_t, standing, _tag)] = assemble._needs_human(table)
++                self.assertFalse(standing, cell)
++
++    def test_no_production_form_is_ever_deferred_to_the_ledger(self) -> None:
++        # End to end, and why (4) matters MORE under (3): mis-reading the constant as an
++        # ordinary HUMAN finding no longer halts the bundle — it would DEFER the template
++        # row into the ledger, where it lingers as a §6 item forever. STANDING is exactly
++        # what keeps it out.
++        for i, form in enumerate(self.FORMS):
++            with self.subTest(form=form):
++                review = ("# Review\n\n| Item | Verdict | Basis |\n|---|---|---|\n"
++                          "| C4 Verification (red→green) | NEEDS-HUMAN | off-by-one |\n"
++                          f"| {form} | NEEDS-HUMAN | fitness is the human's call |\n")
++                d = self._bundle(f"VF{i}", review=review)
++                self.assertTrue(self._try(d))
++                self.assertEqual(autoiterate.ledger_entries(d), [])
++
++
++class ImplTagPromotion(_Base):
++    """Criterion (2) of #332: builder-fixability STATED by the reviewer — a
++    `NEEDS-HUMAN [impl]` VERDICT on a judgment cell — instead of inferred from the
++    taxonomy cell. Promotable = judgment-kind minus V; STANDING wins over the tag;
++    untagged stays HUMAN (the fail-safe is unchanged)."""
++
++    def test_promotable_set_is_judgment_minus_v_from_the_canonical_matrix(self) -> None:
++        expected = ({e for e, _l, k, _o in gates.canonical_elements() if k == "judgment"}
++                    - {"V"})
++        self.assertEqual(assemble._PROMOTABLE_ELEMENTS, expected)
++        self.assertEqual(expected, {"C5", "T5"})
++
++    def test_c5_and_t5_tagged_verdicts_promote_and_fire(self) -> None:
++        for iid, elem in (("TAGC5", "C5 Causal adequacy"), ("TAGT5", "T5 Judgment")):
++            with self.subTest(elem=elem):
++                d = self._bundle(iid, review=_review_table(
++                    elem, verdict="NEEDS-HUMAN [impl]", basis="weak test, builder-fixable"))
++                items = assemble.collect_needs_human(d, self.cfg)
++                self.assertEqual([i.kind for i in items],
++                                 [assemble.IMPL, assemble.STANDING])
++                self.assertTrue(self._try(d))
++                self.assertEqual(autoiterate.ledger_entries(d), [],
++                                 "promoted means addressed by the rebuild, not deferred")
++
++    def test_tag_on_input_cells_is_ignored(self) -> None:
++        for iid, elem in (("TAGC1", "C1 Spec"), ("TAGC3", "C3 Change")):
++            with self.subTest(elem=elem):
++                d = self._bundle(iid, review=_review_table(elem, verdict="NEEDS-HUMAN [impl]"))
++                kinds = [i.kind for i in assemble.collect_needs_human(d, self.cfg)]
++                self.assertNotIn(assemble.IMPL, kinds)
++                self.assertFalse(self._try(d))   # HUMAN-only ⇒ halts
++                self._assert_halted(d)
++
++    def test_a_tagged_v_row_stays_standing(self) -> None:
++        # STANDING is checked BEFORE the tag: the constant cannot be promoted into a
++        # reason to rebuild (V is not promotable, and the row carries no signal).
++        review = ("# Review\n\n| Item | Verdict | Basis |\n|---|---|---|\n"
++                  "| C1 Spec | PASS | ok |\n"
++                  "| Validation — fitness-to-purpose | NEEDS-HUMAN [impl] | tagged in error |\n")
++        d = self._bundle("TAGV", review=review)
++        items = assemble.collect_needs_human(d, self.cfg)
++        self.assertEqual([i.kind for i in items], [assemble.STANDING])
++        self.assertFalse(self._try(d))           # nothing IMPL ⇒ still a clean halt
++        self._assert_halted(d)
++
++    def test_an_untagged_judgment_verdict_stays_human(self) -> None:
++        d = self._bundle("UNTAG", review=_review_table("C5 Causal adequacy"))
++        kinds = [i.kind for i in assemble.collect_needs_human(d, self.cfg)]
++        self.assertEqual(kinds, [assemble.HUMAN, assemble.STANDING])
++        self.assertFalse(self._try(d))
++
++    def test_a_human_tag_is_stripped_and_stays_human(self) -> None:
++        # The advisory prompts now REQUIRE a tag; [human] is the explicit spelling of
++        # the untagged fail-safe, so it must classify identically (and read cleanly).
++        d = self._bundle("HTAG",
++                         advisory="- NEEDS-HUMAN [human] — scope looks wider than the brief\n")
++        [item] = assemble.collect_needs_human(d, self.cfg)
++        self.assertEqual(item, assemble.NeedsHumanItem("scope looks wider than the brief",
++                                                       assemble.HUMAN))
++        self.assertFalse(self._try(d))
++
++    def test_deterministic_items_are_never_promotable(self) -> None:
++        # A gate that could not run, a declared external dependency and an unregistered
++        # dependency never pass through the verdict-tag parse: they are constructed
++        # HUMAN outright, so no tag anywhere can turn them into a reason to rebuild.
++        self.cfg.doctor_checks = []
++        d = self._bundle(
++            "NOPROM", gate=_UNVERIFIABLE,
++            build_notes="NEEDS-HUMAN external dependency: protoc — cannot compile\n",
++            brief_body="- **Slug:** ai\n- **External dependencies:** `protoc` (build)\n")
++        kinds = {i.kind for i in assemble.collect_needs_human(d, self.cfg)}
++        self.assertEqual(kinds, {assemble.HUMAN})
++        self.assertFalse(self._try(d))
++
++
++class SoftHardRounds(_Base):
++    """Criterion (1) of #332: the soft/hard round budgets, table-driven on the worked
++    example (soft 3, hard 5): rounds ≤3 always fire; 3<n≤5 only if the recorded open
++    IMPL count did not increase; n>5 never. Soft unset ⇒ hard-only, exactly as today."""
++
++    def _seed(self, d: Path, spent: int, history: list[int]) -> None:
++        (d / autoiterate.BUDGET_FILE).write_text(
++            json.dumps({"count": spent, "impl_counts": history}), encoding="utf-8")
++
++    def test_worked_example_soft3_hard5(self) -> None:
++        self.cfg.max_auto_iters = 5
++        self.cfg.soft_auto_iters = 3
++        d = self.tmp / "rounds"
++        d.mkdir()
++        cases = [   # (spent, recorded history, current IMPL count, may fire?)
++            (0, [],              9, True),    # round 1: always
++            (2, [5, 9],          9, True),    # round 3: always, even with a rising count
++            (3, [3, 2, 2],       2, True),    # round 4: held ⇒ fires
++            (3, [3, 2, 2],       1, True),    # round 4: fell ⇒ fires
++            (3, [3, 2, 2],       3, False),   # round 4: rose ⇒ hands over
++            (4, [3, 2, 2, 2],    2, True),    # round 5: held ⇒ fires
++            (4, [3, 2, 2, 1],    2, False),   # round 5: rose ⇒ hands over
++            (5, [3, 2, 2, 1, 1], 0, False),   # round 6: never, converging or not
++        ]
++        for spent, history, impl_now, fires in cases:
++            with self.subTest(spent=spent, history=history, impl_now=impl_now):
++                self._seed(d, spent, history)
++                verdict = autoiterate.budget_verdict(d, self.cfg, impl_count=impl_now)
++                self.assertEqual(verdict == "", fires, verdict)
++
++    def test_soft_unset_reproduces_the_hard_only_behaviour(self) -> None:
++        self.cfg.max_auto_iters = 5
++        self.assertIsNone(self.cfg.soft_auto_iters)
++        d = self.tmp / "hardonly"
++        d.mkdir()
++        self._seed(d, 4, [1, 2, 3, 4])       # round 5, IMPL count rising every round
++        self.assertEqual(autoiterate.budget_verdict(d, self.cfg, impl_count=9), "")
++        self._seed(d, 5, [1, 2, 3, 4, 5])    # round 6: the hard cap, as always
++        self.assertNotEqual(autoiterate.budget_verdict(d, self.cfg, impl_count=0), "")
++
++    def test_an_old_shape_budget_file_fails_toward_the_human_in_the_soft_window(self) -> None:
++        # Pre-#332 files carry {"count": n} only. Inside the always-fire window that is
++        # fine; inside the soft window there is no history to prove convergence, so the
++        # driver declines rather than guessing.
++        self.cfg.max_auto_iters = 5
++        self.cfg.soft_auto_iters = 3
++        d = self.tmp / "oldshape"
++        d.mkdir()
++        (d / autoiterate.BUDGET_FILE).write_text('{"count": 2}\n', encoding="utf-8")
++        self.assertEqual(autoiterate.budget_verdict(d, self.cfg, impl_count=1), "")
++        (d / autoiterate.BUDGET_FILE).write_text('{"count": 3}\n', encoding="utf-8")
++        self.assertIn("no per-round IMPL count",
++                      autoiterate.budget_verdict(d, self.cfg, impl_count=1))
++
++    def test_bump_records_per_round_impl_counts_and_count_stays_tolerant(self) -> None:
++        d = self.tmp / "bump"
++        d.mkdir()
++        autoiterate.bump(d, impl_count=3)
++        autoiterate.bump(d, impl_count=2)
++        self.assertEqual(autoiterate.count(d), 2)
++        self.assertEqual(autoiterate.impl_counts(d), [3, 2])
++        (d / autoiterate.BUDGET_FILE).write_text('{"count": 7}\n', encoding="utf-8")
++        self.assertEqual(autoiterate.count(d), 7)      # old shape still counts
++        self.assertEqual(autoiterate.impl_counts(d), [])
++
++    def test_the_flow_names_the_soft_decline(self) -> None:
++        self.cfg.max_auto_iters = 5
++        self.cfg.soft_auto_iters = 1
++        d = self._bundle("SOFT", gate=_FAIL)             # one IMPL finding this round
++        self._seed(d, 1, [0])                            # round 2: 0 → 1 is a rise
++        buf = io.StringIO()
++        with redirect_stderr(buf), redirect_stdout(io.StringIO()):
++            fired = flow._maybe_auto_iterate(self.cfg, d, by="", today="2026-08-02",
++                                             apply_now=False)
++        self.assertFalse(fired)
++        self.assertIn("soft budget", buf.getvalue())
++        self.assertEqual(state.state(d), state.AWAITING_SIGNOFF)   # halted, never dropped
++
++    def test_the_flow_fires_in_the_soft_window_while_the_count_holds(self) -> None:
++        self.cfg.max_auto_iters = 5
++        self.cfg.soft_auto_iters = 1
++        d = self._bundle("SOFT2", gate=_FAIL)
++        self._seed(d, 1, [1])                            # round 2: 1 → 1 held
++        self.assertTrue(self._try(d))
++        self.assertEqual(autoiterate.impl_counts(d), [1, 1])   # this round recorded too
++
++
++class DeferredFindings(_Base):
++    """Criterion (3) of #332: deferral is a delay, never a loss — the ledger survives the
++    archive, re-enters §6 every assemble, and never leaks into the builder's channel."""
++
++    def test_ledger_is_cycle_evidence_and_never_archived(self) -> None:
++        self.assertNotIn(autoiterate.LEDGER_FILE, driver.DOWNSTREAM_OF_BRIEF)
++        self.assertIn(autoiterate.LEDGER_FILE, state.CYCLE_EVIDENCE_ONLY)
++
++    def test_deferred_finding_survives_the_archive_and_reenters_section6(self) -> None:
++        d = self._bundle("DEF1", gate=_FAIL, review=_MIXED_REVIEW)
++        with redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
++            self.assertTrue(flow._maybe_auto_iterate(self.cfg, d, by="",
++                                                     today="2026-08-02", apply_now=True))
++            driver.run_issue(d, self.cfg)
++        self.assertTrue((d / "iteration-v1").is_dir())
++        self.assertFalse((d / "iteration-v1" / autoiterate.LEDGER_FILE).exists())
++        self.assertEqual(autoiterate.ledger_entries(d), [_MIXED_C5_TEXT])
++        summary = (d / "SUMMARY.md").read_text(encoding="utf-8")
++        self.assertIn(f"- [ ] {_MIXED_C5_TEXT}", summary)    # C6 still blocks on it
++
++    def test_round_one_human_finding_still_in_section6_at_handover(self) -> None:
++        self.cfg.max_auto_iters = 1
++        d = self._bundle("DEF2", gate=_FAIL, review=_MIXED_REVIEW)
++        with redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
++            self.assertTrue(flow._maybe_auto_iterate(self.cfg, d, by="",
++                                                     today="2026-08-02", apply_now=True))
++            driver.run_issue(d, self.cfg)
++            self.assertFalse(flow._maybe_auto_iterate(self.cfg, d, by="",
++                                                      today="2026-08-02", apply_now=True))
++        self.assertEqual(state.state(d), state.AWAITING_SIGNOFF)
++        self.assertTrue(any(_MIXED_C5_TEXT in it
++                            for it in signoff.open_needs_human(d / "SUMMARY.md")))
++
++    def test_the_merge_is_deduped_when_the_finding_is_raised_again(self) -> None:
++        d = self._bundle("DEF3", review=_MIXED_REVIEW)
++        (d / autoiterate.LEDGER_FILE).write_text(
++            json.dumps({"deferred": [_MIXED_C5_TEXT]}), encoding="utf-8")
++        texts = [i.text for i in assemble.collect_needs_human(d, self.cfg)]
++        self.assertEqual(texts.count(_MIXED_C5_TEXT), 1)
++
++    def test_deferred_texts_never_reach_the_builder_carry_forward(self) -> None:
++        # The two carry-forward channels stay distinct: IMPL → builder via the brief;
++        # deferred HUMAN → human via ledger + §6 (the #294 property, held under #332).
++        d = self._bundle("DEF4", gate=_FAIL, review=_MIXED_REVIEW)
++        with redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
++            flow._maybe_auto_iterate(self.cfg, d, by="", today="2026-08-02", apply_now=True)
++            driver.run_issue(d, self.cfg)
++        brief_text = (d / "brief.md").read_text(encoding="utf-8")
++        self.assertIn("C4", brief_text)                        # the real defect…
++        self.assertNotIn("guards the symptom", brief_text)     # …never the judgment call
++        self.assertIn("Deferred 1 human finding(s)", brief_text)   # deferral is stated
++
++    def test_a_garbled_ledger_reads_as_empty(self) -> None:
++        d = self._bundle("DEF5", gate=_FAIL)
++        (d / autoiterate.LEDGER_FILE).write_text("{ not json", encoding="utf-8")
++        self.assertEqual(autoiterate.ledger_entries(d), [])
++        self.assertTrue(self._try(d))          # never a crash, never a veto
++
++
++class LedgerRetirement(_Base):
++    """The #335 fold: ledger retirement is exact-first, two-tier on BOTH sides.
++
++    A ticked §6 row retires its unique hit (exact tier first, else `_same_finding`)
++    only if a still-open row does not claim it. Protection mirrors the tick match: an
++    open row verbatim equal to an entry protects that entry ALONE (near-twin pairs still
++    drain); an edited open row protects every `_same_finding` match, even against an
++    exact tick (fail closed: lingering is visible, lost is unrecoverable). The flat
++    symmetric-fuzzy exclusion is the known regression — it makes the near-twin pair
++    permanently unclearable (instance fix getwyrd/wyrd-pdca@e4fdf3b)."""
++
++    E1 = "C5 Causal adequacy — flaky retry loop in worker A"
++    E2 = "C5 Causal adequacy — flaky retry loop in worker A and worker B"
++
++    def _dir(self) -> Path:
++        d = self.tmp / "unit"
++        if d.exists():
++            shutil.rmtree(d)
++        d.mkdir()
++        return d
++
++    def _set(self, d: Path, entries: list[str], *, ticked: tuple = (),
++             open_: tuple = ()) -> None:
++        (d / autoiterate.LEDGER_FILE).write_text(
++            json.dumps({"deferred": list(entries)}), encoding="utf-8")
++        lines = ["# Result — issue U", "",
++                 "## 6. NEEDS-HUMAN — items the human must clear before sign-off"]
++        lines += [f"- [x] {t}" for t in ticked]
++        lines += [f"- [ ] {o}" for o in open_]
++        lines += ["", "## 9. Check sign-off", "- Outcome:", "- By / date:"]
++        (d / "SUMMARY.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
++
++    def test_335_repro_an_annotated_open_row_protects_its_entry(self) -> None:
++        # (a) The field-report repro: the human ANNOTATED entry E1's §6 row and left it
++        # open (unadjudicated); a SIMILAR new finding was ticked. The tick's only fuzzy
++        # hit is E1 — but the open row claims it, so the unadjudicated entry survives.
++        d = self._dir()
++        self._set(d, [self.E1],
++                  ticked=(self.E1 + " (round 2)",),
++                  open_=(self.E1 + " — discussing with the maintainer",))
++        autoiterate.retire_cleared(d)
++        self.assertEqual(autoiterate.ledger_entries(d), [self.E1],
++                         "the unadjudicated entry must survive")
++
++    def test_an_exact_tick_beats_an_open_near_twin(self) -> None:
++        # Near-twin PAIR in the ledger; E1 exactly ticked, E2 exactly open. Symmetric
++        # fuzzy exclusion keeps E1 forever (the open E2 fuzzy-matches it) — the
++        # permanently-unclearable ledger. Exact-first: the open row verbatim-owns E2,
++        # protects E2 alone, and the tick drains E1.
++        d = self._dir()
++        self._set(d, [self.E1, self.E2], ticked=(self.E1,), open_=(self.E2,))
++        autoiterate.retire_cleared(d)
++        self.assertEqual(autoiterate.ledger_entries(d), [self.E2])
++
++    EDIT_SHAPES = (
++        ("case change", lambda t: t.upper()),
++        ("whitespace change", lambda t: "  " + t.replace(" — ", "   —   ")),
++        ("appended annotation", lambda t: t + " — still under discussion"),
++        ("prepended annotation", lambda t: "unresolved: " + t),
++    )
++
++    def test_matcher_drift_guard_every_tick_shape_also_protects_when_open(self) -> None:
++        # (b) Pins the RELATION between the two matchers, not either matcher alone:
++        # every edit shape the tick match tolerates must also protect when the same
++        # edited row is left open — even against an EXACT tick of the entry. If either
++        # side drifts (a tolerant tick with an exact-only exclusion, or vice versa),
++        # one of the two sub-asserts goes red.
++        for name, edit in self.EDIT_SHAPES:
++            with self.subTest(shape=name, side="tick"):
++                d = self._dir()
++                self._set(d, [self.E1], ticked=(edit(self.E1),))
++                autoiterate.retire_cleared(d)
++                self.assertEqual(autoiterate.ledger_entries(d), [],
++                                 f"a tick edited by {name} must still retire")
++            with self.subTest(shape=name, side="open"):
++                d = self._dir()
++                self._set(d, [self.E1], ticked=(self.E1,), open_=(edit(self.E1),))
++                autoiterate.retire_cleared(d)
++                self.assertEqual(autoiterate.ledger_entries(d), [self.E1],
++                                 f"an open row edited by {name} must still protect, "
++                                 "even against an exact tick")
++
++    def test_an_edited_open_row_matching_two_near_twins_protects_both(self) -> None:
++        # (c) The edited row verbatim-owns nothing, so we cannot tell WHICH entry it is:
++        # protect every match, even against exact ticks of both.
++        d = self._dir()
++        edited = self.E2 + " — still discussing"       # _same_finding-matches E1 AND E2
++        self._set(d, [self.E1, self.E2], ticked=(self.E1, self.E2), open_=(edited,))
++        autoiterate.retire_cleared(d)
++        self.assertEqual(autoiterate.ledger_entries(d), [self.E1, self.E2])
++
++    def test_an_ambiguous_tick_retires_nothing(self) -> None:
++        # Fail closed on the tick side too: a tick fuzzy-hitting two entries cannot
++        # know which one it adjudicated.
++        d = self._dir()
++        self._set(d, [self.E1, self.E2], ticked=(self.E2 + " (see notes)",))
++        autoiterate.retire_cleared(d)
++        self.assertEqual(autoiterate.ledger_entries(d), [self.E1, self.E2])
++
++    def test_retirement_runs_at_the_human_iterate_transition(self) -> None:
++        # Integration: the human ticks the deferred row and answers iterate-do; the
++        # driver's ITERATE_DO transition retires the entry before archiving the SUMMARY.
++        d = self._bundle("RET", review=_review_table("C5 Causal adequacy"))
++        entry = "C5 Causal adequacy — off-by-one"
++        (d / autoiterate.LEDGER_FILE).write_text(
++            json.dumps({"deferred": [entry]}), encoding="utf-8")
++        summ = d / "SUMMARY.md"
++        summ.write_text(summ.read_text(encoding="utf-8").replace(
++            f"- [ ] {entry}", f"- [x] {entry}"), encoding="utf-8")
++        signoff.record(summ, action="iterate-do", by="t", date="2026-08-02")
++        self.assertEqual(state.state(d), state.ITERATE_DO)
++        with redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
++            driver.advance(d, self.cfg)
++        self.assertEqual(autoiterate.ledger_entries(d), [])
++        self.assertTrue((d / "iteration-v1").is_dir())
++
++    def test_an_auto_round_never_retires_anything(self) -> None:
++        # Auto-iterate never ticks a §6 box, so its own transition retires nothing —
++        # it can only ever ADD to the ledger.
++        d = self._bundle("RETAUTO", gate=_FAIL, review=_MIXED_REVIEW)
++        seeded = "T5 Judgment — an earlier deferral"
++        (d / autoiterate.LEDGER_FILE).write_text(
++            json.dumps({"deferred": [seeded]}), encoding="utf-8")
++        with redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
++            self.assertTrue(flow._maybe_auto_iterate(self.cfg, d, by="",
++                                                     today="2026-08-02", apply_now=True))
++        self.assertIn(seeded, autoiterate.ledger_entries(d))
++
++
+ class ConfigPlumbing(unittest.TestCase):
+     def setUp(self) -> None:
+         self.tmp = Path(tempfile.mkdtemp())
+@@ -757,6 +1248,28 @@ class ConfigPlumbing(unittest.TestCase):
+     def test_max_auto_iters_floor_of_one(self) -> None:
+         self.assertEqual(self._load("[driver]\nmax_passes = 1\nmax_auto_iters = 0\n").max_auto_iters, 1)
+ 
++    def test_soft_auto_iters_unset_defaults_to_the_hard_budget(self) -> None:
++        # Criterion (1): a rendered instance that never set it reproduces today's
++        # behaviour exactly — soft == hard, no soft window at all.
++        cfg = self._load("[driver]\nmax_auto_iters = 5\n")
++        self.assertIsNone(cfg.soft_auto_iters)
++        self.assertEqual(autoiterate.soft_budget(cfg), cfg.max_auto_iters)
++
++    def test_soft_auto_iters_parsed_and_clamped(self) -> None:
++        cfg = self._load("[driver]\nmax_auto_iters = 5\nsoft_auto_iters = 3\n")
++        self.assertEqual(cfg.soft_auto_iters, 3)
++        self.assertEqual(autoiterate.soft_budget(cfg), 3)
++        # Never above the hard budget (a soft window past the cap is meaningless)…
++        cfg = self._load("[driver]\nmax_auto_iters = 3\nsoft_auto_iters = 99\n")
++        self.assertEqual(cfg.soft_auto_iters, 3)
++        # …never below one, and a non-numeric value falls back to unset (= hard-only).
++        self.assertEqual(self._load("[driver]\nsoft_auto_iters = 0\n").soft_auto_iters, 1)
++        self.assertIsNone(self._load('[driver]\nsoft_auto_iters = "lots"\n').soft_auto_iters)
++
++    def test_soft_env_override(self) -> None:
++        with mock.patch.dict(os.environ, {"PDCA_SOFT_AUTO_ITERS": "2"}):
++            self.assertEqual(self._load("[driver]\nmax_auto_iters = 5\n").soft_auto_iters, 2)
++
+     def test_cli_flag_opts_in(self) -> None:
+         cfg = _stub_config(self.tmp)
+         cfg.auto_iterate = False
+diff --git a/template/tests/test_size_signal.py b/template/tests/test_size_signal.py
+index be55532..fd64364 100644
+--- a/template/tests/test_size_signal.py
++++ b/template/tests/test_size_signal.py
+@@ -234,12 +234,13 @@ class TheOverrideAnnouncesItself(unittest.TestCase):
+         self.assertIn("2 round(s) already spent", out)
+         self.assertIn("iterate-plan", out)
+ 
+-    def test_an_ordinary_human_finding_declines_without_the_extra_line(self) -> None:
++    def test_an_ordinary_human_only_decline_stays_silent(self) -> None:
+         """Every other decline is a §6 item the human is about to read anyway; narrating
+-        those too would bury the one message that carries new information."""
++        those too would bury the one message that carries new information. (Since #332 a
++        HUMAN finding BESIDE an IMPL one defers rather than declining, so the ordinary
++        silent decline is the HUMAN-only set.)"""
+         from pdca_harness import flow
+-        items = [NeedsHumanItem("a real defect", IMPL),
+-                 NeedsHumanItem("C5 Causal adequacy — a real concern", HUMAN)]
++        items = [NeedsHumanItem("C5 Causal adequacy — a real concern", HUMAN)]
+         err = io.StringIO()
+         with mock.patch.object(flow.assemble, "collect_needs_human",
+                                lambda d, cfg: items), \

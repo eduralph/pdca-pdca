@@ -1,0 +1,22 @@
+docs(gates): name both result-changing markers in the module doc
+
+The module doc's evidence-marker paragraph told a reader that
+``PDCA-UNVERIFIABLE`` "stays the one marker that can change a ``result``".
+That has been false since 07766ed3a235e623c0ecdaea7b9b90358bdb810d (#401)
+introduced ``PDCA-DEFERRED`` twenty lines below in the same docstring — a
+second declaration that changes a gate's ``result`` (to ``deferred``). A
+reader trusting the exclusivity claim would conclude a deferral cannot
+change a result, which the module itself contradicts a few paragraphs
+later.
+
+The sentence now names both declarations: "only the
+``PDCA-UNVERIFIABLE``/``PDCA-DEFERRED`` declarations can change a
+``result``". Nothing else in the docstring changes, and no behavior
+changes.
+
+A regression test appended to the #401 suite pins the corrected claim: it
+asserts the exclusivity wording is gone and that the claim names both
+declarations, composing the marker names from the production constants so
+the test cannot drift from the module it describes.
+
+Fixes #442

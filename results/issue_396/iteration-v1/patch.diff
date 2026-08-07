@@ -1,0 +1,255 @@
+diff --git a/template/docs/INTEGRATION.md.jinja b/template/docs/INTEGRATION.md.jinja
+index 0f6b132..c59b415 100644
+--- a/template/docs/INTEGRATION.md.jinja
++++ b/template/docs/INTEGRATION.md.jinja
+@@ -153,10 +153,14 @@ flow runs in, for the whole batch: a `{{ cli_name }} flow` over several bundles
+ sign-off adjudication for hours because nobody is at that machine.
+ 
+ {% if interactive_family == "claude" -%}
+-Claude Code's `--remote-control` flag removes the constraint. Append it to an interactive
+-leaf's `argv` in `pdca.toml` and that leaf becomes answerable from another enrolled device;
+-nothing else changes — `signoff-decision`, the §6 ticks and the C6 accept-guard all run the
+-same code path, and only the human's location differs.
++Claude Code's `--remote-control` flag removes the constraint. Add it to an interactive
++leaf's `argv` in `pdca.toml` — anywhere but last: the driver appends the seed prompt as a
++positional after the argv, and `--remote-control` takes an optional `[name]` value, so as
++the final token it would swallow the whole seed as the RC session name (issue #396; the
++claude-family spawn also inserts `--` before the seed as a backstop, but no flag with an
++optional value should ever sit last). With the flag in place that leaf becomes answerable
++from another enrolled device; nothing else changes — `signoff-decision`, the §6 ticks and
++the C6 accept-guard all run the same code path, and only the human's location differs.
+ 
+ Enabling Remote Control in your own shell does **not** reach the leaves: each is a separate
+ `claude` subprocess whose argv comes from `pdca.toml`. That is the whole reason this needs
+@@ -167,5 +171,9 @@ session, and they have no human to reach.
+ {%- else -%}
+ This instance runs its interactive leaves on `{{ interactive_family }}`. Claude Code offers
+ `--remote-control` for exactly this; check whether your interactive family has an
+-equivalent, and if so append the flag to the leaf's `argv` in `pdca.toml`.
++equivalent, and if so add the flag to the leaf's `argv` in `pdca.toml` — never as the
++final token: the driver appends the seed prompt as one positional after the argv, and a
++flag with an optional value sitting last would swallow it (issue #396). Families without a
++declared end-of-options separator (`seed_separator` in the family profile) have no `--`
++backstop between argv and seed, so placement is the only protection.
+ {%- endif %}
+diff --git a/template/pdca.toml.jinja b/template/pdca.toml.jinja
+index 87d68f8..7624a73 100644
+--- a/template/pdca.toml.jinja
++++ b/template/pdca.toml.jinja
+@@ -546,10 +546,16 @@ argv = []
+ # leaving to be discovered.
+ #
+ # To enable, APPEND the flag to the argv line below — do not add a second `argv = [...]`,
+-# which would be a duplicate key the moment you uncomment it:
++# which would be a duplicate key the moment you uncomment it. Put it anywhere but LAST:
++# the driver seeds every interactive leaf by appending the prompt as one positional after
++# this argv, and `--remote-control` takes an optional [name] value — as the final token it
++# swallows the whole seed as the RC session name (RC fails with "check the debug log" and
++# the REPL opens unseeded, issue #396). The same holds for ANY flag with an optional
++# value, so none may sit last. The claude spawn inserts `--` before the seed as a
++# backstop; non-last placement is the posture every family supports.
+ #
+-#   argv = ["claude", "--agent", "planner", "--permission-mode", "acceptEdits",
+-#           "--remote-control"]
++#   argv = ["claude", "--remote-control", "--agent", "planner",
++#           "--permission-mode", "acceptEdits"]
+ #
+ # The device must be enrolled first (`/login`). Left off by default because a flag that
+ # makes a leaf refuse to start would block the flow on the one path that cannot be retried
+diff --git a/template/src/pdca_harness/families.py b/template/src/pdca_harness/families.py
+index 37eb9b3..3f1f854 100644
+--- a/template/src/pdca_harness/families.py
++++ b/template/src/pdca_harness/families.py
+@@ -76,6 +76,13 @@ class FamilyProfile:
+     # `excludedCommands` can, which is why it rides on its own opt-in (#291). Empty ⇒ the family
+     # has no such flag (claude scopes network by DOMAIN instead — `allowedDomains`, #277).
+     network_argv: tuple[str, ...] = ()
++    # The CLI's end-of-options separator, inserted between the configured argv and the
++    # interactive seed positional (`argv + [sep, seed]` in leaves._invoke, #396). POSIX
++    # Utility Syntax Guideline 10's `--`: everything after it is positional, so no
++    # trailing optional-value flag in an instance's argv (claude's `--remote-control
++    # [name]` is the one that bit) can swallow the seed as its value. "" ⇒ unverified
++    # for this family: the spawn keeps the bare seed positional it always had.
++    seed_separator: str = ""
+ 
+ 
+ BUILTIN: dict[str, FamilyProfile] = {
+@@ -93,6 +100,10 @@ BUILTIN: dict[str, FamilyProfile] = {
+         # Load ONLY the settings the harness seeds into the leaf's cwd (plus managed
+         # policy, which the CLI force-adds) — never the operator's ~/.claude/settings.json.
+         settings_scope_argv=("--setting-sources", "project"),
++        # `claude -- "<prompt>"` parses the prompt as the positional (verified on
++        # claude 2.1.222 at Plan, #396); left "" for the other families until a
++        # vendor's CLI is verified to accept it.
++        seed_separator="--",
+     ),
+     "codex": FamilyProfile(
+         name="codex",
+diff --git a/template/src/pdca_harness/leaves.py b/template/src/pdca_harness/leaves.py
+index 459fd97..4cb54c7 100644
+--- a/template/src/pdca_harness/leaves.py
++++ b/template/src/pdca_harness/leaves.py
+@@ -375,8 +375,15 @@ def _invoke(
+         # limit (#313). `finally` so a non-zero exit or a raising spawn still cleans up;
+         # a SIGKILLed session can still orphan one, which is why the name is gitignored.
+         seed, spill = _seed_positional(prompt, workdir)
++        # End-of-options separator between the instance's argv and the seed (#396):
++        # bare, a trailing optional-value flag (claude's `--remote-control [name]`)
++        # eats the whole seed as its value — RC then fails to start and the REPL
++        # opens unseeded. The separator makes the #313 seed contract argv-independent
++        # (POSIX guideline 10: after `--` everything is positional). Families without
++        # a verified separator keep the bare-positional spawn, byte-identical.
++        sep = [profile.seed_separator] if profile.seed_separator else []
+         try:
+-            subprocess.run(argv + [seed], cwd=workdir, env=run_env)
++            subprocess.run(argv + sep + [seed], cwd=workdir, env=run_env)
+         finally:
+             if spill is not None:
+                 spill.unlink(missing_ok=True)
+diff --git a/template/tests/test_remote_control_docs.py b/template/tests/test_remote_control_docs.py
+index a832cef..2de67b4 100644
+--- a/template/tests/test_remote_control_docs.py
++++ b/template/tests/test_remote_control_docs.py
+@@ -50,6 +50,23 @@ def _sections(text: str) -> list[tuple[str, str]]:
+     return out
+ 
+ 
++def _example_argvs(text: str) -> list[list[str]]:
++    """Every COMMENTED `argv = [...]` example in the doc text, as quoted-token lists.
++
++    An example may wrap across comment lines (the RC one does), so the comment lines
++    are joined — leading `#` stripped — before each bracket pair is read. Active
++    (uncommented) argv lines are deliberately not examples: an instance's own argv is
++    protected by the driver's seed separator, while the example is what gets copied."""
++    commented = "\n".join(ln.lstrip()[1:] for ln in text.splitlines()
++                          if ln.lstrip().startswith("#"))
++    out = []
++    for m in re.finditer(r"argv\s*=\s*\[(.*?)\]", commented, flags=re.S):
++        tokens = re.findall(r'"([^"]*)"', m.group(1))
++        if tokens:
++            out.append(tokens)
++    return out
++
++
+ def remote_control_offenders(text: str) -> list[str]:
+     """Active (uncommented) `--remote-control` lines that are NOT in an interactive leaf.
+ 
+@@ -108,6 +125,25 @@ class RemoteControlDocs(unittest.TestCase):
+                 self.assertLessEqual(len(active), 1,
+                                      f"[leaves.{name}] declares argv {len(active)} times")
+ 
++    def test_the_example_never_shows_the_flag_last(self) -> None:
++        """The driver seeds an interactive leaf by APPENDING the prompt as one
++        positional after the configured argv, and `--remote-control` takes an
++        optional [name] value — as the argv-final token it swallows the whole seed
++        as the RC session name: RC fails to start and the REPL opens unseeded
++        (issue #396). The shipped example is what instances copy verbatim, so it
++        must show the flag NON-last, and the doc must say why."""
++        rc_examples = [ex for ex in _example_argvs(self.text)
++                       if "--remote-control" in ex]
++        self.assertTrue(rc_examples, "the doc block lost its worked example")
++        for ex in rc_examples:
++            with self.subTest(example=ex):
++                self.assertNotEqual(
++                    ex[-1], "--remote-control",
++                    "the example ends in an optional-value flag — following it "
++                    "verbatim makes the flag eat the seed prompt (issue #396)")
++        self.assertIn("anywhere but LAST", self.text,
++                      "the placement rule must be stated, not just modelled")
++
+     def test_it_is_scoped_to_interactive_claude_leaves(self) -> None:
+         """The flag starts an INTERACTIVE session, so the headless builder/reviewer must
+         not carry it — they have no human to reach."""
+@@ -157,10 +193,12 @@ _DOC_BLOCK = """\
+ # REMOTE CONTROL — answer an interactive leaf from another device (issue #337).
+ #
+ # To enable, APPEND the flag to the argv line below — do not add a second `argv = [...]`,
+-# which would be a duplicate key the moment you uncomment it:
++# which would be a duplicate key the moment you uncomment it. Put it anywhere but LAST —
++# the driver appends the seed prompt as a positional after this argv, and a trailing
++# optional-value flag would swallow it (issue #396):
+ #
+-#   argv = ["claude", "--agent", "planner", "--permission-mode", "acceptEdits",
+-#           "--remote-control"]
++#   argv = ["claude", "--remote-control", "--agent", "planner",
++#           "--permission-mode", "acceptEdits"]
+ #
+ # CLAUDE-ONLY, and interactive-only. The headless builder/reviewer must NOT carry it: it
+ # starts an *interactive* session and they have no human to reach.
+diff --git a/template/tests/test_seed_spill.py b/template/tests/test_seed_spill.py
+index f836f14..69303d4 100644
+--- a/template/tests/test_seed_spill.py
++++ b/template/tests/test_seed_spill.py
+@@ -22,8 +22,9 @@ import sys
+ import tempfile
+ import unittest
+ from pathlib import Path
++from unittest import mock
+ 
+-from pdca_harness import leaves
++from pdca_harness import families, leaves
+ from pdca_harness.config import LeafConfig
+ 
+ REPO = Path(__file__).resolve().parents[1]
+@@ -179,5 +180,61 @@ class SeedSpill(unittest.TestCase):
+         self.assertEqual(list(self.tmp.glob(".pdca-prompt-*")), [])
+ 
+ 
++# --- the seed survives a trailing optional-value flag (issue #396) ---------------------
++# The seed above is APPENDED to whatever argv the instance configured — and the template
++# sanctions argvs that END in a flag (`--remote-control`, whose optional [name] value made
++# the flag eat the entire seed as an RC session name: RC failed to start and the REPL
++# opened unseeded). The fix is a family-declared end-of-options separator between argv and
++# seed (`claude -- "<seed>"`, POSIX guideline 10), so the guarantee is argv-independent.
++
++
++class SeedSeparator(unittest.TestCase):
++    def setUp(self) -> None:
++        self.tmp = Path(tempfile.mkdtemp())
++        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
++
++    def _spawn_argv(self, family: str, argv: list[str], prompt: str = "the seed") -> list[str]:
++        """The argv `_invoke` actually spawns for an interactive leaf, recorded not run.
++
++        Patches the one spawn site (`leaves.subprocess.run`) — the production `_invoke`
++        path up to it (profile resolution, seed handling, argv assembly) runs for real."""
++        seen: list[list[str]] = []
++
++        def record(cmd, **kwargs):
++            seen.append(list(cmd))
++            return subprocess.CompletedProcess(cmd, 0)
++
++        with mock.patch.object(leaves.subprocess, "run", record):
++            leaf = LeafConfig(mode="command", family=family, interactive=True, argv=argv)
++            leaves._invoke(leaf, self.tmp, prompt)
++        self.assertEqual(len(seen), 1, "expected exactly one interactive spawn")
++        return seen[0]
++
++    def test_claude_family_separates_seed_from_argv(self) -> None:
++        """The exact defect argv: the doc-sanctioned RC flag as the LAST token. The
++        spawn must carry `--` between the configured argv and the seed, so the flag
++        has nothing to swallow."""
++        argv = ["claude", "--agent", "planner", "--permission-mode", "acceptEdits",
++                "--remote-control"]
++        spawned = self._spawn_argv("claude", argv, "plan issue 19")
++        self.assertEqual(spawned, argv + ["--", "plan issue 19"],
++                         "no end-of-options separator: a trailing optional-value flag "
++                         "eats the seed as its value (issue #396)")
++
++    def test_family_without_the_bit_keeps_the_bare_positional(self) -> None:
++        """No verified separator ⇒ the spawn is byte-identical to before: argv + [seed]."""
++        argv = ["some-cli", "--flag"]
++        spawned = self._spawn_argv("generic", argv)
++        self.assertEqual(spawned, argv + ["the seed"])
++
++    def test_the_separator_is_a_families_profile_bit(self) -> None:
++        """Declared as DATA on the profile — claude (verified `claude -- "<prompt>"` on
++        2.1.222) carries `--`; the others stay unset until their CLI is verified."""
++        self.assertEqual(families.resolve("claude").seed_separator, "--")
++        for fam in ("codex", "gemini", "generic"):
++            with self.subTest(family=fam):
++                self.assertEqual(families.resolve(fam).seed_separator, "")
++
++
+ if __name__ == "__main__":
+     unittest.main()

@@ -1,0 +1,403 @@
+diff --git a/template/agents/publisher.md.jinja b/template/agents/publisher.md.jinja
+index 11fefa8..a9b79c5 100644
+--- a/template/agents/publisher.md.jinja
++++ b/template/agents/publisher.md.jinja
+@@ -20,8 +20,9 @@ not push, branch, or open a PR yourself.**
+      trailer to stand alone as a blank-separated last line. Do **not** append a
+      `Co-Authored-By:` (or any other) trailer after it. **If no tracker id is
+      assigned yet** (the bundle id is not a real tracker number), OMIT the trailer rather
+-     than invent a placeholder like `#0000` — `{{ cli_name }} publish --no-issue` relaxes T4 to a
+-     flag and records the contribution `id_pending` for the human to fill the id in.
++     than invent a placeholder like `#0000` — `{{ cli_name }} publish --no-issue` runs T4 without
++     the tracker-id requirement (every other rule still blocks the push) and records the
++     contribution `id_pending` for the human to fill the id in.
+ 
+ 2. **`pr-description.md`** — the PR body (see `templates/pr-description.md.tpl`).
+    Write for the PR's **actual audience** — a maintainer triaging, a reviewer of the
+diff --git a/template/pdca.toml.jinja b/template/pdca.toml.jinja
+index 87d68f8..21b1164 100644
+--- a/template/pdca.toml.jinja
++++ b/template/pdca.toml.jinja
+@@ -303,8 +303,9 @@ issue_id_example = "{{ issue_id_example }}"
+ # Trailer linking a commit/PR to the issue ({id} = the bug id). Trackers differ
+ # (GitHub/Mantis "Fixes #{id}", Jira "Fixes PROJ-{id}"); "" enforces none. The
+ # publish step's commit-msg ends with this; the T4 gate (if any) checks it.
+-# No tracker id yet? Use `{{ cli_name }} publish --no-issue`: it omits the trailer, relaxes
+-# T4 to a flag, and records the bundle `id_pending` (no magic "#0000" placeholder).
++# No tracker id yet? Use `{{ cli_name }} publish --no-issue`: it omits the trailer, runs T4
++# in the narrow pending-id mode (only the tracker-id requirement is dropped — everything
++# else still blocks), and records the bundle `id_pending` (no magic "#0000" placeholder).
+ issue_trailer = "Fixes #{id}"
+ # Optional issue-URL template ({id} = the bug id). Set it and `{{ cli_name }} publish`
+ # DETERMINISTICALLY hyperlinks the ticket id in the PR body (a Markdown link on the id, not
+@@ -957,7 +958,14 @@ checks = [
+   # deferral (`PDCA-DEFERRED:`, exit 0) and the Check row records `deferred — re-gated at
+   # publish` rather than a green nobody can reproduce (issue #401; docs 04 §Gate result
+   # vocabulary). `{{ cli_name }} publish` then hard-gates T4 after drafting them — the
+-  # substantive verdict, unchanged (relaxed to a flag under --no-issue). Gating is right here — this audits THIS cycle's own contribution artifacts,
++  # substantive verdict, in BOTH modes: under `publish --no-issue` the runner exports
++  # $PDCA_PENDING_ID (derived from the flag on each run, never inherited) and `contribcheck`
++  # honours it as `--no-issue`, so the checker drops exactly the not-yet-assigned tracker-id
++  # requirement and everything else still blocks the push (issue #384; the mode travels via
++  # the environment, not an edit to the row below — rewriting that registered line in place
++  # would conflict on `copier update` for any instance that appended a row beside it,
++  # tests/test_update_compat.py).
++  # Gating is right here — this audits THIS cycle's own contribution artifacts,
+   # not pre-existing code, so the usual "T4 advisory" caveat (below) does not apply.
+   # `at_publish` (issue #339) — whether `{{ cli_name }} publish` re-runs this row before pushing.
+   # Defaults from `scope`: a BUNDLE-scoped T4 row is about the bundle's own contribution
+diff --git a/template/src/pdca_harness/cli.py b/template/src/pdca_harness/cli.py
+index 9d98b52..322558a 100644
+--- a/template/src/pdca_harness/cli.py
++++ b/template/src/pdca_harness/cli.py
+@@ -386,7 +386,8 @@ def main(argv: list[str] | None = None) -> int:
+     p_publish.add_argument("--dry-run", action="store_true", help="print the git/gh commands without running them")
+     p_publish.add_argument("--no-pr", action="store_true", help="push the branch but don't open the draft PR")
+     p_publish.add_argument("--no-issue", action="store_true",
+-                           help="no tracker id yet: relax T4 to a flag, record id_pending (vs a magic #0000)")
++                           help="no tracker id yet: T4 drops only the tracker-id rule "
++                                "(all else still blocks), record id_pending (vs a magic #0000)")
+     p_publish.add_argument("--by", default="", help="who published (recorded in publish.json)")
+ 
+     # Result-bundle recording (issue #317): commit terminal-finished bundles to the
+@@ -1092,7 +1093,13 @@ def _contribcheck(cfg: Config, args: argparse.Namespace) -> int:
+         print(f"{gates.DEFERRED_MARKER} {publish.PR_BODY} not drafted yet — the substantive "
+               "T4 audit of the contribution artifacts runs at publish")
+         return 0
+-    problems = contribution_problems(d, no_issue=args.no_issue)
++    # `--no-issue` also arrives as $PDCA_PENDING_ID (#384): `publish._t4_passes` derives it
++    # from the `publish --no-issue` flag on each run (scrubbing any inherited value), so the
++    # SHIPPED gate row relaxes exactly the tracker-id requirement in pending-id mode without
++    # its registered cmd line ever changing — an in-place edit of that line breaks `copier
++    # update` for any instance that appended a row beside it (tests/test_update_compat.py).
++    no_issue = args.no_issue or bool(os.environ.get("PDCA_PENDING_ID"))
++    problems = contribution_problems(d, no_issue=no_issue)
+     for p in problems:
+         print(f"contribcheck: {p}", file=sys.stderr)
+     return 1 if problems else 0
+diff --git a/template/src/pdca_harness/publish.py b/template/src/pdca_harness/publish.py
+index b1534ce..f618e0e 100644
+--- a/template/src/pdca_harness/publish.py
++++ b/template/src/pdca_harness/publish.py
+@@ -86,8 +86,9 @@ def draft_texts(cfg: Config, d: Path, *, run_t4: bool = True, draft: bool = True
+     legitimately nothing to draft (not COMPLETE, a close/no-fix empty patch, no usable
+     target): :func:`publish`'s own guards re-decide and report those with their richer
+     messages. False = drafting or T4 failed: do not enter the mechanics loop. (The
+-    ``--no-issue``/pending-id T4 relaxation stays exclusive to :func:`publish` — the
+-    flow never publishes pending-id.)
++    ``--no-issue``/pending-id narrow T4 mode stays exclusive to :func:`publish` — the
++    flow never publishes pending-id, so this pre-pass always gates in the default
++    id-known mode.)
+     """
+     if state.state(d) != state.COMPLETE:
+         return True
+@@ -132,10 +133,13 @@ def publish(
+ 
+     ``pending_id`` (``--no-issue``): the first-class "no tracker id yet" path. A
+     project may need to contribute before a tracker number is assigned; rather than a
+-    magic ``Fixes #0000`` placeholder, declare it here. The T4 contribution gate is
+-    then **relaxed to a flag** instead of a hard block, and the bundle is recorded
+-    ``id_pending`` so the human adds the real id and re-gates T4 before marking the PR
+-    ready. The publisher leaf omits the trailer (no invented id) in this case.
++    magic ``Fixes #0000`` placeholder, declare it here. The T4 contribution gate then
++    runs in the **narrow pending-id mode** (#384): ``$PDCA_PENDING_ID`` is exported so
++    the registered checker drops exactly the tracker-id requirement (``contribcheck
++    --no-issue``) — every other contribution rule still hard-blocks the push. The
++    bundle is recorded ``id_pending`` so the human adds the real id and re-gates T4
++    before marking the PR ready. The publisher leaf omits the trailer (no invented
++    id) in this case.
+ 
+     ``texts_prevalidated`` (set by the flow, #295 review): the caller already ran
+     :func:`draft_texts` — drafting AND the T4 gate — over this bundle, so this call is
+@@ -191,21 +195,19 @@ def publish(
+         if not _ensure_texts(cfg, d):
+             return 1
+ 
+-        # T4 contribution gate — the artifacts MUST pass before anything is pushed,
+-        # UNLESS pending_id (--no-issue): then a T4 failure is relaxed to a flag, since
+-        # the one thing legitimately missing is the not-yet-assigned tracker id. The
+-        # bundle is recorded id_pending so the human adds the id and re-gates T4 before
+-        # ready.
+-        if not _t4_passes(cfg, d):
+-            if pending_id:
+-                print(f"publish: T4 contribution gate not satisfied on {COMMIT_MSG} / "
+-                      f"{PR_BODY} — proceeding in --no-issue (pending-id) mode; the "
+-                      "contribution is FLAGGED. Add the tracker id and re-run T4 before "
+-                      "marking the PR ready.", file=sys.stderr)
+-            else:
+-                print(f"publish: T4 contribution gate FAILED on {COMMIT_MSG} / {PR_BODY} — "
+-                      "fix them and retry", file=sys.stderr)
+-                return 1
++        # T4 contribution gate — the artifacts MUST pass before anything is pushed, in
++        # BOTH modes. Under pending_id (--no-issue) the gate itself runs in the narrow
++        # pending-id mode (#384): the one thing legitimately missing is the
++        # not-yet-assigned tracker id, so exactly that requirement is dropped — by the
++        # checker (`contribcheck --no-issue` via $PDCA_PENDING_ID), not by waving the
++        # whole failed gate through as a printed flag, which also amnestied a broken PR
++        # body / commit message. Whatever still fails here is a real defect that blocks
++        # the push. The bundle is still recorded id_pending so the human adds the id
++        # and re-gates T4 before ready.
++        if not _t4_passes(cfg, d, pending_id=pending_id):
++            print(f"publish: T4 contribution gate FAILED on {COMMIT_MSG} / {PR_BODY} — "
++                  "fix them and retry", file=sys.stderr)
++            return 1
+     elif not ((d / COMMIT_MSG).is_file() and (d / PR_BODY).is_file()):
+         # Defensive: prevalidated promises the texts exist; a vanished artifact means
+         # the promise no longer holds — refuse rather than push without a commit message.
+@@ -776,13 +778,27 @@ def publish_gates(cfg: Config) -> list[dict]:
+             and c.get("at_publish", c.get("scope", "repo") == "bundle")]
+ 
+ 
+-def _t4_passes(cfg: Config, d: Path) -> bool:
++def _t4_passes(cfg: Config, d: Path, *, pending_id: bool = False) -> bool:
+     """Run every configured T4-tier gate over the bundle. No T4 gate → nothing to
+-    enforce (True). Keeps publish decoupled from any one project's checker."""
++    enforce (True). Keeps publish decoupled from any one project's checker.
++
++    ``pending_id`` (``--no-issue``, #384): the gate must be told which mode it runs
++    in, or the amnesty for the not-yet-assigned tracker id covers the WHOLE checker.
++    The mode is exported as ``$PDCA_PENDING_ID``, derived from THIS run's flag —
++    mirroring how the Check runner derives each gate's env from the driver's own
++    state (``gates._run_one``: ``PDCA_BRIEF_BASE`` / ``PDCA_LANE``), never inherited:
++    an ambient value is scrubbed, so a stray export from an earlier ``--no-issue``
++    run cannot relax the tracker-id rule for a ticketed publish. The shipped checker
++    honours it as ``contribcheck --no-issue`` (via the env, not an edit to the
++    registered row line — that breaks ``copier update`` for instances that appended
++    a row beside it)."""
+     t4 = publish_gates(cfg)
+     if not t4:
+         return True
+     env = {**os.environ, "PDCA_BUNDLE": str(d)}
++    env.pop("PDCA_PENDING_ID", None)          # derived per run — never inherited (#384)
++    if pending_id:
++        env["PDCA_PENDING_ID"] = "1"
+     for chk in t4:
+         # Resolve `subcmd` through the SAME helper Check uses (#338). Reading the raw
+         # `cmd` ran the empty string for a delegated row — and `subprocess.run("")` exits
+@@ -805,10 +821,18 @@ def _t4_passes(cfg: Config, d: Path) -> bool:
+         # T4 gate reads patch.diff and writes its report once, at the end, so the newest
+         # write is whatever Check left hours earlier and every tick would render
+         # "no writes 180m" — a stall warning on the very run proving it is not stalled.
++        #
++        # Announce BEFORE the heartbeat (#384, regression from the #338 rework; the
++        # #181 "reads as a hang" finding): the first tick is a full interval away, and
++        # on a bundle whose texts already exist this is publish's first action after
++        # its guards. Same shape as the peer gate runner (gates._run_one). The
++        # heartbeat label stays unprefixed — the announce already says "T4 gate".
++        print(f"  · {f'T4 gate {label}'.rstrip()} (this can take minutes)…",
++              file=sys.stderr, flush=True)
+         try:
+             rc, output, _ = progress.run_with_heartbeat(
+                 cmd, cwd=cfg.root, shell=True, env=env, capture=True,
+-                label=f"T4 {label}" if label else "T4 gate",
++                label=label or "T4 gate",
+             )
+         except Exception as exc:  # command not found, etc. — a failing gate, surfaced
+             print(f"publish: T4 gate '{label}' could not run — {exc}", file=sys.stderr)
+diff --git a/template/tests/test_publish_slice.py b/template/tests/test_publish_slice.py
+index 8c45a7c..4871856 100644
+--- a/template/tests/test_publish_slice.py
++++ b/template/tests/test_publish_slice.py
+@@ -11,7 +11,11 @@ from __future__ import annotations
+ 
+ import io
+ import json
++import os
++import re
++import shlex
+ import shutil
++import sys
+ import tempfile
+ import unittest
+ from contextlib import redirect_stderr, redirect_stdout
+@@ -23,6 +27,22 @@ from pdca_harness import cli, flow, gates, leaves, publish, signoff, state
+ from pdca_harness.config import Config, LeafConfig
+ 
+ TEMPLATES = Path(__file__).resolve().parents[1] / "templates"
++_SRC = Path(cli.__file__).resolve().parents[1]          # …/template/src — the tree under test
++
++
++def _shipped_t4_row_cmd() -> str:
++    """The registered `T4-contribution` checker invocation, exactly as shipped (#384):
++    the narrow --no-issue mode must reach an instance through the registered row, not
++    through hand-editing its config. Read from `pdca.toml.jinja` in the template tree
++    or the rendered `pdca.toml` when this suite runs inside a rendered instance (the
++    root render suite copies it there); the instance-specific leading cli token is
++    dropped so the caller can substitute the tree-under-test's own CLI."""
++    root = Path(publish.__file__).resolve().parents[2]
++    config = next(p for p in (root / "pdca.toml.jinja", root / "pdca.toml") if p.is_file())
++    row = next(line for line in config.read_text(encoding="utf-8").splitlines()
++               if '"T4-contribution"' in line)
++    cmd = re.search(r'cmd = "([^"]+)"', row).group(1)
++    return cmd[cmd.index("contribcheck"):]
+ 
+ 
+ def _cfg(root: Path) -> Config:
+@@ -359,20 +379,76 @@ class PublishSlice(unittest.TestCase):
+         self.assertEqual(pj["pr_url"], "")                       # recorded, but empty
+         self.assertEqual(pj["branch"], "fix/PUBFAIL-my-fix")     # branch was pushed
+ 
+-    def test_no_issue_relaxes_failing_t4_to_a_flag(self) -> None:
+-        """Issue #7 item3: `--no-issue` (pending_id) relaxes a failing T4 to a flag
+-        instead of aborting — publish proceeds and flags it; without it a failing T4
+-        still aborts. The first-class 'no tracker id yet' path (vs a magic #0000)."""
+-        self.cfg.gates_checks = [{"id": "T4-x", "tier": "T4", "cmd": "exit 1", "scope": "bundle"}]
+-        _bundle(self.cfg, "PEND", brief_body=_FIX_BRIEF, accepted=True)
+-        # default: a failing T4 aborts the publish
+-        self.assertEqual(publish.publish(self.cfg, "PEND", dry_run=True), 1)
+-        # --no-issue: the failing T4 is relaxed to a flag; publish proceeds
++    def _publish(self, iid: str, **kw) -> tuple[int, str]:
++        """Dry-run publish; return (rc, stderr text)."""
+         err = io.StringIO()
+         with redirect_stderr(err), redirect_stdout(io.StringIO()):
+-            rc = publish.publish(self.cfg, "PEND", dry_run=True, pending_id=True)
+-        self.assertEqual(rc, 0)
+-        self.assertIn("pending-id", err.getvalue().lower())
++            rc = publish.publish(self.cfg, iid, dry_run=True, **kw)
++        return rc, err.getvalue()
++
++    def test_no_issue_no_longer_relaxes_a_failing_t4_to_a_flag(self) -> None:
++        """Issue #384: `--no-issue` states one fact — the tracker id doesn't exist yet —
++        so it may relax exactly the tracker-id requirement (the checker's own narrow
++        mode, exercised below). A T4 failure for ANY other reason blocks the push in
++        either mode; the old branch that waved the WHOLE failed gate through as a
++        printed FLAGGED notice is gone."""
++        self.cfg.gates_checks = [{"id": "T4-x", "tier": "T4", "cmd": "exit 1", "scope": "bundle"}]
++        _bundle(self.cfg, "PEND", brief_body=_FIX_BRIEF, accepted=True)
++        self.assertEqual(self._publish("PEND")[0], 1)          # default: aborts, as before
++        rc, err = self._publish("PEND", pending_id=True)
++        self.assertEqual(rc, 1, "a failing T4 must abort a --no-issue publish too")
++        self.assertNotIn("FLAGGED", err)                        # the amnesty branch is gone
++        self.assertIn("FAILED", err)
++
++    def test_no_issue_mode_reaches_the_t4_gate_as_pdca_pending_id(self) -> None:
++        """#384: the gate is TOLD which mode it runs in — $PDCA_PENDING_ID is exported
++        under --no-issue and absent otherwise, derived from the flag on each run."""
++        _bundle(self.cfg, "PEND2", brief_body=_FIX_BRIEF, accepted=True)
++        self.cfg.gates_checks = [{"id": "T4-x", "tier": "T4", "scope": "bundle",
++                                  "cmd": 'test -n "$PDCA_PENDING_ID"'}]
++        rc, err = self._publish("PEND2", pending_id=True)
++        self.assertEqual((rc, "FLAGGED" in err), (0, False))    # exported → gate passes
++        self.assertEqual(self._publish("PEND2")[0], 1)          # default mode: not exported
++
++    def test_ambient_pdca_pending_id_is_scrubbed_not_honoured(self) -> None:
++        """#384: the mode comes from THIS run's flag, never the ambient environment — a
++        stray export from an earlier --no-issue run must not relax a ticketed publish
++        (mirrors gates._run_one deriving per-run env from driver state)."""
++        _bundle(self.cfg, "PEND3", brief_body=_FIX_BRIEF, accepted=True)
++        self.cfg.gates_checks = [{"id": "T4-x", "tier": "T4", "scope": "bundle",
++                                  "cmd": 'test -z "$PDCA_PENDING_ID"'}]
++        with mock.patch.dict(os.environ, {"PDCA_PENDING_ID": "1"}):
++            self.assertEqual(self._publish("PEND3")[0], 0)      # inherited value scrubbed
++
++    def test_shipped_row_gives_no_issue_only_the_tracker_id_amnesty(self) -> None:
++        """#384 end to end through the SHIPPED `T4-contribution` row and the PRODUCTION
++        checker: publish's derived $PDCA_PENDING_ID reaches `contribcheck` (which
++        honours it as `--no-issue`) through the registered cmd UNCHANGED — rewriting
++        that row line in place breaks `copier update` for instances that appended a row
++        beside it (tests/test_update_compat.py). A bundle whose only T4 problem is the
++        absent tracker id proceeds under --no-issue, the id-known mode still enforces
++        the id, and any OTHER defect is refused in both modes."""
++        row_cmd = _shipped_t4_row_cmd()
++        self.assertTrue(row_cmd.startswith("contribcheck"))
++        cli_cmd = (f"PYTHONPATH={shlex.quote(str(_SRC))} {shlex.quote(sys.executable)} "
++                   "-m pdca_harness.cli")
++        self.cfg.gates_checks = [{"id": "T4-contribution", "tier": "T4", "scope": "bundle",
++                                  "cmd": f"{cli_cmd} {row_cmd}"}]
++        (self.tmp / "pdca.toml").write_text("", encoding="utf-8")  # Config.load for the CLI
++        d = _bundle(self.cfg, "384", brief_body=_FIX_BRIEF, accepted=True)
++        (d / "pr-description.md").write_text(
++            "## Summary\n**User impact:** x.\n\n## Root cause\nx.\n", encoding="utf-8")
++        (d / "commit-msg.txt").write_text("Fix\n\nNo trailer yet.\n", encoding="utf-8")
++        # Only defect = the not-yet-assigned tracker id: --no-issue proceeds…
++        rc, err = self._publish("384", pending_id=True)
++        self.assertEqual((rc, "FLAGGED" in err), (0, False))
++        # …while the default (id-known) mode still enforces the id.
++        self.assertEqual(self._publish("384")[0], 1)
++        # A NON-tracker-id defect (no user-impact opener) is refused even under --no-issue.
++        (d / "pr-description.md").write_text("## Summary\nno opener here.\n", encoding="utf-8")
++        rc, err = self._publish("384", pending_id=True)
++        self.assertEqual(rc, 1, "a malformed PR body must not be waved through as 'pending id'")
++        self.assertIn("User impact", err)
+ 
+     def _stacked_dry_run(self, *, base_remote: str) -> str:
+         # A `Stacks on:` dependent whose parent has a published branch — dry-run publish.
+@@ -904,6 +980,20 @@ class ContribCheck(unittest.TestCase):
+                           commit="Fix the crash\n\nNo trailer.\n")
+         self.assertEqual(self._run("266", no_issue=True)[0], 0)
+ 
++    def test_pdca_pending_id_env_is_the_no_issue_flag(self) -> None:
++        # #384: publish tells the gate its mode via $PDCA_PENDING_ID (derived per run,
++        # scrubbed when absent) rather than editing the shipped row's cmd line — an
++        # in-place edit of that registered line breaks `copier update` for any instance
++        # that appended a row beside it (tests/test_update_compat.py). The env form is
++        # exactly the --no-issue flag: trailer waved, opener still enforced.
++        self._bundle_with("266", "## Summary\n**User impact:** x.\n\n## Root cause\nx.\n",
++                          commit="Fix the crash\n\nNo trailer.\n")
++        self.assertEqual(self._run("266")[0], 1)                # id-known mode: enforced
++        with mock.patch.dict(os.environ, {"PDCA_PENDING_ID": "1"}):
++            self.assertEqual(self._run("266")[0], 0)            # pending-id via the env
++            self._bundle_with("267", "## Summary\nno opener.\n")
++            self.assertEqual(self._run("267")[0], 1)            # opener still enforced
++
+     def test_slug_bundle_skips_the_trailer_requirement(self) -> None:
+         # A non-numeric (slug) id has no real ticket number → only the opener is enforced.
+         self._bundle_with("820-build", "## Summary\n**User impact:** x.\n\n## Root cause\nx.\n",
+diff --git a/template/tests/test_t4_publish_gate.py b/template/tests/test_t4_publish_gate.py
+index 9d15190..91cbd70 100644
+--- a/template/tests/test_t4_publish_gate.py
++++ b/template/tests/test_t4_publish_gate.py
+@@ -19,9 +19,12 @@ registered passed *vacuously* at publish while working correctly at Check.
+ 
+ from __future__ import annotations
+ 
++import io
++import os
+ import shutil
+ import tempfile
+ import unittest
++from contextlib import redirect_stderr
+ from pathlib import Path
+ from unittest import mock
+ 
+@@ -121,6 +124,40 @@ class T4PublishGate(unittest.TestCase):
+                                "cmd": 'test "$PDCA_BUNDLE" = "' + str(self.bundle) + '"'}])
+         self.assertTrue(publish._t4_passes(cfg, self.bundle))
+ 
++    def test_announce_precedes_the_heartbeat_with_an_unprefixed_label(self) -> None:
++        """#384 (announce dropped in the #338 rework — the #181 'reads as a hang'
++        finding): something must reach the terminal BEFORE the heartbeat's first tick,
++        which is a full interval away. And the heartbeat label stays unprefixed — the
++        announce already says 'T4 gate'."""
++        cfg = _cfg(self.tmp, [{"id": "T4-x", "tier": "T4", "scope": "bundle",
++                               "label": "contribution lint", "cmd": "true"}])
++        err = io.StringIO()
++        stderr_at_call: list[str] = []
++
++        def fake(cmd, **kwargs):
++            stderr_at_call.append(err.getvalue())   # what the terminal shows at launch
++            return 0, "", False
++
++        with redirect_stderr(err), \
++             mock.patch.object(progress, "run_with_heartbeat", side_effect=fake) as spy:
++            self.assertTrue(publish._t4_passes(cfg, self.bundle))
++        self.assertIn("T4 gate", stderr_at_call[0], "nothing announced before the run")
++        self.assertIn("contribution lint", stderr_at_call[0])
++        self.assertEqual(spy.call_args.kwargs.get("label"), "T4-x: contribution lint")
++
++    def test_pending_id_mode_is_derived_per_run_never_inherited(self) -> None:
++        """#384: `_t4_passes` exports $PDCA_PENDING_ID from THIS run's flag (so the
++        registered `contribcheck` row can drop exactly the tracker-id rule), and
++        scrubs an ambient value rather than honouring it."""
++        cfg = _cfg(self.tmp, [{"id": "T4-x", "tier": "T4", "scope": "bundle",
++                               "cmd": 'test -n "$PDCA_PENDING_ID"'}])
++        with redirect_stderr(io.StringIO()):
++            self.assertTrue(publish._t4_passes(cfg, self.bundle, pending_id=True))
++            self.assertFalse(publish._t4_passes(cfg, self.bundle))    # default: absent
++            with mock.patch.dict(os.environ, {"PDCA_PENDING_ID": "1"}):
++                self.assertFalse(publish._t4_passes(cfg, self.bundle),
++                                 "an inherited $PDCA_PENDING_ID must be scrubbed")
++
+     def test_unlaunchable_gate_blocks_instead_of_crashing(self) -> None:
+         cfg = _cfg(self.tmp, [{"id": "T4-x", "tier": "T4", "scope": "bundle", "cmd": "false"}])
+         with mock.patch.object(progress, "run_with_heartbeat",

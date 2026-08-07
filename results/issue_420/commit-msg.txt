@@ -1,0 +1,32 @@
+feat(driver): bound each leaf's memory so one can't kill the run
+
+A leaf is a model subprocess doing real work in a real checkout, and with
+lanes several of them run at once. Nothing bounded how much memory they
+could take, so one hungry leaf could take the whole run with it: two
+reviewer leaves doing the independent red-green re-verification the
+reviewer contract asks for wrote ~69 GB of cold build trees in thirteen
+minutes, systemd-oomd killed the entire terminal cgroup for memory
+pressure, and the driver, both lanes and every bundle went with it. Because
+oomd kills the cgroup rather than the offending process, nothing in any
+gate log said why — the run simply vanished.
+
+`[driver].leaf_memory_max` (unset by default) now caps every leaf the
+driver spawns — planner, builder, reviewer, advisory, sign-off, publish,
+Act, headless and interactive alike. A leaf that overruns is killed as
+itself: it exits non-zero, the bundle records that leaf's failure through
+the normal path, and the run survives to report it. Any `[leaves.*]` table
+can override the bound with its own `memory_max`, or opt that leaf out with
+`memory_max = "off"` — including the array-form tables
+(`[[leaves.advisory]]`, `[[leaves.plan_advisory]]`), and
+variants/escalations inherit the leaf they vary rather than silently losing
+its cap.
+
+Two things it deliberately does not do. With the knob unset the spawn is
+byte-identical to what it was before the knob existed: there is no portable
+number to default to, and a cap set too low is its own way to kill a run.
+And a host with no usable `systemd-run --user --scope` — no systemd, no
+user manager, some containers, macOS — degrades to that same no-op with one
+note on stderr, so a configured bound can never be the reason a leaf fails
+to start.
+
+Fixes #420

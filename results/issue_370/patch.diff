@@ -1,0 +1,467 @@
+diff --git a/template/src/pdca_harness/driver.py b/template/src/pdca_harness/driver.py
+index 3219695..b260e5f 100644
+--- a/template/src/pdca_harness/driver.py
++++ b/template/src/pdca_harness/driver.py
+@@ -389,6 +389,8 @@ def _archive_iteration(d: Path, n: int, *, include_brief: bool) -> None:
+                 names.append(str(tf))
+     for name in names:
+         src = d / name
+-        if src.is_file():
++        # A directory entry (state.GATE_LOGS_DIR, #370 — the round's gate evidence logs)
++        # is moved whole: each iteration-v<N>/ keeps the full basis of its own verdict.
++        if src.is_file() or src.is_dir():
+             arch.mkdir(parents=True, exist_ok=True)
+             src.rename(arch / Path(name).name)
+diff --git a/template/src/pdca_harness/gates.py b/template/src/pdca_harness/gates.py
+index db99742..2518d5b 100644
+--- a/template/src/pdca_harness/gates.py
++++ b/template/src/pdca_harness/gates.py
+@@ -23,7 +23,12 @@ any other exit code, because a gate that failed has failed whatever it printed (
+ ``[[gates.checks]]`` is empty the driver falls back to all-PASS stub rows, so the
+ offline vertical slice still runs.
+ 
+-A row: {check, result, oracle, rule_id, path_line, gating}. ``result`` ∈
++A row: {check, result, oracle, rule_id, path_line, gating}. A row produced by a
++bundle-scoped :func:`run_gates` additionally carries ``log`` (the bundle-relative path of
++its full-output evidence log, ``gate-logs/<rule_id>.log``) and ``duration_secs`` (issue
++#370) — additive keys, existing consumers unchanged. When that evidence log could NOT be
++written, the row instead carries ``log_error`` (the reason) so a persistence failure is
++never silent — the verdict itself is unaffected either way. ``result`` ∈
+ ``pass`` / ``fail`` / ``unverifiable`` / ``none``. A ``none`` row is a judgment cell
+ decided by the reviewer + human (docs 04 §judgment cell); it is listed for matrix
+ alignment and never gates. An ``unverifiable`` row does **not** count toward
+@@ -39,6 +44,8 @@ import re
+ import shlex
+ import shutil
+ import sys
++import time
++from datetime import datetime, timezone
+ from pathlib import Path
+ 
+ from . import brief, lane, progress, state, worktree
+@@ -50,6 +57,11 @@ from .config import Config
+ UNVERIFIABLE_RC = 77
+ UNVERIFIABLE_MARKER = "PDCA-UNVERIFIABLE:"
+ 
++# The bundle directory holding one full-output evidence log per gate rule (issue #370).
++# Defined in `state` (next to the archive list that moves it per round) — re-exported
++# here because gates is the writer.
++GATE_LOGS_DIR = state.GATE_LOGS_DIR
++
+ 
+ # ----------------------------------------------------------------------------
+ # Gate-promotion lifecycle (issue #156): a check may carry ``promote_after = N``; once it
+@@ -134,8 +146,15 @@ def promotion_candidates(cfg: Config) -> list[dict]:
+ 
+ 
+ def run_gates(d: Path, cfg: Config) -> dict:
+-    """Run every gate for bundle ``d`` (both repo- and bundle-scoped); write JSON."""
+-    rows = _run_checks(cfg, cwd=cfg.root, bundle=d, scopes=("repo", "bundle"))
++    """Run every gate for bundle ``d`` (both repo- and bundle-scoped); write JSON.
++
++    The FULL output of each check is persisted to ``<d>/gate-logs/<rule_id>.log``
++    (issue #370): the 120-char ``path_line`` is the right *summary*, but it must not be
++    the entire *record* — a gating red that parks the bundle needs its whole basis
++    reconstructable from bundle files alone (the state-is-files doctrine). One file per
++    rule id, overwritten per Check run."""
++    rows = _run_checks(cfg, cwd=cfg.root, bundle=d, scopes=("repo", "bundle"),
++                       log_dir=d / GATE_LOGS_DIR)
+     return _finalize(rows, name=d.name, write_to=d)
+ 
+ 
+@@ -208,7 +227,9 @@ def run_gates_dry(d: Path, cfg: Config) -> dict:
+     frozen ``check-gates.json`` — the gate runner behind ``pdca revalidate`` (issue #11).
+ 
+     Same single-sourced ``_run_checks`` as :func:`run_gates`, but ``write_to=None`` so a
+-    re-gate of an already-COMPLETE bundle never mutates its frozen record."""
++    re-gate of an already-COMPLETE bundle never mutates its frozen record. For the same
++    reason no ``log_dir`` is passed (issue #370): ``gate-logs/`` is the frozen evidence
++    behind the frozen verdict, and a later dry re-gate must not overwrite it either."""
+     rows = _run_checks(cfg, cwd=cfg.root, bundle=d, scopes=("repo", "bundle"))
+     return _finalize(rows, name=d.name, write_to=None)
+ 
+@@ -275,7 +296,8 @@ def _applies(chk: dict, scopes: tuple[str, ...], labels: frozenset[str] | None)
+ 
+ 
+ def _run_checks(cfg: Config, *, cwd: Path, bundle: Path | None, scopes: tuple[str, ...],
+-                worktree_override: Path | None = None) -> list[dict]:
++                worktree_override: Path | None = None,
++                log_dir: Path | None = None) -> list[dict]:
+     # No configured gates → the offline stub: the full 5/5/1 with the mechanical
+     # gate elements stub-passed (so the offline slice runs green). A declared
+     # [gates] host_ci row counts as real configuration too (#311).
+@@ -314,6 +336,13 @@ def _run_checks(cfg: Config, *, cwd: Path, bundle: Path | None, scopes: tuple[st
+                 gating=True, element="C4")], stub=False)
+     else:
+         wt, ovf_primary = None, None
++    if log_dir is not None:
++        # One evidence set per Check run (issue #370): clear the previous run's logs, so
++        # gate-logs/ holds exactly THIS run's files — a check since removed from the
++        # config leaves no stale log masquerading as current evidence. A non-directory
++        # squatting on the path survives this (ignore_errors) and is surfaced per row as
++        # ``log_error`` by _write_gate_log — visibly, never silently (#370 iteration 2).
++        shutil.rmtree(log_dir, ignore_errors=True)
+     configured: list[dict] = []
+     try:
+         for chk in cfg.gates_checks:
+@@ -325,7 +354,8 @@ def _run_checks(cfg: Config, *, cwd: Path, bundle: Path | None, scopes: tuple[st
+                 continue
+             configured.append(_run_one(chk, cwd=cwd, bundle=bundle, runner=cfg.gates_runner,
+                                        worktree_path=wt,
+-                                       default_timeout=cfg.gates_default_timeout_secs))
++                                       default_timeout=cfg.gates_default_timeout_secs,
++                                       log_dir=log_dir))
+         # Host-only CI parity rows ([gates] host_ci, issue #311): commands the host's CI
+         # runs on every PR but the delegated gate runner does not cover (a spell-checker,
+         # a docs lint). Unlike the rows above (cwd=cfg.root; each command must target
+@@ -352,7 +382,8 @@ def _run_checks(cfg: Config, *, cwd: Path, bundle: Path | None, scopes: tuple[st
+                 else:
+                     configured.append(_run_one(chk, cwd=wt, bundle=bundle,
+                                                runner=cfg.gates_runner, worktree_path=wt,
+-                                               default_timeout=cfg.gates_default_timeout_secs))
++                                               default_timeout=cfg.gates_default_timeout_secs,
++                                               log_dir=log_dir))
+     finally:
+         if ovf_primary is not None and wt is not None:
+             worktree.overflow_remove(ovf_primary, wt)
+@@ -399,7 +430,8 @@ def _gate_timeout(chk: dict, default: int | None) -> int | None:
+ 
+ def _run_one(chk: dict, *, cwd: Path, bundle: Path | None, runner: str = "",
+              worktree_path: Path | None = None,
+-             default_timeout: int | None = None) -> dict:
++             default_timeout: int | None = None,
++             log_dir: Path | None = None) -> dict:
+     cmd, cmd_error = _delegated_cmd(chk, runner)
+     gating = bool(chk.get("gating", True))
+     label = f"{chk.get('id', '')}: {chk.get('label', '')}".strip(": ")
+@@ -451,6 +483,10 @@ def _run_one(chk: dict, *, cwd: Path, bundle: Path | None, runner: str = "",
+     watch = bundle or cwd
+     bound = _gate_timeout(chk, default_timeout)
+     print(f"  · gate {label} (a Docker-backed gate can take minutes)…", file=sys.stderr, flush=True)
++    started = datetime.now(timezone.utc).isoformat(timespec="seconds")
++    t0 = time.monotonic()
++    rc: int | None = None
++    output = ""
+     try:
+         # Output is captured for the evidence line; the heartbeat ticks meanwhile so
+         # a long, silent gate (e.g. a Docker-backed test suite) doesn't look hung.
+@@ -469,11 +505,73 @@ def _run_one(chk: dict, *, cwd: Path, bundle: Path | None, runner: str = "",
+             result, evidence = _classify(rc, output)
+     except Exception as exc:  # command not found, etc. — a failing gate, surfaced
+         result, evidence = "fail", [str(exc)]
+-    return _row(
++        output = f"{exc}\n"  # the exception IS the run's whole output — log it (#370)
++    duration = round(time.monotonic() - t0, 2)
++    row = _row(
+         f"{chk.get('tier', '?')} {chk.get('label', chk.get('id', ''))}",
+         result, oracle=cmd, rule_id=chk.get("id", ""),
+         path_line=evidence[0][:120], gating=gating, element=chk.get("tier", ""),
+     )
++    if log_dir is not None:
++        # Persist the FULL evidence (issue #370): the truncated path_line above stays the
++        # summary, but the verdict's whole basis — including the partial capture of a
++        # timed-out gate — must be reconstructable from bundle files alone.
++        rel, log_error = _write_gate_log(log_dir, chk, cmd=cmd, cwd=cwd,
++                                         worktree_path=worktree_path, started=started,
++                                         duration=duration, rc=rc, result=result,
++                                         timeout=bound, output=output)
++        row["duration_secs"] = duration  # additive keys — existing consumers unchanged
++        if log_error is None:
++            row["log"] = rel             # bundle-relative
++        else:
++            # A persistence failure must never break the gate run or alter the verdict —
++            # but it must NOT be silent either (#370 iteration 2): the feature's promise
++            # is "full basis reconstructable from bundle files alone", so a run where
++            # that silently did not happen re-creates the original defect. Record the
++            # reason in the row (additive) and say so on stderr.
++            row["log_error"] = log_error
++            print(f"  ! gate {label}: evidence log {GATE_LOGS_DIR}/ not written — "
++                  f"{log_error}", file=sys.stderr, flush=True)
++    return row
++
++
++def _write_gate_log(log_dir: Path, chk: dict, *, cmd: str, cwd: Path,
++                    worktree_path: Path | None, started: str, duration: float,
++                    rc: int | None, result: str, timeout: int | None,
++                    output: str) -> tuple[str | None, str | None]:
++    """Write ``gate-logs/<rule_id>.log`` — a small header, then the combined
++    stdout+stderr VERBATIM (issue #370). Returns ``(bundle_relative_path, None)`` on
++    success, or ``(None, reason)`` on a write failure: evidence persistence is
++    best-effort and must never break the gate run (the verdict itself is already in the
++    row) — but the failure is returned, not swallowed, so the caller surfaces it as the
++    row's ``log_error`` (#370 iteration 2)."""
++    name = f"{re.sub(r'[^A-Za-z0-9._-]', '_', chk.get('id', '')) or 'gate'}.log"
++    if rc == progress.TIMEOUT_RC:
++        # (#368 × #370) the bound expired: attach what the gate DID say before the kill,
++        # so a hung gate's log shows where it hung instead of nothing.
++        exit_line = f"timeout — killed after its {timeout}s bound (partial output below)"
++    elif rc is None:
++        exit_line = "exception — the command could not be run"
++    else:
++        exit_line = str(rc)
++    header = "\n".join([
++        f"# gate: {chk.get('id', '')} — {chk.get('label', '')}",
++        f"# cmd: {cmd}",
++        f"# cwd: {cwd}",
++        f"# PDCA_WORKTREE: {worktree_path if worktree_path is not None else '(none)'}",
++        f"# start: {started}",
++        f"# duration_secs: {duration}",
++        f"# exit: {exit_line}",
++        f"# outcome: {result}",
++        "# ---- combined stdout+stderr (verbatim) ----",
++        "",
++    ])
++    try:
++        log_dir.mkdir(parents=True, exist_ok=True)
++        (log_dir / name).write_text(header + output, encoding="utf-8")
++    except OSError as exc:
++        return None, f"could not write {GATE_LOGS_DIR}/{name}: {exc}"
++    return f"{GATE_LOGS_DIR}/{name}", None
+ 
+ 
+ def _classify(rc: int, output: str) -> tuple[str, list[str]]:
+diff --git a/template/src/pdca_harness/state.py b/template/src/pdca_harness/state.py
+index b9b547b..0a0d48c 100644
+--- a/template/src/pdca_harness/state.py
++++ b/template/src/pdca_harness/state.py
+@@ -50,6 +50,12 @@ DEPENDENCY_ADJUDICATION = "dependency-adjudication.json"
+ # attempt via DOWNSTREAM_OF_BRIEF below.
+ SESSION_CARRY = "session-carry-forward"
+ 
++# The per-rule gate evidence logs (issue #370): ``gate-logs/<rule_id>.log`` — the full
++# combined output behind each ``check-gates.json`` row, written by a bundle-scoped
++# ``gates.run_gates``. Named here (like CLOSE_MARKER / SESSION_CARRY) so ``gates`` (the
++# writer) and the archive list below share one spelling.
++GATE_LOGS_DIR = "gate-logs"
++
+ # Everything Do and Check write, i.e. everything downstream of brief.md. Includes the
+ # close marker (issue #60) so an iterate archives it too — reopening a close bundle to a
+ # fix path then clears the marker and runs the real Do+Check band.
+@@ -85,6 +91,10 @@ DOWNSTREAM_OF_BRIEF = [
+     # decision is consumed, merged into the brief by _carry_forward_into_brief, and
+     # archived here WITH the attempt it describes — never left to leak into the next one.
+     SESSION_CARRY,
++    # The gate evidence logs (#370): a directory, one <rule_id>.log per configured check.
++    # Archived per round WITH the verdict they explain, so each iteration-v<N>/ keeps the
++    # full basis of its own gate run — the state-is-files doctrine applied to evidence.
++    GATE_LOGS_DIR,
+ ]
+ 
+ # Cycle artifacts matched by pattern rather than name. ONE definition, read by both
+diff --git a/template/tests/test_gate_logs.py b/template/tests/test_gate_logs.py
+new file mode 100644
+index 0000000..02b5fec
+--- /dev/null
++++ b/template/tests/test_gate_logs.py
+@@ -0,0 +1,211 @@
++"""Gate evidence logs (issue #370, stdlib unittest).
++
++A gate's full output used to be discarded: `_run_one` captured combined stdout+stderr,
++`_classify` kept only the last line, the row truncated it to 120 characters, and nothing
++wrote the rest anywhere — so the entire record of a *gating* red that parked a bundle was
++one truncated line. This suite proves the evidence-sufficiency invariant (state-is-files:
++a verdict's full basis is reconstructable from bundle files alone, per round):
++
++  (a) a bundle-scoped run writes `gate-logs/<rule_id>.log` — header (cmd, cwd,
++      $PDCA_WORKTREE, start, duration, exit/outcome) + the combined output VERBATIM,
++      one file per rule id, overwritten per Check run;
++  (b) the row gains `log` + `duration_secs` additively (existing keys unchanged);
++  (c) the iterate archive moves `gate-logs/` with the round's other artifacts;
++  (d) a timed-out gate (#368) attaches its partial capture — where it hung, not nothing;
++  (e) a repo-scoped run with no bundle keeps today's behaviour (no logs, no new keys);
++  a dry re-gate (`run_gates_dry`, revalidate) never overwrites frozen evidence;
++  and (iteration 2) a log-write FAILURE is never silent: the row carries `log_error`
++  with the reason and a stderr line names it — while the verdict stays unchanged.
++
++Deterministic real gate commands — no Claude / Docker. Run from the project root:
++PYTHONPATH=src python -m unittest discover -s tests
++"""
++
++from __future__ import annotations
++
++import contextlib
++import io
++import shutil
++import tempfile
++import unittest
++from pathlib import Path
++
++from pdca_harness import driver, gates, state
++from pdca_harness.config import Config, LeafConfig
++
++# A real bundle-scoped gating gate; only the cmd varies per test.
++_GATE = {"id": "C4-log", "tier": "C4", "label": "verify", "scope": "bundle", "gating": True}
++# Multi-line output: the 120-char evidence line keeps only the LAST line, so the earlier
++# lines prove the log carries what the row summary drops.
++_MULTI = {**_GATE, "cmd": "echo first-line; echo middle-line; echo last-line"}
++
++
++def _stub_config(root: Path) -> Config:
++    return Config(
++        root=root,
++        bundle_root=root / "results",
++        process_dir=root / "process",
++        templates_dir=root / "templates",
++        default_branch="main",
++        tracker_system="github",
++        tracker_url="",
++        issue_id_example="#1",
++        builder=LeafConfig(mode="stub", family="claude"),
++        reviewer=LeafConfig(mode="stub", family="codex"),
++    )
++
++
++class GateEvidenceLogs(unittest.TestCase):
++    def setUp(self) -> None:
++        self.tmp = Path(tempfile.mkdtemp())
++        self.cfg = _stub_config(self.tmp)
++
++    def tearDown(self) -> None:
++        shutil.rmtree(self.tmp, ignore_errors=True)
++
++    def _bundle(self, iid: str) -> Path:
++        d = self.cfg.bundle(iid)
++        d.mkdir(parents=True)
++        (d / "brief.md").write_text("- **Slug:** gl\n", encoding="utf-8")
++        (d / "patch.diff").write_text("--- a\n+++ b\n", encoding="utf-8")
++        return d
++
++    def _gate_row(self, result: dict) -> dict:
++        return next(r for r in result["rows"] if r["rule_id"] == "C4-log")
++
++    # -- (a) the log file: header + verbatim body, bundle-scoped ---------------------
++
++    def test_bundle_run_writes_header_and_verbatim_output(self) -> None:
++        d = self._bundle("LOG")
++        self.cfg.gates_checks = [_MULTI]
++        result = gates.run_gates(d, self.cfg)
++
++        log = d / "gate-logs" / "C4-log.log"
++        self.assertTrue(log.exists(), "bundle-scoped gate run left no gate-logs/<id>.log")
++        text = log.read_text(encoding="utf-8")
++        # The header: command, cwd, $PDCA_WORKTREE, start time, duration, exit/outcome.
++        self.assertIn(f"# cmd: {_MULTI['cmd']}", text)
++        self.assertIn(f"# cwd: {self.cfg.root}", text)
++        self.assertIn("# PDCA_WORKTREE:", text)
++        self.assertIn("# start: ", text)
++        self.assertIn("# duration_secs: ", text)
++        self.assertIn("# exit: 0", text)
++        self.assertIn("# outcome: pass", text)
++        # The body: the combined output VERBATIM — every line, in order, not just the
++        # last one the 120-char evidence summary keeps.
++        self.assertIn("first-line\nmiddle-line\nlast-line\n", text)
++        self.assertEqual(self._gate_row(result)["path_line"], "last-line")
++
++    # -- (b) the row keys, additive ---------------------------------------------------
++
++    def test_row_gains_log_and_duration_additively(self) -> None:
++        d = self._bundle("ROW")
++        self.cfg.gates_checks = [_MULTI]
++        row = self._gate_row(gates.run_gates(d, self.cfg))
++        self.assertEqual(row["log"], "gate-logs/C4-log.log")  # bundle-relative
++        self.assertIsInstance(row["duration_secs"], (int, float))
++        self.assertGreaterEqual(row["duration_secs"], 0)
++        self.assertNotIn("log_error", row)  # the failure key only appears on failure
++        # Additive: every pre-existing key is still there for existing consumers.
++        self.assertLessEqual(
++            {"check", "result", "oracle", "rule_id", "path_line", "gating", "element"},
++            set(row))
++
++    # -- (a) one file per rule id, overwritten per Check run ---------------------------
++
++    def test_rerun_clears_stale_logs_and_overwrites(self) -> None:
++        d = self._bundle("OVR")
++        stale = d / "gate-logs" / "removed-gate.log"
++        stale.parent.mkdir(parents=True)
++        stale.write_text("evidence of a check no longer configured\n", encoding="utf-8")
++        self.cfg.gates_checks = [_MULTI]
++        gates.run_gates(d, self.cfg)
++        self.assertFalse(stale.exists(),
++                         "a stale log survived the re-run masquerading as current evidence")
++        self.assertTrue((d / "gate-logs" / "C4-log.log").exists())
++
++    # -- (iteration 2) a write failure is surfaced, never silent -----------------------
++
++    def test_write_failure_surfaces_log_error_and_stderr(self) -> None:
++        d = self._bundle("ERR")
++        # The reproduced collision: a FILE squatting on the gate-logs path. The pre-run
++        # clear (rmtree) cannot remove it and mkdir cannot replace it, so the evidence
++        # write fails — which must be visible, not a silently absent log.
++        (d / state.GATE_LOGS_DIR).write_text("squatter\n", encoding="utf-8")
++        self.cfg.gates_checks = [_MULTI]
++        err = io.StringIO()
++        with contextlib.redirect_stderr(err):
++            result = gates.run_gates(d, self.cfg)
++        row = self._gate_row(result)
++        # The verdict is untouched — persistence failure never alters a gate result …
++        self.assertEqual(row["result"], "pass")
++        self.assertEqual(result["overall"], "pass")
++        self.assertEqual(row["path_line"], "last-line")
++        # … but the failure is recorded IN the row (additive), with the reason …
++        self.assertNotIn("log", row)
++        self.assertIn("gate-logs/C4-log.log", row["log_error"])
++        self.assertIn("duration_secs", row)  # the measurement itself did happen
++        # … and named on stderr, so a live run shows it too.
++        self.assertIn("C4-log", err.getvalue())
++        self.assertIn("not written", err.getvalue())
++        # The recorded row (check-gates.json) carries the same signal — state is files.
++        self.assertIn("log_error", (d / "check-gates.json").read_text(encoding="utf-8"))
++
++    # -- (d) timeout attaches the partial capture (#368 × #370) ------------------------
++
++    def test_timeout_attaches_partial_capture(self) -> None:
++        d = self._bundle("TMO")
++        self.cfg.gates_checks = [
++            {**_GATE, "cmd": "echo before-the-hang; sleep 30", "timeout_secs": 1}]
++        row = self._gate_row(gates.run_gates(d, self.cfg))
++        self.assertEqual(row["result"], "unverifiable")  # the #368 outcome, unchanged
++        text = (d / "gate-logs" / "C4-log.log").read_text(encoding="utf-8")
++        self.assertIn("timeout", text)  # the header names the outcome …
++        self.assertIn("before-the-hang", text)  # … and the log shows WHERE it hung
++
++    # -- (e) repo-scoped, no bundle: today's behaviour ---------------------------------
++
++    def test_working_tree_run_keeps_todays_behaviour(self) -> None:
++        self.cfg.gates_checks = [
++            {"id": "T3-x", "tier": "T3", "label": "suite", "scope": "repo",
++             "gating": False, "cmd": "echo repo-run"}]
++        result = gates.run_working_tree(self.cfg)
++        row = next(r for r in result["rows"] if r["rule_id"] == "T3-x")
++        self.assertNotIn("log", row)
++        self.assertNotIn("log_error", row)
++        self.assertNotIn("duration_secs", row)
++        self.assertFalse((self.cfg.root / "gate-logs").exists())
++
++    # -- a dry re-gate (revalidate) never rewrites frozen evidence ---------------------
++
++    def test_dry_regate_leaves_frozen_evidence_untouched(self) -> None:
++        d = self._bundle("DRY")
++        self.cfg.gates_checks = [{**_GATE, "cmd": "echo attempt-evidence"}]
++        gates.run_gates(d, self.cfg)
++        log = d / "gate-logs" / "C4-log.log"
++        frozen = log.read_text(encoding="utf-8")
++        self.cfg.gates_checks = [{**_GATE, "cmd": "echo later-re-gate"}]
++        gates.run_gates_dry(d, self.cfg)
++        self.assertEqual(log.read_text(encoding="utf-8"), frozen,
++                         "run_gates_dry mutated the frozen gate evidence")
++
++    # -- (c) the iterate archive keeps each round's evidence ---------------------------
++
++    def test_gate_logs_dir_is_downstream_of_brief(self) -> None:
++        self.assertIn(state.GATE_LOGS_DIR, state.DOWNSTREAM_OF_BRIEF)
++
++    def test_iterate_archives_gate_logs_with_the_round(self) -> None:
++        d = self._bundle("ARCH")
++        log = d / state.GATE_LOGS_DIR / "C4-log.log"
++        log.parent.mkdir(parents=True)
++        log.write_text("round-one evidence\n", encoding="utf-8")
++        driver._archive_iteration(d, 1, include_brief=False)
++        moved = d / "iteration-v1" / state.GATE_LOGS_DIR / "C4-log.log"
++        self.assertTrue(moved.exists(), "gate-logs/ was not archived with its round")
++        self.assertEqual(moved.read_text(encoding="utf-8"), "round-one evidence\n")
++        self.assertFalse((d / state.GATE_LOGS_DIR).exists(),
++                         "the next round would inherit the previous round's evidence")
++
++
++if __name__ == "__main__":
++    unittest.main()

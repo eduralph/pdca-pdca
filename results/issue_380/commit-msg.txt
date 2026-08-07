@@ -1,0 +1,31 @@
+Drop permission rules the settings checker never matches
+
+Every Claude Code session in every instance rendered from this template ended
+with two red validation warnings:
+
+    Permission deny rule (.claude/settings.json): Write(.env) is not matched
+    by file permission checks — only Edit(path) rules are. Use Edit(.env)
+    instead (Edit rules cover all file-editing tools).
+
+The permission checker resolves file rules only through Read(path) and
+Edit(path), and Edit rules already cover every file-editing tool, Write
+included. A rule spelled Write(<path>) is therefore never consulted: the two
+.env deny rows in that form denied nothing the Edit(.env) / Edit(.env.*) rows
+beside them did not already deny, and the Write(**) row in this repo's own
+allow list granted nothing Edit(**) did not. That is worse than noise — a
+reader of the settings file saw a protection that was not in force.
+
+Both settings files this repo ships lose those dead rows. What is actually
+protected is unchanged: the Read(.env), Read(.env.*), Edit(.env) and
+Edit(.env.*) rows stay byte-identical. A new test holds the whole category
+rather than the two rows that prompted it, in both the template checkout and
+a rendered instance, so no future path rule addressed to a tool the checker
+cannot match can slip back into either file unnoticed.
+
+The dead rows arrived beside the correct ones in
+0103877cae660131c81ccda685deeea3aaf6adb9 and were never removed since. An
+instance that has added a Write(<path>) row to its own settings will see the
+new test go red after a copier update until it drops that row — which is the
+check doing its job.
+
+Fixes #380

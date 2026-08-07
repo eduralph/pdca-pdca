@@ -1,0 +1,407 @@
+diff --git a/template/pdca.toml.jinja b/template/pdca.toml.jinja
+index eb24bca..bddaaa8 100644
+--- a/template/pdca.toml.jinja
++++ b/template/pdca.toml.jinja
+@@ -863,6 +863,17 @@ argv = []
+ # characterization, not a pass/fail signal. Cite each tier's rules back to the
+ # project's normative ruleset (docs/INTEGRATION.md §4) so the gate is auditable.
+ #
++# TIMEOUTS (issue #368). A gate command with no bound can hang the Check beat
++# indefinitely — the heartbeat keeps printing "… still working", so a genuinely hung
++# gate never LOOKS hung (measured: an advisory row held a Check beat for 19h). Give a
++# row `timeout_secs = N` (wall-clock seconds), and/or set a `[gates]`-level fallback:
++#   [gates]
++#   default_timeout_secs = 3600  # one hour, for every row without its own bound
++# On expiry the command's whole process group is terminated and the row is recorded
++# UNVERIFIABLE ("gate exceeded its Ns timeout") → SUMMARY §6 NEEDS-HUMAN — the oracle
++# did not answer, which is not a pass/fail verdict. `timeout_secs = 0` on a row opts
++# that row out of the fallback; nothing configured ⇒ unbounded, exactly as before.
++#
+ # DELEGATED GATES (issue #67). If your project already single-sources its gates in its
+ # own runner, point `runner` at it and give each check a bare `subcmd` instead of a full
+ # `cmd`; PDCA runs `<runner> <subcmd>` and treats the host runner as the source of truth
+diff --git a/template/src/pdca_harness/config.py b/template/src/pdca_harness/config.py
+index c523f44..d59d0dc 100644
+--- a/template/src/pdca_harness/config.py
++++ b/template/src/pdca_harness/config.py
+@@ -234,6 +234,11 @@ class Config:
+     # / absent fields fall back to the default [leaves.builder] (default-open — a missing
+     # difficulty tag never reduces capability). The escalation ladder overrides the variant.
+     builder_variants: list[dict] = field(default_factory=list)
++    # Per-gate wall-clock bound fallback (issue #368): ``[gates] default_timeout_secs``.
++    # A ``[[gates.checks]]`` row's own ``timeout_secs`` wins over it; a row that times
++    # out is recorded ``unverifiable`` (→ SUMMARY §6 NEEDS-HUMAN), never pass/fail.
++    # ``None`` (unset / 0) ⇒ unbounded — today's behaviour, unchanged.
++    gates_default_timeout_secs: int | None = None
+     # Delegated gates (issue #67): a host runner that single-sources its own gates
+     # (e.g. "cargo xtask"). A check's bare ``subcmd`` is run as ``<runner> <subcmd>``, so
+     # PDCA orchestrates the host runner instead of re-declaring the gates. "" ⇒ inline only.
+@@ -452,6 +457,14 @@ class Config:
+         gates_checks = list(gates.get("checks", []))
+         host_ci_checks = _normalize_host_ci(gates.get("host_ci", []))
+         gates_runner = gates.get("runner", "")
++        # Per-gate timeout fallback (issue #368): [gates] default_timeout_secs. Unset,
++        # 0 or a non-numeric value ⇒ None (unbounded — behaviour unchanged).
++        try:
++            gates_default_timeout_secs = int(gates.get("default_timeout_secs", 0)) or None
++        except (TypeError, ValueError):
++            gates_default_timeout_secs = None
++        if gates_default_timeout_secs is not None and gates_default_timeout_secs < 0:
++            gates_default_timeout_secs = None
+         registry_consistency = dict(gates.get("registry_consistency", {}))
+         install_extra_bootstrap = data.get("install", {}).get("extra_bootstrap", "")
+         # `pdca try <id>` launch command (project-specific); "" ⇒ the command errors with a hint.
+@@ -650,6 +663,7 @@ class Config:
+             sizer_escalation=sizer_escalation,
+             builder_variants=builder_variants,
+             gates_runner=gates_runner,
++            gates_default_timeout_secs=gates_default_timeout_secs,
+             lanes=lanes,
+             max_passes=max_passes,
+             auto_iterate=auto_iterate,
+diff --git a/template/src/pdca_harness/gates.py b/template/src/pdca_harness/gates.py
+index 6799f67..db99742 100644
+--- a/template/src/pdca_harness/gates.py
++++ b/template/src/pdca_harness/gates.py
+@@ -324,7 +324,8 @@ def _run_checks(cfg: Config, *, cwd: Path, bundle: Path | None, scopes: tuple[st
+                           file=sys.stderr, flush=True)
+                 continue
+             configured.append(_run_one(chk, cwd=cwd, bundle=bundle, runner=cfg.gates_runner,
+-                                       worktree_path=wt))
++                                       worktree_path=wt,
++                                       default_timeout=cfg.gates_default_timeout_secs))
+         # Host-only CI parity rows ([gates] host_ci, issue #311): commands the host's CI
+         # runs on every PR but the delegated gate runner does not cover (a spell-checker,
+         # a docs lint). Unlike the rows above (cwd=cfg.root; each command must target
+@@ -350,7 +351,8 @@ def _run_checks(cfg: Config, *, cwd: Path, bundle: Path | None, scopes: tuple[st
+                         element=chk.get("tier", "T4")))
+                 else:
+                     configured.append(_run_one(chk, cwd=wt, bundle=bundle,
+-                                               runner=cfg.gates_runner, worktree_path=wt))
++                                               runner=cfg.gates_runner, worktree_path=wt,
++                                               default_timeout=cfg.gates_default_timeout_secs))
+     finally:
+         if ovf_primary is not None and wt is not None:
+             worktree.overflow_remove(ovf_primary, wt)
+@@ -378,8 +380,26 @@ def _delegated_cmd(chk: dict, runner: str) -> tuple[str, str]:
+     return f"{runner} {subcmd}", ""
+ 
+ 
++def _gate_timeout(chk: dict, default: int | None) -> int | None:
++    """The wall-clock bound (seconds) for one ``[[gates.checks]]`` row (issue #368).
++
++    The row's own ``timeout_secs`` wins; else the ``[gates] default_timeout_secs``
++    fallback; else ``None`` (unbounded — today's behaviour, unchanged). ``0`` or a
++    negative value means "explicitly unbounded", so one long row can opt out of a
++    configured default. A non-numeric value is treated as unconfigured rather than
++    crashing the gate run.
++    """
++    raw = chk.get("timeout_secs", default)
++    try:
++        secs = int(raw)
++    except (TypeError, ValueError):
++        return None
++    return secs if secs > 0 else None
++
++
+ def _run_one(chk: dict, *, cwd: Path, bundle: Path | None, runner: str = "",
+-             worktree_path: Path | None = None) -> dict:
++             worktree_path: Path | None = None,
++             default_timeout: int | None = None) -> dict:
+     cmd, cmd_error = _delegated_cmd(chk, runner)
+     gating = bool(chk.get("gating", True))
+     label = f"{chk.get('id', '')}: {chk.get('label', '')}".strip(": ")
+@@ -429,15 +449,24 @@ def _run_one(chk: dict, *, cwd: Path, bundle: Path | None, runner: str = "",
+     if lane_id is not None:
+         env = {**(env or {}), "PDCA_LANE": str(lane_id)}
+     watch = bundle or cwd
++    bound = _gate_timeout(chk, default_timeout)
+     print(f"  · gate {label} (a Docker-backed gate can take minutes)…", file=sys.stderr, flush=True)
+     try:
+         # Output is captured for the evidence line; the heartbeat ticks meanwhile so
+         # a long, silent gate (e.g. a Docker-backed test suite) doesn't look hung.
++        # `bound` (issue #368) caps the wall-clock when configured: on expiry the
++        # process group is killed and TIMEOUT_RC comes back instead of an exit code.
+         rc, output, _ = progress.run_with_heartbeat(
+             cmd, cwd=cwd, shell=True, env=_merged_env(env), capture=True, label=label,
+-            status=lambda: progress.bundle_activity(watch),
++            timeout=bound, status=lambda: progress.bundle_activity(watch),
+         )
+-        result, evidence = _classify(rc, output)
++        if rc == progress.TIMEOUT_RC:
++            # The oracle did not answer (#368): a timed-out gate is `unverifiable`
++            # (the #46 outcome — routed to SUMMARY §6 NEEDS-HUMAN, kept out of the
++            # gating verdict), never a pass/fail verdict the command did not reach.
++            result, evidence = "unverifiable", [f"gate exceeded its {bound}s timeout"]
++        else:
++            result, evidence = _classify(rc, output)
+     except Exception as exc:  # command not found, etc. — a failing gate, surfaced
+         result, evidence = "fail", [str(exc)]
+     return _row(
+diff --git a/template/src/pdca_harness/progress.py b/template/src/pdca_harness/progress.py
+index 6b4e588..9b02a53 100644
+--- a/template/src/pdca_harness/progress.py
++++ b/template/src/pdca_harness/progress.py
+@@ -11,8 +11,11 @@ yet, how long since the last write), not just that time passed.
+ 
+ from __future__ import annotations
+ 
++import contextlib
+ import json
++import os
+ import re
++import signal
+ import subprocess
+ import sys
+ import threading
+@@ -21,6 +24,13 @@ from collections import deque
+ from collections.abc import Callable, Iterable
+ from pathlib import Path
+ 
++# The distinguishable timed-out outcome (issue #368): returned in the returncode slot
++# when a configured ``timeout`` expired and the child's process GROUP was terminated.
++# Outside the range a real child can produce (0..255 on exit, ``-signum`` on a signal
++# death), so a caller can route "the oracle did not answer" separately from any
++# pass/fail verdict the child itself could have expressed.
++TIMEOUT_RC = -1001
++
+ 
+ def run_with_heartbeat(
+     cmd,
+@@ -34,6 +44,7 @@ def run_with_heartbeat(
+     tee_stderr: bool = False,
+     stream_format: str = "claude-stream-json",
+     interval: int = 15,
++    timeout: int | None = None,
+     label: str = "",
+     status: Callable[[], str] | None = None,
+ ) -> tuple[int, str, bool]:
+@@ -52,6 +63,16 @@ def run_with_heartbeat(
+     at/near invocation — usage/rate limit, 5xx, auth — before any real output).
+     ``input_text``, if given, is written to stdin.
+ 
++    ``timeout``, if given, is the wall-clock bound in seconds (issue #368): on expiry
++    the child's whole process GROUP is terminated (SIGTERM, then SIGKILL after a
++    grace) and the returncode slot carries :data:`TIMEOUT_RC` — a distinguishable
++    "the oracle did not answer" outcome, never a verdict the child produced. The
++    child is started in its own session for this, because a ``shell=True`` gate's
++    real work is a *grandchild*: killing only the shell would orphan it, still
++    running. ``timeout=None`` (the default) is today's unbounded behaviour,
++    unchanged — the heartbeat keeps a hung child looking alive forever, which is
++    exactly the 19h-hung-gate failure this bound exists to end.
++
+     ``status``, if given, is called on every tick to append a live snapshot of the
+     child's work (e.g. which artifacts exist yet, time since the last write) — so the
+     heartbeat shows *what* is happening, not just that time passed (Tier 1+2). It is
+@@ -85,6 +106,11 @@ def run_with_heartbeat(
+     proc = subprocess.Popen(
+         cmd, cwd=cwd, shell=shell, env=env, text=True,
+         stdin=stdin, stdout=stdout, stderr=stderr,
++        # Only sessionize when a bound exists, so timeout=None stays byte-identical
++        # to today. A new session makes the child the leader of its own process
++        # group (pgid == proc.pid), which is what expiry must kill: under
++        # shell=True the real work is a grandchild of the shell (#368).
++        start_new_session=timeout is not None,
+     )
+ 
+     chunks: list[str] = []
+@@ -128,9 +154,23 @@ def run_with_heartbeat(
+ 
+     suffix = f" — {label}" if label else ""
+     start = time.monotonic()
++    deadline = None if timeout is None else start + timeout
++    timed_out = False
+     while True:
++        wait_for = interval
++        if deadline is not None:
++            remaining = deadline - time.monotonic()
++            if remaining <= 0:
++                # The bound expired: kill the whole group, then reap. The heartbeat
++                # would otherwise keep printing "… still working" forever — the very
++                # mechanism built so a slow gate would not look hung is what kept a
++                # genuinely hung gate from looking hung (#368).
++                timed_out = True
++                _terminate_group(proc)
++                break
++            wait_for = min(interval, remaining)
+         try:
+-            proc.wait(timeout=interval)
++            proc.wait(timeout=wait_for)
+             break
+         except subprocess.TimeoutExpired:
+             mins, secs = divmod(int(time.monotonic() - start), 60)
+@@ -153,7 +193,29 @@ def run_with_heartbeat(
+         if stream is not None:
+             stream.close()
+     output = "".join(chunks) if capture else ("".join(err_tail) if tee_err else "")
+-    return proc.returncode, output, produced["session"]
++    rc = TIMEOUT_RC if timed_out else proc.returncode
++    return rc, output, produced["session"]
++
++
++def _terminate_group(proc: subprocess.Popen, grace: float = 2.0) -> None:
++    """SIGTERM the child's process GROUP, escalating to SIGKILL after ``grace`` seconds.
++
++    Gates run under ``shell=True``, so ``proc`` is the shell and the real work is a
++    grandchild — terminating only ``proc`` would orphan it, still consuming the very
++    wall-clock the bound exists to cap. The child was started with
++    ``start_new_session=True`` (see :func:`run_with_heartbeat`), so its process-group
++    id is ``proc.pid`` and ``os.killpg`` reaches every member. Best-effort on the
++    signals (the group may already be gone); the final ``wait`` reaps the child so no
++    zombie survives the timeout path.
++    """
++    with contextlib.suppress(ProcessLookupError, PermissionError):
++        os.killpg(proc.pid, signal.SIGTERM)
++    try:
++        proc.wait(timeout=grace)
++    except subprocess.TimeoutExpired:
++        with contextlib.suppress(ProcessLookupError, PermissionError):
++            os.killpg(proc.pid, signal.SIGKILL)
++        proc.wait()
+ 
+ 
+ # ----------------------------------------------------------------------------
+diff --git a/template/tests/test_progress.py b/template/tests/test_progress.py
+index 1146e92..1944dd7 100644
+--- a/template/tests/test_progress.py
++++ b/template/tests/test_progress.py
+@@ -19,7 +19,8 @@ import time
+ import unittest
+ from pathlib import Path
+ 
+-from pdca_harness import progress
++from pdca_harness import gates, progress
++from pdca_harness.config import Config, LeafConfig
+ 
+ 
+ class BundleActivity(unittest.TestCase):
+@@ -182,5 +183,129 @@ class CodexStream(unittest.TestCase):
+         self.assertFalse(progress._is_session_event(json.dumps({"type": "item.started"})))
+ 
+ 
++class HeartbeatTimeout(unittest.TestCase):
++    """The wall-clock bound on ``run_with_heartbeat`` (issue #368).
++
++    A gate command previously had no bound anywhere in the chain, so a hung gate
++    held the Check beat indefinitely while the heartbeat printed "… still working".
++    On expiry the child's whole process GROUP must die (gates run shell=True — killing
++    only the shell orphans the real work) and the distinguishable ``TIMEOUT_RC`` comes
++    back, never a verdict the child produced. ``timeout=None`` stays unbounded (every
++    other test in this file exercises that default path unchanged).
++    """
++
++    @staticmethod
++    def _dies(pid: int, within: float = 5.0) -> bool:
++        """True once ``pid`` no longer exists (polled — signal delivery is async)."""
++        end = time.monotonic() + within
++        while time.monotonic() < end:
++            try:
++                os.kill(pid, 0)
++            except ProcessLookupError:
++                return True
++            time.sleep(0.05)
++        return False
++
++    def test_timeout_kills_a_plain_child_within_the_bound(self) -> None:
++        start = time.monotonic()
++        rc, _out, produced = progress.run_with_heartbeat(["sleep", "60"], timeout=1)
++        self.assertEqual(rc, progress.TIMEOUT_RC)  # distinguishable, not an exit code
++        self.assertLess(time.monotonic() - start, 10.0)  # ~1s + kill grace, never 60s
++        self.assertFalse(produced)
++
++    def test_shell_true_kills_the_whole_group_no_survivors(self) -> None:
++        # Gates run shell=True: the real work is a GRANDCHILD of the shell. The shell
++        # prints its own pid ($$ — the group id under start_new_session) and its
++        # background child's ($!) before blocking, so the test can verify EVERY group
++        # member is gone after expiry — killing only the shell would orphan the sleep.
++        cmd = "echo $$; sleep 60 & echo $!; wait"
++        start = time.monotonic()
++        rc, out, _ = progress.run_with_heartbeat(cmd, shell=True, capture=True, timeout=1)
++        self.assertEqual(rc, progress.TIMEOUT_RC)
++        self.assertLess(time.monotonic() - start, 10.0)
++        pids = [int(tok) for tok in out.split() if tok.isdigit()]
++        self.assertEqual(len(pids), 2, f"expected shell + child pids in output: {out!r}")
++        for pid in pids:
++            self.assertTrue(self._dies(pid), f"pid {pid} survived the group kill")
++
++    def test_unexpired_timeout_returns_the_real_exit_code(self) -> None:
++        rc, out, _ = progress.run_with_heartbeat(
++            [sys.executable, "-c", "print('ok')"], capture=True, timeout=30)
++        self.assertEqual(rc, 0)  # a bound that never expires changes nothing
++        self.assertIn("ok", out)
++
++
++# A real bundle-scoped gating gate row; only cmd/timeout keys vary per test (#368).
++_GATE = {"id": "C4", "tier": "C4", "label": "verify", "scope": "bundle", "gating": True}
++
++
++def _stub_config(root: Path) -> Config:
++    return Config(
++        root=root,
++        bundle_root=root / "results",
++        process_dir=root / "process",
++        templates_dir=root / "templates",
++        default_branch="main",
++        tracker_system="github",
++        tracker_url="",
++        issue_id_example="#1",
++        builder=LeafConfig(mode="stub", family="claude"),
++        reviewer=LeafConfig(mode="stub", family="codex"),
++    )
++
++
++class GateTimeoutRow(unittest.TestCase):
++    """``timeout_secs`` on a ``[[gates.checks]]`` row + the ``[gates]
++    default_timeout_secs`` fallback (issue #368): a row that times out is recorded
++    ``unverifiable`` — the oracle did not answer (#46) — with the bound named in the
++    evidence line, and it never fails ``overall`` (it routes to §6 instead)."""
++
++    def setUp(self) -> None:
++        self.tmp = Path(tempfile.mkdtemp())
++        self.cfg = _stub_config(self.tmp)
++
++    def tearDown(self) -> None:
++        shutil.rmtree(self.tmp, ignore_errors=True)
++
++    def _gated_bundle(self, iid: str, gate: dict) -> Path:
++        d = self.cfg.bundle(iid)
++        d.mkdir(parents=True)
++        (d / "brief.md").write_text("- **Slug:** to\n", encoding="utf-8")
++        (d / "patch.diff").write_text("--- a\n+++ b\n", encoding="utf-8")
++        self.cfg.gates_checks = [gate]
++        return d
++
++    def _c4_row(self, result: dict) -> dict:
++        return next(r for r in result["rows"] if r["element"] == "C4")
++
++    def test_timeout_secs_row_records_unverifiable_with_the_bound_named(self) -> None:
++        gate = {**_GATE, "cmd": "sleep 5", "timeout_secs": 1}
++        result = gates.run_gates(self._gated_bundle("TO", gate), self.cfg)
++        row = self._c4_row(result)
++        self.assertEqual(row["result"], "unverifiable")  # not `fail` — no verdict reached
++        self.assertIn("exceeded its 1s timeout", row["path_line"])  # the bound, named
++        self.assertEqual(result["overall"], "pass")  # kept out of the gating verdict
++
++    def test_default_timeout_secs_is_the_fallback(self) -> None:
++        self.cfg.gates_default_timeout_secs = 1
++        gate = {**_GATE, "cmd": "sleep 5"}  # no per-row bound → the [gates] fallback
++        row = self._c4_row(gates.run_gates(self._gated_bundle("DEF", gate), self.cfg))
++        self.assertEqual(row["result"], "unverifiable")
++        self.assertIn("exceeded its 1s timeout", row["path_line"])
++
++    def test_row_timeout_wins_over_the_default(self) -> None:
++        # timeout_secs = 0 opts a long row OUT of a configured default (unbounded).
++        self.cfg.gates_default_timeout_secs = 1
++        gate = {**_GATE, "cmd": "sleep 2 && echo done", "timeout_secs": 0}
++        row = self._c4_row(gates.run_gates(self._gated_bundle("OPT", gate), self.cfg))
++        self.assertEqual(row["result"], "pass")  # ran past the default, unbounded
++
++    def test_no_timeout_configured_leaves_the_gate_unchanged(self) -> None:
++        result = gates.run_gates(
++            self._gated_bundle("NONE", {**_GATE, "cmd": "echo done"}), self.cfg)
++        self.assertEqual(self._c4_row(result)["result"], "pass")
++        self.assertEqual(result["overall"], "pass")
++
++
+ if __name__ == "__main__":
+     unittest.main()

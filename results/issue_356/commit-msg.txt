@@ -1,0 +1,27 @@
+fix(telemetry): record the model and effort each attempt ran on
+
+`loop-telemetry.json` exists to answer one question: how many Do attempts a
+bundle needed, and which backend it finally passed on. It only answered the
+second half when the escalation ladder crossed vendors. For a ladder that
+climbs inside one vendor — sonnet/high, then opus/xhigh, the shape the
+shipped `[[leaves.builder_escalation]]` example suggests — every attempt
+wrote the same builder and family, so the file could not say which tier did
+the work, and the cost/benefit of escalating could not be calibrated from it.
+
+Each attempt now also records the model and the effort that will actually run
+it. "Actually" is the load-bearing word: a leaf configured opus/high whose
+argv pins `--model sonnet` runs sonnet, because explicit argv always wins
+when the per-leaf keys are mapped onto the CLI. The recorded values follow
+that same precedence — the argv value when the family's model flag or effort
+mapping is already pinned there, otherwise the leaf's own keys, otherwise
+empty strings rather than a guessed CLI default. The probe matches the flag
+token exactly, so a family whose model flag is `-m` does not read its model
+out of an unrelated `--model-info` argument.
+
+The existing `n`, `builder` and `family` fields keep their shape and meaning,
+so anything already reading the sidecar is unaffected. The sidecar stays
+best-effort: a malformed `[families.*]` effort mapping records empty values
+instead of breaking Do. The `[[leaves.builder_escalation]]` comment in the
+config template now describes what is recorded rather than promising more.
+
+Fixes #356

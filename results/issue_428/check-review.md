@@ -1,0 +1,15 @@
+Review of issue 428: restrict `PDCA-UNVERIFIABLE:` classification to gate-declared lines so relayed marker text no longer turns real gate results into `unverifiable`.
+
+| Item | Verdict | Basis |
+|------|---------|-------|
+| C1 Spec | PASS | The decision is whether the intended contract is precise enough to test; the brief defines relayed mid-line marker output as `pass` while preserving prefix and rc-77 declarations (`brief.md:20`). |
+| C2 Reproduction (red pre-fix) | PASS | The decision is whether the old behavior is actually exposed; with only `template/src/pdca_harness/gates.py` reversed, the added relay tests fail because rows are still classified `unverifiable` (`template/tests/test_gates_unverifiable.py:130`). |
+| C3 Change | PASS | The decision is whether the patch changes the relevant contract surface only; the classifier now delegates marker recognition to a prefix-only declaration helper and updates the matching docs/tests (`template/src/pdca_harness/gates.py:599`, `template/PCDA/quality-cycle/04-validation-tooling.md:67`). |
+| C4 Verification (red→green) | PASS | The decision is whether the fix, not the added tests alone, causes green; focused unittest was green with the patch and red after reversing the production hunk, with the passing behavior asserted at `template/tests/test_gates_unverifiable.py:136`. |
+| C5 Causal adequacy | PASS | The decision is whether this removes the provenance bug rather than masking it; classification now treats only first-text marker lines as declarations and relayed mid-line occurrences fall through to the real exit-code verdict (`template/src/pdca_harness/gates.py:645`). |
+| T1 Structure | PASS | The decision is whether ownership boundaries are respected; the change stays within gate classification, its existing test module, and the normative docs named by the brief (`template/src/pdca_harness/gates.py:617`). |
+| T2 Shape | NEEDS-HUMAN | The decision owed is whether the rendered-project docs checker actually passed; `check-gates.json` names `./engine/scripts/run-docs-check.sh`, but that script is absent in `$PDCA_TARGET`, so I could not rerun the reported T2 gate. |
+| T3 Runtime | NEEDS-HUMAN | The decision owed is whether the reported rendered-project T3 failure is relevant to this patch; `./engine/scripts/run-suite.sh` is absent in `$PDCA_TARGET`, while direct `PYTHONPATH=src python3 -m unittest discover -s tests` passed locally. |
+| T4 Contribution | NEEDS-HUMAN | The decision owed is whether the contribution artifacts satisfy the project gate; `pdca_harness.cli contribcheck` cannot run here because this target is the template checkout without a rendered `pdca.toml`. |
+| T5 Judgment | PASS | The decision is whether prior art or scope leaves an unresolved advisory concern; affected-path git history and `gh search issues "unverifiable marker"` found #329 plus this issue, with no separate provenance fix already closed. |
+| Validation — fitness-to-purpose | NEEDS-HUMAN | The decision owed is final human fitness-to-purpose sign-off: confirm prefix-only declarations are the desired compatibility boundary for real gate authors before accepting the contract change. |

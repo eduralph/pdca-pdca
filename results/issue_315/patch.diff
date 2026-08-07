@@ -1,0 +1,911 @@
+diff --git a/template/pdca.toml.jinja b/template/pdca.toml.jinja
+index eb24bca..6261e16 100644
+--- a/template/pdca.toml.jinja
++++ b/template/pdca.toml.jinja
+@@ -331,6 +331,23 @@ base_remote = "{{ 'upstream' if contribution_model == 'fork' else 'origin' }}"
+ [publisher.checkouts]
+ # "<org/repo>" = "../<checkout-dir>"   # only the exceptions to the sibling default
+ 
++# Pre-publish review stage (issue #315) — optional; OFF by default (publish is then
++# byte-identical). Enabled, publish runs `passes` PARALLEL review passes over the
++# bundle's FINAL diff (through the [leaves.reviewer] family you already configure)
++# between the T4 gate and the first git step; the passes' findings are unioned +
++# deduped, classes your rubric rejects are dropped ([project].rubric_file — no rubric,
++# no drop step), non-BUG classes are recorded-rejected in the bundle's
++# prepublish-review.json, and BUG-class findings are folded into the brief's
++# carry-forward block and re-enter Do — at most `max_iters` times (the auto-iterate
++# budget shape; on exhaustion publish refuses, loudly, and leaves the bundle to you).
++# Publish proceeds only on a round whose every finding is fixed or recorded-rejected —
++# a triaged fixpoint, so the serialized external re-review rounds are paid BEFORE the
++# draft PR opens. Costs `passes` reviewer runs (plus any fix rounds) per publish.
++# [publisher.review]
++# enabled = true
++# passes = 3      # parallel review passes per round
++# max_iters = 3   # bounded Do re-entries; on exhaustion publish refuses, for you
++
+ # The six model leaves (docs 03 §Implementation substrate). mode = "stub" runs
+ # the offline placeholders (no model/TTY) so the driver works without a model;
+ # mode = "command" runs `argv` as a subprocess with the leaf's prompt. `interactive
+diff --git a/template/src/pdca_harness/config.py b/template/src/pdca_harness/config.py
+index c523f44..ebead90 100644
+--- a/template/src/pdca_harness/config.py
++++ b/template/src/pdca_harness/config.py
+@@ -126,6 +126,15 @@ class Config:
+     # GitHub ".../issues/{id}"). "" ⇒ no link (the bare trailer, as today).
+     issue_url_pattern: str = ""
+     repo_checkouts: dict[str, str] = field(default_factory=dict)  # repo_spec → local path
++    # Pre-publish review stage (issue #315): ``[publisher.review]`` — N parallel review
++    # passes over the bundle's FINAL diff at the publish boundary (between the T4 gate
++    # and the first git step), findings unioned/deduped, rubric-rejected classes
++    # dropped, BUG-class findings re-entering Do under a bounded budget (the
++    # auto-iterate shape), and a triaged fixpoint as the proceed condition. Keys:
++    # ``enabled`` (bool, default false), ``passes`` (int, default 3), ``max_iters``
++    # (int, default 3 — Do re-entries per bundle, never open-ended). Absent / disabled
++    # (the default) ⇒ publish byte-identical to today.
++    prepublish_review: dict = field(default_factory=dict)
+     gates_checks: list[dict] = field(default_factory=list)
+     # Host-only CI parity commands (issue #311): ``[gates] host_ci`` — CI jobs the host
+     # runs on EVERY PR but the delegated gate runner does not cover (a spell-checker like
+@@ -623,6 +632,7 @@ class Config:
+             issue_trailer=tracker.get("issue_trailer", "Fixes #{id}"),
+             issue_url_pattern=tracker.get("issue_url_pattern", ""),
+             repo_checkouts=dict(publisher_cfg.get("checkouts", {})),
++            prepublish_review=dict(publisher_cfg.get("review", {})),
+             gate_target_default=gates.get("target_default", ""),
+             gate_target_match=dict(gates.get("target_match", {})),
+             gate_target_flags=gate_target_flags,
+diff --git a/template/src/pdca_harness/leaves.py b/template/src/pdca_harness/leaves.py
+index c2d1ddc..2f705fb 100644
+--- a/template/src/pdca_harness/leaves.py
++++ b/template/src/pdca_harness/leaves.py
+@@ -1785,12 +1785,19 @@ def _seed_plan_sandbox_settings(sandbox: Path, profile: families.FamilyProfile)
+         return False
+ 
+ 
+-def _run_review_sandboxed(d: Path, cfg: Config) -> None:
+-    """Run the reviewer in a temp dir holding ONLY the reviewer inputs.
+-
+-    This makes the independence contract mechanical, not prompt-based: with the
+-    reviewer's cwd containing no build-notes.md, the builder's framing cannot
+-    leak in even though the model has a Read tool. check-review.md is copied back.
++def _sandboxed_reviewer_invoke(
++    d: Path, cfg: Config, prompt: str, artifact: str, error_log: Path, label: str,
++    env_extra: dict | None = None,
++) -> Exception | None:
++    """Run the reviewer leaf once in a temp dir holding ONLY the reviewer inputs,
++    copying ``artifact`` back into the bundle if the leaf produced it.
++
++    THE reviewer invocation path — :func:`run_review` and the pre-publish review
++    passes (#315) both go through here, so the independence contract (build-notes.md
++    physically absent, not prompt-based), the sandbox seeding (#161/#261) and the
++    target grounding (#75) are implemented exactly once — never a second model-runner.
++    Returns the final exception on a failed invocation, ``None`` on success; the
++    caller decides what a missing artifact means for its own step.
+     """
+     with tempfile.TemporaryDirectory(prefix="pdca-review-") as tmp:
+         sandbox = Path(tmp)
+@@ -1811,32 +1818,47 @@ def _run_review_sandboxed(d: Path, cfg: Config) -> None:
+         # via the family's grounding flag (claude: --add-dir). Independence holds — the
+         # target is the upstream source, not build-notes.md.
+         target = _reviewer_target(d, cfg)
+-        env = {"PDCA_TARGET": str(target)} if target else None
++        env = dict(env_extra or {})
++        if target:
++            env["PDCA_TARGET"] = str(target)
+         extra_argv = ([profile.grounding_flag, str(target)]
+                       if target and profile.grounding_flag else [])
+         # The confinement flag rides on `seeded` (a file that is not there must not cost
+         # the leaf its ambient sandbox, #290); the codex network grant does not (#291).
+         extra_argv += _sandbox_argv(cfg, profile, seeded=seeded)
+-        error_log = d / "check-review.error.log"
+         # A transient (no-output) reviewer failure is retried with backoff before it
+-        # degrades to a §6 placeholder; the failed attempts' stderr lands in error_log.
++        # degrades; the failed attempts' stderr lands in error_log.
+         err = _invoke_leaf_resilient(
+-            cfg.reviewer, sandbox, _REVIEW_PROMPT + rubric_mod.for_reviewer(d, cfg),
++            cfg.reviewer, sandbox, prompt,
+             error_log=error_log,
+-            label=f"Check review {d.name}",
+-            status=lambda: progress.bundle_activity(sandbox, ("check-review.md",)),
++            label=label,
++            status=lambda: progress.bundle_activity(sandbox, (artifact,)),
+             stream_json=True,  # Tier 3 (no-op unless the reviewer family has a stream)
+-            env=env, extra_argv=extra_argv, cfg=cfg,
++            env=env or None, extra_argv=extra_argv, cfg=cfg,
+         )
+-        if err is not None:
+-            _review_unavailable(d, f"reviewer leaf failed: {err}",
+-                                failure=_failure_class(err), error_log=error_log)
+-            return
+-        produced = sandbox / "check-review.md"
++        produced = sandbox / artifact
+         if produced.exists():
+-            shutil.copy2(produced, d / "check-review.md")
+-        else:
+-            _review_unavailable(d, "reviewer produced no check-review.md")
++            shutil.copy2(produced, d / artifact)
++        return err
++
++
++def _run_review_sandboxed(d: Path, cfg: Config) -> None:
++    """Run the reviewer in a temp dir holding ONLY the reviewer inputs.
++
++    This makes the independence contract mechanical, not prompt-based: with the
++    reviewer's cwd containing no build-notes.md, the builder's framing cannot
++    leak in even though the model has a Read tool. check-review.md is copied back.
++    """
++    error_log = d / "check-review.error.log"
++    err = _sandboxed_reviewer_invoke(
++        d, cfg, _REVIEW_PROMPT + rubric_mod.for_reviewer(d, cfg),
++        "check-review.md", error_log, f"Check review {d.name}")
++    if err is not None:
++        _review_unavailable(d, f"reviewer leaf failed: {err}",
++                            failure=_failure_class(err), error_log=error_log)
++        return
++    if not (d / "check-review.md").exists():
++        _review_unavailable(d, "reviewer produced no check-review.md")
+ 
+ 
+ # How a reviewer / advisory leaf failed (#138, #278). The split that matters downstream is
+@@ -1963,6 +1985,76 @@ def _stub_review(d: Path, cfg: Config) -> None:
+     )
+ 
+ 
++# ----------------------------------------------------------------------------
++# Pre-publish review passes (issue #315) — reviewer-shaped, run by `publish` between
++# the T4 gate and the first git step, N in parallel over the bundle's FINAL diff.
++# Same leaf, same sandboxed invocation path as run_review (never a second
++# model-runner); only the prompt and the artifact differ. The stage's union/dedup,
++# classification and bounded Do re-entry live in publish._prepublish_review_passes.
++# ----------------------------------------------------------------------------
++def prepublish_pass_artifact(d: Path, n: int) -> Path:
++    """The artifact pre-publish pass ``n`` writes (parallel to check-review.md)."""
++    return d / f"prepublish-review-pass-{n}.md"
++
++
++def _prepublish_prompt(artifact_name: str, n: int, total: int, rubric: str) -> str:
++    return (
++        f"You are pre-publish review pass {n} of {total} — independent, artifact-only, "
++        "decorrelated from the builder. The accepted fix's FINAL full diff is about to "
++        "open as a draft PR; your findings are the review an external maintainer would "
++        "otherwise serialize AFTER it opens, paid now instead (issue #315). You have "
++        "ONLY patch.diff, brief.md and check-gates.json in this directory "
++        "(build-notes.md is deliberately withheld); ground every cited path:line on "
++        "the target source at $PDCA_TARGET (read-only), never other checkouts. Review "
++        "patch.diff the way an external maintainer reviews a PR. Write "
++        f"{artifact_name} in this directory: one Markdown bullet per finding "
++        "(`- <finding>`, citing path:line), naming REAL defects — a logic bug, a "
++        "missed case, a broken invariant, a weak or vacuous test, a regression risk. "
++        "Word each finding plainly: a genuine defect should say so (bug / incorrect / "
++        "crash / race / regression), polish should say so (nit / cosmetic) — the "
++        "driver classifies findings by keyword and only defect-class findings re-enter "
++        "the build. Do not restate the implementation. If you find nothing, write "
++        "exactly: No findings."
++    ) + rubric
++
++
++def run_prepublish_pass(d: Path, cfg: Config, n: int, total: int) -> bool:
++    """One pre-publish review pass (#315): the Check reviewer leaf, invoked through the
++    same sandboxed path as :func:`run_review`, writing ``prepublish-review-pass-<n>.md``.
++
++    Returns True iff the pass artifact exists in the bundle afterwards. A stub
++    reviewer writes a deterministic no-findings artifact — the offline slice must
++    never fabricate findings. A failed pass returns False and leaves its captured
++    stderr tail in ``prepublish-review-pass-<n>.error.log``; judging what a failed
++    pass means (publish fails CLOSED when no pass at all produced a review) is the
++    stage's job, not this leaf's.
++    """
++    artifact = prepublish_pass_artifact(d, n)
++    artifact.unlink(missing_ok=True)  # a stale pass from a prior round must never count
++    if cfg.reviewer.mode != "command":
++        artifact.write_text(
++            "# Pre-publish review pass — stub\n\nNo findings.\n", encoding="utf-8")
++        return True
++    error_log = d / f"prepublish-review-pass-{n}.error.log"
++    err = _sandboxed_reviewer_invoke(
++        d, cfg,
++        _prepublish_prompt(artifact.name, n, total, rubric_mod.for_reviewer(d, cfg)),
++        artifact.name, error_log, f"pre-publish review {d.name} pass {n}/{total}",
++        # The artifact name + pass number as env too, so a non-prompt-following
++        # command leaf (and the offline test stubs) can address its output file.
++        env_extra={"PDCA_REVIEW_ARTIFACT": artifact.name, "PDCA_REVIEW_PASS": str(n)},
++    )
++    if err is not None:
++        print(f"leaves: {d.name} — pre-publish review pass {n} failed ({err}); see "
++              f"{error_log.name}", file=sys.stderr)
++        return False
++    if not artifact.exists():
++        print(f"leaves: {d.name} — pre-publish review pass {n} produced no "
++              f"{artifact.name}", file=sys.stderr)
++        return False
++    return True
++
++
+ # ----------------------------------------------------------------------------
+ # Optional advisory reviewer leaves (issue #64) — an OPEN, role-distinct set of extra
+ # advisory reviewers (e.g. a correctness-bug + reuse/cleanup code-review lens), each a
+diff --git a/template/src/pdca_harness/publish.py b/template/src/pdca_harness/publish.py
+index 4ec60b9..f2a8c8f 100644
+--- a/template/src/pdca_harness/publish.py
++++ b/template/src/pdca_harness/publish.py
+@@ -29,9 +29,10 @@ import re
+ import shlex
+ import subprocess
+ import sys
++from concurrent.futures import ThreadPoolExecutor
+ from pathlib import Path
+ 
+-from . import brief, gates, leaves, progress, state, worktree
++from . import brief, gates, leaves, progress, rubric, state, worktree
+ from .config import Config
+ 
+ COMMIT_MSG = "commit-msg.txt"
+@@ -44,6 +45,14 @@ STACK_BASE_FILE = "stack-base"
+ # pinned base + patch.diff tree, written when the gate REFUSES (so the refusal survives
+ # for the human, naming the command and the base) and removed again once they pass.
+ HOST_CI_JSON = "host-ci.json"
++# The pre-publish review stage's record (issue #315): every finding the rounds' passes
++# surfaced — its class, which passes raised it, and its status (open / fixed / rejected /
++# dropped) — plus the spent Do re-entry budget. The ``count`` key mirrors
++# ``autoiterate.BUDGET_FILE``'s shape and is read with the same tolerance, and the file
++# persists like ``auto-iterate.json`` (deliberately never archived: the budget and the
++# recorded-rejected findings must accumulate across attempts, or the bound is no bound).
++# A human can mark a finding's ``status`` "rejected" here to record-reject it by hand.
++PREPUBLISH_JSON = "prepublish-review.json"
+ 
+ 
+ def _ensure_texts(cfg: Config, d: Path) -> bool:
+@@ -210,6 +219,16 @@ def publish(
+               "aborting", file=sys.stderr)
+         return 1
+ 
++    # Pre-publish review stage (issue #315): between the T4 gate and the first git step,
++    # N parallel review passes over the bundle's FINAL diff; BUG-class findings re-enter
++    # Do under a bounded budget, and publish proceeds only on a round with every finding
++    # fixed or recorded-rejected. Config-gated ([publisher.review]) and OFF by default —
++    # disabled, publish is byte-identical to today. Skipped on --dry-run: a dry run
++    # pushes nothing, and the passes are paid samples of a nondeterministic reviewer
++    # (the #339 lesson — never re-sample one for a run that publishes nothing).
++    if not dry_run and not _prepublish_review_passes(cfg, d):
++        return 1
++
+     # Stack mode (issue #54): the brief names an existing PR's head branch — contribute a
+     # commit onto it instead of a new PR. The shared spine above (guard, target, artifacts,
+     # T4) already ran; the branch/steps/PR step are what differ.
+@@ -293,6 +312,11 @@ def publish(
+         if stack_branch:
+             kind = "stacked draft PR" if own_repo else "stacked draft PR (fork: cumulative diff vs base)"
+         print(f"publish --dry-run — {d.name} → {kind} on {repo_spec} ({branch} → {pr_base}):")
++        en_review, n_review, _mi = _prepublish_cfg(cfg)
++        if en_review:
++            print(f"  # pre-publish review stage (#315): {n_review} parallel review "
++                  "pass(es) over patch.diff run FIRST — BUG-class findings re-enter Do "
++                  "(bounded) and any open finding blocks the push")
+         print(f"  # stash the target working tree (Do/Check leave it dirty), restore it after")
+         if cfg.host_ci_checks:
+             print(f"  # host CI gate (#311): fetch, pin the exact {checkout_base} commit the "
+@@ -759,6 +783,262 @@ def _t4_passes(cfg: Config, d: Path) -> bool:
+     return True
+ 
+ 
++# ----------------------------------------------------------------------------
++# Pre-publish review stage (issue #315) — N parallel review passes over the bundle's
++# FINAL diff, between the T4 gate and the first git step; findings unioned/deduped,
++# rubric-rejected classes dropped, BUG-class findings re-entering Do under a bounded
++# budget; publish proceeds only on a round with every finding fixed or
++# recorded-rejected. Config-gated ([publisher.review]); off by default.
++# ----------------------------------------------------------------------------
++def _prepublish_cfg(cfg: Config) -> tuple[bool, int, int]:
++    """``(enabled, passes, max_iters)`` from ``[publisher.review]`` (#315).
++
++    ``enabled`` is STRICTLY boolean, the ``network_access`` rule (config.py): a quoted
++    ``"true"`` must not silently buy N model passes per publish — it is reported and
++    treated as FALSE (off = today's behaviour, the safe direction). ``getattr`` so a
++    synthetic test Config lacking the field reads as disabled."""
++    spec = getattr(cfg, "prepublish_review", None) or {}
++    enabled = spec.get("enabled", False)
++    if not isinstance(enabled, bool):
++        print(f"publish: [publisher.review] enabled must be a boolean, got {enabled!r} "
++              "— treating it as FALSE (the stage stays off). Write `enabled = true`, "
++              "unquoted.", file=sys.stderr)
++        enabled = False
++    try:
++        passes = max(1, int(spec.get("passes", 3)))
++    except (TypeError, ValueError):
++        passes = 3
++    try:
++        max_iters = max(0, int(spec.get("max_iters", 3)))
++    except (TypeError, ValueError):
++        max_iters = 3
++    return enabled, passes, max_iters
++
++
++def _prepublish_record(d: Path) -> dict:
++    """The stage record, or ``{}`` — tolerant like every other bundle-file read."""
++    try:
++        data = json.loads((d / PREPUBLISH_JSON).read_text(encoding="utf-8"))
++    except (OSError, ValueError):
++        return {}
++    return data if isinstance(data, dict) else {}
++
++
++def _prepublish_count(record: dict) -> int:
++    """Spent Do re-entry rounds — ``autoiterate.count``'s read, same tolerance."""
++    try:
++        return int(record["count"])
++    except (KeyError, TypeError, ValueError):
++        return 0
++
++
++_PASS_BULLET_RE = re.compile(r"^\s*[-*]\s+(.*\S)\s*$")
++_NO_FINDINGS_RE = re.compile(r"(?i)^\s*no\s+findings?\b")
++
++
++def _pass_findings(text: str) -> list[str]:
++    """The finding bullets of one pass artifact. A bare "No findings." line is not a
++    bullet; a bulleted one is skipped too, so a literal-minded pass can't raise a
++    finding that says there are none."""
++    out: list[str] = []
++    for line in text.splitlines():
++        m = _PASS_BULLET_RE.match(line)
++        if m and not _NO_FINDINGS_RE.match(m.group(1)):
++            out.append(m.group(1))
++    return out
++
++
++def _finding_key(text: str) -> str:
++    """The union/dedup key across passes AND rounds: the finding's NORMALIZED TEXT
++    (case-folded, punctuation/whitespace collapsed). Proposed over file+line (the open
++    question the #315 design records): line numbers shift between rounds precisely
++    because Do re-enters, so a positional key would re-open every carried finding."""
++    return re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
++
++
++_CF_HEADING_RE = re.compile(r"^## Iteration (\d+) — carry-forward", re.MULTILINE)
++
++
++def _carry_forward_findings(d: Path, open_bugs: list[dict], round_no: int) -> None:
++    """Fold the open BUG-class findings into the brief's carry-forward block — the same
++    ``## Iteration N — carry-forward`` shape ``driver._carry_forward_into_brief`` writes
++    and the builder is contracted to read — so the re-entered Do is not blind about why.
++    Numbered past any existing block (driver- or stage-written), so headings never
++    collide. Best-effort like the driver's: a failure must never break the stage."""
++    brief_path = d / "brief.md"
++    try:
++        text = brief_path.read_text(encoding="utf-8") if brief_path.exists() else ""
++        n = max((int(m) for m in _CF_HEADING_RE.findall(text)), default=0) + 1
++        out = [f"\n## Iteration {n} — carry-forward (pre-publish review round {round_no})\n"]
++        out.append("- Pre-publish review (issue #315): BUG-class finding(s) on the FINAL "
++                   "diff must be fixed before the draft PR opens — update patch.diff "
++                   "(and the test) so they no longer hold:\n")
++        for e in open_bugs:
++            out.append(f"- Finding: {e.get('text', '')}\n")
++        out.append("- Address the above; do NOT re-attempt the rejected approach "
++                   "unchanged. Satisfy the brief's Success criterion (the end result).\n")
++        with brief_path.open("a", encoding="utf-8") as fh:
++            fh.write("".join(out))
++    except Exception:  # noqa: BLE001 — carry-forward is advisory; never break the stage
++        pass
++
++
++def _prepublish_review_passes(cfg: Config, d: Path) -> bool:
++    """The pre-publish review stage (issue #315). True ⇒ proceed to the git steps;
++    False ⇒ refuse the publish (nothing pushed, no PR opened).
++
++    Sits between the T4 gate and the first git step — the seam where the serialized
++    post-publish review churn (~1 new real finding per external re-review round; 13
++    rounds observed on one PR) is paid up front instead. Each round:
++
++    * **N parallel passes** over the bundle's final diff, through the Check reviewer
++      leaf's own sandboxed invocation path (``leaves.run_prepublish_pass`` — the family
++      the instance already configures; never a second model-runner);
++    * **union + dedup** of the passes' findings (key: normalized text — each pass
++      surfaces distinct findings, the union is what counts);
++    * **classification** via ``triage``'s deterministic, rubric-tunable keyword table
++      (#316 — one classifier, no second vocabulary). Where a rubric is configured,
++      findings of the class the instance rubric rejects (NOISE — the class whose
++      keyword list a rubric's exclusion lines retune) are **dropped**; with no rubric
++      the drop step is skipped. Non-BUG classes are **recorded-rejected**: the stage
++      fixes bugs, it does not re-litigate style at the publish boundary — everything
++      is recorded in ``prepublish-review.json`` for the human and for Act;
++    * **BUG-class findings re-enter Do**, bounded: the finding set is folded into the
++      brief's carry-forward block and ``leaves.do_build`` rebuilds, at most
++      ``max_iters`` times per bundle — the ``auto-iterate.json`` budget shape
++      (``count``, bumped, persisted, never archived), so a noisy reviewer cannot spin
++      the loop and the bound holds across publish attempts;
++    * the exit is a **triaged fixpoint**, not reviewer silence: a round whose every
++      finding is fixed (no pass reports it against the rebuilt diff) or
++      recorded-rejected proceeds; an exhausted budget with open BUGs refuses, loudly,
++      leaving the bundle for the human (who may fix, or record-reject a finding by
++      editing its ``status`` in the record).
++
++    Fail CLOSED when no pass at all produced a review — proceeding unreviewed is the
++    exact churn this stage exists to pay down. Disabled (the default) ⇒ zero reads,
++    zero writes: publish is byte-identical to today."""
++    enabled, passes, max_iters = _prepublish_cfg(cfg)
++    if not enabled:
++        return True
++
++    from . import triage  # lazy: triage imports publish at module level (import cycle)
++    rubric_configured = bool(str(getattr(cfg, "rubric_file", "") or "").strip())
++    rubric_text = rubric.load(d, cfg) if rubric_configured else ""
++    table = triage.class_keywords(rubric_text)
++
++    record = _prepublish_record(d)
++    findings: dict[str, dict] = {
++        str(f["key"]): dict(f) for f in record.get("findings", [])
++        if isinstance(f, dict) and f.get("key")
++    }
++    count = _prepublish_count(record)
++
++    def _write(overall: str) -> None:
++        (d / PREPUBLISH_JSON).write_text(json.dumps(
++            {"count": count, "overall": overall, "passes": passes,
++             "max_iters": max_iters,
++             "findings": sorted(findings.values(), key=lambda f: str(f.get("key")))},
++            indent=2) + "\n", encoding="utf-8")
++
++    round_no = 0
++    while True:
++        round_no += 1
++        print(f"publish: pre-publish review — {passes} parallel pass(es) over "
++              f"{d.name}'s diff (round {round_no})…", file=sys.stderr)
++        with ThreadPoolExecutor(max_workers=passes) as ex:
++            produced = list(ex.map(
++                lambda n: (n, leaves.run_prepublish_pass(d, cfg, n, passes)),
++                range(1, passes + 1)))
++        ok_passes = [n for n, ok in produced if ok]
++        if not ok_passes:
++            _write("blocked")
++            print("publish: pre-publish review — NO pass produced a review; refusing "
++                  "to publish unreviewed (fail closed). Fix the reviewer leaf (see the "
++                  "prepublish-review-pass-*.error.log tails) and retry, or disable "
++                  "[publisher.review].", file=sys.stderr)
++            return False
++
++        # Union + dedup across the passes; classify + triage a NEW finding exactly once
++        # (a recorded status — incl. a human-edited "rejected" — is never re-decided).
++        seen: set[str] = set()
++        for n in ok_passes:
++            text = leaves.prepublish_pass_artifact(d, n).read_text(encoding="utf-8")
++            for raw in _pass_findings(text):
++                key = _finding_key(raw)
++                if not key:
++                    continue
++                seen.add(key)
++                entry = findings.get(key)
++                if entry is None:
++                    fnd = triage.Finding(source="prepublish", author=f"pass-{n}",
++                                         text=raw)
++                    triage.classify(fnd, table)
++                    entry = findings[key] = {
++                        "key": key, "text": raw, "class": fnd.cls or "UNCLASSIFIED",
++                        "keyword": fnd.keyword, "passes": [], "round": round_no,
++                        "status": "open", "reason": "",
++                    }
++                    if rubric_configured and entry["class"] == "NOISE":
++                        entry["status"] = "dropped"
++                        entry["reason"] = "class the instance rubric rejects (NOISE)"
++                    elif entry["class"] != "BUG":
++                        entry["status"] = "rejected"
++                        entry["reason"] = (f"non-BUG class ({entry['class']}) "
++                                           "recorded-rejected at the pre-publish stage")
++                if n not in entry.setdefault("passes", []):
++                    entry["passes"].append(n)
++                if entry.get("status") == "fixed":
++                    # A "fixed" finding a pass reports again was NOT fixed — re-open.
++                    entry["status"] = "open"
++                    entry["reason"] = "reappeared after a fix round"
++
++        # A BUG carried into this round that no pass reports any more is fixed — the
++        # fixpoint is judged by RE-REVIEW, never by trusting the fix round.
++        for entry in findings.values():
++            if entry.get("status") == "open" and entry.get("key") not in seen:
++                entry["status"] = "fixed"
++                entry["reason"] = f"no pass reports it against the round-{round_no} diff"
++
++        open_bugs = [e for e in findings.values() if e.get("status") == "open"]
++        if not open_bugs:
++            _write("proceed")
++            done = {s: sum(1 for e in findings.values() if e.get("status") == s)
++                    for s in ("fixed", "rejected", "dropped")}
++            print(f"publish: pre-publish review — proceed ({done['fixed']} fixed, "
++                  f"{done['rejected']} recorded-rejected, {done['dropped']} "
++                  f"rubric-dropped; see {d.name}/{PREPUBLISH_JSON}).", file=sys.stderr)
++            return True
++
++        if count >= max_iters:
++            _write("blocked")
++            print(f"publish: pre-publish review — {len(open_bugs)} BUG-class "
++                  f"finding(s) still open with the Do re-entry budget spent "
++                  f"({count}/{max_iters}); NOT publishing — nothing was pushed, no PR "
++                  f"was opened. Fix them (or record a finding rejected by setting its "
++                  f"status in {d.name}/{PREPUBLISH_JSON}) and re-run `pdca publish`. "
++                  "Open:", file=sys.stderr)
++            for e in open_bugs:
++                print(f"    - {e.get('text', '')}", file=sys.stderr)
++            return False
++
++        # Bounded re-entry to Do: spend one round of the budget (the auto-iterate
++        # shape), fold the findings into the brief's carry-forward block — the one
++        # input the builder reads — and rebuild. The next round re-reviews the diff
++        # the rebuild produced.
++        count += 1
++        _write("iterating")
++        _carry_forward_findings(d, open_bugs, count)
++        print(f"publish: pre-publish review — {len(open_bugs)} BUG-class finding(s); "
++              f"re-entering Do ({count}/{max_iters})…", file=sys.stderr)
++        try:
++            leaves.do_build(d, cfg)
++        except Exception as exc:  # noqa: BLE001 — a failed rebuild refuses, never crashes
++            _write("blocked")
++            print(f"publish: pre-publish review — Do re-entry failed ({exc}); NOT "
++                  "publishing.", file=sys.stderr)
++            return False
++
++
+ def _pinned_base(repo: Path, fetch_remote: str, base_ref: str) -> tuple[str, str]:
+     """``(sha, error)`` — fetch and resolve the exact base commit the push will build on.
+ 
+diff --git a/template/tests/test_prepublish_review.py b/template/tests/test_prepublish_review.py
+new file mode 100644
+index 0000000..d173de0
+--- /dev/null
++++ b/template/tests/test_prepublish_review.py
+@@ -0,0 +1,356 @@
++"""Pre-publish review stage (`[publisher.review]`, issue #315) — offline slice.
++
++The churn this closes: the harness stops at the draft PR, so external review depth is
++serialized AFTER publish (~1 new real finding per re-review round; 13 rounds observed
++on one PR). The stage pays it up front: between the T4 gate and the first git step,
++publish runs N parallel review passes over the bundle's FINAL diff, unions + dedups
++the findings, drops classes the instance rubric rejects, records-rejected the non-BUG
++classes, and re-enters Do on BUG-class findings under a bounded budget (the
++auto-iterate shape). Publish proceeds only on a round whose every finding is fixed or
++recorded-rejected — a triaged fixpoint, never reviewer silence.
++
++Success criterion, asserted here with stubbed review leaves (command-mode `sh -c`
++scripts through the REAL sandboxed reviewer invocation path, the way the leaf tests
++stub leaves):
++  (a) enabled, publish runs N passes between T4 and the first git step;
++  (b) findings are unioned/deduped across passes; rubric-rejected classes dropped;
++  (c) BUG-class findings feed the brief's carry-forward block and re-enter Do,
++      bounded — never open-ended;
++  (d) publish proceeds only when a round completes with every finding fixed or
++      recorded-rejected (and refuses, with nothing pushed, otherwise);
++  (e) disabled (the default) ⇒ publish byte-identical to today.
++
++Red on pre-fix `main`: `publish()` goes straight from `_t4_passes` to
++branch/apply/commit/push with no review seam in between, so the BUG-emitting stub
++reviewer here never blocks anything. The git/gh subprocesses are stubbed the way this
++suite already stubs them (`test_host_ci` / `test_publish_slice`); no Claude, no network.
++"""
++
++from __future__ import annotations
++
++import contextlib
++import io
++import json
++import shutil
++import tempfile
++import unittest
++from contextlib import redirect_stderr, redirect_stdout
++from pathlib import Path
++from types import SimpleNamespace
++from unittest import mock
++
++from pdca_harness import publish, signoff
++from pdca_harness.config import Config, LeafConfig
++
++TEMPLATES = Path(__file__).resolve().parents[1] / "templates"
++
++
++def _cfg(root: Path) -> Config:
++    """Stub leaves, no configured gates, generic publish defaults (own-repo remotes)."""
++    return Config(
++        root=root,
++        bundle_root=root / "results",
++        process_dir=root / "process",
++        templates_dir=TEMPLATES,
++        default_branch="main",
++        tracker_system="github",
++        tracker_url="https://example.org/issues",
++        issue_id_example="1",
++        builder=LeafConfig(mode="stub"),
++        reviewer=LeafConfig(mode="stub"),
++        planner=LeafConfig(mode="stub", interactive=True),
++        signoff=LeafConfig(mode="stub", interactive=True),
++        publisher=LeafConfig(mode="stub", interactive=True),
++        act=LeafConfig(mode="stub", interactive=True),
++        gates_checks=[],
++        base_remote="origin",
++        # Hermetic: pin the (nonexistent) toy target inside this test's tmp root, so
++        # neither the reviewer grounding nor publish resolves a real sibling checkout.
++        repo_checkouts={"example-org/example-repo": str(root / "example-repo")},
++    )
++
++
++_FIX_BRIEF = (
++    "- **Slug:** my-fix\n"
++    "- **Repo + branch target:** example-org/example-repo @ main\n"
++)
++_STACK_BRIEF = _FIX_BRIEF + "- **Onto branch:** origin/feature/x\n"
++
++# Command-mode pass scripts — the "stubbed review leaves": each runs through the REAL
++# sandboxed reviewer invocation path (temp cwd holding only the reviewer inputs) and
++# writes its pass artifact, addressed via $PDCA_REVIEW_ARTIFACT / $PDCA_REVIEW_PASS.
++_ALWAYS_BUG = ('printf -- "- bug: the flag parse crashes on empty input (x.py:1)\\n" '
++               '> "$PDCA_REVIEW_ARTIFACT"')
++_BUG_TEXT = "bug: the flag parse crashes on empty input (x.py:1)"
++_BUG_IF_MARKER = (
++    'if grep -q MARKER_BAD patch.diff; then '
++    'printf -- "- bug: MARKER_BAD crashes the parser (x.py:2)\\n" '
++    '> "$PDCA_REVIEW_ARTIFACT"; '
++    'else printf "No findings.\\n" > "$PDCA_REVIEW_ARTIFACT"; fi')
++_SHARED_PLUS_PASS1_STYLE = (
++    '{ printf -- "- bug: shared crash in the parser (p.py:3)\\n"; '
++    'if [ "$PDCA_REVIEW_PASS" = "1" ]; then '
++    'printf -- "- prefer a docstring tweak (p.py:9)\\n"; fi; } '
++    '> "$PDCA_REVIEW_ARTIFACT"')
++
++
++def _reviewer(script: str) -> LeafConfig:
++    return LeafConfig(mode="command", family="generic", argv=["sh", "-c", script])
++
++
++def _bundle(cfg: Config, issue_id: str, *, brief_body: str = _FIX_BRIEF) -> Path:
++    """An accepted (COMPLETE) bundle with a non-empty patch — publish's precondition."""
++    d = cfg.bundle(issue_id)
++    d.mkdir(parents=True)
++    (d / "brief.md").write_text(brief_body, encoding="utf-8")
++    (d / "patch.diff").write_text("diff --git a/x b/x\n", encoding="utf-8")
++    (d / "check-gates.json").write_text("{}", encoding="utf-8")
++    shutil.copyfile(TEMPLATES / "SUMMARY.md.tpl", d / "SUMMARY.md")
++    signoff.record(d / "SUMMARY.md", action="accept", by="Tester", date="2026-08-01")
++    return d
++
++
++class PrepublishConfig(unittest.TestCase):
++    """`[publisher.review]` parses; absent / non-boolean ⇒ the stage stays off."""
++
++    def setUp(self) -> None:
++        self.tmp = Path(tempfile.mkdtemp())
++        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
++
++    def _load(self, toml: str) -> Config:
++        (self.tmp / "pdca.toml").write_text(toml, encoding="utf-8")
++        return Config.load(self.tmp)
++
++    def test_publisher_review_parses(self) -> None:
++        cfg = self._load("[publisher.review]\nenabled = true\npasses = 2\n"
++                         "max_iters = 1\n")
++        self.assertEqual(cfg.prepublish_review,
++                         {"enabled": True, "passes": 2, "max_iters": 1})
++        self.assertEqual(publish._prepublish_cfg(cfg), (True, 2, 1))
++
++    def test_absent_defaults_off(self) -> None:
++        # Criterion (e) at the config layer: nothing declared ⇒ disabled, defaults 3/3.
++        cfg = self._load("[publisher]\nfix_branch_pattern = 'fix/{id}-{slug}'\n")
++        self.assertEqual(cfg.prepublish_review, {})
++        self.assertEqual(publish._prepublish_cfg(cfg), (False, 3, 3))
++
++    def test_non_bool_enabled_stays_off_loudly(self) -> None:
++        # The network_access rule: a quoted "true" must not buy N model passes per
++        # publish — strict boolean, reported, treated as FALSE (off = today).
++        cfg = self._load("[publisher.review]\nenabled = 'true'\n")
++        err = io.StringIO()
++        with redirect_stderr(err):
++            enabled, _p, _m = publish._prepublish_cfg(cfg)
++        self.assertFalse(enabled)
++        self.assertIn("boolean", err.getvalue())
++
++
++class PrepublishStage(unittest.TestCase):
++    """The stage in `publish()`: after T4, before the first git step — both PR paths."""
++
++    def setUp(self) -> None:
++        self.tmp = Path(tempfile.mkdtemp())
++        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
++        self.cfg = _cfg(self.tmp)
++        self.calls: list[list[str]] = []
++
++    def _fake_run(self, cmd, *a, **k):
++        self.calls.append(list(cmd))
++        return SimpleNamespace(returncode=0, stdout="", stderr="")
++
++    def _enable(self, *, passes: int = 1, max_iters: int = 0) -> None:
++        self.cfg.prepublish_review = {"enabled": True, "passes": passes,
++                                      "max_iters": max_iters}
++
++    def _publish(self, issue_id: str, *, do_build=None, dry_run: bool = False):
++        """Real (non-dry by default) publish with git/gh stubbed and Do re-entry mocked
++        at the leaf boundary (`leaves.do_build` — the model touchpoint)."""
++        db = do_build if do_build is not None else mock.MagicMock()
++        buf, err = io.StringIO(), io.StringIO()
++        with contextlib.ExitStack() as st:
++            st.enter_context(mock.patch.object(publish, "_check_repo", return_value=0))
++            st.enter_context(mock.patch.object(publish.subprocess, "run",
++                                               side_effect=self._fake_run))
++            st.enter_context(mock.patch.object(publish.leaves, "do_build", db,
++                                               create=True))
++            st.enter_context(redirect_stdout(buf))
++            st.enter_context(redirect_stderr(err))
++            rc = publish.publish(self.cfg, issue_id, by="Tester", today="2026-08-01",
++                                 dry_run=dry_run)
++        return rc, buf.getvalue(), err.getvalue(), db
++
++    def _record(self, d: Path) -> dict:
++        return json.loads((d / "prepublish-review.json").read_text(encoding="utf-8"))
++
++    # -- (a)+(d): a BUG-class finding blocks publish before any git step -------------
++    def test_bug_finding_blocks_publish_before_git(self) -> None:
++        d = _bundle(self.cfg, "A1")
++        self._enable(passes=1, max_iters=0)          # no re-entry budget: block at once
++        self.cfg.reviewer = _reviewer(_ALWAYS_BUG)
++        rc, _out, err, db = self._publish("A1")
++        self.assertEqual(rc, 1, err)
++        self.assertEqual(self.calls, [])             # no git step ran at all
++        db.assert_not_called()                       # budget 0 ⇒ no Do re-entry either
++        self.assertFalse((d / "publish.json").exists())
++        self.assertTrue((d / "prepublish-review-pass-1.md").exists())
++        record = self._record(d)
++        self.assertEqual(record["overall"], "blocked")
++        (finding,) = record["findings"]
++        self.assertEqual(finding["class"], "BUG")
++        self.assertEqual(finding["status"], "open")
++        self.assertIn(_BUG_TEXT, err)                # the refusal names the finding
++
++    # -- (e): disabled (the default) is byte-identical -------------------------------
++    def test_disabled_default_is_byte_identical(self) -> None:
++        d = _bundle(self.cfg, "E1")
++        self.cfg.reviewer = _reviewer(_ALWAYS_BUG)   # would block IF the stage ran
++        with mock.patch.object(publish.leaves, "run_prepublish_pass",
++                               create=True) as passes:
++            rc, _out, err, _db = self._publish("E1")
++        self.assertEqual(rc, 0, err)
++        passes.assert_not_called()                   # zero extra work
++        self.assertTrue(any("push" in c for c in self.calls))
++        self.assertFalse((d / "prepublish-review.json").exists())
++        self.assertEqual(list(d.glob("prepublish-review-pass-*")), [])
++
++    # -- (c)+(d): BUG re-enters Do via the carry-forward, fixpoint proceeds ----------
++    def test_bug_reenters_do_then_fixpoint_proceeds(self) -> None:
++        d = _bundle(self.cfg, "R1")
++        (d / "patch.diff").write_text("diff --git a/x b/x\nMARKER_BAD\n",
++                                      encoding="utf-8")
++        self._enable(passes=1, max_iters=2)
++        self.cfg.reviewer = _reviewer(_BUG_IF_MARKER)
++
++        def fix(bundle, cfg):                        # the re-entered Do fixes the diff
++            (bundle / "patch.diff").write_text("diff --git a/x b/x\nfixed\n",
++                                               encoding="utf-8")
++
++        rc, _out, err, db = self._publish("R1", do_build=mock.MagicMock(side_effect=fix))
++        self.assertEqual(rc, 0, err)
++        self.assertEqual(db.call_count, 1)           # one bounded re-entry sufficed
++        self.assertTrue(any("push" in c for c in self.calls))       # then published
++        brief_text = (d / "brief.md").read_text(encoding="utf-8")
++        self.assertIn("carry-forward", brief_text)   # the finding fed the brief…
++        self.assertIn("MARKER_BAD crashes the parser", brief_text)  # …verbatim
++        record = self._record(d)
++        self.assertEqual(record["overall"], "proceed")
++        self.assertEqual(record["count"], 1)         # the auto-iterate-shaped budget
++        (finding,) = record["findings"]
++        self.assertEqual(finding["status"], "fixed") # judged by RE-REVIEW of the diff
++        self.assertTrue((d / "publish.json").exists())
++
++    # -- (c): the re-entry budget bounds the loop — never open-ended -----------------
++    def test_reentry_budget_is_bounded(self) -> None:
++        d = _bundle(self.cfg, "B1")
++        self._enable(passes=1, max_iters=2)
++        self.cfg.reviewer = _reviewer(_ALWAYS_BUG)   # a noisy reviewer: BUG every round
++        rc, _out, err, db = self._publish("B1")      # do_build no-op: nothing gets fixed
++        self.assertEqual(rc, 1, err)
++        self.assertEqual(db.call_count, 2)           # exactly max_iters re-entries
++        self.assertEqual(self.calls, [])             # nothing pushed
++        record = self._record(d)
++        self.assertEqual(record["overall"], "blocked")
++        self.assertEqual(record["count"], 2)
++        self.assertIn("budget", err)
++
++    # -- (b): union + dedup across the parallel passes -------------------------------
++    def test_findings_unioned_and_deduped_across_passes(self) -> None:
++        d = _bundle(self.cfg, "U1")
++        self._enable(passes=3, max_iters=0)
++        self.cfg.reviewer = _reviewer(_SHARED_PLUS_PASS1_STYLE)
++        rc, _out, _err, _db = self._publish("U1")
++        self.assertEqual(rc, 1)                      # the shared BUG blocks
++        record = self._record(d)
++        self.assertEqual(len(record["findings"]), 2)     # union, deduped
++        by_class = {f["class"]: f for f in record["findings"]}
++        self.assertEqual(by_class["BUG"]["passes"], [1, 2, 3])   # all 3 raised it once
++        self.assertEqual(by_class["CONVENTION"]["passes"], [1])  # pass 1's distinct one
++        self.assertEqual(by_class["CONVENTION"]["status"], "rejected")
++
++    # -- (b): classes the instance rubric rejects are dropped ------------------------
++    def test_rubric_rejected_class_is_dropped(self) -> None:
++        d = _bundle(self.cfg, "N1")
++        self.cfg.rubric_file = "AGENTS.md"           # a rubric IS configured…
++        (d / "rubric-snapshot.md").write_text(       # …and the bundle snapshot is read
++            "Review rubric.\n- NOISE: bikeshed\n", encoding="utf-8")
++        self._enable(passes=1, max_iters=0)
++        self.cfg.reviewer = _reviewer(
++            'printf -- "- bikeshed: repaint the shed (s.py:1)\\n" '
++            '> "$PDCA_REVIEW_ARTIFACT"')
++        rc, _out, err, _db = self._publish("N1")
++        self.assertEqual(rc, 0, err)                 # dropped ⇒ nothing blocks
++        self.assertTrue(any("push" in c for c in self.calls))
++        (finding,) = self._record(d)["findings"]
++        self.assertEqual(finding["status"], "dropped")
++        self.assertIn("rubric", finding["reason"])
++
++    # -- (d): a non-BUG class is recorded-rejected (no rubric ⇒ no drop step) --------
++    def test_non_bug_class_recorded_rejected_and_proceeds(self) -> None:
++        d = _bundle(self.cfg, "N2")
++        self._enable(passes=1, max_iters=0)
++        self.cfg.reviewer = _reviewer(
++            'printf -- "- nit: cosmetic spacing (s.py:2)\\n" > "$PDCA_REVIEW_ARTIFACT"')
++        rc, _out, err, _db = self._publish("N2")
++        self.assertEqual(rc, 0, err)
++        (finding,) = self._record(d)["findings"]
++        self.assertEqual(finding["status"], "rejected")
++        self.assertIn("non-BUG", finding["reason"])
++
++    # -- (d): a human-recorded rejection unblocks a re-run ---------------------------
++    def test_human_recorded_rejection_unblocks(self) -> None:
++        d = _bundle(self.cfg, "H1")
++        self._enable(passes=1, max_iters=0)
++        self.cfg.reviewer = _reviewer(_ALWAYS_BUG)
++        (d / "prepublish-review.json").write_text(json.dumps({
++            "count": 0,
++            "findings": [{"key": publish._finding_key(_BUG_TEXT), "text": _BUG_TEXT,
++                          "class": "BUG", "status": "rejected",
++                          "reason": "human: false positive"}]}), encoding="utf-8")
++        rc, _out, err, _db = self._publish("H1")
++        self.assertEqual(rc, 0, err)                 # recorded-rejected ⇒ proceed
++        self.assertTrue(any("push" in c for c in self.calls))
++
++    # -- fail CLOSED: no pass produced a review ⇒ refuse, never publish unreviewed ---
++    def test_all_passes_failed_fails_closed(self) -> None:
++        d = _bundle(self.cfg, "F1")
++        self._enable(passes=1, max_iters=0)
++        self.cfg.reviewer = _reviewer("exit 1")
++        rc, _out, err, _db = self._publish("F1")
++        self.assertEqual(rc, 1)
++        self.assertEqual(self.calls, [])
++        self.assertEqual(self._record(d)["overall"], "blocked")
++        self.assertTrue((d / "prepublish-review-pass-1.error.log").exists())
++        self.assertIn("fail closed", err)
++
++    # -- the stacked `Onto branch` path pushes too — the stage sits before it --------
++    def test_stacked_onto_branch_path_is_gated_too(self) -> None:
++        _bundle(self.cfg, "S1", brief_body=_STACK_BRIEF)
++        self._enable(passes=1, max_iters=0)
++        self.cfg.reviewer = _reviewer(_ALWAYS_BUG)
++        rc, _out, _err, _db = self._publish("S1")
++        self.assertEqual(rc, 1)
++        self.assertEqual(self.calls, [])             # refused before any git/gh call
++
++    # -- offline determinism: the stub reviewer finds nothing and proceeds -----------
++    def test_stub_reviewer_proceeds_without_findings(self) -> None:
++        d = _bundle(self.cfg, "T1")
++        self._enable(passes=2, max_iters=0)          # reviewer stays mode="stub"
++        rc, _out, err, _db = self._publish("T1")
++        self.assertEqual(rc, 0, err)
++        self.assertEqual(self._record(d)["overall"], "proceed")
++        self.assertIn("No findings",
++                      (d / "prepublish-review-pass-1.md").read_text(encoding="utf-8"))
++
++    # -- --dry-run pushes nothing, so it skips the paid passes but names the stage ---
++    def test_dry_run_skips_the_stage_but_names_it(self) -> None:
++        d = _bundle(self.cfg, "D1")
++        self._enable(passes=1, max_iters=0)
++        self.cfg.reviewer = _reviewer(_ALWAYS_BUG)   # would block IF the passes ran
++        rc, out, _err, _db = self._publish("D1", dry_run=True)
++        self.assertEqual(rc, 0)
++        self.assertFalse((d / "prepublish-review.json").exists())
++        self.assertIn("pre-publish review stage", out)
++
++
++if __name__ == "__main__":
++    unittest.main()

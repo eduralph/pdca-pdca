@@ -1,0 +1,30 @@
+feat(driver): halt Do on a confirmed unmet external dependency
+
+A builder that honestly declares an unmet external dependency
+(`NEEDS-HUMAN external dependency:` in build-notes.md, per the builder
+contract) previously changed nothing: BUILT unconditionally bought the full
+Check beat — gates, cross-vendor reviewer, adversary — to adjudicate a patch
+already stated to be unverifiable. The honest and dishonest builder paths
+proceeded identically, and the dishonest bundle looked better at Check.
+
+With the opt-in `[driver].dependency_halt` enabled, the driver now
+adjudicates the claim deterministically at BUILT: the declared dependency
+must resolve to a [[doctor.checks]] row — registered in pdca.toml, else
+parsed from the fenced TOML block the builder contract already requires it
+to propose — AND that row's detect cmd must actually exit non-zero, probed
+through the same helper the Plan-exit guard uses (#340; the duplicated
+inline probe is extracted to doctor.probe so "what it means to probe a row"
+cannot drift). Confirmed: the bundle takes the existing close fast path to
+AWAITING_SIGNOFF (N/A gate matrix, no reviewer, no adversary) and stays
+resumable — install the dependency and answer iterate-do, which archives
+the attempt with its adjudication record and reruns the full band; sign-off
+alone still owns COMPLETE/DISCONTINUED. Refuted (the cmd exits 0) or
+unresolvable — including a malformed proposed block — full Check runs
+unchanged, with the refutation lifted into SUMMARY §6 where the human and
+`pdca act index` can see it: a self-report can never skip review on its own
+say-so, and failure is always toward review, never away from it.
+
+Strict boolean, default off, opt-in for one release; while off no detect
+cmd is even spawned and the beat is byte-identical to today.
+
+Fixes #341

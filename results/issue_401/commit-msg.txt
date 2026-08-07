@@ -1,0 +1,35 @@
+fix(gates): record a Check-time T4 row as deferred, not a pass
+
+The contribution gate lints the commit message and the PR body, and those two
+files are drafted at publish — after Check has already run. At Check time the
+gate therefore had nothing to lint, exited 0, and the matrix recorded a plain
+green with an empty evidence string: a pass nobody could reproduce, because the
+artifacts the row names do not exist yet. The reviewer's only honest move was to
+mark the row provisional, so every cycle ended with the same T4 item sitting in
+SUMMARY.md §6 NEEDS-HUMAN — 9 of 9 frozen bundles in this instance's last review
+— cleared unread every time. An item that fires on 100% of cycles trains the
+human to tick §6 boxes, which is the guard C6 depends on.
+
+A gate that runs and finds its subject absent by design now says so. It prints
+`PDCA-DEFERRED: <reason>` while exiting 0, and the row is recorded `deferred`:
+visible in the matrix and in §5 evidence with its reason, counted neither as a
+green nor as a gating failure, and — the one deliberate difference from
+`unverifiable` — not lifted into §6. The two differ in who owes the answer:
+`unverifiable` means nobody has one, so a human must decide; `deferred` means
+this row's substantive audit runs later, at a gate that cannot be skipped, so
+there is nothing for the human to clear.
+
+A deferral is a hand-off, never a waiver. The marker is honoured only for a row
+something genuinely re-runs later — one the publish re-gate selects (a
+bundle-scoped T4 row, or an explicit `at_publish = true`) — so no audit can be
+dropped by printing a line, and a row nothing re-gates keeps its pass/fail. The
+substantive T4 verdict is unchanged and still hard-gates the push.
+
+Upgrading an existing instance: nothing rewrites a frozen check-gates.json, and
+readers that test for `fail` or `unverifiable` are unaffected — a `deferred` row
+is neither. Two visible consequences: revalidating an older complete bundle
+reports its T4 row as `pass → deferred`, a true statement about the current
+engine rather than a regression, and an instance whose T4 checker is its own
+script keeps today's behaviour until that script declares the marker.
+
+Fixes #401

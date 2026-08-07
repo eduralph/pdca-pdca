@@ -1,0 +1,30 @@
+fix(progress): sweep surviving child processes after a normal exit
+
+run_with_heartbeat only waited on the direct child; under shell=True (every
+gate) that child is just the shell, so anything it backgrounded survived the
+call. Measured: one leaked test process burned ~100% of a core for 21 hours,
+and a straggler that still holds ports, locks or fixtures when the next run's
+gates start in the same worktree is the class of one-off, never-reproducible
+gate failure. 228e80b750a1f5595b4d45580baa751d5152ac52 (#368) sessionizes
+only bounded children and kills the group only on timeout expiry — a normal
+exit, the overwhelmingly common path, was never swept.
+
+On POSIX, every child whose stdio the harness owns (capture / stream_json) or
+whose wall clock is bounded now runs in its own session, and however the wait
+ends — normal return, timeout, Ctrl-C — surviving group members are swept:
+SIGTERM, a short grace, then SIGKILL, with one stderr note naming the swept
+command. The sweep runs before the capture streams close, mirroring the
+timeout path's kill-then-close order: a straggler holding the capture pipe
+otherwise keeps the drain thread blocked mid-read, and closing the stream
+then waits on that blocked reader. A clean exit with no survivors prints
+nothing and stays byte-identical; interactive calls (no capture, no stream,
+no bound) are never sessionized, so they keep the terminal exactly as today.
+Non-POSIX behaviour is unchanged.
+
+Known limitation: a swept grandchild is not this process's child, so it
+cannot be reaped here — under a non-reaping init (e.g. a minimal container)
+the group kill leaves a zombie table entry. The subreaper design is deferred
+to #383; a naive waitpid(-1) reaper could steal exit statuses from concurrent
+Popen.wait() calls and corrupt a gate verdict — strictly worse than a zombie.
+
+Fixes #372
