@@ -1,0 +1,15 @@
+Reviewing mid-run adoption of split children on the unified flow path, including dependency scheduling, shared pass budgeting, guard behavior, and operator reporting.
+
+| Item | Verdict | Basis |
+|------|---------|-------|
+| C1 Spec | PASS | The brief makes the mid-run-only boundary, lineage scope, run-wide budget, held-child behavior, and exclusions falsifiable, so no planning decision remains unresolved. |
+| C2 Reproduction (red pre-fix) | PASS | The isolated base-plus-test leg executed all 22 tests and failed 21, including the child-terminal assertions that capture the stranded-child symptom (`template/tests/test_flow_adopt_split.py:322`). |
+| C3 Change | PASS | The requested adoption, scheduling, budgeting, guard, documentation, and fixture-cleanup surfaces stay within the declared slice, with the shared splice seam located at `template/src/pdca_harness/flow.py:929`. |
+| C4 Verification (red→green) | PASS | Independent reruns produced 22 tests/21 failures before the production hunks and 22/22 passing after them; docs lint/link audit, 7 copier render/update tests, and all 1,655 driver tests also passed (`template/src/pdca_harness/flow.py:1265`). |
+| C5 Causal adequacy | NEEDS-HUMAN [impl] | Rebuild decision: make lineage containment resolution-aware—the lexical `d.parent` check accepts an `issue_<id>` symlink resolving outside the bundle root, and my probe returned that external target as adoptable, so the escape guard is incomplete (`template/src/pdca_harness/flow.py:881`). |
+| T1 Structure | PASS | Every CLI shape reaches one mutable wave loop and one adoption seam, avoiding a second entry-point implementation (`template/src/pdca_harness/flow.py:786`). |
+| T2 Shape | PASS | Diff whitespace, documentation lint, and rendered-site link audit passed, and the operator-facing budget/adoption contract remains internally linked (`docs/07-crosscutting.md:243`). |
+| T3 Runtime | PASS | The real Python and copier toolchains exercised the feature, full driver, render, and update-compat paths with no skips attributable to missing tools; the primary runtime behavior is asserted through `cli._flow` (`template/tests/test_flow_adopt_split.py:322`). |
+| T4 Contribution | NEEDS-HUMAN | Release-text approval is still owed—`commit-msg.txt` and `pr-description.md` were not supplied, so the user-impact opener and #472 linkage required by the contribution rule cannot be independently audited (`template/pdca.toml.jinja:960`). |
+| T5 Judgment | PASS | No conflicting prior art remains: affected-path history covers the merged lineage/flow work, and the complete closed-PR corpus has only one unmerged rejection, which touched `README.md` rather than any affected path. |
+| Validation — fitness-to-purpose | NEEDS-HUMAN | Ship-or-iterate remains the human decision—automatic transitive adoption changes orchestration, pass-budget exhaustion, and stderr/results semantics, so maintainers must confirm that operational trade-off is desirable (`template/src/pdca_harness/flow.py:1171`). |

@@ -1,0 +1,38 @@
+feat(split): record split lineage in the child and parent bundles
+
+Accepting a split created child work items but wrote down the relationship
+only in the tracker: the "Child slice of #N" line went into the filed issue
+body and nowhere else. On disk the result was invisible. A child bundle
+looked exactly like any other oversized brief, so nothing that later read
+the directory could tell that the work had already been sliced, which items
+it had been sliced alongside, or how many rounds of splitting it had taken.
+
+`--accept` now writes `split-lineage.json` into every bundle it touches.
+Each child records its parent, its siblings and its depth (the parent's
+depth plus one, so the recursion is written down rather than recounted
+later), and the parent's record gains the list of its children. The two
+edges are independent and merged rather than replaced, so a bundle that is
+both a child and a parent keeps its own parent and siblings and simply
+gains children: splitting something that was itself a slice no longer
+throws away the sibling set it already carried.
+
+The record is read back through one tolerant reader that returns nothing
+instead of raising, for every way a file can fail to be read — missing,
+unreadable, not valid UTF-8, malformed, pathologically nested, or written
+by a future version — and a `depth` that is not a number is ignored for the
+arithmetic rather than crashing the accept. A hand-edited or corrupted
+record therefore costs you the hint, never the run.
+
+It is provenance about the split rather than one build attempt's output, so
+it is deliberately kept out of the set of files that re-planning archives,
+and it inherits the accept's existing all-or-nothing guarantees: the
+children's records are staged and moved with their briefs, the parent's is
+written before the close marker, and a failed accept puts the parent's
+previous record back byte-for-byte. A record that cannot be read refuses
+the accept up front, because one that cannot be read cannot be restored.
+
+Nothing reads the record yet. This ships the contract on its own so the
+sizing signal, the planning prompts and the convergence report can be built
+against a settled schema instead of each inventing one.
+
+Fixes #456

@@ -1,0 +1,483 @@
+diff --git a/template/docs/fork-discipline.md.jinja b/template/docs/fork-discipline.md.jinja
+index e546428..e70b23f 100644
+--- a/template/docs/fork-discipline.md.jinja
++++ b/template/docs/fork-discipline.md.jinja
+@@ -46,6 +46,14 @@ it there, not by editing this file (so `copier update` keeps the rules current).
+ - The automation **commits, pushes a branch, and opens a *draft* PR — then stops.** It
+   never marks a PR ready and never merges. Marking ready is the human's disposition
+   after a fresh-eyes re-read.
++  *(This binds the model leaves unconditionally, and every final-wave PR always.
++  `[driver].wave_mode = "merge"` (own-repo/CD, opt-in — instance: INTEGRATION.md §2) is the
++  one exception: there the deterministic driver itself `gh pr ready`s and `gh pr merge`s
++  each NON-final wave's PR at the wave boundary — no model leaf touches `gh pr ready` /
++  `gh pr merge`, ever — guarded by the per-bundle human sign-off that already gated it to
++  COMPLETE, plus the full check-rollup gate (`[driver].merge_requires`, issue #413) right
++  before the merge attempt. The final wave's PR is never readied by the driver either way —
++  it stays a draft for the human.)*
+ - No push / PR-open / ready-mark happens without explicit instruction. This is
+   **mechanically enforced** by the builder/publisher PreToolUse hook (`builder_guard.py`),
+   not left to prompt discipline.
+diff --git a/template/pdca.toml.jinja b/template/pdca.toml.jinja
+index 4d0901b..e8823a6 100644
+--- a/template/pdca.toml.jinja
++++ b/template/pdca.toml.jinja
+@@ -123,6 +123,20 @@ wave_mode = "stack"
+ # The `gh pr merge` strategy when wave_mode = "merge": "merge" (a merge commit — auditable,
+ # bisectable; the default), "squash", or "rebase".
+ merge_method = "merge"
++# Full check-rollup gate for wave_mode = "merge" (issue #413). `gh pr merge` only fails
++# closed on checks the HOST repo marks REQUIRED in branch protection — a thinly protected
++# host lets a red non-required job, or an in-flight run, through, and the next wave builds
++# on a base that never went green.
++#   merge_requires = "all"       (default) — read the PR's FULL check rollup itself, via
++#       `gh pr checks`, right after `gh pr ready` (marking a draft ready can itself trigger
++#       `ready_for_review` CI) and immediately before `gh pr merge`; refuse — no merge — on
++#       any failing OR pending/queued check, and on an EMPTY rollup (no checks reported at
++#       all; absence of evidence is not green). Skipped/neutral checks alongside passes do
++#       not block.
++#   merge_requires = "required"  — restore host-config-only semantics: skip this gate, so
++#       `gh pr merge`'s own required-check enforcement (branch protection) is the only
++#       backstop again, exactly as before #413 — including merging on an EMPTY rollup.
++merge_requires = "all"
+ # Optional integration re-gate (#wave-model). After each wave folds (stack mode), run the
+ # repo-scoped gates over the folded integration tip before the next wave builds on it, so a
+ # combination that is red though each fix was green ALONE stops the run. Off by default
+diff --git a/template/src/pdca_harness/config.py b/template/src/pdca_harness/config.py
+index 01d168d..b768c45 100644
+--- a/template/src/pdca_harness/config.py
++++ b/template/src/pdca_harness/config.py
+@@ -358,6 +358,15 @@ class Config:
+     # The `gh pr merge` strategy for wave_mode="merge" (issue #wave-model): merge | squash |
+     # rebase. Default "merge" (a merge commit — auditable, bisectable). [driver].merge_method.
+     merge_method: str = "merge"
++    # Full check-rollup gate for wave_mode="merge" (issue #413): `gh pr merge` only fails
++    # closed on checks the HOST repo marks REQUIRED in branch protection, so a thinly
++    # protected host lets a red non-required job or an in-flight run through. "all"
++    # (default) reads the PR's FULL check rollup itself — via `gh pr checks` — right after
++    # `gh pr ready` and refuses (no merge) on any failing OR pending check, and on an EMPTY
++    # rollup (absence of evidence is not green). "required" restores host-config-only
++    # semantics (skips this gate; `gh pr merge`'s own required-check enforcement is the only
++    # backstop, as before #413 — including merging on an empty rollup). [driver].merge_requires.
++    merge_requires: str = "all"
+     # Optional integration re-gate (#wave-model): after each wave folds onto the
+     # integration branch, run the repo-scoped gates over that tip before the next wave
+     # builds on it, so a combination that is red though each fix was green alone STOPs the
+@@ -689,6 +698,14 @@ class Config:
+         lane_preflight = driver_cfg.get("lane_preflight", "")  # issue #213
+         wave_mode = driver_cfg.get("wave_mode", "stack")  # #wave-model: stack | merge
+         merge_method = driver_cfg.get("merge_method", "merge")  # merge | squash | rebase
++        # Check-rollup gate knob for wave_mode="merge" (issue #413). An unknown value fails
++        # CLOSED to "all" (the stricter reading) — the fail-safe direction here is "verify
++        # the rollup ourselves", the opposite of guessing the looser host-config-only mode.
++        merge_requires = str(driver_cfg.get("merge_requires", "all")).strip().lower()
++        if merge_requires not in ("all", "required"):
++            print(f"config: unknown [driver].merge_requires '{merge_requires}' — expected "
++                  "all | required; using 'all'", file=sys.stderr)
++            merge_requires = "all"
+         regate_between_waves = bool(driver_cfg.get("regate_between_waves", False))
+         act_cadence = max(1, int(driver_cfg.get("act_cadence", 5)))  # issue #109
+         # Footprint sweep mode (issue #297). An unknown value falls back to "clean" with a
+@@ -794,6 +811,7 @@ class Config:
+             lane_preflight=lane_preflight,
+             wave_mode=wave_mode,
+             merge_method=merge_method,
++            merge_requires=merge_requires,
+             regate_between_waves=regate_between_waves,
+             act_cadence=act_cadence,
+             sweep_worktrees=sweep_worktrees,
+diff --git a/template/src/pdca_harness/merge.py b/template/src/pdca_harness/merge.py
+index ec73aad..a8c497c 100644
+--- a/template/src/pdca_harness/merge.py
++++ b/template/src/pdca_harness/merge.py
+@@ -15,10 +15,22 @@ deterministic ``git``/``gh`` (no model); dry-run (stubbed publisher) prints the
+ merges nothing. The harness's own ``gh pr merge`` runs in the orchestrator, outside the
+ ``builder_guard`` hook that blocks the model leaves from merging — exactly as publish's
+ ``gh pr create`` does.
++
++That fail-closed rule extends to the FULL check rollup, not just the host's configured
++required checks (issue #413): ``gh pr merge`` only fails closed on checks the host repo
++marks required in branch protection, so a thinly-protected host lets a red non-required
++job or an in-flight run through, and the next wave builds on a base that never went
++green. ``[driver].merge_requires = "all"`` (the default) reads the rollup itself via
++``gh pr checks`` right after ``gh pr ready`` — marking a draft ready can itself trigger
++``ready_for_review`` CI, so a rollup read only pre-ready cannot promise green-at-merge —
++and refuses (no ``gh pr merge``) on any failing or pending/queued check, and on an EMPTY
++rollup (absence of evidence is not green). ``merge_requires = "required"`` restores
++host-config-only semantics, skipping this gate entirely.
+ """
+ 
+ from __future__ import annotations
+ 
++import json
+ import subprocess
+ import sys
+ from pathlib import Path
+@@ -26,6 +38,15 @@ from pathlib import Path
+ from . import merged, publish, state
+ from .config import Config
+ 
++# `gh pr checks --json bucket` classifies each check into one of these buckets
++# (https://cli.github.com/manual/gh_pr_checks). "pass" and "skipping" (skipped/neutral)
++# both count as a completed non-failure and do not block a merge; "pending" (running or
++# queued) always blocks; anything else — "fail", "cancel", or a value this harness doesn't
++# know about yet — is treated as failing, fail-closed (never guess green on an unrecognized
++# bucket).
++_ROLLUP_OK = {"pass", "skipping"}
++_ROLLUP_PENDING = {"pending"}
++
+ 
+ def merge_wave(cfg: Config, bundles: list[Path], *, dry_run: bool = False,
+                method: str = "merge") -> int:
+@@ -39,6 +60,39 @@ def merge_wave(cfg: Config, bundles: list[Path], *, dry_run: bool = False,
+     return 0
+ 
+ 
++def _check_rollup(pr_url: str) -> str:
++    """Classify PR ``pr_url``'s FULL check rollup (issue #413), via
++    ``gh pr checks <pr> --json name,bucket``:
++
++    * ``"green"``   — every reported check is a completed non-failure (pass or
++      skipped/neutral).
++    * ``"pending"`` — one or more checks are still running/queued.
++    * ``"failing"`` — one or more checks failed (or ``gh`` itself could not be read —
++      fail-closed, never guess green).
++    * ``"empty"``   — no checks were reported at all (absence of evidence is not green).
++    """
++    r = subprocess.run(["gh", "pr", "checks", str(pr_url), "--json", "name,bucket"],
++                       capture_output=True, text=True)
++    # `gh pr checks` exits 0 (all pass), 1 (a check failed OR gh itself errored — e.g. no
++    # checks reported also exits 1 on some gh versions), or 8 (checks pending). Any OTHER
++    # exit code means gh couldn't even enumerate the checks (auth, network, bad PR) —
++    # fail-closed, the same doctrine as a failing check.
++    if r.returncode not in (0, 1, 8):
++        return "failing"
++    try:
++        checks = json.loads(r.stdout or "[]")
++    except ValueError:
++        return "failing"  # unparsable output — fail-closed, never guess green
++    if not checks:
++        return "empty"
++    buckets = {c.get("bucket") for c in checks}
++    if buckets - _ROLLUP_OK - _ROLLUP_PENDING:
++        return "failing"
++    if buckets & _ROLLUP_PENDING:
++        return "pending"
++    return "green"
++
++
+ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
+                fetched: set[str]) -> int:
+     """Merge one bundle's recorded PR (idempotent, fail-closed). ``fetched`` dedupes the
+@@ -79,6 +133,27 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
+               file=sys.stderr)
+         return 1
+ 
++    # Full check-rollup gate (issue #413): read AFTER `gh pr ready` and immediately before
++    # `gh pr merge` — marking a draft ready can itself trigger `ready_for_review` CI, so a
++    # rollup read only pre-ready cannot guarantee green-at-merge. `gh pr merge` on its own
++    # (below) only fails closed on checks the HOST repo marks required in branch
++    # protection; this refuses on ANY failing or pending/queued check, and on an empty
++    # rollup, independent of host branch-protection config. `merge_requires = "required"`
++    # (default "all") opts back into host-config-only semantics and skips this gate.
++    if cfg.merge_requires != "required":
++        rollup = _check_rollup(str(pr_url))
++        if rollup != "green":
++            reason = {
++                "pending": "one or more checks are still pending/queued",
++                "failing": "one or more checks are failing",
++                "empty": "the check rollup is EMPTY — no checks reported at all",
++            }[rollup]
++            print(f"\n!!! merge: {d.name} ({pr_url}) refused before merge — {reason}. "
++                  "STOP: later waves are NOT run; a re-run resumes idempotently once the "
++                  "checks are green (or set [driver] merge_requires = \"required\" to "
++                  "restore host-config-only semantics).\n", file=sys.stderr)
++            return 1
++
+     print(f"→ gh pr merge {pr_url} --{method}")
+     r = subprocess.run(cmd, capture_output=True, text=True)
+     if r.returncode != 0:
+diff --git a/template/tests/test_merge.py b/template/tests/test_merge.py
+index 255c7cd..5ef2a7b 100644
+--- a/template/tests/test_merge.py
++++ b/template/tests/test_merge.py
+@@ -6,6 +6,13 @@ COMPLETE bundle with no recorded PR, or a `gh pr merge` failure, returns non-zer
+ caller STOPs. Dry-run shells nothing. `gh` and state are mocked — no network. Run from the
+ project root:
+     PYTHONPATH=src python -m unittest discover -s tests
++
++Issue #413 extends the fail-closed contract to the FULL check rollup (`gh pr checks`), not
++just whatever the host repo happens to mark required in branch protection: `_merge_one`
++must refuse — no `gh pr merge` — on any failing or pending/queued check, and on an EMPTY
++rollup, reading it AFTER `gh pr ready` (which can itself trigger new CI) and immediately
++before the merge attempt. `[driver].merge_requires = "required"` opts back into the old,
++host-config-only behaviour.
+ """
+ 
+ from __future__ import annotations
+@@ -23,14 +30,29 @@ from unittest import mock
+ from pdca_harness import merge, state
+ from pdca_harness.config import Config, LeafConfig
+ 
++# A green `gh pr checks --json name,bucket` payload — reused by every test that doesn't
++# itself exercise the rollup gate, so the fixture stays realistic now that `_merge_one`
++# always queries it (default `merge_requires = "all"`).
++_GREEN_ROLLUP = json.dumps([{"name": "ci", "bucket": "pass"}])
++
+ 
+-def _cfg(root: Path) -> Config:
++def _cfg(root: Path, *, merge_requires: str = "all") -> Config:
+     return Config(
+         root=root, bundle_root=root / "results", process_dir=root / "process",
+         templates_dir=root / "templates", default_branch="main", tracker_system="github",
+         tracker_url="", issue_id_example="#1",
+         builder=LeafConfig(mode="stub"), reviewer=LeafConfig(mode="stub"),
+-        base_remote="origin", repo_checkouts={"org/repo": str(root / "repo")})
++        base_remote="origin", repo_checkouts={"org/repo": str(root / "repo")},
++        merge_requires=merge_requires)
++
++
++def _gh_ok(cmd, **kw):
++    """Default stub for tests that don't themselves exercise the rollup gate: every `gh`/
++    `git` call succeeds, and `gh pr checks` reports a green rollup so `_merge_one` proceeds
++    to `gh pr merge` exactly as it did before #413."""
++    if cmd[:3] == ["gh", "pr", "checks"]:
++        return SimpleNamespace(returncode=0, stdout=_GREEN_ROLLUP, stderr="")
++    return SimpleNamespace(returncode=0, stdout="", stderr="")
+ 
+ 
+ class MergeWave(unittest.TestCase):
+@@ -68,7 +90,7 @@ class MergeWave(unittest.TestCase):
+ 
+         def fake_run(cmd, **kw):
+             runs.append(cmd)
+-            return SimpleNamespace(returncode=0, stdout="", stderr="")
++            return _gh_ok(cmd, **kw)
+ 
+         with mock.patch("pdca_harness.merge.subprocess.run", side_effect=fake_run), \
+                 mock.patch.object(merge.state, "state", return_value=state.COMPLETE), \
+@@ -98,9 +120,10 @@ class MergeWave(unittest.TestCase):
+     def test_merge_failure_stops(self) -> None:
+         b = self._bundle("M5")
+ 
+-        def fail_merge(cmd, **kw):  # ready succeeds; the merge itself fails
+-            rc = 1 if cmd[:3] == ["gh", "pr", "merge"] else 0
+-            return SimpleNamespace(returncode=rc, stdout="", stderr="not mergeable")
++        def fail_merge(cmd, **kw):  # ready + rollup succeed; the merge itself fails
++            if cmd[:3] == ["gh", "pr", "merge"]:
++                return SimpleNamespace(returncode=1, stdout="", stderr="not mergeable")
++            return _gh_ok(cmd, **kw)
+ 
+         with mock.patch("pdca_harness.merge.subprocess.run", side_effect=fail_merge), \
+                 mock.patch.object(merge.state, "state", return_value=state.COMPLETE), \
+@@ -118,7 +141,7 @@ class MergeWave(unittest.TestCase):
+ 
+         def fake_run(cmd, **kw):
+             runs.append(cmd)
+-            return SimpleNamespace(returncode=0, stdout="", stderr="")
++            return _gh_ok(cmd, **kw)
+ 
+         with mock.patch("pdca_harness.merge.subprocess.run", side_effect=fake_run), \
+                 mock.patch.object(merge.state, "state", return_value=state.COMPLETE), \
+@@ -128,7 +151,8 @@ class MergeWave(unittest.TestCase):
+         self.assertEqual(rc, 0)
+         gh = [c for c in runs if c[:2] == ["gh", "pr"]]
+         self.assertEqual(gh[0], ["gh", "pr", "ready", "https://gh/pr/1"])
+-        self.assertEqual(gh[1], ["gh", "pr", "merge", "https://gh/pr/1", "--merge"])
++        self.assertEqual(gh[1][:3], ["gh", "pr", "checks"])   # rollup read AFTER ready
++        self.assertEqual(gh[2], ["gh", "pr", "merge", "https://gh/pr/1", "--merge"])
+ 
+     def test_ready_failure_stops_before_merge(self) -> None:
+         # If a PR can't be readied it can't be merged — fail-closed, and never attempt merge.
+@@ -172,15 +196,190 @@ class MergeWave(unittest.TestCase):
+         ok = self._bundle("MA")
+         bad = self._bundle("MB", pr_url=None)
+ 
++        with mock.patch("pdca_harness.merge.subprocess.run", side_effect=_gh_ok), \
++                mock.patch.object(merge.state, "state", return_value=state.COMPLETE), \
++                mock.patch.object(merge.merged, "is_merged", return_value=False), \
++                redirect_stderr(io.StringIO()):
++            rc = merge.merge_wave(self.cfg, [ok, bad])
++        self.assertEqual(rc, 1)
++
++    # ---- issue #413: the full check-rollup gate --------------------------------------
++
++    def test_red_rollup_refuses_and_never_merges(self) -> None:
++        # A failing check that the host does NOT mark required in branch protection must
++        # still refuse — `gh pr merge` on its own would happily succeed here.
++        b = self._bundle("MC")
++        calls: list[list[str]] = []
++
+         def fake_run(cmd, **kw):
++            calls.append(cmd)
++            if cmd[:3] == ["gh", "pr", "checks"]:
++                return SimpleNamespace(
++                    returncode=1,
++                    stdout=json.dumps([{"name": "lint", "bucket": "fail"}]), stderr="")
++            return SimpleNamespace(returncode=0, stdout="", stderr="")  # ready succeeds
++
++        with mock.patch("pdca_harness.merge.subprocess.run", side_effect=fake_run), \
++                mock.patch.object(merge.state, "state", return_value=state.COMPLETE), \
++                mock.patch.object(merge.merged, "is_merged", return_value=False), \
++                redirect_stderr(io.StringIO()) as err:
++            rc = merge.merge_wave(self.cfg, [b])
++        self.assertEqual(rc, 1)
++        self.assertIn("failing", err.getvalue())
++        self.assertFalse(any(c[:3] == ["gh", "pr", "merge"] for c in calls))
++
++    def test_pending_rollup_refuses(self) -> None:
++        # A check still running/queued must refuse too — never merge past an in-flight run.
++        b = self._bundle("MD")
++
++        def fake_run(cmd, **kw):
++            if cmd[:3] == ["gh", "pr", "checks"]:
++                return SimpleNamespace(
++                    returncode=8,
++                    stdout=json.dumps([{"name": "ci", "bucket": "pending"}]), stderr="")
+             return SimpleNamespace(returncode=0, stdout="", stderr="")
+ 
+         with mock.patch("pdca_harness.merge.subprocess.run", side_effect=fake_run), \
+                 mock.patch.object(merge.state, "state", return_value=state.COMPLETE), \
+                 mock.patch.object(merge.merged, "is_merged", return_value=False), \
+-                redirect_stderr(io.StringIO()):
+-            rc = merge.merge_wave(self.cfg, [ok, bad])
++                redirect_stderr(io.StringIO()) as err:
++            rc = merge.merge_wave(self.cfg, [b])
+         self.assertEqual(rc, 1)
++        self.assertIn("pending", err.getvalue())
++
++    def test_all_green_rollup_ready_and_merge_proceed(self) -> None:
++        b = self._bundle("ME")
++        calls: list[list[str]] = []
++
++        def fake_run(cmd, **kw):
++            calls.append(cmd)
++            return _gh_ok(cmd, **kw)
++
++        with mock.patch("pdca_harness.merge.subprocess.run", side_effect=fake_run), \
++                mock.patch.object(merge.state, "state", return_value=state.COMPLETE), \
++                mock.patch.object(merge.merged, "is_merged", return_value=False), \
++                redirect_stdout(io.StringIO()):
++            rc = merge.merge_wave(self.cfg, [b])
++        self.assertEqual(rc, 0)
++        gh = [c for c in calls if c[:2] == ["gh", "pr"]]
++        self.assertEqual([c[:3] for c in gh],
++                          [["gh", "pr", "ready"], ["gh", "pr", "checks"], ["gh", "pr", "merge"]])
++
++    def test_empty_rollup_refuses_under_all(self) -> None:
++        # Absence of evidence is not green — no checks reported at all must refuse under
++        # the default `merge_requires = "all"`.
++        b = self._bundle("MF")
++
++        def fake_run(cmd, **kw):
++            if cmd[:3] == ["gh", "pr", "checks"]:
++                return SimpleNamespace(returncode=0, stdout="[]", stderr="")
++            return SimpleNamespace(returncode=0, stdout="", stderr="")
++
++        with mock.patch("pdca_harness.merge.subprocess.run", side_effect=fake_run), \
++                mock.patch.object(merge.state, "state", return_value=state.COMPLETE), \
++                mock.patch.object(merge.merged, "is_merged", return_value=False), \
++                redirect_stderr(io.StringIO()) as err:
++            rc = merge.merge_wave(self.cfg, [b])
++        self.assertEqual(rc, 1)
++        self.assertIn("EMPTY", err.getvalue())
++
++    def test_skipped_neutral_checks_do_not_block(self) -> None:
++        # Skipped/neutral checks alongside real passes count as completed non-failures.
++        b = self._bundle("MG")
++
++        def fake_run(cmd, **kw):
++            if cmd[:3] == ["gh", "pr", "checks"]:
++                return SimpleNamespace(returncode=0, stdout=json.dumps([
++                    {"name": "ci", "bucket": "pass"},
++                    {"name": "optional-lint", "bucket": "skipping"},
++                ]), stderr="")
++            return SimpleNamespace(returncode=0, stdout="", stderr="")
++
++        with mock.patch("pdca_harness.merge.subprocess.run", side_effect=fake_run), \
++                mock.patch.object(merge.state, "state", return_value=state.COMPLETE), \
++                mock.patch.object(merge.merged, "is_merged", return_value=False), \
++                redirect_stdout(io.StringIO()):
++            rc = merge.merge_wave(self.cfg, [b])
++        self.assertEqual(rc, 0)
++
++    def test_rollup_read_after_ready_catches_new_pending(self) -> None:
++        # Marking a draft ready can itself trigger `ready_for_review` CI: the rollup is
++        # GREEN before `gh pr ready` runs and flips to PENDING once it has. A rollup read
++        # only pre-ready would have (wrongly) let this merge — proving the gate reads AFTER
++        # ready, immediately before the merge attempt.
++        b = self._bundle("MH")
++        readied = False
++        calls: list[list[str]] = []
++
++        def fake_run(cmd, **kw):
++            nonlocal readied
++            calls.append(cmd)
++            if cmd[:3] == ["gh", "pr", "ready"]:
++                readied = True
++                return SimpleNamespace(returncode=0, stdout="", stderr="")
++            if cmd[:3] == ["gh", "pr", "checks"]:
++                bucket = "pending" if readied else "pass"
++                return SimpleNamespace(
++                    returncode=8 if readied else 0,
++                    stdout=json.dumps([{"name": "ready_for_review-ci", "bucket": bucket}]),
++                    stderr="")
++            return SimpleNamespace(returncode=0, stdout="", stderr="")
++
++        with mock.patch("pdca_harness.merge.subprocess.run", side_effect=fake_run), \
++                mock.patch.object(merge.state, "state", return_value=state.COMPLETE), \
++                mock.patch.object(merge.merged, "is_merged", return_value=False), \
++                redirect_stderr(io.StringIO()) as err:
++            rc = merge.merge_wave(self.cfg, [b])
++        self.assertEqual(rc, 1)
++        self.assertIn("pending", err.getvalue())
++        self.assertFalse(any(c[:3] == ["gh", "pr", "merge"] for c in calls))
++
++    def test_merge_requires_required_skips_rollup_gate(self) -> None:
++        # Opt-in legacy behaviour: `gh pr merge`'s own exit is the only gate again — a red
++        # rollup that `gh pr merge` itself would let through must NOT be refused here.
++        cfg = _cfg(self.tmp, merge_requires="required")
++        b = self._bundle("MI")
++        calls: list[list[str]] = []
++
++        def fake_run(cmd, **kw):
++            calls.append(cmd)
++            if cmd[:3] == ["gh", "pr", "checks"]:
++                return SimpleNamespace(
++                    returncode=1,
++                    stdout=json.dumps([{"name": "ci", "bucket": "fail"}]), stderr="")
++            return SimpleNamespace(returncode=0, stdout="", stderr="")
++
++        with mock.patch("pdca_harness.merge.subprocess.run", side_effect=fake_run), \
++                mock.patch.object(merge.state, "state", return_value=state.COMPLETE), \
++                mock.patch.object(merge.merged, "is_merged", return_value=False), \
++                redirect_stdout(io.StringIO()):
++            rc = merge.merge_wave(cfg, [b])
++        self.assertEqual(rc, 0)
++        self.assertFalse(any(c[:3] == ["gh", "pr", "checks"] for c in calls))
++        self.assertTrue(any(c[:3] == ["gh", "pr", "merge"] for c in calls))
++
++    def test_merge_requires_parsed_from_driver_config(self) -> None:
++        # #413: wired through the REAL config loader (`Config.load`), not only a directly
++        # constructed `Config` — proves `[driver] merge_requires` in pdca.toml actually
++        # reaches `_merge_one`, not just the dataclass default.
++        root = self.tmp / "instance"
++        root.mkdir()
++        (root / "pdca.toml").write_text(
++            '[paths]\nbundle_root = "results"\n\n[driver]\nmerge_requires = "required"\n',
++            encoding="utf-8")
++        self.assertEqual(Config.load(root).merge_requires, "required")
++
++        (root / "pdca.toml").write_text('[paths]\nbundle_root = "results"\n',
++                                         encoding="utf-8")   # unset ⇒ default
++        self.assertEqual(Config.load(root).merge_requires, "all")
++
++        (root / "pdca.toml").write_text(
++            '[paths]\nbundle_root = "results"\n\n[driver]\nmerge_requires = "bogus"\n',
++            encoding="utf-8")
++        with redirect_stderr(io.StringIO()) as err:
++            cfg = Config.load(root)
++        self.assertEqual(cfg.merge_requires, "all")   # unknown value fails CLOSED to "all"
++        self.assertIn("merge_requires", err.getvalue())
+ 
+ 
+ if __name__ == "__main__":

@@ -1,0 +1,37 @@
+feat(flow): drive a split's children in the run that split them
+
+A `pdca flow` run that decomposed a bundle mid-run stranded the very children it
+had just created. The Plan / re-plan beat concludes the slice is too large,
+`pdca split --accept` files the children and closes the parent with
+`close-disposition = split` — and the run then walked away: parent terminal,
+children sitting fully briefed and undriven, the operator restarting by hand
+with `pdca flow <child-ids>`.
+
+The drive set is no longer frozen. A bundle that reaches the split disposition
+while this run is driving it hands its children back to it: they are read from
+the split's lineage record, validated with the resume path's tolerance and
+spliced into the waves AFTER the parent's, then driven as ordinary members of
+the run — levelled by their own `Depends on` / `Conflicts with`, pointed at the
+same per-target integration branch, published and folded by the same code, and
+drawn from ONE run-wide pass pool, so an adopted wave can never quietly multiply
+`[driver].max_passes`. Adoption follows the lineage edge only — the children of
+the bundles this run is driving, transitively — and never widens into a sweep of
+`results/`. A child that cannot be scheduled is held with its reason, left in
+flight and excluded from the run's results; a split never aborts the flow that
+caused it.
+
+The record is a file an operator can hand-edit, so the reader guards it, and
+every entry it refuses is named: an id that is not a plain tracker token is
+reported (the rule `split.validate` already applies at write time), an entry
+that is not a usable id at all is counted and echoed rather than dropped in
+silence, containment is decided on the RESOLVED path so an `issue_<id>`
+symlinked out of the instance is skipped rather than driven and published, and
+one bundle is adopted once even when two names reach it — an `issue_<id>`
+symlinked to a bundle the run already drives no longer puts one directory in a
+wave twice.
+
+Implemented once, on the unified drive path #468 landed, so `pdca flow <id>`, an
+explicit id list and the CSV batch all inherit it from one implementation —
+landing it on forked entry points is what produced #449's divergence chase.
+
+Fixes #472

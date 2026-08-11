@@ -75,16 +75,48 @@
     "signal": "t2 shape \u2014 decide whether to accept shape",
     "raw": "T2 Shape \u2014 Decide whether to accept shape without the configured docs wrapper: `./engine/scripts/run-docs-check.sh` was unavailable at `$PDCA_TARGET` root, so its recorded pass could not be independently re-run (`check-gates.json:29`).",
     "first_seen": "2026-08-06",
-    "status": "open",
-    "applied_date": null,
-    "location": ""
+    "status": "applied",
+    "applied_date": "2026-08-10",
+    "location": "CLEARED by the #31 local work (resolvable ./scripts/pdca wrapper + wired engine/scripts): the oracle-absence classes appear in ZERO of the 5 cycles frozen for the 2026-08-10 review (413, 458, 459, 472, 473), after dominating every earlier wave."
   },
   {
     "signal": "t4 contribution \u2014 decide whether to rely on",
     "raw": "T4 Contribution \u2014 Decide whether to rely on the recorded contribution PASS \u2014 the PR-body artifacts and contribcheck oracle were not among the reviewer inputs, so tracker/opener compliance could not be independently reproduced; issue linkage is present in the test at `template/tests/test_verify_red_leg.py:2`.",
     "first_seen": "2026-08-06",
+    "status": "structural",
+    "applied_date": "2026-08-10",
+    "location": "Split at the 2026-08-10 review: the ORACLE half is cleared (the T4 row now names the resolvable ./scripts/pdca contribcheck \u2014 #31), the ARTIFACT half is structural (commit-msg.txt / pr-description.md do not exist at Check by design) and still recurs in all 5 cycles. Reporting half upstream: https://github.com/eduralph/pdca-harness/issues/401."
+  },
+  {
+    "signal": "confirm the close disposition 'split' (no patch was",
+    "raw": "Confirm the close disposition 'split' (no patch was built). Override to a fix path (iterate-to-Do) if the close is wrong.",
+    "first_seen": "2026-08-09",
+    "status": "structural",
+    "applied_date": null,
+    "location": "by design: the split close path asks the human to confirm the disposition (\u00a76 is the intended surface); no delta possible"
+  },
+  {
+    "signal": "size backstop \u2014 this slice is behaving oversized:",
+    "raw": "size backstop \u2014 this slice is behaving oversized: 2 round(s) already spent (threshold 2). Recommend answering `iterate-plan` at sign-off and authoring the split in the re-plan (`pdca split`), rather than `iterate-do`: a slice that is too big yields implementation-shaped findings every round, and splitting authors briefs, which is Plan's beat.",
+    "first_seen": "2026-08-09",
+    "status": "applied",
+    "applied_date": "2026-08-09",
+    "location": "pdca.toml [driver.size_signal] rounds=3, patch_kb=125, patch_files=25 (Act 2026-08-09). Cause routed upstream: #446 (env rounds, merged, awaits v0.57.0) + #477 (human-class rounds, filed 2026-08-09). Re-tighten with scripts/size-calibrate after both land. HOLDING at the 2026-08-10 review: fired only on issue_472 (4 rounds) and issue_473 (3 rounds), both genuinely multi-round implementation slices, and silent on 413/458/459 — no noise firing this wave."
+  },
+  {
+    "signal": "t4 contribution \u2014 confirm the eventual commit message",
+    "raw": "T4 Contribution \u2014 Confirm the eventual commit message and PR body retain the user-impact opener and #316 tracker identity \u2014 those contribution artifacts were withheld from this artifact-only review, so the recorded contribcheck pass could not be independently rerun.",
+    "first_seen": "2026-08-10",
+    "status": "structural",
+    "applied_date": null,
+    "location": "Same class as the two other T4 entries above (2026-08-10 review): the contribution artifacts do not exist at Check by design, so no reviewer can reproduce the row. Structural here; the reporting half is upstream https://github.com/eduralph/pdca-harness/issues/401."
+  },
+  {
+    "signal": "supply `copier` and decide whether render/update compatibility is",
+    "raw": "T3 Runtime \u2014 Supply `copier` and decide whether render/update compatibility is green \u2014 the entire 7-test root suite skipped because that dependency was absent. CLASS: the reviewer cannot exercise the render/update suites; 4 of the 5 cycles in the 2026-08-10 wave (413, 458, 459, 472), under FOUR different normalized keys.",
+    "first_seen": "2026-08-10",
     "status": "open",
     "applied_date": null,
-    "location": ""
+    "location": "Registered BY HAND at the 2026-08-10 Act review: the driver's first-8-words signal identity split this class into four keys, so `register_signals` never saw a recurrence (filed as https://github.com/eduralph/pdca-harness/issues/501). Cause: the copier skip guards probe library importability and report tool installation, so a CLI-installed copier reads as absent \u2014 filed https://github.com/eduralph/pdca-harness/issues/495. No local delta: the gate leg genuinely runs the 7 tests (run-suite.sh uses .venv/bin/python3; [install].extra_bootstrap provisions copier there \u2014 evidence in every bundle's gate-logs/T3-suite.log), and v0.57.0's #403 seeding gives the reviewer that log. Recurrence AFTER the update is the signal."
   }
 ]

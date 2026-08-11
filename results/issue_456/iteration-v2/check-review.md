@@ -1,0 +1,15 @@
+Review of the change that records durable split lineage in child and parent bundles while preserving mixed-role and rollback semantics.
+
+| Item | Verdict | Basis |
+|------|---------|-------|
+| C1 Spec | PASS | The brief settles the schema, mixed-role merge, tolerant-reader behavior, archive persistence, transaction ordering, scope, and an executable falsifier, so the required outcome is unambiguous. |
+| C2 Reproduction (red pre-fix) | PASS | The decision was whether the retained test genuinely detects the missing capability: a clean `main` tree collected all 18 tests and all 18 errored on absent lineage symbols, beginning with the functional case at `template/tests/test_split_lineage.py:78`. |
+| C3 Change | FAIL | The reader must abstain for every unreadable or malformed record, but invalid UTF-8 bytes raise `UnicodeDecodeError` because the decode at `template/src/pdca_harness/split.py:387` is outside the `ValueError` handler; a consumer can still be crashed by the provenance file. |
+| C4 Verification (red→green) | FAIL | The nominal leg is real (18 red errors, then 18/18 green), but a direct invalid-byte probe still raises at `template/src/pdca_harness/split.py:387`, so the green suite does not verify the stated never-raises contract. |
+| C5 Causal adequacy | PASS | The change creates provenance where the split is materialised and records the inverse parent edge before close (`template/src/pdca_harness/split.py:469`, `template/src/pdca_harness/split.py:595`); no capability probe or symptom-only runtime guard was introduced. |
+| T1 Structure | PASS | The patch applies cleanly to the exact current `main` SHA, touches only the three scoped paths, and leaves lineage outside the attempt-output registry at `template/src/pdca_harness/state.py:82`. |
+| T2 Shape | PASS | The independent docs rerun rendered 22 pages with a clean link audit, and the documented one-file mixed-role contract is grounded at `docs/07-crosscutting.md:217`. |
+| T3 Runtime | PASS | Copier 9.17.1 was actually exercised: all 7 render/update-compat tests passed, the full offline suite passed 1,617 tests with 2 unrelated skips, and the carried-forward unreadable-prior transaction case passes at `template/tests/test_split_lineage.py:279`. |
+| T4 Contribution | NEEDS-HUMAN | Re-run the contribution lint against the actual commit and PR artifacts before publish — those artifacts are absent from the reviewer inputs, so the checker correctly returned deferred at `template/src/pdca_harness/cli.py:1089` and the recorded PASS cannot be independently confirmed. |
+| T5 Judgment | PASS | The change remains one lineage-contract fix with no downstream consumers, and an exact affected-path scan covered merged history plus closed/rejected PRs: no prior `split-lineage.json` implementation or rejected overlapping change exists. |
+| Validation — fitness-to-purpose | NEEDS-HUMAN | After the tolerant-reader defect is corrected, decide whether this one-file independent-edge contract is the right prerequisite for the downstream sizing and flow work — mechanical checks cannot determine that product-level fitness. |

@@ -1,0 +1,15 @@
+Reviewing the mid-run flow enhancement that adopts a terminal split parent's lineage children into later waves under one run-wide pass budget.
+
+| Item | Verdict | Basis |
+|------|---------|-------|
+| C1 Spec | PASS | The contract is bounded and falsifiable: adoption is mid-run, lineage-scoped, scheduled after the parent, and charged to one pool (`docs/07-crosscutting.md:243`, `docs/07-crosscutting.md:257`, `docs/07-crosscutting.md:319`). |
+| C2 Reproduction (red pre-fix) | PASS | In an isolated clean `HEAD` with only the new test retained, all 27 tests executed and 26 failed on stranded children, including the CLI criterion at `template/tests/test_flow_adopt_split.py:322`. |
+| C3 Change | PASS | The change stays on the unified drive path and performs adoption before the existing publish/fold boundary, while the ancillary environment cleanup is confined to its test fixture (`template/src/pdca_harness/flow.py:1430`, `template/tests/test_verify_base.py:74`). |
+| C4 Verification (red→green) | PASS | The clean-base leg ran 27 tests with 26 failures and the patched target ran all 27 green; the focused same-wave mutation also failed its named adversary test (`template/tests/test_flow_adopt_split.py:1052`). |
+| C5 Causal adequacy | PASS | The frozen-tail cause is removed by recomputing and replacing the un-driven schedule, then invoking that splice from the shared loop; no capability-probe or symptom guard was introduced (`template/src/pdca_harness/flow.py:1173`, `template/src/pdca_harness/flow.py:1434`). |
+| T1 Structure | PASS | Adoption is factored once and reached from the common `_drive_and_act` wave loop, preserving entry-point parity (`template/src/pdca_harness/flow.py:1082`, `template/src/pdca_harness/flow.py:1434`). |
+| T2 Shape | PASS | Independent docs lint and a 22-page rendered-link audit both passed, grounding the new operator contract at `docs/07-crosscutting.md:243`. |
+| T3 Runtime | NEEDS-HUMAN | Accept the runtime baseline only after rerunning the 7 Copier-dependent render/update tests — Copier was absent here, so they all skipped even though 1,660 driver tests passed (`tests/test_render_and_run.py:23`, `tests/test_render_and_run.py:31`). |
+| T4 Contribution | NEEDS-HUMAN | Approve release text only after inspecting `commit-msg.txt` and `pr-description.md` — neither artifact was supplied, so the asserted user-impact opener and tracker linkage cannot be independently rerun (`template/pdca.toml.jinja:985`). |
+| T5 Judgment | NEEDS-HUMAN | Confirm no applicable closed/rejected prior work beyond the locally found #468 path history — artifact-only `git log --all` cannot settle tracker history, which matters to avoid reviving rejected flow semantics (`template/src/pdca_harness/flow.py:1434`). |
+| Validation — fitness-to-purpose | NEEDS-HUMAN | Decide whether the adoption, held-child reporting, and fixed-pool behavior fit real operator workflows — the offline CLI suite verifies mechanics but cannot establish product fitness (`template/tests/test_flow_adopt_split.py:322`). |

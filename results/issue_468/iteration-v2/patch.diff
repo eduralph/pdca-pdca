@@ -1,0 +1,676 @@
+diff --git a/template/src/pdca_harness/cli.py b/template/src/pdca_harness/cli.py
+index 322558a..102713f 100644
+--- a/template/src/pdca_harness/cli.py
++++ b/template/src/pdca_harness/cli.py
+@@ -21,7 +21,7 @@ from pathlib import Path
+ 
+ from . import (act, brief, cleanup, doctor, drift, driver, flow, gates, leaves, manual_test,
+                merged, publish, queue, record, registry, revalidate, revert, signoff, sizing,
+-               sources, split, state, sweep, triage, waves, worktree)
++               split, state, sweep, triage, waves, worktree)
+ from .config import Config
+ 
+ 
+@@ -558,11 +558,13 @@ def _run(cfg: Config, issue_id: str) -> int:
+ def _flow(cfg: Config, args: argparse.Namespace) -> int:
+     """Run the whole cycle for one or more issues (the single ``flow`` verb, #86).
+ 
+-    Arity selects the mode: **one id** is a single sequential cycle (Plan→Do→Check→
+-    sign-off→publish→Act); **several ids** fan out across lanes with a cheap-first
+-    sign-off queue; **zero ids + --from-csv** plans a batch the planner picks from the
+-    export. Unbriefed ids are auto-planned (one shared interactive Plan session) — no
+-    --plan flag. Act runs by default after COMPLETE (--no-act to skip).
++    Arity selects the PRESENTATION, not the machinery (issue #468): **one or more ids**
++    all drive through :func:`flow.flow_ids` and one results map — one id reports as
++    ``state<TAB>path`` (+ the §6 listing), several as the batch table — while **zero ids +
++    --from-csv** plans a batch the planner picks from the export. A single id therefore
++    runs a one-bundle wave (Plan→Do→Check→sign-off→publish→Act), not a second, parallel
++    implementation of the same cycle. Unbriefed ids are auto-planned (one shared
++    interactive Plan session) — no --plan flag. Act runs by default (--no-act to skip).
+     """
+     if getattr(args, "lanes", None) is not None:
+         cfg.lanes = max(1, args.lanes)
+@@ -599,79 +601,78 @@ def _flow(cfg: Config, args: argparse.Namespace) -> int:
+             print(f"flow: {exc}", file=sys.stderr)
+             return 1
+ 
+-    if len(ids) == 1:  # single sequential cycle (auto-plans if unbriefed)
+-        iid = ids[0]
+-        d = cfg.bundle(iid)
+-        if d.exists() and state.state(d) == state.COMPLETE:
+-            print(f"{state.COMPLETE}\t{d}", file=sys.stderr)
+-            print(f"  already complete — nothing to run. To redo it: rm -rf {d}", file=sys.stderr)
+-            return 0
+-        if d.exists() and state.state(d) == state.RESOLVED:
+-            # A settled tracker item is a successful no-op, like COMPLETE (#302 review
+-            # round 3): the multi-id path skips it and exits 0 — automation must not
+-            # read this terminal state as a failed flow on the single-id path either.
+-            # But the marker is a CACHE (#302 review round 4): the tracker can have
+-            # REOPENED the issue since it was written, and the seed never refreshes an
+-            # existing notes.json — so revalidate against the live tracker first, and
+-            # a reopened issue clears the marker and proceeds to a real flow.
+-            if sources.tracker_issue_reopened(cfg, iid):
+-                if not sources.clear_resolved_marker(d):
+-                    # clear_resolved_marker printed the why (#302 review round 11):
+-                    # claiming "planning it" over a still-resolved bundle would
+-                    # silently suppress the reopened work — fail loudly instead.
+-                    return 1
+-                print(f"flow: issue_{iid} — the tracker issue is OPEN again; cleared "
+-                      "the resolved marker and planning it.", file=sys.stderr)
+-            else:
+-                print(f"{state.RESOLVED}\t{d}", file=sys.stderr)
+-                # The manual remediation names the WHOLE file (#302 review round 15):
+-                # deleting only the `resolved` key would leave the closure-era
+-                # notes.json in place, and ensure_notes refuses to re-fetch while it
+-                # exists — Plan would brief from the pre-reopen thread.
+-                print("  tracker item resolved outside a cycle — nothing to run. Reopen "
+-                      "it in the tracker (a reachable GitHub tracker is then picked up "
+-                      "here automatically; otherwise rename notes.json away — e.g. to "
+-                      "notes.superseded-by-reopen.json — so the next Plan re-fetches "
+-                      "the fresh thread) to plan it again.", file=sys.stderr)
+-                return 0
+-        if not d.exists():
+-            d.mkdir(parents=True)
+-        final = flow.flow(cfg, iid, csv=args.from_csv,
+-                          do_publish=do_publish, do_act=do_act, by=args.by)
+-        print(f"{final}\t{d}")
+-        if final == state.AWAITING_SIGNOFF:
+-            for it in signoff.open_needs_human(d / "SUMMARY.md"):
+-                print(f"    {it}")
+-        # RESOLVED counts as success too: the flow can DISCOVER the resolution mid-run
+-        # (the Plan seed fetches notes that carry the terminal marker, #302) — a settled
+-        # ticket correctly skipped is not a failed cycle.
+-        return 0 if final in (state.COMPLETE, state.AWAITING_SIGNOFF, state.RESOLVED) else 1
+-
+-    # Several ids: batch — auto-plan unbriefed, drive concurrently, cheap-first sign-off.
++    # ONE routing path and ONE results map, for BOTH CLI shapes (issue #468). The single-id
++    # route used to be structurally different machinery — a pre-run short-circuit on raw disk
++    # state, then `flow.flow` returning a bare state string, with no `except PreflightError`
++    # — and five iterations of #449 broke "both shapes do the same thing to the same disk" by
++    # a new route each round. There is nothing left to keep in step: `flow_ids` already
++    # revalidates a cached RESOLVED marker against the live tracker (`flow.py:1070-1079`) and
++    # skips an already-terminal bundle with its recovery hint (`flow.py:1100-1104`) for every
++    # id it is given, one or several, so that DECISION lives in exactly one place.
+     try:
+-        return _report_batch(flow.flow_ids(
+-            cfg, ids, plan_missing=True, csv=args.from_csv,
+-            do_publish=do_publish, do_act=do_act, by=args.by))
++        results = flow.flow_ids(cfg, ids, plan_missing=True, csv=args.from_csv,
++                                do_publish=do_publish, do_act=do_act, by=args.by)
+     except flow.PreflightError as exc:
+         print(f"flow: {exc}", file=sys.stderr)
+         return 1
+ 
++    # Two PRESENTATIONS of that one map — never two drive paths.
++    return _report_single(cfg, ids[0], results) if len(ids) == 1 else _report_batch(results)
++
++
++#: States a flow run counts as a SUCCESSFUL terminal: finished, or settled in the tracker
++#: outside the cycle (#302 review round 11) — a correctly skipped item is not a failed flow.
++_FLOW_OK = (state.COMPLETE, state.RESOLVED)
++
++
++def _results_rc(results: dict[str, str], ok: tuple[str, ...] = _FLOW_OK) -> int:
++    """The ONE exit-code rule over a flow results map (issue #468): 0 iff every bundle in it
++    reached a successful terminal. An EMPTY map — every named id already terminal, so nothing
++    was driven — is 0: a no-op is not a failure. (Only the batch shape can pass one; the
++    single-id shape always reports its one id's disposition, driven or skipped.)
++
++    ``ok`` carries the single documented difference between the shapes, in one place instead
++    of as an emergent property of two drive paths: a SINGLE-id run adds AWAITING_SIGNOFF,
++    because stopping for the human who just typed the command is the intended end of that
++    run, not a failure. A multi-id set keeps the batch rule (rc 0 iff all COMPLETE/RESOLVED).
++    """
++    return 0 if all(s in ok for s in results.values()) else 1
++
++
++def _report_single(cfg: Config, iid: str, results: dict[str, str]) -> int:
++    """The single-id presentation of the shared results map (issue #468).
++
++    Preserved from the pre-#468 single-id route, now DERIVED from the map the batch shape
++    also reports: the `state<TAB>path` line on stdout, the AWAITING_SIGNOFF listing of open
++    §6 items, and the rc-0 stop-for-the-human semantics.
++    """
++    d = cfg.bundle(iid)
++    # An id the shared drive skipped as already terminal never enters the map (`flow_ids`'s
++    # filter, `flow.py:1100-1104`, which named the state and the recovery on stderr); its
++    # disposition is its state on disk — the same value `_drive_and_act` records for a
++    # bundle it DID drive (`flow.py:976`), so the two shapes report one disposition.
++    final = results[iid] if iid in results else state.state(d)
++    print(f"{final}\t{d}")
++    if final == state.AWAITING_SIGNOFF:
++        for it in signoff.open_needs_human(d / "SUMMARY.md"):
++            print(f"    {it}")
++    return _results_rc({iid: final}, ok=(*_FLOW_OK, state.AWAITING_SIGNOFF))
++
+ 
+ def _report_batch(results: dict[str, str]) -> int:
+-    """Print a batch result map and return a process code (0 iff every bundle reached
+-    a SUCCESSFUL terminal — COMPLETE, or RESOLVED (#302 review round 11): a tracker
+-    item settled outside the cycle is a successful no-op on the batch path exactly as
+-    it is on the single-id path; automation must not read it as a failed flow."""
++    """Print a batch result map and return a process code — :func:`_results_rc`'s rule
++    (0 iff every bundle reached a SUCCESSFUL terminal), which the single-id shape derives
++    its own exit code from too (issue #468)."""
+     if not results:
+         print("flow: nothing to drive — no in-flight briefs among the ids.", file=sys.stderr)
+         return 0
+     for iid, st in sorted(results.items()):
+         print(f"{st}\t{iid}")
+-    done = sum(1 for s in results.values() if s in (state.COMPLETE, state.RESOLVED))
++    done = sum(1 for s in results.values() if s in _FLOW_OK)
+     resolved = sum(1 for s in results.values() if s == state.RESOLVED)
+     tail = f" ({resolved} resolved in the tracker)" if resolved else ""
+     print(f"flow: {done}/{len(results)} complete{tail}")
+-    return 0 if done == len(results) else 1
++    return _results_rc(results)
+ 
+ 
+ def _prog() -> str:
+diff --git a/template/src/pdca_harness/flow.py b/template/src/pdca_harness/flow.py
+index 4168fdb..1ae87c9 100644
+--- a/template/src/pdca_harness/flow.py
++++ b/template/src/pdca_harness/flow.py
+@@ -27,7 +27,7 @@ from pathlib import Path
+ 
+ from . import (act, assemble, autoiterate, brief, driver, gates, integrate, lane, leaves,
+                merge, merged, preflight, publish, queue, signoff, size_signal, sources,
+-               state, sweep, waves)
++               split, state, sweep, waves)
+ from .config import Config
+ 
+ 
+@@ -659,6 +659,66 @@ def _audit_wave_overlap(wave: list[Path]) -> None:
+ _TERMINAL = (state.COMPLETE, state.DISCONTINUED, state.RESOLVED)
+ 
+ 
++def _lineage_children(record: dict) -> list[str]:
++    """The child ids a lineage record's ``children`` edge names, or ``[]`` — never raises.
++
++    The value-level half of the tolerance :func:`split.read_lineage` gives the FILE
++    (``split.py:373``), mirroring :func:`split._recorded_depth` (``split.py:405``): the
++    reader abstains on a file it cannot parse, this abstains on a VALUE it cannot format
++    with. ``{"children": 7}`` and ``{"children": [1, null]}`` are valid JSON with a valid
++    ``version``, so the reader hands them straight back — and ``" ".join(...)`` on either
++    raises ``TypeError`` out of :func:`flow_ids`, aborting the run on a hand-edited
++    provenance file exactly as a raising reader would. Tolerating the file but not its
++    contents would only move the throw one line down.
++    """
++    value = record.get("children")
++    if not isinstance(value, list):
++        return []
++    # Stripped, so a hand-added space cannot render an uncopyable `pdca flow " 469 "` hint;
++    # `split.validate` only ever writes `[A-Za-z0-9._-]+` tokens (``split.py:281``).
++    return [c.strip() for c in value if isinstance(c, str) and c.strip()]
++
++
++def _terminal_hint(d: Path, s: str) -> str:
++    """What an operator can DO about a bundle the drive set skipped as terminal, or ``""``.
++
++    One hint, on the one shared path (issue #468). Both ``pdca flow <id>`` and ``pdca flow
++    <id> <id>`` reach a terminal bundle through :func:`flow_ids`'s filter below, so the
++    recovery advice cannot differ by CLI arity — which is exactly how the single-id route
++    came to print ``rm -rf`` at a SPLIT PARENT while the batch route printed a bare skip.
++
++    Deleting a split parent is destructive: its ``split-lineage.json`` (``split.py:47``) is
++    the only on-disk record of the split's edges, so ``rm -rf`` there orphans the children
++    the parent already produced. A record carrying a ``children`` key IS a split parent
++    (independent optional edges, ``children`` iff split — ``split.py:392``), so the key's
++    mere PRESENCE suppresses the destructive advice; only the ability to NAME the children
++    depends on the value being usable (:func:`_lineage_children`).
++    """
++    record = split.read_lineage(d) or {}
++    if "children" in record:
++        kids = _lineage_children(record)
++        if kids:
++            return (f"split into children — nothing to run here; drive them instead with "
++                    f"`pdca flow {' '.join(kids)}`. Do not delete this bundle: its "
++                    f"{split.LINEAGE} is the only on-disk record of the split.")
++        return (f"split into children, but its {split.LINEAGE} names none readably — "
++                f"nothing to run here. Do not delete this bundle; read that file (or the "
++                f"parent's tracker issue) to find the child bundles.")
++    if s == state.RESOLVED:
++        # Verbatim from the single-id CLI short-circuit this shared path replaces
++        # (`cli.py:631-635` on f7876f2). The remediation names the WHOLE file (#302
++        # review round 15): deleting only the `resolved` key would leave the closure-era
++        # notes.json in place, and ensure_notes refuses to re-fetch while it exists — so
++        # Plan would brief from the pre-reopen thread.
++        return ("tracker item resolved outside a cycle — nothing to run. Reopen it in the "
++                "tracker (a reachable GitHub tracker is then picked up here automatically; "
++                "otherwise rename notes.json away — e.g. to notes.superseded-by-reopen.json "
++                "— so the next Plan re-fetches the fresh thread) to plan it again.")
++    if s == state.COMPLETE:
++        return f"already complete — nothing to run. To redo it: rm -rf {d}"
++    return ""
++
++
+ def _warn_abandoned(bundles: list[Path], *, why: str) -> None:
+     """Name every bundle the driver is walking away from un-terminal (issue #260).
+ 
+@@ -1039,6 +1099,9 @@ def flow_ids(
+             continue
+         if s in _TERMINAL:
+             print(f"flow: {d.name} — already terminal ({s}), skipped", file=sys.stderr)
++            hint = _terminal_hint(d, s)   # the ONE recovery advice, both CLI shapes (#468)
++            if hint:
++                print(f"  {hint}", file=sys.stderr)
+             continue
+         bundles.append(d)
+     if not bundles:
+diff --git a/template/tests/test_autoiterate.py b/template/tests/test_autoiterate.py
+index 1a334bd..765ab55 100644
+--- a/template/tests/test_autoiterate.py
++++ b/template/tests/test_autoiterate.py
+@@ -771,8 +771,11 @@ class ConfigPlumbing(unittest.TestCase):
+     def test_cli_flag_opts_in(self) -> None:
+         cfg = _stub_config(self.tmp)
+         cfg.auto_iterate = False
++        # `flow_ids` is the ONE drive path `cli._flow` routes a single id through (#468),
++        # so that is the call to stub out for a flag-plumbing test.
+         with mock.patch.object(cli.Config, "load", return_value=cfg), \
+-             mock.patch.object(cli.flow, "flow", return_value=state.COMPLETE), \
++             mock.patch.object(cli.flow, "flow_ids",
++                               return_value={"ID1": state.COMPLETE}), \
+              redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+             cli.main(["flow", "ID1", "--auto-iterate", "--no-publish", "--no-act"])
+         self.assertTrue(cfg.auto_iterate)
+diff --git a/template/tests/test_flow_entrypoint_parity.py b/template/tests/test_flow_entrypoint_parity.py
+new file mode 100644
+index 0000000..edd283e
+--- /dev/null
++++ b/template/tests/test_flow_entrypoint_parity.py
+@@ -0,0 +1,376 @@
++"""Offline slice for issue #468 — `cli._flow` must route the single-id and the multi-id
++CLI shapes through ONE drive path (`flow.flow_ids`) returning ONE results map, with the
++single-id presentation DERIVED from that map rather than a second drive path returning a
++bare state string.
++
++Every drive here goes **through `cli._flow`** — never a hand-picked `flow.*` call — because
++that is the surface where iterations 4 and 5 of #449 both found parity breaks. Fixture shape
++mirrors `tests/test_flow_slice.py:31-56` (all six leaves stubbed, gates empty): no Claude,
++no TTY, no Docker, no tracker.
++
++Modules are imported, never new symbols (`from pdca_harness import cli, flow, …`): a
++`from pdca_harness.flow import <new helper>` would raise ImportError on the C4 red leg,
++which `engine/scripts/run-verify.sh` classifies PDCA-UNVERIFIABLE rather than red.
++
++Run from the project root:
++    PYTHONPATH=src python3 -m unittest tests.test_flow_entrypoint_parity
++"""
++
++from __future__ import annotations
++
++import io
++import json
++import re
++import shutil
++import tempfile
++import unittest
++from contextlib import redirect_stderr, redirect_stdout
++from pathlib import Path
++from types import SimpleNamespace
++
++from pdca_harness import cli, flow, leaves, signoff, split, state
++from pdca_harness.config import Config, LeafConfig
++
++
++def _stub_config(root: Path) -> Config:
++    """All six leaves stubbed, gates empty (all-PASS stub rows) — the same fixture shape as
++    `tests/test_flow_slice.py:31-56`, the peer callsite the brief names."""
++    return Config(
++        root=root,
++        bundle_root=root / "results",
++        process_dir=root / "process",
++        templates_dir=root / "templates",  # empty → planner stub uses its fallback brief
++        default_branch="main",
++        tracker_system="github",
++        tracker_url="",
++        issue_id_example="#1",
++        builder=LeafConfig(mode="stub", family="claude"),
++        reviewer=LeafConfig(mode="stub", family="codex"),
++        planner=LeafConfig(mode="stub", family="claude", interactive=True),
++        signoff=LeafConfig(mode="stub", family="claude", interactive=True),
++        publisher=LeafConfig(mode="stub", family="claude", interactive=True),
++        act=LeafConfig(mode="stub", family="claude", interactive=True),
++        act_cadence=1,
++        # Hermetic toy target inside this test's tmp root (same reason as test_flow_slice).
++        repo_checkouts={"example-org/example-repo": str(root / "example-repo")},
++    )
++
++
++def _args(ids: list[str]) -> SimpleNamespace:
++    return SimpleNamespace(issue_ids=ids, from_csv=None, from_briefs=None,
++                           no_publish=True, no_act=True, by="", lanes=None)
++
++
++def _state_for(iid: str, out: str) -> str | None:
++    """The disposition token printed for `iid`, whichever shape produced `out`: the single-id
++    shape prints `state<TAB><path ending in issue_<iid>>`, the multi-id one (`_report_batch`)
++    prints `state<TAB><iid>`. ONE reader for both, so no comparison favours either format."""
++    for line in out.splitlines():
++        parts = line.split("\t")
++        if len(parts) == 2 and (parts[1] == iid or parts[1].endswith(f"issue_{iid}")):
++            return parts[0]
++    return None
++
++
++_TERMINAL_SKIP_RE = re.compile(r"already terminal \((\w+)\)")
++
++
++def _disposition(iid: str, out: str, err: str) -> str | None:
++    """`_state_for`, plus the batch shape's stderr-only case: an id already terminal BEFORE
++    the run never enters the results map (the shared terminal filter in `flow_ids`), so it
++    never reaches the printed table — its disposition is the state in the skip note."""
++    s = _state_for(iid, out)
++    if s is not None:
++        return s
++    for line in err.splitlines():
++        if f"issue_{iid} " in line:
++            m = _TERMINAL_SKIP_RE.search(line)
++            if m:
++                return m.group(1)
++    return None
++
++
++def _split_proposal(child_labels: list[str]) -> str:
++    body = "<!-- pdca:split-proposal v1 -->\n\n"
++    for label in child_labels:
++        body += (
++            f"<!-- pdca:child {label} -->\n"
++            f"- **Slug:** {label}\n"
++            f"- **Defect / goal:** stub child body for {label}.\n"
++            f"- **Success criterion:** stub.\n"
++            f"<!-- pdca:end {label} -->\n\n"
++        )
++    return body
++
++
++class EntrypointParity(unittest.TestCase):
++    def setUp(self) -> None:
++        self.tmp = Path(tempfile.mkdtemp())
++        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
++
++    # -- fixture builders --------------------------------------------------------------
++
++    def _fork(self, seed_root: Path) -> Path:
++        """A byte-identical copy of `seed_root`'s disk state, so the two shapes each drive
++        the SAME starting bytes independently."""
++        dst = Path(tempfile.mkdtemp()) / "root"
++        shutil.copytree(seed_root, dst)
++        self.addCleanup(shutil.rmtree, dst.parent, ignore_errors=True)
++        return dst
++
++    def _run(self, root: Path, ids: list[str]) -> tuple[int, str, str]:
++        """Drive `ids` **through `cli._flow`** (never a hand-picked `flow.*` call)."""
++        cfg = _stub_config(root)
++        out, err = io.StringIO(), io.StringIO()
++        with redirect_stdout(out), redirect_stderr(err):
++            rc = cli._flow(cfg, _args(ids))
++        return rc, out.getvalue(), err.getvalue()
++
++    def _inflight(self, root: Path, iid: str) -> None:
++        cfg = _stub_config(root)
++        leaves.do_plan(cfg.bundle(iid), cfg)  # PLANNED — nothing driven yet
++        self.assertEqual(state.state(cfg.bundle(iid)), state.PLANNED)
++
++    def _complete(self, root: Path, iid: str) -> None:
++        cfg = _stub_config(root)
++        final = flow.flow(cfg, iid, do_publish=False, do_act=False, today="2026-08-01")
++        self.assertEqual(final, state.COMPLETE)
++
++    def _discontinued(self, root: Path, iid: str) -> None:
++        cfg = _stub_config(root)
++
++        def discontinue_signoff(d: Path, cfg_: Config) -> None:
++            (d / leaves.SIGNOFF_DECISION).write_text(
++                "discontinue\nsuperseded, handled out-of-band\n", encoding="utf-8")
++
++        orig = leaves.run_signoff
++        leaves.run_signoff = discontinue_signoff
++        try:
++            final = flow.flow(cfg, iid, do_publish=False, do_act=False, today="2026-08-01")
++        finally:
++            leaves.run_signoff = orig
++        self.assertEqual(final, state.DISCONTINUED)
++
++    def _resolved(self, root: Path, iid: str) -> None:
++        # Non-digit id: `sources.tracker_issue_reopened` bails at its `isdigit()` guard
++        # without touching `gh`, so the shared RESOLVED revalidation stays offline here.
++        cfg = _stub_config(root)
++        d = cfg.bundle(iid)
++        d.mkdir(parents=True, exist_ok=True)
++        (d / "notes.json").write_text(json.dumps({
++            "resolved": {"github_state": "CLOSED", "state_reason": "COMPLETED",
++                         "closed_at": "2026-01-01T00:00:00Z",
++                         "note": "settled outside a cycle"},
++        }), encoding="utf-8")
++        self.assertEqual(state.state(d), state.RESOLVED)
++
++    def _split_parent(self, root: Path, iid: str, child_ids: list[str]) -> Path:
++        """A REAL terminal split parent: production `split.accept` (`split.py:525`) writes
++        the `children` lineage edge and the close marker; the flow then drives it terminal."""
++        cfg = _stub_config(root)
++        pd = cfg.bundle(iid)
++        leaves.do_plan(pd, cfg)  # a normal brief first — a realistic split parent
++        labels = [f"child-{i + 1}" for i in range(len(child_ids))]
++        (pd / split.PROPOSAL).write_text(_split_proposal(labels), encoding="utf-8")
++        split.accept(pd, child_ids, cfg)
++        final = flow.flow(cfg, iid, do_publish=False, do_act=False, today="2026-08-01")
++        self.assertEqual(final, state.COMPLETE)
++        self.assertEqual((split.read_lineage(pd) or {}).get("children"), child_ids)
++        return pd
++
++    # -- structural proof: ONE drive path ----------------------------------------------
++
++    def test_single_id_routes_through_flow_ids_not_flow(self) -> None:
++        """`cli._flow` must call the SAME `flow.flow_ids` the multi-id shape uses for
++        `len(ids) == 1` too — never a separate `flow.flow(...)` returning a bare state
++        string. Pre-fix, `flow.flow_ids` is never reached for a single id."""
++        captured: dict = {}
++
++        def spy(cfg, ids, **kw):
++            captured["ids"] = ids
++            captured["plan_missing"] = kw.get("plan_missing")
++            return {"SOLO468": state.COMPLETE}
++
++        orig = flow.flow_ids
++        flow.flow_ids = spy
++        try:
++            cfg = _stub_config(self.tmp)
++            outbuf, errbuf = io.StringIO(), io.StringIO()
++            with redirect_stdout(outbuf), redirect_stderr(errbuf):
++                rc = cli._flow(cfg, _args(["SOLO468"]))
++            out = outbuf.getvalue()
++        finally:
++            flow.flow_ids = orig
++        self.assertEqual(captured.get("ids"), ["SOLO468"])
++        self.assertTrue(captured.get("plan_missing"))
++        self.assertEqual(rc, 0)
++        self.assertIn(f"{state.COMPLETE}\t", out)   # presentation DERIVED from that map
++
++    def test_preflight_error_same_rc_and_message_both_shapes(self) -> None:
++        """An error meant to abort a run produces the SAME rc (and message) on both shapes —
++        pre-fix the single-id route had no `try/except` at all, so a `PreflightError` escaped
++        `cli._flow` uncaught for `len(ids) == 1` while the batch route returned 1."""
++
++        def boom(*_a, **_kw):
++            raise flow.PreflightError("lane preflight failed for this stub")
++
++        orig_ids, orig_flow = flow.flow_ids, flow.flow
++        flow.flow_ids = boom
++        flow.flow = boom
++        try:
++            cfg = _stub_config(self.tmp)
++            out1, err1 = io.StringIO(), io.StringIO()
++            with redirect_stdout(out1), redirect_stderr(err1):
++                rc1 = cli._flow(cfg, _args(["A468"]))
++            out2, err2 = io.StringIO(), io.StringIO()
++            with redirect_stdout(out2), redirect_stderr(err2):
++                rc2 = cli._flow(cfg, _args(["A468", "B468"]))
++        finally:
++            flow.flow_ids = orig_ids
++            flow.flow = orig_flow
++        self.assertEqual(rc1, 1)
++        self.assertEqual(rc2, 1)
++        self.assertEqual(err1.getvalue(), err2.getvalue())
++
++    # -- behavioural parity across the state matrix ------------------------------------
++
++    def test_in_flight_bundle_agrees_across_shapes(self) -> None:
++        seed = self.tmp / "seed"
++        self._inflight(seed, "IF468")
++        rc1, out1, _err1 = self._run(self._fork(seed), ["IF468"])
++        rc2, out2, _err2 = self._run(self._fork(seed), ["IF468", "FILLER468"])
++        self.assertEqual(_state_for("IF468", out1), state.COMPLETE)
++        self.assertEqual(_state_for("IF468", out1), _state_for("IF468", out2))
++        self.assertEqual(rc1, 0)
++        self.assertEqual(rc2, 0)  # the filler completes too → the batch rule agrees here
++
++    def test_complete_bundle_agrees_across_shapes(self) -> None:
++        seed = self.tmp / "seed"
++        self._complete(seed, "DONE468")
++        rc1, out1, err1 = self._run(self._fork(seed), ["DONE468"])
++        _rc2, out2, err2 = self._run(self._fork(seed), ["DONE468", "FILLER468"])
++        self.assertEqual(_state_for("DONE468", out1), state.COMPLETE)
++        self.assertEqual(_state_for("DONE468", out1), _disposition("DONE468", out2, err2))
++        self.assertEqual(rc1, 0)
++        # A plain COMPLETE bundle (no lineage record) keeps the redo hint — and now BOTH
++        # shapes print it, from the one shared terminal filter.
++        for err in (err1, err2):
++            self.assertIn("already complete — nothing to run", err)
++
++    def test_discontinued_bundle_agrees_across_shapes(self) -> None:
++        seed = self.tmp / "seed"
++        self._discontinued(seed, "DISC468")
++        rc1, out1, err1 = self._run(self._fork(seed), ["DISC468"])
++        _rc2, out2, err2 = self._run(self._fork(seed), ["DISC468", "FILLER468"])
++        self.assertEqual(_state_for("DISC468", out1), state.DISCONTINUED)
++        self.assertEqual(_state_for("DISC468", out1), _disposition("DISC468", out2, err2))
++        # Unchanged from pre-fix, and the SAME rule the batch shape applies: the exit code
++        # counts successful terminals, and a deliberately abandoned bundle is not one.
++        self.assertEqual(rc1, 1)
++        for err in (err1, err2):   # an abandoned bundle is never told to redo itself
++            self.assertNotIn("rm -rf", err)
++
++    def test_resolved_bundle_agrees_across_shapes(self) -> None:
++        seed = self.tmp / "seed"
++        self._resolved(seed, "RES468")
++        rc1, out1, err1 = self._run(self._fork(seed), ["RES468"])
++        _rc2, out2, err2 = self._run(self._fork(seed), ["RES468", "FILLER468"])
++        self.assertEqual(_state_for("RES468", out1), state.RESOLVED)
++        self.assertEqual(_state_for("RES468", out1), _disposition("RES468", out2, err2))
++        self.assertEqual(rc1, 0)  # RESOLVED is a successful no-op (#302)
++        # The #302 reopen remediation was single-id-only pre-fix; on the shared path both
++        # shapes give it (parity in the direction that keeps the guidance, not drops it).
++        for err in (err1, err2):
++            self.assertIn("resolved outside a cycle", err)
++            self.assertIn("notes.superseded-by-reopen.json", err)
++
++    def test_terminal_split_parent_names_children_never_rm_rf(self) -> None:
++        """The brief's concrete defect: a terminal bundle with a `children` lineage edge (a
++        split parent, `split.py:392-395`) must never be told `rm -rf` — deleting it destroys
++        the one on-disk record of the split (`split.py:47`) and orphans the children. Both
++        shapes must name the recovery instead, and agree on the id's disposition."""
++        seed = self.tmp / "seed"
++        self._split_parent(seed, "PARENT468", ["469", "470"])
++        rc1, out1, err1 = self._run(self._fork(seed), ["PARENT468"])
++        _rc2, out2, err2 = self._run(self._fork(seed), ["PARENT468", "FILLER468"])
++        self.assertEqual(_state_for("PARENT468", out1), state.COMPLETE)
++        self.assertEqual(_state_for("PARENT468", out1),
++                         _disposition("PARENT468", out2, err2))
++        self.assertEqual(rc1, 0)
++        for err in (err1, err2):
++            self.assertNotIn("rm -rf", err)
++            self.assertIn("pdca flow 469 470", err)
++
++    def test_malformed_lineage_children_degrades_the_hint_not_the_run(self) -> None:
++        """A hand-edited lineage record must degrade the HINT, never abort the flow.
++
++        `split.read_lineage` is tolerant by construction about the FILE (`split.py:373-402`)
++        and `split._recorded_depth` about a VALUE it cannot compute with (`split.py:405`);
++        a consumer that formats `children` without the same tolerance moves the throw one
++        line down — `" ".join(7)` raises TypeError straight out of `cli._flow`. And a record
++        that CARRIES a `children` key is a split parent whatever its value, so the
++        destructive `rm -rf` advice must stay suppressed even when the ids are unreadable.
++        """
++        cases = {
++            "non-list": 7,
++            "string": "469",
++            "junk-entries": [1, None, {}, ""],
++            "empty-list": [],
++        }
++        for name, children in cases.items():
++            with self.subTest(case=name):
++                seed = self.tmp / f"seed-{name}"
++                iid = f"BAD{name.upper().replace('-', '')}468"
++                self._complete(seed, iid)
++                cfg = _stub_config(seed)
++                (cfg.bundle(iid) / split.LINEAGE).write_text(
++                    json.dumps({"version": split.LINEAGE_VERSION, "id": iid,
++                                "children": children}), encoding="utf-8")
++                rc1, out1, err1 = self._run(self._fork(seed), [iid])
++                _rc2, out2, err2 = self._run(self._fork(seed), [iid, "FILLER468"])
++                self.assertEqual(rc1, 0)
++                self.assertEqual(_state_for(iid, out1), state.COMPLETE)
++                self.assertEqual(_state_for(iid, out1), _disposition(iid, out2, err2))
++                for err in (err1, err2):
++                    self.assertIn("already terminal (COMPLETE), skipped", err)
++                    self.assertNotIn("rm -rf", err)   # a `children` key ⇒ a split parent
++                    self.assertNotIn("Traceback", err)
++                    # …and no invented recovery: `" ".join("469")` would offer
++                    # `pdca flow 4 6 9`, which is worse advice than none.
++                    self.assertNotIn("drive them instead", err)
++
++    # -- preserved single-id presentation ----------------------------------------------
++
++    def test_single_id_awaiting_signoff_presentation_preserved(self) -> None:
++        """Single-id keeps its own presentation — the §6 listing and the rc-0
++        stop-for-the-human semantics — as a PRESENTATION of the shared map, not as a
++        separate drive path."""
++
++        def bad_signoff(d: Path, cfg: Config) -> None:
++            (d / leaves.SIGNOFF_DECISION).write_text("accept\n", encoding="utf-8")
++            # deliberately leaves §6 NEEDS-HUMAN open — C6 must refuse the accept
++
++        # The shared drive path takes every pending bundle through the wave sign-off
++        # (`_drive_wave` → `leaves.run_signoff_batch` → `_stub_signoff` in stub mode), not
++        # the single-bundle `leaves.run_signoff` — patch the entry point it actually calls.
++        orig = leaves._stub_signoff
++        leaves._stub_signoff = bad_signoff
++        try:
++            cfg = _stub_config(self.tmp)
++            out, err = io.StringIO(), io.StringIO()
++            with redirect_stdout(out), redirect_stderr(err):
++                rc = cli._flow(cfg, _args(["AWSF468"]))
++        finally:
++            leaves._stub_signoff = orig
++        self.assertEqual(rc, 0)                      # stop-for-the-human is not a failure
++        printed = out.getvalue()
++        self.assertTrue(printed.startswith(f"{state.AWAITING_SIGNOFF}\t"))
++        d = cfg.bundle("AWSF468")
++        open_items = signoff.open_needs_human(d / "SUMMARY.md")
++        self.assertTrue(open_items)
++        for it in open_items:
++            self.assertIn(f"    {it}", printed)
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/template/tests/test_flow_slice.py b/template/tests/test_flow_slice.py
+index 5030a52..e66f08a 100644
+--- a/template/tests/test_flow_slice.py
++++ b/template/tests/test_flow_slice.py
+@@ -1710,9 +1710,11 @@ class MaxPassesConfig(unittest.TestCase):
+ 
+     def _run_cli(self, cfg: Config, *extra: str) -> mock.Mock:
+         """Real parser → dispatch → `_flow`; `main(argv)` skips the inhibitor re-exec.
+-        `flow.flow` is stubbed so only the config plumbing is under test."""
++        `flow.flow_ids` — the ONE drive path both CLI shapes route through (issue #468) —
++        is stubbed, so only the config plumbing is under test."""
+         with mock.patch.object(cli.Config, "load", return_value=cfg), \
+-             mock.patch.object(cli.flow, "flow", return_value=state.COMPLETE) as driven, \
++             mock.patch.object(cli.flow, "flow_ids",
++                               return_value={"ID1": state.COMPLETE}) as driven, \
+              redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+             cli.main(["flow", "ID1", "--no-publish", "--no-act", *extra])
+         return driven

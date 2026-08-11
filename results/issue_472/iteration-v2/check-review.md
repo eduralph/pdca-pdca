@@ -1,0 +1,15 @@
+Review of the mid-run split-adoption core: drive lineage children in later waves through the unified flow path under one pre-adoption pass budget.
+
+| Item | Verdict | Basis |
+|------|---------|-------|
+| C1 Spec | PASS | The decision boundary is explicit: adopt only terminal split descendants created during this run, while terminal-parent recovery and reporting refinements remain separate (`docs/07-crosscutting.md:243`). |
+| C2 Reproduction (red pre-fix) | PASS | In a target-derived copy with production hunks reversed, all 21 focused tests executed and 20 failed by leaving children undriven; the principal assertion is at `template/tests/test_flow_adopt_split.py:322`. |
+| C3 Change | PASS | The patch stays within the adoption core and its accepted hermetic-test cleanup: scheduling, shared-budget accounting, operator guidance, docs, and tests are the surfaces needed for the stated contract (`template/src/pdca_harness/flow.py:929`). |
+| C4 Verification (red→green) | PASS | Independent red→green ran 21 tests on both legs (20 failures before, all 21 passing after), and removing same-wave `taken` dedup separately failed the adversarial test at `template/tests/test_flow_adopt_split.py:823`. |
+| C5 Causal adequacy | PASS | The change removes the frozen-schedule cause by recomputing and splicing the live tail, then charges adopted waves through the existing drive loop; it does not add an optional-capability probe around a load-time symptom (`template/src/pdca_harness/flow.py:1172`). |
+| T1 Structure | PASS | Adoption is composed once into `_drive_and_act`, while held reporting is shared with the resume path, preserving one implementation for every CLI shape (`template/src/pdca_harness/flow.py:1226`). |
+| T2 Shape | PASS | Docs lint and site rendering/link audit both pass, and the published semantics align adoption, lineage scope, holds, and budget behavior (`docs/07-crosscutting.md:243`). |
+| T3 Runtime | PASS | The full offline driver suite passes 1,654 tests (2 skipped), compileall succeeds, and the ambient-base cleanup passes 19 tests even with all three outer base variables set (`template/tests/test_verify_base.py:74`). |
+| T4 Contribution | NEEDS-HUMAN | The release-text decision remains owed — `commit-msg.txt` and `pr-description.md` were not supplied, so the recorded checker pass cannot be independently rerun and the user-impact opener plus #472 linkage remain unaudited. |
+| T5 Judgment | PASS | The affected-path audit across merged history and all closed/unmerged GitHub work found no conflicting prior art; the only rejected PR touches `README.md`, outside this patch's seven affected paths (`template/src/pdca_harness/flow.py:929`). |
+| Validation — fitness-to-purpose | NEEDS-HUMAN | The operator-semantics decision is owed — confirm that stderr-only held-child reporting and a pool fixed from the original schedule are acceptable, because those choices determine whether same-run adoption communicates unfinished work honestly (`docs/07-crosscutting.md:257`). |

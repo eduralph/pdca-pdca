@@ -1,0 +1,31 @@
+split: report convergence before --accept does anything irreversible
+
+`pdca split --accept` filed real, unrevokable tracker sub-issues — and with
+`--ids` materialised real bundles — without ever running the size estimate
+over the staged children. A split that left every child oversized was only
+discovered a full cycle later, when each child's own size guard fired and
+pointed the planner back at `pdca split`. The `--ids` shape, the one the
+docs call required for a tracker `pdca` cannot reach, never even ran
+`preflight`, so the operator who had already paid for the issues by hand got
+no verdict at all.
+
+Both acceptance shapes now print a convergence report at the last point
+where the answer can still change the decision. Each staged child is scored
+by the same structural estimate a materialised bundle gets (sibling labels
+standing in for the tracker ids that do not exist yet), banded against the
+parent, and the report says plainly when most children do not band lower —
+or when every pair of children declares a `Conflicts with` edge, meaning the
+split separated nothing. That second verdict reads the sibling-conflict
+count the estimate exposes (#457) rather than the score those declarations
+were excluded from, so the exclusion cannot blind it; an estimator without
+that count is named in the report rather than silently substituted for.
+
+The report is strictly advisory: it never blocks, never prompts, and never
+changes what is filed or materialised. Every write on the acceptance path
+now goes through one guarded helper, so a stream that breaks part-way
+(`pdca split <id> --accept 2>&1 | head`) changes neither the exit code nor
+the set of bundles created — previously a BrokenPipeError either surfaced
+as a traceback after the bundles were already on disk, or was misread as
+"no split-proposal.md" and refused a perfectly good proposal with rc 1.
+
+Fixes #459

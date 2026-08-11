@@ -1,0 +1,920 @@
+diff --git a/docs/07-crosscutting.md b/docs/07-crosscutting.md
+index 3fe7bfb..b2b4d03 100644
+--- a/docs/07-crosscutting.md
++++ b/docs/07-crosscutting.md
+@@ -125,6 +125,13 @@ The estimate has **two independent signals**, combined by deterministic code
+    | `ext_deps` | 3 | external dependency tokens — highest single-feature precision |
+    | `brief_bytes` | 3 | brief size above a 12 KB cutoff |
+    | `is_plan_pointer` | **−2** | a brief pointing at a host planning artifact converges *better* — the one de-escalating term |
++   | `split_child` | 0 | registered, unmeasured: the bundle carries `split-lineage.json`, i.e. a split already carved it out. Retunable per instance; ships at 0 because no corpus has measured it |
++
++   A split **child** is not scored for the split's own artifacts: `Conflicts with`
++   entries naming its own siblings are the scheduling metadata the split installed
++   and are excluded from `conflicts_with` (organic conflicts still count in full),
++   and the size remedy recommends `pdca split` again only when the *sizer* names two
++   independently shippable outcomes — never on the structural score alone.
+ 
+    The score sorts into two separate readouts, because they answer different
+    questions: **churn** (how many sign-off rounds this will take) and **patch
+diff --git a/template/pdca.toml.jinja b/template/pdca.toml.jinja
+index 4d0901b..1055ecc 100644
+--- a/template/pdca.toml.jinja
++++ b/template/pdca.toml.jinja
+@@ -233,12 +233,30 @@ size_guard = "off"
+ # mine the bundles' sizing.json by hand — a retuning pass has no evidence that can
+ # justify moving model_weight off 0: leave it at 0 and record the gap in the Act notes
+ # rather than tuning it on taste.
++#
++# `split_child` (#448): how much a bundle's own `split-lineage.json` — written by
++# `{{ cli_name }} split --accept`, i.e. the slice was already carved out of a larger one — moves the
++# score. 0, the shipped default, is a REGISTERED but unweighted feature: no corpus has
++# measured it, and this estimator's rule is that only measured features carry weight, so a
++# guessed value here would be the folklore-fitting the module docstring forbids. It is
++# config rather than a constant so your own Act-cadence pass can move it against evidence
++# (`size-calibrate` mines no lineage feature yet either — the same blind spot as
++# model_weight above; say so in the Act notes rather than tuning on taste). A negative
++# value, by symmetry with is_plan_pointer, is the obvious candidate if your corpus shows
++# split children converging better.
++#   Independent of the weight, and NOT tunable: a child's `Conflicts with` entries naming
++#   its own SIBLINGS are excluded from `conflicts_with` altogether. Those are scheduling
++#   metadata the split installed — the ordering fields are the point of splitting — not
++#   evidence of churn, and counting them made every child of a `high`-difficulty parent
++#   score 3+3+3 = 9 against a cutoff of 7 whatever its actual scope. Organic conflicts (any
++#   id that is not a sibling) still count at full weight.
+ # [driver.sizing]
+ # conflicts_with = 3
+ # difficulty_high = 3
+ # ext_deps = 3
+ # brief_bytes = 3
+ # is_plan_pointer = -2
++# split_child = 0
+ # brief_bytes_kb = 12
+ # watch = 4
+ # oversized = 7
+diff --git a/template/src/pdca_harness/leaves.py b/template/src/pdca_harness/leaves.py
+index bfb6554..140939a 100644
+--- a/template/src/pdca_harness/leaves.py
++++ b/template/src/pdca_harness/leaves.py
+@@ -555,6 +555,9 @@ def _plan_prompt(cfg: Config, csv: str | None, d: Path) -> str:
+         "(it trips a safety prompt; `git -C` is the safe idiom). Do NOT scan THIS harness "
+         "repo for issue information — the tracker is the source. "
+     )
++    # "" for every bundle that is not a split child, i.e. for every bundle that existed
++    # before #448 — the prompt is then byte-identical to today's.
++    lineage_note = split.lineage_note(d, cfg)
+     return (
+         "You are the Plan leaf of a PDCA cycle. " + src_line + csv_line + notes_line
+         + sources_line + citation_line
+@@ -569,11 +572,16 @@ def _plan_prompt(cfg: Config, csv: str | None, d: Path) -> str:
+         "branch target per INTEGRATION §2; set `Difficulty` (the fix's blast-radius / "
+         "cross-file reach, NOT edge-case density) so Do/review routing can key on it. "
+         "One bundle = one brief.md. Plan only.\n\n"
++        # Provenance BEFORE the split instructions below (#448), and only for a bundle
++        # that carries it. A planner told to split whatever looks large, on a child a
++        # split just produced, proposes the remedy that produced it — the inherited
++        # fields read as scope to a reader who cannot see where they came from.
++        + (lineage_note + "\n\n" if lineage_note else "")
+         # The split belongs to THIS beat and no later one (#358): Do builds what it is
+         # given, and Check can only report that what it built is misshapen. Stated in the
+         # runtime prompt as well as agents/planner.md because the role file alone has
+         # twice proved insufficient — the prompt the model actually receives is built here.
+-        "If this slice turns out to be several slices, SPLIT IT IN THIS BEAT — a split "
++        + "If this slice turns out to be several slices, SPLIT IT IN THIS BEAT — a split "
+         "produces briefs, and briefs are yours. Run `pdca split "
+         f"{issue_id}` to have the splitter draft a proposal, read it with the human, then "
+         f"`pdca split {issue_id} --accept`: that files one tracker issue per child as a "
+@@ -1246,10 +1254,15 @@ def _split_prompt(d: Path, cfg: Config) -> str:
+             "disagree, and saying so with a reason is more useful than agreeing.\n"
+             + ("  outcomes it identified: " + "; ".join(outcomes) + "\n" if outcomes else "")
+             + ("  seams it proposed: " + "; ".join(seams) + "\n" if seams else ""))
++    # A split of a split child (#448). The splitter is asked to draw seams; told nothing,
++    # it draws them through the inherited fields that made the child score large in the
++    # first place, and the decomposition ratchets one level deeper.
++    lineage_note = split.lineage_note(d, cfg)
+     return (
+         f"You are the SPLITTER. Read {d / 'brief.md'}. This slice has been judged too "
+         "large to build as one cycle. The driver sized it "
+-        f"{est.band}: {'; '.join(est.reasons) or 'no structural signal'}.{prior}\n\n"
++        f"{est.band}: {'; '.join(est.reasons) or 'no structural signal'}."
++        + (f"\n\n{lineage_note}" if lineage_note else "") + f"{prior}\n\n"
+         f"Fill {tpl} and write the result to {d / split.PROPOSAL} — exactly one file, "
+         "nothing else. Do NOT create bundles, branches or tracker items, and do NOT edit "
+         "brief.md. The split is authored in PLAN, by the human: they read your proposal "
+diff --git a/template/src/pdca_harness/plan_policy.py b/template/src/pdca_harness/plan_policy.py
+index 9650782..961ee7e 100644
+--- a/template/src/pdca_harness/plan_policy.py
++++ b/template/src/pdca_harness/plan_policy.py
+@@ -51,7 +51,7 @@ from __future__ import annotations
+ import sys
+ from typing import NamedTuple
+ 
+-from . import doctor, sizing
++from . import doctor, sizing, split
+ 
+ #: `[driver].size_guard` values. `hold` is NOT among them, deliberately — see
+ #: :func:`size_reasons`.
+@@ -99,6 +99,14 @@ def size_reasons(d, cfg, *, before_do: bool = True) -> list[HoldReason]:
+ 
+     ``size_guard = "hold"`` is therefore accepted but treated as ``warn``, with a note —
+     silently downgrading it would let an instance believe it is protected when it is not.
++
++    **A split child is not told to split again on structure alone** (issue #448). For a
++    bundle carrying child lineage, ``consider `pdca split` first`` is emitted only when
++    the SIZER named ≥ 2 independently shippable outcomes (``model_band == oversized``) —
++    the one signal that can see decomposability, and the only evidence that a slice
++    already carved out of another one should be carved again. A structural score alone
++    says the child inherited its parent's `Difficulty` and dependency tokens, which is
++    what a split does to every child; recommending the same remedy there is the ratchet.
+     """
+     mode = str(getattr(cfg, "size_guard", OFF) or OFF).strip().lower()
+     if mode == OFF:
+@@ -134,9 +142,18 @@ def size_reasons(d, cfg, *, before_do: bool = True) -> list[HoldReason]:
+     splittable = (est.churn_band == sizing.OVERSIZED
+                   or est.model_band == sizing.OVERSIZED
+                   or est.patch_band != sizing.OVERSIZED)
++    # The same shape as the "large but coherent" carve-out above, keyed on lineage instead
++    # of on the readout: evidence the estimator itself cannot produce says the structural
++    # score is not what it looks like.
++    split_child = split.lineage_phrase(d, cfg)
+     if not splittable:
+         remedy = ("expect a large patch — worth a look before Do, but a large COHERENT "
+                   "change is not a split candidate")
++    elif before_do and split_child and est.model_band != sizing.OVERSIZED:
++        remedy = (f"scores large for a split child ({split_child}) — driven by "
++                  "inherited/sibling fields; prefer building over re-splitting. Only the "
++                  "sizer naming two independently shippable outcomes would justify "
++                  "splitting this again")
+     elif before_do:
+         remedy = "consider `pdca split` first"
+     else:
+diff --git a/template/src/pdca_harness/sizing.py b/template/src/pdca_harness/sizing.py
+index fb15f6c..4abff70 100644
+--- a/template/src/pdca_harness/sizing.py
++++ b/template/src/pdca_harness/sizing.py
+@@ -92,6 +92,15 @@ DEFAULT_WEIGHTS = {
+     "ext_deps": 3,           # ρ 0.28 — highest single-feature precision (57%)
+     "brief_bytes": 3,        # ρ 0.27
+     "is_plan_pointer": -2,   # ρ -0.24 — de-escalates
++    # REGISTERED, and shipped at 0 (issue #448). A bundle carrying `split-lineage.json` is
++    # a slice a split already carved out, which is a fact about it no other feature can
++    # see — so the key exists and `[driver.sizing]` retunes it like any other. It ships at
++    # 0 because no corpus has measured it: this module's rule is that only measured
++    # features carry weight, and a guessed −2 "by symmetry with is_plan_pointer" would be
++    # exactly the folklore-fitting the docstring above forbids. The DETERMINISTIC half of
++    # #448 — not counting the split's own sibling conflicts as churn — is in `estimate`
++    # and needs no weight at all.
++    "split_child": 0,
+ }
+ 
+ #: Weight of the sizer LEAF's verdict in the numeric score when :func:`combine` folds one
+@@ -214,11 +223,38 @@ def _weights(cfg) -> dict[str, int]:
+     return weights
+ 
+ 
++def _split_lineage(brief_path: Path) -> dict | None:
++    """The CHILD lineage record of the bundle this brief sits in, or ``None`` (issue #448).
++
++    Read from ``brief_path.parent``, which inside :func:`estimate` is a real ``Path`` (the
++    :class:`AprioriBrief` is constructed there, one line below). Reaching for ``.parent``
++    on the ``AprioriBrief`` instead would hit its allowlist — by design, and that guard
++    must not be widened for this: the record is a sibling FILE, not brief text, so it
++    carries none of the carry-forward leakage the class exists to withhold.
++
++    Parent records read as ``None`` here. A parent is not a split child, and this feature
++    answers exactly one question: was THIS slice carved out of another one?
++    """
++    from . import split
++    record = split.lineage(brief_path.parent)
++    return record if record and record.get("role") == "child" else None
++
++
+ def estimate(brief_path: Path, cfg) -> SizeEstimate:
+-    """The structural estimate for one brief. Pure function of the file plus config.
++    """The structural estimate for one brief. Pure function of the bundle's files plus
++    config — the brief, and (since #448) the ``split-lineage.json`` beside it.
+ 
+     Never raises on a malformed or absent brief: an unreadable brief scores 0 / ``ok``,
+     because a *detector* that crashes the Plan beat is worse than one that abstains.
++
++    **A split child is not scored for the split's own artifacts** (issue #448). Where the
++    bundle carries child lineage, ``Conflicts with`` entries naming its SIBLINGS are
++    scheduling metadata this process installed — the whole point of the ordering fields —
++    and counting them as churn evidence is how a split ratcheted: three of the five
++    weighted features (`conflicts_with`, `difficulty_high`, `ext_deps`) are fields the
++    split itself installs into every child, scoring 9 against a cutoff of 7 whatever the
++    child's actual scope. Organic conflicts — any id the record does not list as a sibling
++    — still count at full weight, because those ARE evidence.
+     """
+     if not brief_path.exists():
+         return SizeEstimate(0, OK, ["no brief to size"])
+@@ -238,7 +274,11 @@ def estimate(brief_path: Path, cfg) -> SizeEstimate:
+         ap = AprioriBrief(brief_path, apriori_text(brief_path))
+         apriori = len(ap.read_text().encode("utf-8"))
+         difficulty = brief.field(ap, "difficulty").lower()
+-        conflicts = len(brief.conflicts_with(ap))
++        lineage = _split_lineage(brief_path)
++        siblings = frozenset(lineage["siblings"]) if lineage else frozenset()
++        declared = brief.conflicts_with(ap)
++        sibling_conflicts = [c for c in declared if c in siblings]
++        conflicts = len(declared) - len(sibling_conflicts)
+         ext_deps = len(brief.external_dependency_tokens(ap))
+         plan_pointer = bool(brief.planning_artifact(ap))
+     except OSError:
+@@ -273,6 +313,17 @@ def estimate(brief_path: Path, cfg) -> SizeEstimate:
+     if plan_pointer:
+         score += w["is_plan_pointer"]
+         reasons.append("points at a host planning artifact (converges better)")
++    if lineage is not None:
++        # Reported whatever the weight, and the shipped weight is 0: the line explains the
++        # sibling conflicts that were NOT counted above, and a reason a reader cannot see
++        # is a score they cannot check. `size_reasons` and the split convergence report
++        # both quote these.
++        score += w["split_child"]
++        detail = f"split child of #{lineage['parent'] or '?'} (depth {lineage['depth']})"
++        if sibling_conflicts:
++            detail += (f", {len(sibling_conflicts)} sibling conflict(s) not counted "
++                       "(split scheduling metadata)")
++        reasons.append(detail)
+ 
+     churn_band = (OVERSIZED if score >= oversized_at
+                   else WATCH if score >= watch_at else OK)
+diff --git a/template/src/pdca_harness/split.py b/template/src/pdca_harness/split.py
+index 1a52e27..6d35a17 100644
+--- a/template/src/pdca_harness/split.py
++++ b/template/src/pdca_harness/split.py
+@@ -24,10 +24,12 @@ are staged and moved into place only once all of them succeed.
+ 
+ from __future__ import annotations
+ 
++import json
+ import re
+ import shutil
+ import subprocess
+ import sys
++import tempfile
+ from dataclasses import dataclass
+ from pathlib import Path
+ 
+@@ -46,6 +48,26 @@ SUPPORTED_VERSION = 1
+ #: feature pointless: `compute_waves` reads exactly these.
+ ORDERING_FIELDS = ("Depends on", "Conflicts with")
+ 
++#: The provenance record `--accept` writes into every bundle it touches (issue #448) — the
++#: machine-readable inverse of the prose breadcrumb, which stays.
++#:
++#: ONE filename in BOTH directions, distinguished by `role`. The child edge
++#: (`parent` / `siblings` / `depth`) is what stops a split child being indistinguishable
++#: from a fresh oversized brief — three of the five weighted `sizing` features are fields
++#: the split itself installs — and the parent edge (`children`) is what a later consumer
++#: needs to find the slices a bundle became. Two files would drift the first time either
++#: side changed, and the drift would be invisible.
++#:
++#: Provenance, NOT attempt output: deliberately absent from `state.DOWNSTREAM_OF_BRIEF`, so
++#: it survives an `iterate-plan` re-plan and the archive of a rejected attempt. A bundle
++#: does not stop being a split child because its brief was rewritten.
++LINEAGE = "split-lineage.json"
++
++#: Schema version of :data:`LINEAGE`. A record carrying anything else reads as ABSENT (see
++#: :func:`lineage`) rather than being coerced: a consumer guessing at a format it does not
++#: know would score a bundle on fields that may have changed meaning.
++LINEAGE_VERSION = 1
++
+ 
+ def _unfenced(text: str):
+     """`(line, in_fence)` for each line, so callers can skip fenced content.
+@@ -221,6 +243,177 @@ def _cycles(children: list[Child]) -> list[str]:
+     return bad
+ 
+ 
++# ---------------------------------------------------------------------------
++# Lineage (issue #448) — what a bundle IS, recorded where every consumer can read it
++#
++# Before this, nothing downstream knew a split had happened: `materialise` wrote only the
++# child body and "Child slice of #N" went solely to the tracker issue body, so `estimate`,
++# `size_reasons`, the sizer leaf and the planner prompt all saw a child as an ordinary
++# oversized brief — and pointed at `pdca split` again. The record below is the fact those
++# consumers were missing; every one of them treats its absence as "not a split child", so
++# bundles written before this change behave exactly as they do today.
++# ---------------------------------------------------------------------------
++
++
++def lineage(bundle: Path) -> dict | None:
++    """The split provenance of one bundle, or ``None`` when it carries none.
++
++    THE reader — every consumer goes through it, so "what counts as lineage" is decided
++    once. Missing, unreadable, malformed, or carrying a version this harness does not know
++    all yield ``None``, and every consumer then behaves exactly as it did before #448.
++
++    **Nothing here may raise into a beat.** This is consulted from the estimator, the
++    pre-dispatch policy and two prompt builders — none of which is a place where a stray
++    byte in a JSON file may abort the cycle. An abstention loses one advisory; an
++    exception loses the beat.
++
++    Returns the record with its own fields normalised (``id`` / ``parent`` strings, the id
++    list a list of strings, ``depth`` a non-negative int) so a consumer never has to guess
++    what a hand-edited file put there.
++    """
++    try:
++        raw = json.loads((bundle / LINEAGE).read_text(encoding="utf-8"))
++    except (OSError, ValueError, TypeError):
++        return None
++    if not isinstance(raw, dict) or raw.get("version") != LINEAGE_VERSION:
++        return None
++    role = raw.get("role")
++    if role not in ("child", "parent"):
++        return None
++    ids_key = "siblings" if role == "child" else "children"
++    listed = raw.get(ids_key)
++    try:
++        depth = max(0, int(raw.get("depth", 0)))
++    except (TypeError, ValueError, OverflowError):
++        depth = 0
++    record = dict(raw)
++    record["id"] = str(raw.get("id", ""))
++    record["depth"] = depth
++    record[ids_key] = [str(x) for x in listed] if isinstance(listed, list) else []
++    if role == "child":
++        record["parent"] = str(raw.get("parent", ""))
++    return record
++
++
++def bundle_id(bundle: Path) -> str:
++    """The tracker id a bundle directory is named for (``results/issue_500`` → ``500``).
++
++    Not :func:`_parent_number`, which answers a different question: that one returns ""
++    for a non-numeric id because `gh issue create --parent` needs a number. Lineage keys
++    on the id the bundle is NAMED for, which `cfg.bundle` also keys on, so a hand-made
++    bundle still records honest provenance.
++    """
++    return bundle.name.removeprefix("issue_")
++
++
++def _depth(bundle: Path) -> int:
++    """A bundle's own recursion depth — 0 unless it was itself materialised by a split."""
++    return int((lineage(bundle) or {}).get("depth", 0))
++
++
++def _write_lineage(bundle: Path, record: dict) -> None:
++    (bundle / LINEAGE).write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
++
++
++def _child_record(issue_id: str, parent_id: str, ids: list[str], depth: int) -> dict:
++    """One child's record. ``depth`` is the PARENT's — the child sits one below it."""
++    return {"version": LINEAGE_VERSION, "role": "child", "id": issue_id,
++            "parent": parent_id, "siblings": [i for i in ids if i != issue_id],
++            "depth": depth + 1}
++
++
++def lineage_phrase(bundle: Path, cfg=None) -> str:
++    """``"child 2 of a split of #448, depth 1"`` — or ``""`` for a bundle with no lineage.
++
++    ONE definition of the phrase, because three surfaces quote it (the size remedy, the
++    planner prompt, the splitter prompt) and three spellings of the same provenance would
++    be three chances to describe the bundle differently.
++
++    The ordinal comes from the PARENT's record, the inverse edge written by the same
++    acceptance: the child's own record carries the other ids but not its position among
++    them, and inventing an order (sorting the ids) would print a number that is not the
++    one the proposal declared. Unavailable — no ``cfg``, no parent bundle, an id the
++    parent does not list — simply drops the ordinal rather than guessing.
++    """
++    record = lineage(bundle)
++    if not record or record.get("role") != "child":
++        return ""
++    ordinal = ""
++    try:
++        parent_record = lineage(cfg.bundle(record["parent"])) or {}
++        ordinal = f" {parent_record['children'].index(record['id']) + 1}"
++    except (AttributeError, KeyError, ValueError, TypeError, OSError):
++        ordinal = ""
++    return (f"child{ordinal} of a split of #{record['parent'] or '?'}, "
++            f"depth {record['depth']}")
++
++
++def lineage_note(bundle: Path, cfg=None) -> str:
++    """The one sentence a MODEL is told about a bundle's provenance, or ``""``.
++
++    Injected into the planner and splitter prompts (`leaves._plan_prompt`,
++    `leaves._split_prompt`) because the loop #448 exists to stop is not only numeric: a
++    child that reads as oversized is briefed by a planner that has no way to know its
++    `Conflicts with` entries are sibling scheduling metadata this process installed, so it
++    proposes the same remedy that produced it.
++    """
++    phrase = lineage_phrase(bundle, cfg)
++    if not phrase:
++        return ""
++    return (f"This bundle IS a split child ({phrase}): its `Conflicts with` siblings and "
++            "its inherited `Difficulty` / `External dependencies` are artifacts of that "
++            "split, not evidence of its own scope. Splitting it again on those fields "
++            "alone re-runs the loop that produced it — prefer building it.")
++
++
++def convergence_report(parent: Path, children: list[Child], cfg) -> list[str]:
++    """How each staged child would score against the parent — advisory, deterministic.
++
++    Run from :func:`preflight`, i.e. BEFORE `file_children`, which is the only point at
++    which the answer can still change a decision: after it, the tracker issues exist and
++    cannot be withdrawn.
++
++    Each child body is estimated as it would be materialised, lineage included — inside a
++    proposal every ordering ref is a sibling LABEL by construction (`_validate_ordering`
++    has just checked it), so the staged records make `sizing.estimate` exclude them
++    exactly as it will once the children are real. Estimating them without that would
++    report a band no materialised child will ever have.
++
++    Advisory only, matching the size guard's warn-only stance (`plan_policy.size_reasons`
++    — 62% best precision): it never blocks, never prompts and never changes what is filed.
++    """
++    from . import sizing
++    parent_est = sizing.estimate(parent / "brief.md", cfg)
++    labels = [c.label for c in children]
++    depth = _depth(parent)
++    lines = [f"split: convergence check (advisory) — parent {parent.name} scores "
++             f"{parent_est.band} ({parent_est.score})"]
++    lowered = 0
++    with tempfile.TemporaryDirectory() as tmp:
++        for child in children:
++            staged = Path(tmp) / child.label
++            staged.mkdir()
++            (staged / "brief.md").write_text(child.body, encoding="utf-8")
++            _write_lineage(staged, _child_record(child.label, bundle_id(parent),
++                                                 labels, depth))
++            est = sizing.estimate(staged / "brief.md", cfg)
++            lower = (est.band != parent_est.band
++                     and sizing.higher(parent_est.band, est.band) == parent_est.band)
++            lowered += bool(lower)
++            lines.append(f"  {child.label}: {est.band} ({est.score}) — "
++                         f"{'lower than' if lower else 'NOT lower than'} the parent"
++                         f"; {'; '.join(est.reasons) or 'no structural signal'}")
++    if lowered * 2 < len(children):
++        # The finding worth naming: a split that does not converge produces children that
++        # will be judged as large as their parent, which is how a decomposition turns into
++        # a ratchet. Named, never blocking — the reasons above say which feature carries
++        # each score, so the human can see whether it is scope or inheritance.
++        lines.append(f"  only {lowered} of {len(children)} child(ren) score BELOW the "
++                     "parent's band — this split may not converge; the reasons above name "
++                     "the feature carrying each score. Advisory only, nothing is blocked")
++    return lines
++
++
+ def preflight(parent: Path, children: list[Child], cfg) -> None:
+     """Every reason acceptance would fail that does NOT depend on the ids.
+ 
+@@ -242,6 +435,16 @@ def preflight(parent: Path, children: list[Child], cfg) -> None:
+             "first orphaned from the parent's breadcrumb. Reopen it first if that is what "
+             "you want")
+     _validate_ordering(children)
++    # LAST, and only once the proposal is known consistent: the report estimates each
++    # child body, and a body whose ordering fields are wrong is not a body that will be
++    # materialised. Wrapped because it is an advisory: a size estimate that fails must
++    # never be the reason a valid split cannot be accepted.
++    try:
++        for line in convergence_report(parent, children, cfg):
++            print(line, file=sys.stderr)
++    except Exception as exc:  # noqa: BLE001 — advisory: it reports or it says nothing
++        print(f"split: the convergence check did not run ({exc}) — accepting anyway, it "
++              "is advisory", file=sys.stderr)
+ 
+ 
+ def _validate_ordering(children: list[Child]) -> None:
+@@ -345,19 +548,37 @@ def rewrite_ordering(body: str, mapping: dict[str, str]) -> str:
+     return "\n".join(out) + ("\n" if body.endswith("\n") else "")
+ 
+ 
+-def materialise(children: list[Child], ids: list[str], cfg, staging: Path) -> list[Path]:
++def materialise(children: list[Child], ids: list[str], cfg, staging: Path, *,
++                parent: Path | None = None) -> list[Path]:
+     """Write each child's brief into ``staging``; return the staged bundle dirs.
+ 
+     Staged rather than written in place so a failure part-way leaves the instance
+-    untouched — see the module docstring.
++    untouched — see the module docstring. The lineage record goes into ``staging`` with
++    the brief for exactly that reason: anything written per child is staged and moved, so
++    a failure half-way cannot leave a bundle whose provenance disagrees with its content.
++
++    ``parent`` is the bundle being split. Given, each child also receives a
++    :data:`LINEAGE` record naming it, its siblings and its depth (the parent's + 1, so a
++    child of a child records 2 without anyone counting). Omitted, no record is written and
++    the children are exactly what this function produced before #448 — which keeps the
++    function callable for its own sake and makes lineage a property of ACCEPTANCE rather
++    than of writing files.
++
++    The PARENT's own (inverse) record is deliberately NOT written here: the parent is not
++    staged, and its write has to be ordered against the close marker so a failure leaves
++    it un-marked and retryable. :func:`accept` writes it, beside the breadcrumb.
+     """
+     mapping = {c.label: i for c, i in zip(children, ids)}
++    parent_id = bundle_id(parent) if parent is not None else ""
++    depth = _depth(parent) if parent is not None else 0
+     staged: list[Path] = []
+     for child, issue_id in zip(children, ids):
+         d = staging / cfg.bundle(issue_id).name
+         d.mkdir(parents=True)
+         (d / "brief.md").write_text(rewrite_ordering(child.body, mapping).lstrip("\n"),
+                                     encoding="utf-8")
++        if parent is not None:
++            _write_lineage(d, _child_record(issue_id, parent_id, ids, depth))
+         staged.append(d)
+     return staged
+ 
+@@ -406,8 +627,16 @@ def accept(parent: Path, ids: list[str], cfg) -> list[Path]:
+     staging = parent / ".split-staging"
+     shutil.rmtree(staging, ignore_errors=True)
+     created: list[Path] = []
++    # The parent's own record, read BEFORE its own is written below — that write replaces
++    # a child record with a parent one, and the depth it carries is the only place a
++    # grandchild's depth can come from.
++    parent_depth = _depth(parent)
++    try:
++        prior_lineage = (parent / LINEAGE).read_bytes()
++    except OSError:
++        prior_lineage = None
+     try:
+-        staged = materialise(children, ids, cfg, staging)
++        staged = materialise(children, ids, cfg, staging, parent=parent)
+         for src, issue_id in zip(staged, ids):
+             dst = cfg.bundle(issue_id)          # the SAME path validate() checked
+             if dst.exists():                    # re-checked at the moment of writing
+@@ -458,6 +687,14 @@ def accept(parent: Path, ids: list[str], cfg) -> list[Path]:
+             "The human confirms the split at sign-off; reopening to a fix path (iterate-to-Do) "
+             "archives this marker and re-enables the full Do+Check band.\n",
+             encoding="utf-8")
++        # The inverse edge, alongside the prose breadcrumb and BEFORE the marker — same
++        # ordering guarantee: a failed write here leaves the parent un-marked and the
++        # printed retry works. `children` is the ORDERED id list, so a child can recover
++        # its position among its siblings from here (`lineage_phrase`) without the schema
++        # carrying an ordinal that could disagree with it.
++        _write_lineage(parent, {"version": LINEAGE_VERSION, "role": "parent",
++                                "id": bundle_id(parent), "children": list(ids),
++                                "depth": parent_depth})
+         (parent / state.CLOSE_MARKER).write_text("split\n", encoding="utf-8")
+     except Exception:
+         _rollback(created)
+@@ -468,6 +705,16 @@ def accept(parent: Path, ids: list[str], cfg) -> list[Path]:
+             (parent / state.CLOSE_MARKER).unlink(missing_ok=True)
+         except OSError:
+             pass
++        # Same for the provenance record: a parent edge naming children that were just
++        # rolled back is a lie about what exists, and it would overwrite the parent's OWN
++        # child record (the only source of a grandchild's depth). Restore what was there.
++        try:
++            if prior_lineage is None:
++                (parent / LINEAGE).unlink(missing_ok=True)
++            else:
++                (parent / LINEAGE).write_bytes(prior_lineage)
++        except OSError:
++            pass
+         raise
+     return created
+ 
+diff --git a/template/tests/test_split_lineage.py b/template/tests/test_split_lineage.py
+new file mode 100644
+index 0000000..f82b41c
+--- /dev/null
++++ b/template/tests/test_split_lineage.py
+@@ -0,0 +1,345 @@
++"""A split child stops being indistinguishable from a fresh oversized brief (issue #448).
++
++Three of the five weighted `sizing` features are fields the split itself installs into
++every child: `conflicts_with` (sibling ordering entries — correct scheduling metadata),
++`difficulty_high` (inherited from the parent) and `ext_deps` (the parent's tokens, copied).
++3 + 3 + 3 = 9 against a cutoff of 7, whatever the child's actual scope, and the one
++de-escalating term (`is_plan_pointer`) a split child never has. Nothing downstream knew a
++split had happened, so every consumer read a child as a fresh oversized brief and pointed
++at `pdca split` again — the ratchet these tests close.
++
++What is asserted here is the WHOLE chain on the production path: `--accept` writes the
++lineage, the estimator reads it and stops counting the split's own artifacts, the remedy
++stops recommending a further split on structural score alone, and the convergence report
++reaches the operator BEFORE the irreversible filing it is supposed to inform.
++
++Modules are imported, never new symbols: on the C4 red leg the production hunks are
++reverted while this file stays, and a `from pdca_harness.split import <new helper>` would
++raise ImportError — which run-verify.sh classifies PDCA-UNVERIFIABLE, not red, so the test
++would prove nothing.
++"""
++
++from __future__ import annotations
++
++import io
++import json
++import shutil
++import tempfile
++import unittest
++from contextlib import redirect_stderr, redirect_stdout
++from pathlib import Path
++from types import SimpleNamespace
++from unittest import mock
++
++from pdca_harness import cli, leaves, plan_policy, sizing, split, state
++from pdca_harness.config import Config, LeafConfig
++
++TEMPLATES = Path(__file__).resolve().parents[1] / "templates"
++
++# A child as a split actually materialises one: `Difficulty` and `External dependencies`
++# inherited from the parent, `Conflicts with` naming its siblings. 3 + 3 + 3 = 9 today.
++_INHERITED = ("- **Difficulty:** high\n"
++              "- **External dependencies:** `protoc`\n")
++
++
++def _child(slug: str, conflicts: str) -> str:
++    return (f"- **Slug:** {slug}\n- **Defect / goal:** {slug}\n"
++            + _INHERITED + f"- **Conflicts with:** {conflicts}\n")
++
++
++def _proposal(*children: str) -> str:
++    body = "<!-- pdca:split-proposal v1 -->\n# Split proposal\n\n"
++    for i, child in enumerate(children, 1):
++        body += (f"<!-- pdca:child child-{i} -->\n{child}\n"
++                 f"<!-- pdca:end child-{i} -->\n\n")
++    return body
++
++
++class _Bundles(unittest.TestCase):
++    """A real instance root, a real parent bundle, real `--accept` runs."""
++
++    def setUp(self) -> None:
++        self.tmp = Path(tempfile.mkdtemp())
++        self.cfg = Config(
++            root=self.tmp, bundle_root=self.tmp / "results",
++            process_dir=self.tmp / "process", templates_dir=TEMPLATES,
++            default_branch="main", tracker_system="github", tracker_url="",
++            issue_id_example="#1",
++            builder=LeafConfig(mode="stub"), reviewer=LeafConfig(mode="stub"),
++        )
++        self.cfg.size_guard = "warn"
++        self.parent = self.cfg.bundle("500")
++        self.parent.mkdir(parents=True)
++        (self.parent / "brief.md").write_text(
++            "- **Slug:** parent\n" + _INHERITED, encoding="utf-8")
++
++    def tearDown(self) -> None:
++        shutil.rmtree(self.tmp, ignore_errors=True)
++
++    def _propose(self, text: str, parent: Path | None = None) -> None:
++        (parent or self.parent).joinpath(split.PROPOSAL).write_text(
++            text, encoding="utf-8")
++
++    def _accept_two(self) -> list[Path]:
++        """The ordinary case: two children that conflict with each other."""
++        self._propose(_proposal(_child("first", "child-2"),
++                                _child("second", "child-1")))
++        with redirect_stderr(io.StringIO()):
++            return split.accept(self.parent, ["601", "602"], self.cfg)
++
++
++class LineageIsWrittenAtMaterialisation(_Bundles):
++    """Item 1. Before this, `materialise` wrote only the child body and "Child slice of
++    #N" went solely into the tracker issue — so a child was locally indistinguishable from
++    a fresh brief to every consumer that matters."""
++
++    def test_each_child_records_its_parent_siblings_and_depth(self) -> None:
++        created = self._accept_two()
++        record = split.lineage(created[0])
++        self.assertEqual(record["role"], "child")
++        self.assertEqual(record["id"], "601")
++        self.assertEqual(record["parent"], "500")
++        self.assertEqual(record["siblings"], ["602"])
++        self.assertEqual(record["depth"], 1)
++        self.assertEqual(split.lineage(created[1])["siblings"], ["601"])
++
++    def test_the_parent_records_the_inverse_edge(self) -> None:
++        """One filename in BOTH directions, distinguished by `role`: the child edge is what
++        stops the ratchet, the parent edge is what a consumer needs to find the slices a
++        bundle became. Two files would drift."""
++        self._accept_two()
++        record = split.lineage(self.parent)
++        self.assertEqual(record["role"], "parent")
++        self.assertEqual(record["id"], "500")
++        self.assertEqual(record["children"], ["601", "602"], "not the ORDERED id list")
++        self.assertEqual(record["depth"], 0)
++
++    def test_depth_counts_recursion_without_anyone_counting(self) -> None:
++        """A split of a split child: the grandchildren record depth 2, and the middle
++        bundle's parent record keeps the depth its own child record carried."""
++        created = self._accept_two()
++        child = created[0]
++        self._propose(_proposal(_child("a", "child-2"), _child("b", "child-1")), child)
++        with redirect_stderr(io.StringIO()):
++            grandchildren = split.accept(child, ["701", "702"], self.cfg)
++        self.assertEqual(split.lineage(grandchildren[0])["depth"], 2)
++        self.assertEqual(split.lineage(child)["depth"], 1,
++                         "the parent record lost the depth its child record carried")
++
++    def test_the_record_is_staged_like_every_other_per_child_write(self) -> None:
++        """`split.py:406-427` — anything written per child goes into `staging` and is moved
++        with the rest, never in place: a failure half-way must not leave a bundle whose
++        provenance disagrees with its content."""
++        children = split.parse(_proposal(_child("first", "child-2"),
++                                         _child("second", "child-1")))
++        staging = self.parent / ".split-staging"
++        staged = split.materialise(children, ["601", "602"], self.cfg, staging,
++                                   parent=self.parent)
++        self.assertTrue((staged[0] / split.LINEAGE).is_file())
++        self.assertEqual(list(self.cfg.bundle_root.glob("issue_60*")), [],
++                         "a child bundle was written outside staging")
++
++    def test_lineage_is_provenance_not_attempt_output(self) -> None:
++        """It must NOT join `DOWNSTREAM_OF_BRIEF`: a bundle does not stop being a split
++        child because its brief was re-planned or a rejected attempt was archived."""
++        self.assertNotIn(split.LINEAGE, state.DOWNSTREAM_OF_BRIEF)
++
++    def test_an_unreadable_record_reads_as_absent_and_never_raises(self) -> None:
++        """Nothing here may raise into a beat: an abstention loses one advisory, an
++        exception loses the beat."""
++        created = self._accept_two()
++        for bad in ("not json at all", json.dumps({"version": 99, "role": "child"}),
++                    json.dumps({"version": 1, "role": "not-a-role"}),
++                    json.dumps(["not", "a", "dict"])):
++            with self.subTest(record=bad[:24]):
++                (created[0] / split.LINEAGE).write_text(bad, encoding="utf-8")
++                self.assertIsNone(split.lineage(created[0]))
++        (created[0] / split.LINEAGE).unlink()
++        self.assertIsNone(split.lineage(created[0]))
++        self.assertIsNone(split.lineage(self.tmp / "no-such-bundle"))
++
++
++class TheEstimatorStopsScoringTheSplitsOwnArtifacts(_Bundles):
++    """Item 2 — success criterion (a). Sibling `Conflicts with` entries are scheduling
++    metadata this process installed, not churn evidence."""
++
++    def test_a_child_scores_below_the_cutoff_where_it_scores_9_today(self) -> None:
++        created = self._accept_two()
++        child = created[0]
++        est = sizing.estimate(child / "brief.md", self.cfg)
++
++        # The control is the SAME brief text with no lineage beside it — every bundle
++        # written before #448, and what this child was until the record existed.
++        plain = self.tmp / "plain"
++        plain.mkdir()
++        shutil.copyfile(child / "brief.md", plain / "brief.md")
++        without = sizing.estimate(plain / "brief.md", self.cfg)
++        self.assertGreaterEqual(without.score, sizing.DEFAULT_OVERSIZED)
++        self.assertEqual(without.band, sizing.OVERSIZED)
++
++        self.assertLess(est.score, sizing.DEFAULT_OVERSIZED,
++                        f"the split's own artifacts are still scored: {est.reasons}")
++        self.assertNotEqual(est.band, sizing.OVERSIZED)
++        self.assertTrue(any("sibling conflict" in r for r in est.reasons),
++                        f"the exclusion is not visible in the reasons: {est.reasons}")
++
++    def test_an_organic_conflict_still_counts_at_full_weight(self) -> None:
++        """The strongest measured churn signal on organic bundles — weakening it beyond
++        the split's own siblings would trade a real signal for a special case."""
++        created = self._accept_two()
++        child = created[0]
++        text = (child / "brief.md").read_text(encoding="utf-8")
++        (child / "brief.md").write_text(
++            text.replace("- **Conflicts with:** 602", "- **Conflicts with:** 602, 903"),
++            encoding="utf-8")
++        est = sizing.estimate(child / "brief.md", self.cfg)
++        self.assertIn("1 conflict(s) declared", est.reasons)
++        self.assertEqual(est.band, sizing.OVERSIZED)
++
++    def test_the_weight_is_registered_and_ships_at_zero(self) -> None:
++        """Registered so `[driver.sizing]` retunes it without patching the engine — the
++        same shape as every other weight; 0 because no corpus has measured it."""
++        self.assertEqual(sizing.DEFAULT_WEIGHTS["split_child"], 0)
++        created = self._accept_two()
++        cfg = SimpleNamespace(sizing={"split_child": -2})
++        self.assertEqual(sizing.estimate(created[0] / "brief.md", cfg).score,
++                         sizing.estimate(created[0] / "brief.md", self.cfg).score - 2)
++
++    def test_a_bundle_with_no_lineage_is_scored_exactly_as_today(self) -> None:
++        p = self.tmp / "organic"
++        p.mkdir()
++        (p / "brief.md").write_text("- **Slug:** s\n" + _INHERITED
++                                    + "- **Conflicts with:** 12, 13\n", encoding="utf-8")
++        est = sizing.estimate(p / "brief.md", self.cfg)
++        self.assertEqual(est.score, 9)
++        self.assertEqual(est.band, sizing.OVERSIZED)
++
++
++class TheRemedyIsDepthAndEvidenceAware(_Bundles):
++    """Item 3 — success criterion (b). Structural score alone cannot see decomposability;
++    the sizer leaf can, and it is the only evidence that justifies splitting a child."""
++
++    def _oversized_child(self) -> Path:
++        """A split child that is oversized even AFTER the sibling exclusion: high
++        difficulty + external dependencies + a brief over the size cutoff = 9."""
++        self._propose(_proposal(
++            _child("first", "child-2") + "- **Scope:** " + ("pad " * 4000) + "\n",
++            _child("second", "child-1")))
++        with redirect_stderr(io.StringIO()):
++            created = split.accept(self.parent, ["601", "602"], self.cfg)
++        est = sizing.estimate(created[0] / "brief.md", self.cfg)
++        self.assertEqual(est.band, sizing.OVERSIZED, "the fixture is not oversized")
++        return created[0]
++
++    def test_a_split_child_is_not_told_to_split_again_on_structure_alone(self) -> None:
++        child = self._oversized_child()
++        with redirect_stderr(io.StringIO()):
++            reasons = plan_policy.size_reasons(child, self.cfg, before_do=True)
++        self.assertTrue(reasons, "the advisory stopped firing altogether")
++        detail = reasons[0].detail
++        self.assertIn("scores large for a split child", detail)
++        self.assertIn("driven by inherited/sibling fields", detail)
++        self.assertIn("depth 1", detail)
++        self.assertNotIn("consider `pdca split` first", detail)
++
++    def test_the_sizers_verdict_still_earns_the_split_remedy(self) -> None:
++        """≥ 2 independently shippable outcomes is the one signal that can see
++        decomposability — a child that really is two slices must still be splittable."""
++        child = self._oversized_child()
++        with mock.patch("pdca_harness.leaves.run_sizer",
++                        return_value={"band": "oversized",
++                                      "independent_outcomes": ["a", "b"]}), \
++                redirect_stderr(io.StringIO()):
++            reasons = plan_policy.size_reasons(child, self.cfg, before_do=True)
++        self.assertIn("consider `pdca split` first", reasons[0].detail)
++
++    def test_a_bundle_without_lineage_keeps_todays_remedy(self) -> None:
++        child = self._oversized_child()
++        (child / split.LINEAGE).unlink()
++        with redirect_stderr(io.StringIO()):
++            reasons = plan_policy.size_reasons(child, self.cfg, before_do=True)
++        self.assertIn("consider `pdca split` first", reasons[0].detail)
++
++    def test_the_iterate_plan_wording_is_unchanged_after_do(self) -> None:
++        child = self._oversized_child()
++        with redirect_stderr(io.StringIO()):
++            reasons = plan_policy.size_reasons(child, self.cfg, before_do=False)
++        self.assertIn("iterate-plan", reasons[0].detail)
++
++    def test_the_planner_and_splitter_prompts_carry_the_same_context(self) -> None:
++        """The loop is not only numeric: a planner or splitter that cannot see where the
++        inherited fields came from proposes the remedy that produced them."""
++        child = self._oversized_child()
++        plan_prompt = leaves._plan_prompt(self.cfg, None, child)
++        split_prompt = leaves._split_prompt(child, self.cfg)
++        for name, prompt in (("planner", plan_prompt), ("splitter", split_prompt)):
++            with self.subTest(prompt=name):
++                self.assertIn("split child", prompt)
++                self.assertIn("child 1 of a split of #500, depth 1", prompt)
++        parent_plan = leaves._plan_prompt(self.cfg, None, self.parent)
++        self.assertNotIn("split child", parent_plan,
++                         "a bundle with no lineage had its prompt changed")
++
++
++class ConvergenceIsCheckedBeforeIrreversibleFiling(_Bundles):
++    """Item 4 — success criterion (c). `preflight` runs before `file_children`, which is
++    the only point at which the answer can still change a decision: after it the tracker
++    issues exist and cannot be withdrawn."""
++
++    def test_preflight_reports_each_staged_childs_band_against_the_parent(self) -> None:
++        children = split.parse(_proposal(_child("first", "child-2"),
++                                         _child("second", "child-1")))
++        err = io.StringIO()
++        self._propose(_proposal(_child("first", "child-2"), _child("second", "child-1")))
++        with redirect_stderr(err):
++            split.preflight(self.parent, children, self.cfg)
++        report = err.getvalue()
++        self.assertIn("convergence check", report)
++        for label in ("child-1", "child-2"):
++            self.assertIn(label, report)
++        self.assertIn(self.parent.name, report)
++
++    def test_the_staged_estimate_treats_ordering_refs_as_siblings(self) -> None:
++        """Inside a proposal every ordering ref is a sibling LABEL by construction, so the
++        staged estimate must exclude them exactly as the materialised child will —
++        otherwise it reports a band no child will ever have."""
++        children = split.parse(_proposal(_child("first", "child-2"),
++                                         _child("second", "child-1")))
++        report = "\n".join(split.convergence_report(self.parent, children, self.cfg))
++        self.assertIn("sibling conflict", report)
++        self.assertNotIn("2 conflict(s) declared", report)
++
++    def test_the_report_reaches_the_operator_BEFORE_the_issues_are_filed(self) -> None:
++        """The whole point of running it in `preflight`: a convergence verdict that
++        arrived after filing could not inform the decision it exists to inform."""
++        self._propose(_proposal(_child("first", "child-2"), _child("second", "child-1")))
++        err = io.StringIO()
++        seen: list[str] = []
++
++        def filer(parent, children, cfg, **kw):
++            seen.append(err.getvalue())
++            return ["601", "602"]
++
++        with mock.patch("pdca_harness.split.file_children", filer), \
++                redirect_stderr(err), redirect_stdout(io.StringIO()):
++            rc = cli._split(self.cfg, SimpleNamespace(issue_id="500", accept=True, ids=""))
++        self.assertEqual(rc, 0)
++        self.assertIn("convergence check", seen[0],
++                      "the children were filed before the convergence report was printed")
++
++    def test_the_report_never_blocks_an_acceptance(self) -> None:
++        """Advisory, matching the size guard's warn-only stance — and an estimate that
++        fails must not be the reason a valid split cannot be accepted."""
++        children = split.parse(_proposal(_child("first", "child-2"),
++                                         _child("second", "child-1")))
++        self._propose(_proposal(_child("first", "child-2"), _child("second", "child-1")))
++        with mock.patch("pdca_harness.sizing.estimate", side_effect=RuntimeError("boom")), \
++                redirect_stderr(io.StringIO()):
++            split.preflight(self.parent, children, self.cfg)   # must not raise
++        with redirect_stderr(io.StringIO()):
++            created = split.accept(self.parent, ["601", "602"], self.cfg)
++        self.assertEqual(len(created), 2)
++
++
++if __name__ == "__main__":
++    unittest.main()

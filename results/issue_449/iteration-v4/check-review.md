@@ -1,0 +1,15 @@
+Reviewing issue 449’s enhancement so a flow adopts and drives split descendants in later waves during the same bounded run instead of stranding them PLANNED.
+
+| Item | Verdict | Basis |
+|------|---------|-------|
+| C1 Spec | PASS | The contract is decidable across entry points, lineage-only scope, scheduling tolerance, reporting, and budget behavior, so no implementation-critical product choice remains unstated (`docs/07-crosscutting.md:243`). |
+| C2 Reproduction (red pre-fix) | PASS | With only production hunks reversed and the regression module retained, all 15 tests executed and the suite produced 18 assertion failures, including both entry points leaving child 601 PLANNED (`template/tests/test_flow_adopt_split.py:254`). |
+| C3 Change | PASS | The change reads the lineage edge, tolerantly re-levels only the remaining schedule plus descendants, and adds only scheduled children to run state, preserving explicit-id scope (`template/src/pdca_harness/flow.py:824`). |
+| C4 Verification (red→green) | PASS | After restoring the exact patch, the same 15 tests all passed; the target also passes `git diff --check` and the complete offline driver suite (`template/tests/test_flow_adopt_split.py:254`). |
+| C5 Causal adequacy | PASS | The frozen-drive-set cause is removed by recomputing and splicing the remaining waves after each driven split, rather than hidden behind a capability probe or symptom guard (`template/src/pdca_harness/flow.py:968`). |
+| T1 Structure | PASS | Shared detect/validate/splice/report helpers live behind `_drive_and_act`, while the single-id path delegates to that same mechanism with carried accounting instead of duplicating the scheduler (`template/src/pdca_harness/flow.py:451`). |
+| T2 Shape | PASS | Docs lint and the 22-page render/link audit passed, and the operator contract states later-wave placement, lineage-only scope, recovery, and held-child behavior consistently (`docs/07-crosscutting.md:243`). |
+| T3 Runtime | NEEDS-HUMAN | Decide whether to waive the recorded T3 red as gate-runner state leakage — the full driver suite and all seven Copier 9.17.1-backed render/update tests pass independently, but the recorded run inherited `PDCA_VERIFY_BASE` where wave-0 tests require it absent (`template/tests/test_verify_base.py:100`). |
+| T4 Contribution | NEEDS-HUMAN | Decide whether to accept the reported contribution-metadata green without an independent audit — `commit-msg.txt` and `pr-description.md` were not supplied, so their user-impact opener and tracker reference could not be rerun. |
+| T5 Judgment | PASS | Affected-path merged history and all closed-unmerged PRs were checked mechanically; #354/#362/#460/#465 are complementary antecedents and no rejected affected-path work duplicates this adoption change. |
+| Validation — fitness-to-purpose | NEEDS-HUMAN | Decide whether transitive recovery adoption and the one-wave pass pool for a parent-only recovery match the intended operator experience — automation proves the mechanics but cannot own that product-policy judgment (`docs/07-crosscutting.md:331`). |

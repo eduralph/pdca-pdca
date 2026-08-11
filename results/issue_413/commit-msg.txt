@@ -1,0 +1,33 @@
+fix(merge): require a green check rollup before merge mode merges
+
+In `wave_mode = "merge"` the driver merges each non-final wave's PR so the
+next wave builds on the merged base. Until now the only thing standing
+between "the bundle is COMPLETE" and `gh pr merge` was gh's own exit code —
+and gh fails closed only on the checks the HOST repo marks required in
+branch protection. On a thinly protected repo a red non-required job, or a
+run still in flight, merged anyway, and the next wave built on a base whose
+CI never went green. The harness's fail-closed rule ("the next wave must
+never build on an unmerged base") is meant to protect the base, so it must
+not hinge on how tightly each host configured branch protection.
+
+`_merge_one` now reads the PR's full check rollup itself (`gh pr checks
+--json name,bucket`) and refuses — no merge, the wave STOPs — on any
+failing, pending or unreadable check, and on an EMPTY rollup: absence of
+evidence is not green. Skipped/neutral checks are completed non-failures
+and do not block. The read happens AFTER `gh pr ready` and immediately
+before `gh pr merge`, because marking a draft ready can itself trigger
+`ready_for_review` CI; refusing there is cheap, since a re-run resumes
+idempotently. Both the read and its verdict are echoed in the run log, so
+an operator can see that a merge was gated rather than merged blind.
+`[driver].merge_requires = "required"` (default `"all"`) restores the
+host-config-only semantics for anyone who deliberately wants them.
+
+Two docs go with it. `docs/fork-discipline.md.jinja` claimed flatly that
+the automation "never marks a PR ready and never merges", which merge mode
+has falsified since ready-before-merge (#279); it now scopes the claim to
+what actually holds — every model leaf unconditionally, every final-wave
+PR — and names the one exception with its two guards: the per-bundle human
+sign-off, and this rollup gate. `docs/07-crosscutting.md` gains the new
+fail-closed condition and the knob, beside `merge_method`.
+
+Fixes #413

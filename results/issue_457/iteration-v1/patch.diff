@@ -1,0 +1,426 @@
+diff --git a/docs/07-crosscutting.md b/docs/07-crosscutting.md
+index 30baf84..5e3ba83 100644
+--- a/docs/07-crosscutting.md
++++ b/docs/07-crosscutting.md
+@@ -126,6 +126,17 @@ The estimate has **two independent signals**, combined by deterministic code
+    | `brief_bytes` | 3 | brief size above a 12 KB cutoff |
+    | `is_plan_pointer` | **−2** | a brief pointing at a host planning artifact converges *better* — the one de-escalating term |
+ 
++   For a bundle carrying split-lineage (`split-lineage.json`, issue #456),
++   `conflicts_with` counts only **organic** conflicts — ids that are not this
++   bundle's own split siblings. A materialised child's `Conflicts with` entries
++   naming its siblings are the split's own scheduling metadata (the splitter is
++   explicitly told those ordering fields "BETWEEN children are the point"), not
++   organic churn, and the ρ 0.32 above was measured over organic bundles only.
++   The excluded count is reported on the estimate as `sibling_conflicts` — not
++   scored, but visible to a caller (e.g. the split convergence report) that
++   needs to know a proposal's children conflict pairwise even where that no
++   longer moves the churn score.
++
+    The score sorts into two separate readouts, because they answer different
+    questions: **churn** (how many sign-off rounds this will take) and **patch
+    size** (how big the diff will be). A large-but-coherent change scores high on
+diff --git a/template/scripts/size-calibrate b/template/scripts/size-calibrate
+index 4128994..dc470d6 100755
+--- a/template/scripts/size-calibrate
++++ b/template/scripts/size-calibrate
+@@ -67,7 +67,8 @@ try:
+     # ONE definition of the a-priori split, shared with the runtime estimator (#355). A
+     # second copy here drifted from `sizing` the moment either side changed — and the drift
+     # would be invisible, because both sides would still look self-consistent.
+-    from pdca_harness.sizing import AprioriBrief, apriori_text, carry_forward_bytes
++    from pdca_harness.sizing import (AprioriBrief, apriori_text, carry_forward_bytes,
++                                     sibling_conflict_count)
+     # ONE definition of "rounds attributable to the current brief", shared with the
+     # runtime backstop (#324). This file defined it; the estimator was counting every
+     # archive, so it measured a different quantity from the one these thresholds describe.
+@@ -216,7 +217,18 @@ class Row:
+     declares_prod_reach: int
+     is_plan_pointer: int
+     depends_on: int
++    #: UNIQUE ORGANIC ids only — this bundle's own split siblings (`split-lineage.json`,
++    #: issue #456) are excluded, matching `sizing.estimate`'s `conflicts_with` weight
++    #: exactly (issue #457: both call `sizing.sibling_conflict_count`, so a retune fits the
++    #: same quantity the engine actually scores). The excluded count is `sibling_conflicts`
++    #: below — auditable rather than silently dropped, the same discipline as
++    #: `carry_forward_bytes`.
+     conflicts_with: int
++    #: How many of the raw `Conflicts with` ids were this bundle's own split siblings and so
++    #: excluded from `conflicts_with` above. 0 for every bundle with no lineage record —
++    #: today's (pre-#457) behaviour, unchanged. NOT in :data:`FEATURES`: it is process
++    #: metadata the split itself writes, not a candidate churn predictor.
++    sibling_conflicts: int
+     # --- observed: what the cycle actually cost -------------------------------------
+     rounds: int
+     replans: int
+@@ -275,6 +287,10 @@ def extract(d: Path) -> Row | None:
+     scope = value_block(ap, text, "scope")
+     difficulty = normalize_difficulty(brief.field(ap, "difficulty"))
+     bundle_state = state.state(d)
++    # UNIQUE ids (see the `depends_on` comment below for why): computed once so
++    # `conflicts_with` and `sibling_conflicts` below cannot read two different sets.
++    declared_conflicts = list(set(brief.conflicts_with(ap)))
++    sib_conflicts = sibling_conflict_count(bp, declared_conflicts)
+     return Row(
+         bundle=d.name,
+         difficulty=difficulty,
+@@ -297,7 +313,11 @@ def extract(d: Path) -> Row | None:
+         # rows for one edge. Counting declarations would inflate the feature on exactly the
+         # briefs most likely to be old enough to matter. Same for a repeated `Conflicts with`.
+         depends_on=len(set(waves.declared_deps(ap))),
+-        conflicts_with=len(set(brief.conflicts_with(ap))),
++        # `sibling_conflict_count` is the SAME function `sizing.estimate` weights against —
++        # not a re-derivation of it — so `conflicts_with` here measures exactly what the
++        # engine scores for a split child, and a retune fits the quantity actually used.
++        conflicts_with=len(declared_conflicts) - sib_conflicts,
++        sibling_conflicts=sib_conflicts,
+         rounds=rounds,
+         replans=replans,
+         auto_iters=autoiterate.count(d),
+diff --git a/template/src/pdca_harness/sizing.py b/template/src/pdca_harness/sizing.py
+index fb15f6c..5b5a944 100644
+--- a/template/src/pdca_harness/sizing.py
++++ b/template/src/pdca_harness/sizing.py
+@@ -81,7 +81,7 @@ import re
+ from dataclasses import dataclass, field
+ from pathlib import Path
+ 
+-from . import brief
++from . import brief, split
+ 
+ #: Weights, proportional to |ρ| against rounds over the surviving features. In
+ #: ``[driver.sizing]`` so an instance retunes against its own corpus without patching the
+@@ -192,6 +192,13 @@ class SizeEstimate:
+     #: justifies a SPLIT — and a caller choosing between "split this" and "expect a large
+     #: coherent patch" needs it whether or not it moved the number.
+     model_band: str = ""
++    #: How many of this bundle's `Conflicts with` entries name its own split siblings
++    #: (`split.py:493-499`) and so were EXCLUDED from `conflicts_with`'s contribution to
++    #: `score` (issue #457). Recorded even when it did not move the score — a proposal
++    #: whose children all conflict pairwise is the splitter's own statement that the split
++    #: separated nothing, which a convergence report needs to see whether or not any of
++    #: those conflicts happened to also be organic.
++    sibling_conflicts: int = 0
+ 
+ 
+ def _cfg_int(cfg, key: str, default: int) -> int:
+@@ -214,6 +221,37 @@ def _weights(cfg) -> dict[str, int]:
+     return weights
+ 
+ 
++def sibling_conflict_count(brief_path: Path, conflict_ids: list[str]) -> int:
++    """How many of ``conflict_ids`` name THIS bundle's own split siblings (issue #457).
++
++    ``split.materialise`` writes a `Conflicts with` entry into every child naming its
++    siblings (`split.py:491-499`) — the splitter is explicitly told those ordering fields
++    "BETWEEN children are the point" (``leaves.py``'s split prompt) — and
++    ``split.rewrite_ordering`` turns the proposal-local labels into the same real ids the
++    lineage record stores as ``siblings`` (`split.py:333-358`). So a sibling id in
++    `Conflicts with` is the split's own scheduling metadata, not organic churn: the ρ 0.32
++    calibration behind the `conflicts_with` weight was measured over organic bundles only
++    (module docstring), and scoring the artifact the process itself created inflates every
++    materialised child regardless of its actual scope.
++
++    Defined ONCE, here, and imported by both :func:`estimate` and
++    ``scripts/size-calibrate`` — the same discipline as :func:`apriori_text` and
++    :class:`AprioriBrief` (module docstring): a second definition would drift the first
++    time either side changed, invisibly.
++
++    ``split.read_lineage`` never raises (its own contract) — a bundle with no lineage
++    record, an unreadable one, or one whose ``siblings`` is not a list all yield 0, which
++    is today's (pre-#456) behaviour exactly: nothing is excluded and every declared
++    conflict scores as organic.
++    """
++    record = split.read_lineage(brief_path.parent)
++    siblings = record.get("siblings") if record else None
++    if not isinstance(siblings, list):
++        siblings = []
++    siblings = set(siblings)
++    return sum(1 for c in conflict_ids if c in siblings)
++
++
+ def estimate(brief_path: Path, cfg) -> SizeEstimate:
+     """The structural estimate for one brief. Pure function of the file plus config.
+ 
+@@ -238,7 +276,7 @@ def estimate(brief_path: Path, cfg) -> SizeEstimate:
+         ap = AprioriBrief(brief_path, apriori_text(brief_path))
+         apriori = len(ap.read_text().encode("utf-8"))
+         difficulty = brief.field(ap, "difficulty").lower()
+-        conflicts = len(brief.conflicts_with(ap))
++        conflict_ids = brief.conflicts_with(ap)
+         ext_deps = len(brief.external_dependency_tokens(ap))
+         plan_pointer = bool(brief.planning_artifact(ap))
+     except OSError:
+@@ -249,6 +287,12 @@ def estimate(brief_path: Path, cfg) -> SizeEstimate:
+         # nobody read, and one stray byte is a bad reason to emit one.
+         return SizeEstimate(0, OK, ["brief unreadable — not sized"])
+ 
++    # `split.read_lineage` is total — never raises — so this cannot turn a malformed or
++    # absent lineage record into a crashed Plan beat; it degrades to 0 excluded, i.e.
++    # today's (pre-#457) behaviour, exactly like an absent brief field would.
++    sib_conflicts = sibling_conflict_count(brief_path, conflict_ids)
++    conflicts = len(conflict_ids) - sib_conflicts
++
+     # Word-matched, not equality and not bare substring. The field is prose in practice
+     # ("high — the widest-surface slice: …") so equality scores nearly every real brief as
+     # unset — but a bare substring fires on "hardening", and the highest band must win so a
+@@ -290,7 +334,8 @@ def estimate(brief_path: Path, cfg) -> SizeEstimate:
+         patch_band = OK
+ 
+     return SizeEstimate(score, higher(churn_band, patch_band), reasons,
+-                        churn_band=churn_band, patch_band=patch_band)
++                        churn_band=churn_band, patch_band=patch_band,
++                        sibling_conflicts=sib_conflicts)
+ 
+ 
+ def _band(value: str) -> str:
+@@ -481,4 +526,5 @@ def combine(structural: SizeEstimate, model: dict | None, cfg=None) -> SizeEstim
+     return SizeEstimate(score, combined, reasons,
+                         churn_band=structural.churn_band,
+                         patch_band=structural.patch_band,
+-                        model_band=band)
++                        model_band=band,
++                        sibling_conflicts=structural.sibling_conflicts)
+diff --git a/template/tests/test_sizing_split_child.py b/template/tests/test_sizing_split_child.py
+new file mode 100644
+index 0000000..edbfc56
+--- /dev/null
++++ b/template/tests/test_sizing_split_child.py
+@@ -0,0 +1,237 @@
++"""`sizing.estimate` must not score a split child's own scheduling metadata as churn
++(issue #457).
++
++`split.materialise` writes a `Conflicts with` entry into every child naming its siblings
++(`split.py:491-499`) — the splitter is explicitly told those ordering fields "BETWEEN
++children are the point" — and `split.rewrite_ordering` turns the proposal-local labels
++into the real ids the lineage record's `siblings` stores (`split.py:333-358`). Before this
++fix, `sizing.estimate` counted a sibling id in `Conflicts with` identically to an organic
++one, so three of its five weighted features (`conflicts_with`, `difficulty_high` inherited
++from a `high` parent, `ext_deps` inherited tokens) were often the split's own artifacts —
++9 >= the `oversized` cutoff of 7 regardless of the child's actual scope.
++
++Per the brief: import the MODULE, never the new symbols, so a red run (production hunks
++reverted) fails with a real `AttributeError` on `sizing.<name>` / `SizeEstimate(...).<name>`
++rather than an `ImportError` that would exit the verifier as PDCA-UNVERIFIABLE.
++"""
++
++from __future__ import annotations
++
++import tempfile
++import unittest
++from pathlib import Path
++from types import SimpleNamespace
++
++from pdca_harness import brief, sizing, split
++from pdca_harness.config import Config, LeafConfig
++
++_CFG = SimpleNamespace(sizing={})
++
++_CHILD_1 = ("- **Slug:** child one\n- **Defect / goal:** a\n"
++           "- **Difficulty:** high\n"
++           "- **External dependencies:** `protoc`\n"
++           "- **Conflicts with:** child-2, child-3\n")
++_CHILD_2 = "- **Slug:** child two\n- **Defect / goal:** b\n"
++_CHILD_3 = "- **Slug:** child three\n- **Defect / goal:** c\n"
++
++
++def _proposal(*children: str, version: int = 1) -> str:
++    body = f"<!-- pdca:split-proposal v{version} -->\n# Split proposal\n\n"
++    for i, child in enumerate(children, 1):
++        body += (f"<!-- pdca:child child-{i} -->\n{child}\n"
++                 f"<!-- pdca:end child-{i} -->\n\n")
++    return body
++
++
++class SplitChildBase(unittest.TestCase):
++    """Materialises a real split, through the production `split.accept` path — not a
++    hand-built lineage fixture — so the test exercises the same code the splitter runs."""
++
++    def setUp(self) -> None:
++        self.tmp = Path(tempfile.mkdtemp())
++        self.cfg = Config(
++            root=self.tmp, bundle_root=self.tmp / "results",
++            process_dir=self.tmp / "process", templates_dir=self.tmp / "templates",
++            default_branch="main", tracker_system="github", tracker_url="",
++            issue_id_example="#1",
++            builder=LeafConfig(mode="stub"), reviewer=LeafConfig(mode="stub"),
++        )
++        self.parent = self.cfg.bundle("500")
++        self.parent.mkdir(parents=True)
++        (self.parent / "brief.md").write_text("- **Slug:** parent\n", encoding="utf-8")
++
++    def _accept(self) -> list[Path]:
++        (self.parent / split.PROPOSAL).write_text(
++            _proposal(_CHILD_1, _CHILD_2, _CHILD_3), encoding="utf-8")
++        return split.accept(self.parent, ["601", "602", "603"], self.cfg)
++
++
++class SiblingConflictsExcluded(SplitChildBase):
++    """Criterion (a): a materialised child's sibling `Conflicts with` entries do not count
++    toward the churn score, so its actual one-function scope no longer bands `oversized`."""
++
++    def test_child_with_only_sibling_conflicts_scores_below_oversized(self) -> None:
++        created = self._accept()
++        child_1 = created[0]
++
++        # Fixture sanity: production `split` really did what the scenario needs — two
++        # REAL sibling ids in `Conflicts with`, not proposal-local labels.
++        rec = split.read_lineage(child_1)
++        self.assertIsNotNone(rec, "materialise did not write a lineage record")
++        self.assertEqual(sorted(rec["siblings"]), ["602", "603"])
++        conflict_ids = brief.conflicts_with(child_1 / "brief.md")
++        self.assertEqual(sorted(conflict_ids), ["602", "603"],
++                         "rewrite_ordering did not turn the sibling labels into real ids")
++
++        est = sizing.estimate(child_1 / "brief.md", _CFG)
++        self.assertLess(
++            est.score, sizing.DEFAULT_OVERSIZED,
++            f"a child whose only conflicts are its own siblings still scored oversized: "
++            f"{est.reasons}")
++        self.assertNotEqual(
++            est.churn_band, sizing.OVERSIZED,
++            "the sibling-conflict artifact still banded this child oversized")
++
++    def test_the_same_child_scores_oversized_before_exclusion(self) -> None:
++        """The falsifiability check, inline: prove the fixture genuinely exercises the
++        defect by recomputing the PRE-#457 score by hand — weights that fire regardless of
++        which conflicts are organic. If this fails, the fixture above is not the case the
++        brief describes and the first test would pass vacuously."""
++        created = self._accept()
++        child_1 = created[0]
++        w = sizing.DEFAULT_WEIGHTS
++        naive_score = (w["difficulty_high"] + w["ext_deps"]
++                       + w["conflicts_with"])  # today's (unfixed) formula: raw count
++        self.assertGreaterEqual(naive_score, sizing.DEFAULT_OVERSIZED,
++                                "fixture does not reach the oversized cutoff pre-fix — "
++                                "not exercising the defect")
++
++
++class OrganicConflictsStillCount(SplitChildBase):
++    """Criterion (b): organic conflicts — ids that are NOT this bundle's siblings — must
++    still score at full weight, and a lineage-free bundle must be untouched."""
++
++    def test_an_organic_conflict_among_siblings_still_scores_full_weight(self) -> None:
++        created = self._accept()
++        child_1 = created[0]
++        bp = child_1 / "brief.md"
++        text = bp.read_text(encoding="utf-8")
++        self.assertIn("602, 603", text, "fixture assumption changed upstream")
++        # One more conflict, naming a bundle that is NOT a sibling — organic churn.
++        bp.write_text(text.replace("602, 603", "602, 603, 999"), encoding="utf-8")
++
++        est = sizing.estimate(bp, _CFG)
++        self.assertEqual(est.sibling_conflicts, 2)
++        # Exactly one organic conflict fires the SAME weight a lone organic conflict would.
++        baseline = sizing.estimate(
++            _brief_with(self.tmp, "- **Slug:** s\n- **Conflicts with:** 999\n"),
++            _CFG)
++        organic_contribution = est.score - (
++            sizing.DEFAULT_WEIGHTS["difficulty_high"] + sizing.DEFAULT_WEIGHTS["ext_deps"])
++        self.assertEqual(organic_contribution, baseline.score,
++                         "an organic conflict scored a different weight inside a split "
++                         "child than it does standalone")
++
++    def test_a_bundle_with_no_lineage_is_byte_identical_to_an_existing_fixture(self) -> None:
++        """(b)'s second half: no split lineage at all must be untouched. Mirrors the exact
++        fixture and expected score already asserted by `test_sizing.Structural.
++        test_bands_follow_the_cutoffs` — the pre-existing production test — so a regression
++        here would also be a regression there, not only in a fixture invented for #457."""
++        high = _brief_with(self.tmp, "- **Slug:** s\n- **Difficulty:** high\n"
++                                     "- **Conflicts with:** 1\n"
++                                     "- **External dependencies:** `protoc`\n")
++        est = sizing.estimate(high, _CFG)
++        self.assertEqual(est.score, 9)
++        self.assertEqual(est.churn_band, sizing.OVERSIZED)
++        self.assertEqual(est.sibling_conflicts, 0)
++
++
++class SiblingConflictCountIsExposed(SplitChildBase):
++    """Criterion (c): the excluded count is data on the estimate, not only a scoring
++    side-effect — child-3 keys wording on it and child-4's convergence report needs to see
++    a proposal whose children conflict pairwise even where that no longer moves the score."""
++
++    def test_pairwise_conflicting_children_expose_a_nonzero_count_each(self) -> None:
++        """Two children that each name the OTHER as a conflict — the splitter's own
++        statement that the split separated nothing. Their score must NOT reflect it (that
++        is the fix), but `sibling_conflicts` must, so a convergence report can still tell
++        this apart from a clean split."""
++        two = "- **Slug:** two\n- **Defect / goal:** a\n- **Conflicts with:** child-2\n"
++        other = "- **Slug:** other\n- **Defect / goal:** b\n- **Conflicts with:** child-1\n"
++        (self.parent / split.PROPOSAL).write_text(_proposal(two, other), encoding="utf-8")
++        created = split.accept(self.parent, ["701", "702"], self.cfg)
++
++        for d in created:
++            with self.subTest(bundle=d.name):
++                est = sizing.estimate(d / "brief.md", _CFG)
++                self.assertEqual(est.sibling_conflicts, 1,
++                                 "the pairwise sibling conflict was not exposed on the "
++                                 "estimate")
++                self.assertNotIn("conflict(s) declared", "; ".join(est.reasons),
++                                 "the excluded conflict still moved the score/reasons")
++
++    def test_the_field_defaults_to_zero_with_no_lineage(self) -> None:
++        est = sizing.estimate(
++            _brief_with(self.tmp, "- **Slug:** s\n- **Conflicts with:** 1\n"),
++            _CFG)
++        self.assertEqual(est.sibling_conflicts, 0)
++
++    def test_the_field_survives_model_escalation(self) -> None:
++        """`combine()` must not drop what structure already found."""
++        structural = sizing.SizeEstimate(3, sizing.OK, ["x"], sibling_conflicts=2)
++        combined = sizing.combine(structural, {"band": "oversized"})
++        self.assertEqual(combined.sibling_conflicts, 2)
++
++
++class CalibratorAgreement(SplitChildBase):
++    """Criterion (d): `sizing.estimate` and `scripts/size-calibrate` must mine the same
++    quantity for `conflicts_with`, or two distinctly-named ones — not a shared name over
++    two different quantities."""
++
++    def _load_calibrate(self):
++        import importlib.machinery, importlib.util, sys as _sys
++        script = Path(__file__).resolve().parents[1] / "scripts" / "size-calibrate"
++        loader = importlib.machinery.SourceFileLoader("_sc_457", str(script))
++        spec = importlib.util.spec_from_loader(loader.name, loader)
++        mod = importlib.util.module_from_spec(spec)
++        _sys.modules[loader.name] = mod
++        loader.exec_module(mod)
++        return mod
++
++    def test_the_calibrator_imports_the_shared_sibling_exclusion(self) -> None:
++        """ONE definition, the same discipline as `apriori_text` / `AprioriBrief`
++        (`sizing.py` module docstring): asserted by object identity, which only holds if
++        the calibrator imports this very function rather than re-deriving it."""
++        sc = self._load_calibrate()
++        self.assertIs(sc.sibling_conflict_count, sizing.sibling_conflict_count,
++                      "the calibrator has its own copy of the sibling exclusion — the two "
++                      "can now drift silently, mining a value the engine no longer scores")
++
++    def test_the_calibrator_and_the_estimator_agree_on_a_real_split_child(self) -> None:
++        sc = self._load_calibrate()
++        created = self._accept()
++        child_1 = created[0]
++        # `extract` needs SOME reached-Do signal; a patch is the simplest.
++        (child_1 / "patch.diff").write_text("--- a\n+++ b\n", encoding="utf-8")
++
++        est = sizing.estimate(child_1 / "brief.md", _CFG)
++        row = sc.extract(child_1)
++        self.assertIsNotNone(row, "the calibrator skipped a bundle the estimator scored")
++        self.assertEqual(row.sibling_conflicts, est.sibling_conflicts)
++        # The organic count the ENGINE scores (0 here — both declared conflicts are
++        # siblings) must equal what the CALIBRATOR mines under the same feature name.
++        self.assertNotIn("conflict(s) declared", "; ".join(est.reasons))
++        self.assertEqual(row.conflicts_with, 0,
++                         "the calibrator's `conflicts_with` measures a different quantity "
++                         "from the one `sizing.estimate` scores for this bundle")
++
++
++def _brief_with(tmp: Path, body: str) -> Path:
++    d = Path(tempfile.mkdtemp(dir=tmp))
++    p = d / "brief.md"
++    p.write_text(body, encoding="utf-8")
++    return p
++
++
++if __name__ == "__main__":
++    unittest.main()
