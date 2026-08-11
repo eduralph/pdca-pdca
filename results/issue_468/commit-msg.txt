@@ -1,0 +1,37 @@
+fix(flow): drive both pdca flow shapes from one results map
+
+`pdca flow <id>` and `pdca flow <id> <id>` were two different machines.
+The single-id shape short-circuited on raw disk state before driving
+anything, then derived its report and exit code from the bare state
+string the library driver returned; the batch shape drove and reported
+a results map. The same bundle on the same disk could therefore get a
+different answer depending on how it was asked for: a DISCONTINUED
+bundle failed the run when named alone but vanished from the count
+beside a completing sibling, an error that cleanly aborts a batch
+escaped the single-id shape as an uncaught traceback, and a terminal
+split parent was advised `rm -rf <bundle>` — destructive advice, since
+its split-lineage.json (introduced in
+5c83070060c2b3a4b54b3bab8d74012ad1361d3a) is the only on-disk record of
+the split and deleting it orphans the children.
+
+Now every non-empty id list drives through `flow.flow_ids`, and the map
+it returns is total over the ids it was given: an id the run skipped
+reports its state on disk, the same value a driven bundle records, so
+neither shape has to invent an answer for a bundle only the other could
+see. The two shapes are presentations of that one map — the single-id
+`state<TAB>path` line, its listing of open sign-off items and its
+exit-0 stop-for-the-human at AWAITING_SIGNOFF are derived from the map,
+and one exit rule serves both, with the single documented shape
+difference (AWAITING_SIGNOFF counts as success for a single id, not for
+a batch) carried as a parameter rather than as a second code path. The
+terminal recovery hint lives once on the shared path and is
+lineage-aware: a split parent is told to drive its children
+(`pdca flow <child-ids>`), never to delete itself.
+
+Two visible consequences are deliberate. A terminal bundle's
+disposition now prints on stdout like every other run's, instead of a
+stderr-only notice; and a batch run reports and counts the ids it
+skipped — `pdca flow` over a DISCONTINUED id plus a completing one now
+reports 1/2 complete and exits 1, where it reported 1/1 and exited 0.
+
+Fixes #468

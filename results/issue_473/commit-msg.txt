@@ -1,0 +1,32 @@
+flow: recover stranded split children; fund and report adopted waves
+
+A split accepted by a run that then ended — a crash, a ^C, a session
+closed — left its children sitting PLANNED: `pdca flow <parent-id>` skipped
+the terminal parent and only re-printed a hint, so the operator had to
+hand-type every child id to resume. Naming the parent now recovers the
+brood: the id is still skipped as finished (and the hint still prints),
+but it seeds the same lineage-scoped adoption a mid-run split gets — the
+same guards, announcements and results-map semantics, walking transitively
+through generations an earlier run already closed.
+
+Two honesty gaps in the run that adopts close with it. The pass pool was
+sized once, before adoption grew the schedule, so an adopted wave could
+starve work the operator explicitly named — "the run's pass budget is
+spent" over an id the run itself scheduled. The pool is now read off the
+live schedule: one allowance per wave, no wave funded twice, and the bound
+unchanged because adoption itself is finite (a bundle adopted once, a
+candidate examined once, every child already on disk). And the single-id
+shape printed one state line for the named id while deriving its exit code
+from every bundle the run drove, so `pdca flow 500` could print COMPLETE
+while exiting 1 — or exit 0 with an adopted child waiting at sign-off,
+unmentioned. It now prints the documented state<TAB>path line for every
+bundle in the results map, the named id first, so stdout and the exit code
+cannot disagree.
+
+Operator docs and the planner guidance asserted the old pool rule and the
+old "a later run does not pick them up" limitation; both are updated to
+state the shipped behaviour.
+
+Builds on the adoption core from #472 (PR #478), which must land first.
+
+Fixes #473

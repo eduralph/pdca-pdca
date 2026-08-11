@@ -184,13 +184,23 @@ size_guard = "warn"
 # (76% of bundles at two rounds reach a third). The flow names this rule on stderr when it
 # declines, so an early halt is never a mystery. Set any threshold to 0 to switch it off.
 #
-# Commented out because the defaults ARE the calibrated values; uncomment to retune against
-# your own corpus with `scripts/size-calibrate`. A sub-table, so it must sit after every bare
-# [driver] key — see the note above size_guard for what happens when that ordering slips.
-# [driver.size_signal]
-# patch_kb = 100
-# patch_files = 20
-# rounds = 2
+# Retuned at the 2026-08-09 Act review (process/act-log.md): the rounds rule fired in 4 of
+# the 6 frozen cycles at exactly threshold 2, and every firing was noise — the rounds were
+# spent on environment losses (a missing `copier` in the verifier) and permanently-human §6
+# classes (T4 artifacts withheld, validation), not implementation-shaped findings
+# (issue_453 §10). The upstream discounting fix (#446, from issue_436) is merged but not in
+# any release yet. Until it arrives via v0.57.0 + `copier update`, the human's calibration
+# stands: 20–30% over target is acceptable given the estimator's accuracy — patch thresholds
+# loosened ~25%, and `rounds` moved to 3 so the backstop fires only once the full
+# `max_auto_iters` budget above is actually spent. Re-tighten with `scripts/size-calibrate`
+# after the update lands and #446 discounts the noise rounds.
+# (Original calibrated defaults: patch_kb = 100, patch_files = 20, rounds = 2.)
+# A sub-table, so it must sit after every bare [driver] key — see the note above size_guard
+# for what happens when that ordering slips.
+[driver.size_signal]
+patch_kb = 125
+patch_files = 25
+rounds = 3
 
 
 # Install bootstrap (issue #207). `make install` runs scripts/bootstrap-tools.sh, which
@@ -843,6 +853,15 @@ id = "bash >= 4 (C4 gate uses mapfile)"
 cmd = "bash -c 'test \"${BASH_VERSINFO[0]}\" -ge 4'"
 hint = "install a modern bash (macOS: brew install bash) — engine/scripts/run-verify.sh uses mapfile, absent from bash 3.2"
 level = "WARN"
+
+# The GitHub CLI is the harness's base toolchain: publish opens draft PRs with it, and
+# briefs that touch merge/PR flows declare it as a dependency (`gh` ↔ this row's id).
+[[doctor.checks]]
+group = "engine"
+id = "gh"
+cmd = "gh --version"
+hint = "install the GitHub CLI (https://cli.github.com) — publish opens draft PRs with gh"
+required = true
 
 
 # Deterministic Check gates (docs 04). Each check runs a shell command; it PASSES

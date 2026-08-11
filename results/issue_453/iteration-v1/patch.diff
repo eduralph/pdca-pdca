@@ -1,0 +1,268 @@
+diff --git a/template/src/pdca_harness/flow.py b/template/src/pdca_harness/flow.py
+index 7a8a01d..f96e230 100644
+--- a/template/src/pdca_harness/flow.py
++++ b/template/src/pdca_harness/flow.py
+@@ -213,7 +213,24 @@ def _apply_decision(
+ def _signoff_and_apply(
+     cfg: Config, d: Path, *, by: str, today: str, apply_now: bool = True
+ ) -> str | None:
+-    """Single-issue: run the interactive sign-off leaf, then apply its decision."""
++    """Single-issue: apply a decision already durable on disk if one exists — WITHOUT a
++    fresh session; otherwise run the interactive sign-off leaf, then apply its decision.
++
++    A ``signoff-decision`` left by an earlier, interrupted session (a ``^C`` between the
++    leaf's write and the driver's apply) is un-consumed input to the driver, not an
++    in-process by-product of the session that wrote it (issue #453) — so it must be read
++    and applied before this bundle is ever offered a NEW session, or the human's decision
++    (already made, possibly re-affirmed on every later pass) is silently re-asked for and
++    then overwritten. The one exception is an ``accept`` C6 refuses (``"blocked"``): that
++    bundle genuinely still needs a human to return, so a fresh session runs even though a
++    (refused) decision was already on disk.
++    """
++    if leaves.signoff_decision(d):
++        print(f"flow: {d.name} — sign-off decision already on disk; recording it "
++              f"without a new session", file=sys.stderr)
++        applied = _apply_decision(cfg, d, by=by, today=today, apply_now=apply_now)
++        if applied != "blocked":
++            return applied
+     leaves.run_signoff(d, cfg)
+     return _apply_decision(cfg, d, by=by, today=today, apply_now=apply_now)
+ 
+@@ -224,9 +241,10 @@ def _maybe_auto_iterate(
+     """Rebuild without asking, when Check found only implementation defects (issue #264).
+ 
+     Returns True iff the bundle was routed to ITERATE_DO. Every other outcome — auto-iterate
+-    off, the bundle not halted at AWAITING_SIGNOFF, an empty §6, any HUMAN-kind finding, or
+-    the per-bundle budget spent — returns False and leaves the bundle exactly where it was,
+-    for the human.
++    off, the bundle not halted at AWAITING_SIGNOFF, a decision already durable on disk
++    (issue #453 — never author a second decision over one this driver did not just write,
++    human or automatic), an empty §6, any HUMAN-kind finding, or the per-bundle budget spent
++    — returns False and leaves the bundle exactly where it was, for the human.
+ 
+     Deliberately routed through the existing ``_apply_decision`` rather than calling
+     ``signoff.record`` directly: §9 then stays authored solely by ``signoff.record``, and the
+@@ -240,6 +258,12 @@ def _maybe_auto_iterate(
+     """
+     if not cfg.auto_iterate or state.state(d) != state.AWAITING_SIGNOFF:
+         return False
++    if leaves.signoff_decision(d):
++        # A decision is already durable on disk — from an earlier (possibly interrupted)
++        # human session, or a prior pass's own auto-iterate not yet applied. Never author a
++        # second one over it (issue #453): the un-consumed decision belongs to whoever wrote
++        # it, and is applied by the ordinary sign-off path, not here. Spends no budget.
++        return False
+     try:
+         items = assemble.collect_needs_human(d, cfg)
+     except (OSError, ValueError) as exc:
+@@ -641,7 +665,10 @@ def _drive_wave(cfg: Config, wave: list[Path], *, by: str, today: str,
+     """Drive ONE wave's bundles to all-terminal (COMPLETE / DISCONTINUED) with iteration,
+     then the cheap-first sign-off restricted to the wave. Publishing and folding are the
+     caller's. The pass loop mirrors the prior single-batch driver: build-all
+-    (beat-synchronised, isolated), then a chunked sign-off whose decisions are recorded
++    (beat-synchronised, isolated), then — before any bundle is offered a session — a
++    pre-apply of whichever pending bundles already carry a durable decision from an
++    earlier, interrupted session (issue #453; the un-consumed-input invariant), then a
++    chunked sign-off, over only the bundles still undecided, whose decisions are recorded
+     (``apply_now=False``) so an iterate-do doesn't rebuild mid-review — looping until the
+     wave makes no progress (an iterate-plan re-open #105 still counts as progress) or every
+     bundle is terminal.
+@@ -683,7 +710,25 @@ def _drive_wave(cfg: Config, wave: list[Path], *, by: str, today: str,
+                 _warn_abandoned(wave, why="a full pass made no progress")
+                 return
+             continue    # progress (e.g. an iterate-plan re-open) — give it another pass
+-        for chunk in _chunks(pending, SIGNOFF_BATCH_SIZE):
++        # Pre-apply (issue #453): a pending bundle may already carry a decision from an
++        # earlier, interrupted session — the write happened, but the run died before this
++        # driver's apply ever ran (a `^C` `_isolate` deliberately does not contain). Record
++        # + transition it now, WITHOUT opening a fresh session for a bundle the human
++        # already judged, using the SAME apply shape the post-session path below uses. The
++        # one exception is an `accept` C6 refuses ("blocked"): that bundle still needs a
++        # human to return, so it stays in `needing_session`.
++        needing_session: list[Path] = []
++        for d in pending:
++            if not leaves.signoff_decision(d):
++                needing_session.append(d)
++                continue
++            print(f"flow: {d.name} — sign-off decision already on disk; recording it "
++                  f"without a new session", file=sys.stderr)
++            applied = _isolate(d, "sign-off (pre-apply)", lambda d=d: _apply_decision(
++                cfg, d, by=by, today=today, apply_now=False))
++            if applied == "blocked":
++                needing_session.append(d)
++        for chunk in _chunks(needing_session, SIGNOFF_BATCH_SIZE):
+             try:
+                 leaves.run_signoff_batch(cfg, chunk)
+             except Exception as exc:  # noqa: BLE001 — a dropped session is not fatal
+diff --git a/template/tests/test_signoff_orphan.py b/template/tests/test_signoff_orphan.py
+new file mode 100644
+index 0000000..7764b8e
+--- /dev/null
++++ b/template/tests/test_signoff_orphan.py
+@@ -0,0 +1,166 @@
++"""Offline slice for issue #453 — a `signoff-decision` orphaned by an interrupted
++session is un-consumed input to the driver, not an in-process by-product of the
++session that wrote it (stdlib unittest).
++
++Pre-fix: a bundle halted at AWAITING_SIGNOFF that already carries a valid
++`signoff-decision` (written by an earlier session that then died before the driver
++applied it — a `^C`, a crash) gets offered a FRESH sign-off session on every later
++pass, and that session's write clobbers the orphaned decision — the human's actual
++call is silently discarded. Post-fix: both drive paths — the batch `flow._drive_wave`
++and the single-issue `flow._signoff_and_apply` — read the decision already on disk,
++record §9 and transition the bundle WITHOUT invoking any sign-off leaf; and
++`flow._maybe_auto_iterate` declines (writes no decision, spends no auto-iterate
++budget) while such a file exists. Run from the project root:
++    PYTHONPATH=src python3 -m unittest tests.test_signoff_orphan
++"""
++
++from __future__ import annotations
++
++import shutil
++import tempfile
++import unittest
++from pathlib import Path
++
++from pdca_harness import assemble, autoiterate, driver, flow, leaves, signoff, state
++from pdca_harness.config import Config, LeafConfig
++
++
++def _stub_config(root: Path) -> Config:
++    """All six leaves stubbed, gates empty (all-PASS stub rows) — same shape as
++    ``tests.test_flow_slice._stub_config`` (template/tests/test_flow_slice.py:32-55)."""
++    return Config(
++        root=root,
++        bundle_root=root / "results",
++        process_dir=root / "process",
++        templates_dir=root / "templates",  # empty → planner stub uses its fallback brief
++        default_branch="main",
++        tracker_system="github",
++        tracker_url="",
++        issue_id_example="#1",
++        builder=LeafConfig(mode="stub", family="claude"),
++        reviewer=LeafConfig(mode="stub", family="codex"),
++        planner=LeafConfig(mode="stub", family="claude", interactive=True),
++        signoff=LeafConfig(mode="stub", family="claude", interactive=True),
++        publisher=LeafConfig(mode="stub", family="claude", interactive=True),
++        act=LeafConfig(mode="stub", family="claude", interactive=True),
++        repo_checkouts={"example-org/example-repo": str(root / "example-repo")},
++    )
++
++
++class SignoffOrphanSlice(unittest.TestCase):
++    def setUp(self) -> None:
++        self.tmp = Path(tempfile.mkdtemp())
++        self.cfg = _stub_config(self.tmp)
++
++    def tearDown(self) -> None:
++        shutil.rmtree(self.tmp, ignore_errors=True)
++
++    def _awaiting_signoff_bundle(self, issue_id: str) -> Path:
++        """Drive a fresh bundle (stub Plan/Do/Check) to AWAITING_SIGNOFF, with NO
++        sign-off session run — exactly the halt this issue's decision then gets
++        written onto."""
++        d = self.cfg.bundle(issue_id)
++        self.assertTrue(flow._plan_if_unplanned(self.cfg, d, None))
++        self.assertEqual(driver.run_issue(d, self.cfg), state.AWAITING_SIGNOFF)
++        return d
++
++    def test_drive_wave_applies_orphaned_decision_without_a_session(self) -> None:
++        d = self._awaiting_signoff_bundle("ORPHANWAVE")
++        (d / leaves.SIGNOFF_DECISION).write_text(
++            "iterate-do\nnot yet — the gate is wrong\n", encoding="utf-8")
++
++        calls: list[list[Path]] = []
++        orig_batch = leaves.run_signoff_batch
++
++        def spying_batch(cfg: Config, bundles: list[Path]) -> None:
++            calls.append(list(bundles))
++            # If this were ever invoked it would overwrite the orphaned decision — the
++            # exact bug this test exists to catch — so record the call but do NOT
++            # delegate to the stub (the assertion below on `calls` is what matters).
++
++        leaves.run_signoff_batch = spying_batch
++        try:
++            # One pass is enough to prove the point: the orphaned decision must be
++            # pre-applied WITHIN this very pass, before any chunk is offered a session.
++            # (A later pass legitimately rebuilds the now-iterate-do'd bundle and asks
++            # for a genuinely NEW decision — that is ordinary lifecycle, not this bug.)
++            flow._drive_wave(self.cfg, [d], by="t", today="2026-01-01", max_passes=1)
++        finally:
++            leaves.run_signoff_batch = orig_batch
++
++        self.assertEqual(calls, [], "a fresh sign-off session was opened for a bundle "
++                                     "that already carried a decision on disk")
++        self.assertEqual(signoff.outcome_token(d / "SUMMARY.md"), "iterated-to-Do")
++        self.assertEqual(signoff.iteration_delta(d / "SUMMARY.md"),
++                         "not yet — the gate is wrong")
++        self.assertFalse((d / leaves.SIGNOFF_DECISION).exists())  # consumed
++
++    def test_signoff_and_apply_applies_orphaned_decision_without_a_session(self) -> None:
++        d = self._awaiting_signoff_bundle("ORPHANSOLO")
++        (d / leaves.SIGNOFF_DECISION).write_text(
++            "iterate-do\nnot yet — the gate is wrong\n", encoding="utf-8")
++
++        calls: list[Path] = []
++        orig_signoff = leaves.run_signoff
++        leaves.run_signoff = lambda d, cfg: calls.append(d)  # would overwrite the decision
++        try:
++            applied = flow._signoff_and_apply(self.cfg, d, by="t", today="2026-01-01",
++                                              apply_now=False)
++        finally:
++            leaves.run_signoff = orig_signoff
++
++        self.assertEqual(calls, [], "a fresh sign-off session was opened for a bundle "
++                                     "that already carried a decision on disk")
++        self.assertEqual(applied, "iterate-do")
++        self.assertEqual(signoff.outcome_token(d / "SUMMARY.md"), "iterated-to-Do")
++        self.assertFalse((d / leaves.SIGNOFF_DECISION).exists())  # consumed
++
++    def test_c6_blocked_accept_still_falls_through_to_a_fresh_session(self) -> None:
++        # The one documented exception: an `accept` C6 refuses (§6 NEEDS-HUMAN still
++        # open) still needs a human to return, so a fresh session still runs.
++        d = self._awaiting_signoff_bundle("ORPHANBLOCKED")
++        (d / leaves.SIGNOFF_DECISION).write_text("accept\n", encoding="utf-8")
++        # SUMMARY.md's §6 is left with its stub-authored open items — C6 refuses.
++
++        calls: list[Path] = []
++
++        def fresh_session(dd: Path, cfg: Config) -> None:
++            calls.append(dd)
++            leaves._stub_signoff(dd, cfg)  # the human clears §6 and re-decides for real
++
++        orig_signoff = leaves.run_signoff
++        leaves.run_signoff = fresh_session
++        try:
++            applied = flow._signoff_and_apply(self.cfg, d, by="t", today="2026-01-01",
++                                              apply_now=False)
++        finally:
++            leaves.run_signoff = orig_signoff
++
++        self.assertEqual(calls, [d], "a C6-refused accept must still fall through to a "
++                                      "fresh session")
++        self.assertEqual(applied, "accept")
++        self.assertEqual(signoff.outcome_token(d / "SUMMARY.md"), "merged-wider")
++
++    def test_maybe_auto_iterate_declines_while_a_decision_is_on_disk(self) -> None:
++        d = self._awaiting_signoff_bundle("ORPHANAUTO")
++        (d / leaves.SIGNOFF_DECISION).write_text("accept\n", encoding="utf-8")
++        self.cfg.auto_iterate = True
++
++        def must_not_be_called(dd: Path, cfg: Config):
++            raise AssertionError("assemble.collect_needs_human must not run while a "
++                                  "decision is already on disk — auto-iterate must "
++                                  "decline before spending any work")
++
++        orig_collect = assemble.collect_needs_human
++        assemble.collect_needs_human = must_not_be_called
++        try:
++            routed = flow._maybe_auto_iterate(self.cfg, d, by="auto-iterate",
++                                              today="2026-01-01", apply_now=False)
++        finally:
++            assemble.collect_needs_human = orig_collect
++
++        self.assertFalse(routed)
++        self.assertEqual(autoiterate.count(d), 0, "auto-iterate must spend no budget "
++                                                    "while a decision is orphaned on disk")
++        self.assertEqual(leaves.signoff_decision(d), "accept")  # untouched
++        self.assertEqual(state.state(d), state.AWAITING_SIGNOFF)  # not re-driven

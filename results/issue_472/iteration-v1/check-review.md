@@ -1,0 +1,15 @@
+Task under review: adopt the children of a bundle that splits during `pdca flow`, scheduling and driving them in later waves under the original run-wide pass budget.
+
+| Item | Verdict | Basis |
+|------|---------|-------|
+| C1 Spec | PASS | The acceptance boundary is decision-complete: lineage-scoped, transitive adoption, tolerant holds, deduplication, real wave reporting, and the original-schedule budget are all observable through the CLI fixture at `template/tests/test_flow_adopt_split.py:322`. |
+| C2 Reproduction (red pre-fix) | PASS | The production-reverted leg executed all 20 focused tests and failed 18 because split children remained undriven, directly reproducing the operator restart at `template/tests/test_flow_adopt_split.py:333`. |
+| C3 Change | PASS | The change stays within the adoption core and its documented/test support; adopted children enter the shared drive path and ordinary later-wave handling at `template/src/pdca_harness/flow.py:1220`. |
+| C4 Verification (red→green) | PASS | Independent red→green rerun executed 20 tests on each leg (18 failures without production hunks; 20 passes with them), grounding the criterion at `template/tests/test_flow_adopt_split.py:322`. |
+| C5 Causal adequacy | PASS | The frozen drive set is removed as the cause by extending and re-waving the shared run state, rather than guarded by a capability probe or alternate entrypoint, at `template/src/pdca_harness/flow.py:1151`. |
+| T1 Structure | PASS | Adoption is decomposed into detection, validation, rescheduling, and one splice while `_drive_and_act` remains the sole execution path, limiting parity risk at `template/src/pdca_harness/flow.py:929`. |
+| T2 Shape | PASS | Diff whitespace validation, documentation lint, and the 22-page rendered-site link audit all pass; the public contract covers wave, lineage, hold, and budget semantics at `docs/07-crosscutting.md:243`. |
+| T3 Runtime | PASS | The focused suite, full offline driver discovery, and all seven Copier render/update-compat tests pass with the patched target; pass accounting is exercised at `template/tests/test_flow_adopt_split.py:397`. |
+| T4 Contribution | NEEDS-HUMAN | The contribution-text decision remains owed — `commit-msg.txt` and `pr-description.md` were not supplied, so the asserted checker pass cannot be independently rerun and release-facing impact text remains unaudited. |
+| T5 Judgment | PASS | Shared-path placement preserves the merged #468 architecture, and affected-path searches found the relevant merged lineage/flow prior art but no closed-unmerged PR collision; the remaining boundary is explicitly documented at `template/src/pdca_harness/flow.py:967`. |
+| Validation — fitness-to-purpose | NEEDS-HUMAN | The maintainer must decide whether automatic transitive adoption, stderr-only holds, and a pool fixed to the original wave count match operator expectations — these choices change run duration and unfinished-work visibility despite green automation at `docs/07-crosscutting.md:257`. |

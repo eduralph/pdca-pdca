@@ -1,0 +1,15 @@
+Reviewing issue #457: stop split-child sibling scheduling conflicts from inflating sizing churn while preserving organic-conflict scoring and calibration visibility.
+
+| Item | Verdict | Basis |
+|------|---------|-------|
+| C1 Spec | PASS | The brief defines falsifiable sibling-only, organic-conflict, no-lineage, exposed-count, and calibrator-agreement outcomes against the estimator contract at `template/src/pdca_harness/sizing.py:255`. |
+| C2 Reproduction (red pre-fix) | PASS | With only production hunks reversed in a copy of the target, all 9 tests executed and the materialised child scored 9 against the cutoff 7, failing the assertion at `template/tests/test_sizing_split_child.py:87`. |
+| C3 Change | FAIL | A malformed lineage list member such as `"siblings": [[]]` now raises `TypeError` while building the set at `template/src/pdca_harness/sizing.py:251`, so the required abstain-not-crash behavior is not preserved. |
+| C4 Verification (red→green) | PASS | The focused oracle independently ran 9 tests red without the production hunks and 9/9 green with them; the agreement assertion exercises both estimator and calibrator at `template/tests/test_sizing_split_child.py:217`. |
+| C5 Causal adequacy | PASS | The change removes sibling ids from the scored quantity at `template/src/pdca_harness/sizing.py:293` and retains organic conflicts, rather than adding a capability probe or downstream symptom guard. |
+| T1 Structure | PASS | One helper owns sibling classification and the calibrator imports it at `template/scripts/size-calibrate:70`; model combination preserves the exposed count at `template/src/pdca_harness/sizing.py:526`. |
+| T2 Shape | PASS | Documentation lint and a 22-page site render/link audit independently passed; the documented organic/excluded distinction is grounded at `docs/07-crosscutting.md:129`. |
+| T3 Runtime | FAIL | Although the full offline suite, 124 focused regression tests, and compile checks passed, the malformed-lineage runtime case crashes at `template/src/pdca_harness/sizing.py:251` despite the total-reader contract at `template/src/pdca_harness/split.py:373`. |
+| T4 Contribution | NEEDS-HUMAN | Human/publish must confirm the PR body opener and tracker id in both contribution artifacts — those artifacts were not supplied, so the recorded green cannot be independently rerun against the rules at `template/src/pdca_harness/cli.py:1061`. |
+| T5 Judgment | NEEDS-HUMAN | Human must confirm issue #456 lands before this integration-based patch and that no closed/rejected affected-path work changes the approach — merged history includes #456, but closed/rejected prior art was not mechanically available; the dependency surface begins at `template/src/pdca_harness/split.py:373`. |
+| Validation — fitness-to-purpose | NEEDS-HUMAN | Human must run the render and `copier update` compatibility suites with real `copier` installed and judge release fitness — `copier` was absent here, so the green offline suite did not exercise that external dependency. |

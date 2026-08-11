@@ -1,0 +1,11 @@
+{
+  "mode": "stacked-pr",
+  "branch": "fix/457-sizing-ignores-sibling-conflicts",
+  "pr_url": "https://github.com/eduralph/pdca-harness/pull/483",
+  "base": "pdca-integration/main",
+  "repo": "eduralph/pdca-harness",
+  "by": "Eduard Ralph",
+  "date": "2026-08-10",
+  "id_pending": false,
+  "stacks_on": []
+}

@@ -1,0 +1,853 @@
+diff --git a/docs/07-crosscutting.md b/docs/07-crosscutting.md
+index 4e81618..6c20436 100644
+--- a/docs/07-crosscutting.md
++++ b/docs/07-crosscutting.md
+@@ -206,6 +206,23 @@ proposal-local label (`child-2`); acceptance rewrites those to the real
+ [waves](#waves-in-execution) correctly from the first `pdca flow` on the
+ children.
+ 
++Before either shape does anything irreversible, acceptance also prints a
++**convergence report** — the one question the checks above never asked: *does
++this split actually make the children smaller?* Each child's own body is staged
++through the same structural estimate a materialised bundle gets (labels standing
++in for the tracker ids that don't exist yet, including in the lineage record the
++estimate reads), and the report names each child's band against the parent's and
++the feature carrying its score, saying so plainly when most children don't band
++lower. It isn't fooled by a proposal whose children conflict pairwise either: a
++`Conflicts with` edge *between* siblings is the splitter's own statement that
++those two children edit a shared resource, so a complete set of them is a split
++that separated nothing, reported as NOT converged even where the estimate
++excludes those declarations from the band printed beside them. It is strictly
++advisory — it never blocks and never prompts, exactly like the [size
++guard](#the-estimate) it mirrors — and its own writes are guarded, so a stream
++that breaks part-way (`pdca split 13636 --accept 2>&1 | head`) changes neither
++the exit code nor which bundles are created.
++
+ The parent bundle doesn't just sit there afterward — it's marked via the same
+ [close-disposition fast path](04-do.md#the-close-disposition-fast-path) a
+ duplicate or wontfix uses (`close-disposition` = `split`), so it routes straight
+diff --git a/template/src/pdca_harness/cli.py b/template/src/pdca_harness/cli.py
+index 9f2ceea..ca807d1 100644
+--- a/template/src/pdca_harness/cli.py
++++ b/template/src/pdca_harness/cli.py
+@@ -754,76 +754,80 @@ def _split(cfg: Config, args) -> int:
+         if token:
+             ids.append(token)
+     filed = False
++    # Read the proposal and run `preflight` on BOTH shapes, before either does anything
++    # irreversible (issue #459). It carries the checks that do not need the ids — a second
++    # acceptance filed a whole second set of real sub-issues before discovering the parent
++    # was already split; a cyclic proposal filed its children before `validate` refused
++    # them — and now also the CONVERGENCE REPORT, the one statement of whether this split
++    # actually makes the children smaller. `--ids` reached neither: it went straight to
++    # `accept`, and it is the path the docs call *required* for a tracker this cannot reach
++    # — the operator who has already paid for the issues by hand, and so most needs the
++    # verdict. Tracker issues cannot be withdrawn and a materialised bundle is barely
++    # better, so this order is the whole guarantee.
++    try:
++        children = split.parse((d / split.PROPOSAL).read_text(encoding="utf-8"))
++        split.preflight(d, children, cfg)
++    except OSError:
++        split.advisory(f"split: {d.name} has no {split.PROPOSAL} — run "
++                       f"`{_prog()} split {args.issue_id}` first")
++        return 1
++    except split.SplitError as exc:
++        split.advisory(f"split: {exc}")
++        return 1
+     if not ids:
+-        # No ids given: file one issue per child, parented to this bundle's issue. Reading
+-        # the proposal here rather than inside `accept` so a malformed one is refused
+-        # BEFORE anything is filed — a tracker issue cannot be rolled back, and creating
+-        # three of them for a proposal that then fails to parse is the worst order.
+-        try:
+-            children = split.parse((d / split.PROPOSAL).read_text(encoding="utf-8"))
+-            # Every reason acceptance would fail that does not need the ids — run BEFORE a
+-            # single issue is filed. Without it, a second `--accept` filed a whole second
+-            # set of real sub-issues and only then discovered the parent was already
+-            # split; a cyclic proposal filed its children before `validate` refused them.
+-            # Tracker issues cannot be withdrawn, so the order is the whole guarantee.
+-            split.preflight(d, children, cfg)
+-        except OSError:
+-            print(f"split: {d.name} has no {split.PROPOSAL} — run "
+-                  f"`{_prog()} split {args.issue_id}` first", file=sys.stderr)
+-            return 1
+-        except split.SplitError as exc:
+-            print(f"split: {exc}", file=sys.stderr)
+-            return 1
++        # No ids given: file one issue per child, parented to this bundle's issue.
+         try:
+             ids = split.file_children(d, children, cfg, prog=_prog())
+         except split.TrackerUnavailable as exc:
+             # Never a silent skip: name the reason AND the way forward. A split that
+             # filed nothing and materialised nothing would otherwise look like a no-op.
+-            print(f"split: {exc}. File one issue per child yourself and pass them in "
+-                  f"proposal order:\n  {_prog()} split {args.issue_id} --accept --ids "
+-                  + ",".join(f"<id-{n}>" for n in range(1, len(children) + 1)),
+-                  file=sys.stderr)
++            split.advisory(f"split: {exc}. File one issue per child yourself and pass them "
++                           f"in proposal order:\n  {_prog()} split {args.issue_id} "
++                           "--accept --ids "
++                           + ",".join(f"<id-{n}>" for n in range(1, len(children) + 1)))
+             return 1
+         except split.SplitError as exc:
+-            print(f"split: {exc}", file=sys.stderr)
++            split.advisory(f"split: {exc}")
+             return 1
+         filed = True
+-        try:
+-            print(f"filed {len(ids)} child issue(s): "
+-                  + ", ".join("#" + i for i in ids), file=sys.stderr)
+-        except OSError:
+-            # A closed or full stderr must not abort the run HERE: the issues exist, and
+-            # stopping between filing and accepting is the one state with no artifact
+-            # naming them. Carry on; the failure paths below re-print the numbers.
+-            pass
++        # A closed or full stderr must not abort the run HERE: the issues exist, and
++        # stopping between filing and accepting is the one state with no artifact naming
++        # them. `split.advisory` absorbs it; the failure paths below re-print the numbers.
++        split.advisory(f"filed {len(ids)} child issue(s): "
++                       + ", ".join("#" + i for i in ids))
+     try:
+         created = split.accept(d, ids, cfg)
+     except split.SplitError as exc:
+-        print(f"split: {exc}", file=sys.stderr)
++        split.advisory(f"split: {exc}")
+         if filed:
+             # The issues are real and cannot be withdrawn. Say so explicitly and give the
+             # command that resumes against them, or they are orphaned with nothing on
+             # screen naming them — the one failure this feature must not have.
+-            print("split: the child issues were already filed and CANNOT be rolled back: "
+-                  + ", ".join("#" + i for i in ids) + ".", file=sys.stderr)
++            split.advisory("split: the child issues were already filed and CANNOT be "
++                           "rolled back: " + ", ".join("#" + i for i in ids) + ".")
+             if "already marked" in str(exc):
+                 # `preflight` passed and `accept` then found the parent terminal, so
+                 # ANOTHER acceptance won the race between them. Printing the ordinary
+                 # retry here would be a false instruction: it cannot succeed against an
+                 # already-split parent, and following it would file a third set.
+-                print("split: the parent was marked split by another run while these were "
+-                      "being filed, so its children already exist. Do NOT re-run --accept: "
+-                      "close the issues above as duplicates, or reopen the parent if this "
+-                      "run's split is the one you want.", file=sys.stderr)
++                split.advisory(
++                    "split: the parent was marked split by another run while these were "
++                    "being filed, so its children already exist. Do NOT re-run --accept: "
++                    "close the issues above as duplicates, or reopen the parent if this "
++                    "run's split is the one you want.")
+             else:
+-                print("Fix the problem above, then re-run against them:\n"
+-                      f"  {_prog()} split {args.issue_id} --accept --ids {','.join(ids)}",
+-                      file=sys.stderr)
++                split.advisory("Fix the problem above, then re-run against them:\n"
++                               f"  {_prog()} split {args.issue_id} --accept --ids "
++                               f"{','.join(ids)}")
+         return 1
++    # Everything below is advisory in the strongest sense: the bundles are on disk and the
++    # issues are filed, so no write here can change the outcome — but an unguarded one
++    # could still change the EXIT CODE. `pdca split 500 --accept 2>&1 | head` breaks both
++    # streams part-way and, before #459, turned a completed acceptance into a traceback.
+     for child in created:
+-        print(child)
+-    print(f"{d.name} marked split; run `{_prog()} flow {' '.join(ids)}` to drive the "
+-          "children", file=sys.stderr)
++        split.advisory(str(child), file=sys.stdout)
++    split.advisory(f"{d.name} marked split; run `{_prog()} flow {' '.join(ids)}` to drive "
++                   "the children")
+     return 0
+ 
+ 
+diff --git a/template/src/pdca_harness/split.py b/template/src/pdca_harness/split.py
+index b24346f..71b66be 100644
+--- a/template/src/pdca_harness/split.py
++++ b/template/src/pdca_harness/split.py
+@@ -29,6 +29,7 @@ import re
+ import shutil
+ import subprocess
+ import sys
++import tempfile
+ from dataclasses import dataclass
+ from pathlib import Path
+ 
+@@ -234,6 +235,44 @@ def _cycles(children: list[Child]) -> list[str]:
+     return bad
+ 
+ 
++def advisory(text: str, *, file=None) -> None:
++    """Write one ADVISORY line, absorbing a stream failure rather than raising (issue #459).
++
++    Every write on the acceptance path is advisory in this exact sense: what the
++    convergence report below prints can only change the human's *decision*, and what
++    `cli._split` prints after :func:`accept` returns cannot change anything at all — the
++    tracker issues are filed and the child bundles are on disk. Neither may fail the
++    command, and `pdca split 500 --accept 2>&1 | head` is enough to break the stream
++    part-way through and make them try.
++
++    Both failure shapes were real. A `BrokenPipeError` out of a report line escaped
++    `preflight`, where `cli._split`'s own `except OSError` reads it as "this bundle has no
++    split-proposal.md" (`cli.py:770-773`) — so a perfectly good proposal was refused with
++    rc 1 and a flatly wrong reason. Out of the status line *after* `accept` returned it was
++    worse: an unhandled traceback and a non-zero exit on a run whose irreversible half had
++    already succeeded, which is the one thing an advisory line must never do.
++
++    ONE definition, used by the report here, by the notices :func:`_rollback`,
++    :func:`_restore_lineage` and :func:`file_children` print when something goes wrong
++    mid-acceptance, and by every line `cli._split` writes — so "output can never abort an
++    acceptance" is a property of the whole path rather than of the writes someone
++    remembered to wrap. Guarding the report alone was not enough: the status line after
++    `accept` returned still raised, and a persistently broken stream still changed the exit
++    code of a run whose bundles were already on disk. In the interrupt report
++    (:func:`file_children`) it also keeps a `KeyboardInterrupt` from being replaced by the
++    `OSError` of failing to describe it. ``flush=True`` because a piped stdout is
++    block-buffered: without it the failure lands in the interpreter's own shutdown flush,
++    outside every handler, where CPython reports it and exits 120.
++
++    The stream is resolved at CALL time (``file=None`` → ``sys.stderr``), so a caller that
++    redirects `sys.stderr` — the CLI under a pipe, a test — is honoured.
++    """
++    try:
++        print(text, file=sys.stderr if file is None else file, flush=True)
++    except OSError:
++        pass
++
++
+ def preflight(parent: Path, children: list[Child], cfg) -> None:
+     """Every reason acceptance would fail that does NOT depend on the ids.
+ 
+@@ -242,6 +281,14 @@ def preflight(parent: Path, children: list[Child], cfg) -> None:
+     run a second time filed a whole second set of real sub-issues and only THEN
+     discovered the parent was already split — and a proposal with a dependency cycle
+     filed its children before `validate` refused them.
++
++    It also emits the **convergence report** (issue #459), last, once the proposal is known
++    to be acceptable. This is the only point BOTH acceptance shapes reach before anything
++    irreversible happens — a filed tracker sub-issue, a materialised bundle — so it is the
++    last point at which "does this split actually make the children smaller?" can still
++    change the decision. Advisory in the strict sense: :func:`_emit_convergence_report`
++    neither raises nor blocks, so nothing about it can change what is filed, what is
++    materialised, or the exit code.
+     """
+     proposal = parent / PROPOSAL
+     if not proposal.exists():
+@@ -255,6 +302,7 @@ def preflight(parent: Path, children: list[Child], cfg) -> None:
+             "first orphaned from the parent's breadcrumb. Reopen it first if that is what "
+             "you want")
+     _validate_ordering(children)
++    _emit_convergence_report(parent, children, cfg)
+ 
+ 
+ def _validate_ordering(children: list[Child]) -> None:
+@@ -278,6 +326,168 @@ def _validate_ordering(children: list[Child]) -> None:
+             "them). Fix the ordering in the proposal first")
+ 
+ 
++# ---------------------------------------------------------------------------
++# The convergence report (issue #459)
++#
++# `preflight` used to check only the reasons acceptance would FAIL. Nothing asked the one
++# question the human is actually deciding: does this split make the children smaller? A
++# split that leaves every child `oversized` was discovered a whole cycle later, when each
++# child's own size guard fired and pointed the planner at `pdca split` again — by which
++# time the sub-issues are filed, and a tracker issue cannot be withdrawn (#358). So the
++# estimate runs here, at the last point where the answer can still change the decision,
++# and it only ever REPORTS: the size guard it mirrors is warn-only for a calibrated reason
++# (`plan_policy.size_reasons` — 62% precision at its best), and a blocking check at that
++# rate is one people learn to override.
++# ---------------------------------------------------------------------------
++
++
++def _staged_estimates(parent: Path, children: list[Child], cfg) -> list[tuple[Child, object]]:
++    """``(child, estimate)`` per child, scored exactly as the materialised bundle will be.
++
++    Staged through :func:`materialise` — the writer acceptance itself uses — into a
++    throwaway directory, with each child's LABEL standing in for the tracker id it does not
++    have yet. Reusing that function is the whole point: the staged bundle differs from the
++    one `--accept` will write only in the ids that do not exist yet, so the report cannot
++    end up describing a bundle assembled differently from the one about to land.
++
++    The lineage record it writes matters as much as the brief. `sizing.estimate` reads the
++    sibling set from it to decide which declared conflicts are the split's own scheduling
++    metadata rather than churn (#457), and at `preflight` time every ordering ref is a
++    sibling LABEL by construction (:func:`_validate_ordering` has just proven it) — so
++    staging with labels as ids is what makes the estimate apply the SAME rule the live
++    estimator will apply the moment the children exist.
++
++    Nothing lands in the instance: `_LABEL_RE` pins every label to ``child-\\d+`` so a path
++    composed from one cannot traverse, and the `TemporaryDirectory` is outside the instance
++    and removed on every exit, success or failure. That is `preflight`'s standing guarantee
++    — it runs BEFORE `file_children` and must leave nothing behind.
++    """
++    from . import sizing   # lazy: sizing imports split, so a module-level import cycles
++    labels = [c.label for c in children]
++    with tempfile.TemporaryDirectory(prefix="pdca-split-convergence-") as tmp:
++        staged = materialise(children, labels, cfg, Path(tmp), parent=parent)
++        return [(child, sizing.estimate(d / "brief.md", cfg))
++                for child, d in zip(children, staged)]
++
++
++def _exposed_sibling_conflicts(est) -> int | None:
++    """How many `Conflicts with` entries the estimator EXCLUDED as siblings, or ``None``.
++
++    `SizeEstimate.sibling_conflicts` (#457) is the only honest source for this. A reader
++    that judged sibling entanglement from the estimate's ``score`` or ``reasons`` instead
++    would see an *excluded* 0 — the exclusion is precisely that those declarations no
++    longer contribute — and report a proposal whose children all conflict pairwise as
++    clean, which is the one shape that means the split separated nothing.
++
++    ``None`` (not 0) when the estimator predates #457 and excludes nothing, so the caller
++    can say so in the report rather than silently read "no sibling conflicts" off a field
++    that was never written. A malformed value is treated the same way: this must not turn
++    an advisory line into an exception.
++    """
++    value = getattr(est, "sibling_conflicts", None)
++    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
++        return None
++    return value
++
++
++def convergence_report(parent: Path, children: list[Child], cfg) -> list[str]:
++    """Does this split make the children smaller? One line per child, then a verdict.
++
++    Read-only and deterministic: computed from the proposal and the parent's brief, with
++    no tracker id involved and nothing written into the instance
++    (:func:`_staged_estimates`). Returns the lines rather than printing them, so the
++    guarded writer is the only thing that touches a stream.
++
++    Two independent NOT-CONVERGED signals, because the band comparison alone is blind to
++    the second. A `Conflicts with` edge *between* siblings is the splitter's own statement
++    that those two children edit a shared resource — `leaves._split_prompt` tells it
++    outright that those fields "BETWEEN children are the point" — so a proposal whose
++    children conflict pairwise has separated nothing, however small each child reads. That
++    signal
++    survives #457's exclusion only because it is taken from the count the estimate
++    EXPOSES (:func:`_exposed_sibling_conflicts`), never from the score those declarations
++    were removed from.
++    """
++    from . import sizing   # lazy: see _staged_estimates
++    parent_est = sizing.estimate(parent / "brief.md", cfg)
++    labels = [c.label for c in children]
++    lines = [f"split: convergence report for {parent.name} (advisory, changes nothing) — "
++             f"parent bands {parent_est.band} (score {parent_est.score})"]
++    lower = 0
++    edges: set[frozenset[str]] = set()
++    unexposed = False
++    for child, est in _staged_estimates(parent, children, cfg):
++        siblings = [label for label in labels if label != child.label]
++        # WHICH siblings this child names; `_validate_ordering` has already refused every
++        # ref that is not one. The count comes from the estimate, the identities can only
++        # come from here — no id exists yet — so the estimate's count is what decides how
++        # many of these edges are credited.
++        declared = [ref for ref in dict.fromkeys(child.ordering("Conflicts with"))
++                    if ref in siblings]
++        exposed = _exposed_sibling_conflicts(est)
++        if exposed is None:
++            unexposed = True
++        conflicts = len(declared) if exposed is None else exposed
++        for ref in declared[:conflicts]:
++            edges.add(frozenset((child.label, ref)))
++        if est.band == parent_est.band:
++            relation = "same band as the parent"
++        elif sizing.higher(est.band, parent_est.band) == parent_est.band:
++            relation, lower = "LOWER than the parent", lower + 1
++        else:
++            relation = "HIGHER than the parent"
++        note = f" [{conflicts} sibling conflict(s) declared]" if conflicts else ""
++        lines.append(f"split:   {child.label}: {est.band} (score {est.score}) — {relation} "
++                     f"— {'; '.join(est.reasons) or 'no structural signal'}{note}")
++    not_lower = len(children) - lower
++    verdicts: list[str] = []
++    if children and not_lower * 2 > len(children):
++        verdicts.append(
++            f"split: NOT CONVERGED — {not_lower} of {len(children)} child(ren) do not band "
++            f"lower than {parent.name}: this split does not make the work smaller, and "
++            "each child costs a full cycle. Reconsider the seams before accepting.")
++    if len(children) > 1 and len(edges) == len(children) * (len(children) - 1) // 2:
++        verdicts.append(
++            "split: NOT CONVERGED — every pair of children declares a `Conflicts with` "
++            "edge, so the split separated nothing: the splitter is saying each pair edits "
++            "a shared resource, and they cannot be built independently.")
++    if not verdicts:
++        verdicts.append(f"split: converged — {lower} of {len(children)} child(ren) band "
++                        f"lower than {parent.name}.")
++    lines += verdicts
++    if unexposed:
++        # NAMED, never absorbed: this estimator excludes nothing, so the counts above are
++        # the proposal's own — identical here by construction (`_validate_ordering` has
++        # just proven every ref names a sibling), but the difference belongs on screen
++        # rather than hidden behind a fallback, so a base missing #457 is visible.
++        lines.append("split:   note: this estimator exposes no `sibling_conflicts` count "
++                     "(#457), so the sibling edges above are read from the proposal's own "
++                     "ordering fields.")
++    return lines
++
++
++def _emit_convergence_report(parent: Path, children: list[Child], cfg) -> None:
++    """Print :func:`convergence_report`, and never let it change what `--accept` does.
++
++    Total, in both directions. Every line goes out through :func:`advisory`, so a stream
++    that fails part-way — or on every write, which is what a broken pipe actually does —
++    changes neither the exit code nor the set of bundles created. And the report's own
++    computation is wrapped: an advisory estimate that raised (a full disk under the
++    staging directory, a future estimator that stops abstaining) would otherwise escape
++    `preflight` and refuse an acceptance over a line nobody reads twice. A failure is
++    NAMED on the same guarded stream rather than swallowed — the discipline
++    :func:`_restore_lineage` already follows.
++    """
++    try:
++        lines = convergence_report(parent, children, cfg)
++    except Exception as exc:   # noqa: BLE001 — an advisory report may never abort an accept
++        advisory(f"split: the convergence report could not be produced ({exc!r}) — "
++                 "continuing, it is advisory and decides nothing")
++        return
++    for line in lines:
++        advisory(line)
++
++
+ def validate(children: list[Child], ids: list[str], cfg) -> None:
+     """Every reason acceptance would fail, checked before a single file is written."""
+     if len(children) != len(ids):
+@@ -464,9 +674,8 @@ def _restore_lineage(path: Path, prior: bytes | None) -> None:
+         else:
+             path.write_bytes(prior)
+     except OSError as exc:
+-        print(f"split: could not restore {path} while rolling back ({exc}). Check it by "
+-              "hand before retrying — it may name children this run did not create.",
+-              file=sys.stderr)
++        advisory(f"split: could not restore {path} while rolling back ({exc}). Check it by "
++                 "hand before retrying — it may name children this run did not create.")
+ 
+ 
+ def materialise(children: list[Child], ids: list[str], cfg, staging: Path, *,
+@@ -517,9 +726,9 @@ def _rollback(created: list[Path]) -> None:
+         if d.exists():
+             stuck.append(d)
+     if stuck:
+-        print("split: could not remove " + ", ".join(str(d) for d in stuck)
+-              + " while rolling back. Delete them by hand before retrying, or the retry "
+-                "will refuse them as existing bundles.", file=sys.stderr)
++        advisory("split: could not remove " + ", ".join(str(d) for d in stuck)
++                 + " while rolling back. Delete them by hand before retrying, or the retry "
++                   "will refuse them as existing bundles.")
+ 
+ 
+ def accept(parent: Path, ids: list[str], cfg) -> list[Path]:
+@@ -810,8 +1019,8 @@ def file_children(parent: Path, children: list[Child], cfg, *,
+         # non-numeric id). The children can still be filed, but NOT as sub-issues — and
+         # the umbrella relationship is half the reason this exists, so say so rather than
+         # quietly producing a flat set of unrelated issues.
+-        print(f"split: {parent.name} carries no numeric tracker id — filing the children "
+-              "as standalone issues, NOT as sub-issues", file=sys.stderr)
++        advisory(f"split: {parent.name} carries no numeric tracker id — filing the "
++                 "children as standalone issues, NOT as sub-issues")
+     body_head = (f"Child slice of #{parent_no}, split during Plan.\n\n"
+                  if parent_no else "Child slice, split during Plan.\n\n")
+     created: list[str] = []
+@@ -860,7 +1069,7 @@ def file_children(parent: Path, children: list[Child], cfg, *,
+             if not isinstance(exc, Exception):
+                 # An interrupt stays an interrupt: report, then let it propagate, so Ctrl-C
+                 # still aborts rather than being converted into an ordinary error.
+-                print(f"split: {exc!r}\n{report}", file=sys.stderr)
++                advisory(f"split: {exc!r}\n{report}")
+                 raise
+             raise SplitError(f"{exc}\n{report}") from exc
+     return created
+diff --git a/template/tests/test_split_convergence.py b/template/tests/test_split_convergence.py
+new file mode 100644
+index 0000000..6420a6e
+--- /dev/null
++++ b/template/tests/test_split_convergence.py
+@@ -0,0 +1,395 @@
++"""The split convergence report (issue #459).
++
++`pdca split <id> --accept` files real, unrevokable tracker sub-issues — and with `--ids`
++materialises real bundles — without ever running the size estimate over the staged
++children. A split that leaves every child `oversized` was therefore discovered a whole
++cycle later, when each child's own guard fired and the planner was pointed back at
++`pdca split`. `preflight` now answers that question at the one point BOTH acceptance
++shapes reach before anything irreversible happens, and it may never do more than report:
++its own output cannot change the exit code or the set of bundles created.
++
++Only the MODULES are imported, never the new symbols. A `from pdca_harness.split import
++convergence_report` would raise ImportError on the red leg — 0 tests run, exit 77
++`PDCA-UNVERIFIABLE` — instead of a red that proves anything.
++
++Run from template/: PYTHONPATH=src python3 -m unittest tests.test_split_convergence
++"""
++
++from __future__ import annotations
++
++import io
++import shutil
++import tempfile
++import unittest
++from contextlib import redirect_stderr, redirect_stdout
++from pathlib import Path
++from types import SimpleNamespace
++from unittest import mock
++
++from pdca_harness import cli, sizing, split
++from pdca_harness.config import Config, LeafConfig
++
++TEMPLATES = Path(__file__).resolve().parents[1] / "templates"
++
++_SMALL = "- **Slug:** small\n- **Defect / goal:** a narrow fix\n"
++_HEAVY = ("- **Slug:** heavy\n- **Defect / goal:** a wide one\n- **Difficulty:** high\n"
++          "- **External dependencies:** `sometool`\n")
++
++
++def _proposal(*children: str, version: int = 1) -> str:
++    body = f"<!-- pdca:split-proposal v{version} -->\n# Split proposal\n\n"
++    for i, child in enumerate(children, 1):
++        body += (f"<!-- pdca:child child-{i} -->\n{child}\n"
++                 f"<!-- pdca:end child-{i} -->\n\n")
++    return body
++
++
++class _BrokenStream:
++    """A stream that fails and STAYS failed — what a broken pipe actually does.
++
++    A fake that raises once and then recovers is not a broken pipe; it is a stream that
++    hiccuped. The previous attempt at this fix was accepted against exactly that fake and
++    shipped an unguarded status write, so with a genuinely broken stderr the acceptance
++    still ended in an `OSError` — after both bundles were on disk. Once tripped (by write
++    ordinal or by content) every subsequent `write` raises, `flush` included.
++    """
++
++    def __init__(self, *, fail_from: int = 1, fail_on: str | None = None) -> None:
++        self.fail_from = fail_from
++        self.fail_on = fail_on
++        self.writes = 0
++        self.raised = 0
++        self.tripped = False
++        self.text: list[str] = []
++
++    def _should_fail(self, s: str) -> bool:
++        if self.tripped:
++            return True
++        if self.fail_on is not None:
++            return self.fail_on in s
++        return self.writes >= self.fail_from
++
++    def write(self, s: str) -> int:
++        self.writes += 1
++        if self._should_fail(s):
++            self.tripped = True
++            self.raised += 1
++            raise BrokenPipeError(32, "Broken pipe")
++        self.text.append(s)
++        return len(s)
++
++    def flush(self) -> None:
++        if self.tripped:
++            self.raised += 1
++            raise BrokenPipeError(32, "Broken pipe")
++
++    def value(self) -> str:
++        return "".join(self.text)
++
++
++class _ExcludingEstimate:
++    """What `sizing.estimate` returns once it EXCLUDES a child's sibling conflicts (#457).
++
++    Stands in for the dependency, not for the code under test: the exclusion drops those
++    declarations out of `score` and `reasons` and reports the number it removed on
++    `sibling_conflicts`. A report that read entanglement off the score or the reasons
++    would see this as a perfectly clean child — which is the blinding criterion (c) is
++    about — so this is the only shape that can prove where the count is read from.
++    """
++
++    def __init__(self, band: str, score: int, sibling_conflicts: int) -> None:
++        self.band = band
++        self.score = score
++        self.reasons = ["difficulty=high"]     # deliberately no "conflict(s) declared"
++        self.churn_band = band
++        self.patch_band = band
++        self.model_band = ""
++        self.sibling_conflicts = sibling_conflicts
++
++
++class ConvergenceReport(unittest.TestCase):
++    def setUp(self) -> None:
++        self.tmp = Path(tempfile.mkdtemp())
++        self.cfg = Config(
++            root=self.tmp, bundle_root=self.tmp / "results",
++            process_dir=self.tmp / "process", templates_dir=TEMPLATES,
++            default_branch="main", tracker_system="github",
++            tracker_url="https://github.com/acme/widgets", issue_id_example="#1",
++            builder=LeafConfig(mode="stub"), reviewer=LeafConfig(mode="stub"),
++        )
++        self.parent = self.cfg.bundle("500")
++        self.parent.mkdir(parents=True)
++        (self.parent / "brief.md").write_text(
++            "- **Slug:** parent\n- **Defect / goal:** everything\n"
++            "- **Difficulty:** high\n- **External dependencies:** `sometool`\n",
++            encoding="utf-8")
++
++    def tearDown(self) -> None:
++        shutil.rmtree(self.tmp, ignore_errors=True)
++
++    # -- helpers -----------------------------------------------------------------------
++
++    def _write(self, *children: str) -> None:
++        (self.parent / split.PROPOSAL).write_text(_proposal(*children), encoding="utf-8")
++
++    def _children(self) -> list:
++        return split.parse((self.parent / split.PROPOSAL).read_text(encoding="utf-8"))
++
++    def _report(self) -> str:
++        return "\n".join(split.convergence_report(self.parent, self._children(), self.cfg))
++
++    def _args(self, ids: str = "") -> SimpleNamespace:
++        return SimpleNamespace(issue_id="500", accept=True, ids=ids)
++
++    def _accept_via_cli(self, ids: str = "", stderr=None) -> tuple[int, str]:
++        """Run the real `pdca split 500 --accept` code path; return (rc, stderr text)."""
++        err = io.StringIO() if stderr is None else stderr
++        with redirect_stderr(err), redirect_stdout(io.StringIO()):
++            rc = cli._split(self.cfg, self._args(ids))
++        return rc, err.getvalue() if isinstance(err, io.StringIO) else ""
++
++    def _bundles(self) -> set[str]:
++        root = self.cfg.bundle_root
++        return {p.name for p in root.iterdir() if p.is_dir()} if root.exists() else set()
++
++    # -- (a) BOTH acceptance paths report before anything irreversible ------------------
++
++    def test_the_ids_path_reports_before_it_materialises_anything(self) -> None:
++        """`--accept --ids a,b` never reached `preflight` at all: it went straight to
++        `accept` and printed nothing but the `pdca flow` follow-up. It is the path the
++        docs call *required* for a tracker `pdca` cannot reach — the operator who has
++        already paid for the issues by hand, and so most needs the verdict."""
++        self._write(_SMALL, _HEAVY)
++        seen: dict[str, str] = {}
++        err = io.StringIO()
++        real_accept = split.accept
++
++        def watched(parent, ids, cfg):
++            seen["before"] = err.getvalue()          # the irreversible step on this shape
++            return real_accept(parent, ids, cfg)
++
++        with mock.patch("pdca_harness.split.accept", watched):
++            rc, out = self._accept_via_cli("601,602", stderr=err)
++        self.assertEqual(rc, 0)
++        self.assertEqual(self._bundles(), {"issue_500", "issue_601", "issue_602"})
++        self.assertIn("convergence report", seen["before"])
++        self.assertIn("child-1", seen["before"])
++        self.assertIn("child-2", seen["before"])
++
++    def test_the_auto_filing_path_reports_before_a_single_issue_is_filed(self) -> None:
++        self._write(_SMALL, _HEAVY)
++        seen: dict[str, str] = {}
++        err = io.StringIO()
++
++        def filer(parent, children, cfg, **kwargs):
++            seen["before"] = err.getvalue()          # the irreversible step on this shape
++            return ["601", "602"]
++
++        with mock.patch("pdca_harness.split.file_children", filer):
++            rc, out = self._accept_via_cli("", stderr=err)
++        self.assertEqual(rc, 0)
++        self.assertIn("convergence report", seen["before"])
++        self.assertIn("child-1", seen["before"])
++
++    # -- (b) per-child band against the parent's, and the feature that carries it -------
++
++    def test_names_each_childs_band_against_the_parents_and_its_driving_reason(self) -> None:
++        self._write(_SMALL, _HEAVY)
++        # Cross-checked against the SAME estimator the report calls, so this cannot drift
++        # into asserting a band the production code no longer produces.
++        parent_est = sizing.estimate(self.parent / "brief.md", self.cfg)
++        text = self._report()
++        self.assertIn(f"parent bands {parent_est.band}", text)
++        self.assertIn(f"child-1: {sizing.OK} (score 0) — LOWER than the parent", text)
++        self.assertIn(f"child-2: {parent_est.band} ", text)
++        self.assertIn("same band as the parent", text)
++        self.assertIn("difficulty=high", text)          # child-2's own driving reason
++
++    def test_says_plainly_when_most_children_do_not_band_lower(self) -> None:
++        """Both children inherit the parent's own weighted features, so neither reads any
++        smaller — the split that costs two cycles and buys nothing."""
++        self._write(_HEAVY, _HEAVY)
++        text = self._report()
++        self.assertIn("NOT CONVERGED", text)
++        self.assertIn("2 of 2 child(ren) do not band lower than issue_500", text)
++
++    def test_a_split_that_does_converge_says_so(self) -> None:
++        self._write(_SMALL, _SMALL)
++        text = self._report()
++        self.assertNotIn("NOT CONVERGED", text)
++        self.assertIn("converged — 2 of 2 child(ren) band lower than issue_500", text)
++
++    # -- (c) not blinded by the sibling-conflict exclusion ------------------------------
++
++    def test_the_sibling_conflict_count_is_read_from_the_estimate_not_its_score(self) -> None:
++        """With #457's exclusion in force the declarations are gone from `score` and
++        `reasons` — the estimate looks clean. The count it EXPOSES is the only place the
++        entanglement survives, and the report has to read it there."""
++        self._write("- **Slug:** a\n- **Conflicts with:** child-2\n",
++                    "- **Slug:** b\n- **Conflicts with:** child-1\n")
++        excluding = _ExcludingEstimate(sizing.OK, 3, sibling_conflicts=1)
++        with mock.patch("pdca_harness.sizing.estimate", return_value=excluding):
++            text = self._report()
++        self.assertNotIn("conflict(s) declared —", text)   # nothing in the reasons
++        self.assertIn("[1 sibling conflict(s) declared]", text)
++        self.assertIn("NOT CONVERGED", text)
++        self.assertIn("separated nothing", text)
++        self.assertNotIn("exposes no `sibling_conflicts`", text)
++
++    def test_an_estimator_that_exposes_no_count_is_named_not_absorbed(self) -> None:
++        """The count is #457's; an estimator without it excludes nothing, so the same
++        number is the proposal's own — `_validate_ordering` has just proven every ref
++        names a sibling. That substitution is stated in the report rather than absorbed
++        silently, so a base missing the prerequisite is visible instead of masked."""
++        self._write("- **Slug:** a\n- **Conflicts with:** child-2\n",
++                    "- **Slug:** b\n- **Conflicts with:** child-1\n")
++        bare = SimpleNamespace(band=sizing.OK, score=0, reasons=[])   # no sibling_conflicts
++        with mock.patch("pdca_harness.sizing.estimate", return_value=bare):
++            text = self._report()
++        self.assertIn("exposes no `sibling_conflicts` count", text)
++        self.assertIn("[1 sibling conflict(s) declared]", text)
++        self.assertIn("separated nothing", text)
++
++    def test_an_estimate_reporting_no_sibling_conflicts_is_believed(self) -> None:
++        """The other direction, so the count is load-bearing rather than decorative: an
++        estimator that says none of these declarations name siblings must not have a
++        `separated nothing` verdict manufactured from the raw ordering fields."""
++        self._write("- **Slug:** a\n- **Conflicts with:** child-2\n",
++                    "- **Slug:** b\n- **Conflicts with:** child-1\n")
++        clean = _ExcludingEstimate(sizing.OK, 3, sibling_conflicts=0)
++        with mock.patch("pdca_harness.sizing.estimate", return_value=clean):
++            text = self._report()
++        self.assertNotIn("separated nothing", text)
++
++    def test_children_that_all_conflict_pairwise_are_reported_as_not_converged(self) -> None:
++        """Through the REAL estimator, whichever of the two it is: every pair declares an
++        edge, so the splitter itself is saying the split separated nothing."""
++        self._write("- **Slug:** a\n- **Conflicts with:** child-2, child-3\n",
++                    "- **Slug:** b\n- **Conflicts with:** child-1, child-3\n",
++                    "- **Slug:** c\n- **Conflicts with:** child-1, child-2\n")
++        text = self._report()
++        self.assertIn("NOT CONVERGED", text)
++        self.assertIn("every pair of children declares a `Conflicts with` edge", text)
++
++    def test_a_proposal_with_a_free_pair_is_not_reported_as_separating_nothing(self) -> None:
++        self._write("- **Slug:** a\n- **Conflicts with:** child-2\n",
++                    "- **Slug:** b\n- **Conflicts with:** child-1\n",
++                    "- **Slug:** c\n- **Defect / goal:** independent\n")
++        text = self._report()
++        self.assertNotIn("separated nothing", text)
++
++    def test_the_staged_estimate_presents_the_sibling_LABELS_as_the_sibling_set(self) -> None:
++        """No tracker id exists at `preflight` time — every ordering ref is a sibling
++        LABEL — so the staged bundle must carry those labels as its lineage siblings, or
++        the estimate applies a different rule from the one the live estimator will apply
++        the moment the children land."""
++        self._write("- **Slug:** a\n- **Conflicts with:** child-2\n", "- **Slug:** b\n")
++        staged: list[tuple[str, dict]] = []
++        real = sizing.estimate
++
++        def spy(brief_path, cfg):
++            staged.append((brief_path.read_text(encoding="utf-8"),
++                           split.read_lineage(brief_path.parent) or {}))
++            return real(brief_path, cfg)
++
++        with mock.patch("pdca_harness.sizing.estimate", spy):
++            self._report()
++        children = [rec for body, rec in staged if rec.get("parent") == "500"]
++        self.assertEqual([rec["id"] for rec in children], ["child-1", "child-2"])
++        self.assertEqual([rec["siblings"] for rec in children],
++                         [["child-2"], ["child-1"]])
++        self.assertIn("- **Conflicts with:** child-2", staged[1][0])
++
++    # -- (d) the report's own output can never abort the acceptance ---------------------
++
++    def test_a_persistently_broken_stderr_leaves_preflight_itself_unharmed(self) -> None:
++        """Driven at `preflight`, where the escape happened: an `OSError` out of it is read
++        by `cli._split` as "this bundle has no split-proposal.md" and refuses a proposal
++        that is perfectly fine."""
++        self._write(_SMALL, _HEAVY)
++        stream = _BrokenStream(fail_from=2)       # print() writes the text, then the "\n"
++        before = self._bundles()
++        with mock.patch.object(split.sys, "stderr", stream):
++            split.preflight(self.parent, self._children(), self.cfg)   # must not raise
++        self.assertGreaterEqual(stream.raised, 2, "the stream must have stayed broken")
++        self.assertEqual(self._bundles(), before)
++
++    def test_a_broken_stderr_changes_neither_the_exit_code_nor_the_bundles(self) -> None:
++        self._write(_SMALL, _HEAVY)
++        stream = _BrokenStream(fail_from=1)       # broken from the very first write
++        with mock.patch.object(cli.sys, "stderr", stream), \
++             mock.patch.object(split.sys, "stderr", stream), \
++             redirect_stdout(io.StringIO()):
++            rc = cli._split(self.cfg, self._args("601,602"))
++        self.assertEqual(rc, 0)
++        self.assertEqual(self._bundles(), {"issue_500", "issue_601", "issue_602"})
++        self.assertGreaterEqual(stream.raised, 3,
++                                "every line on the path must have been attempted")
++
++    def test_a_stderr_that_breaks_after_the_report_still_exits_zero(self) -> None:
++        """The regression the previous attempt shipped: the report was guarded and the
++        status write after `accept` returned was not, so a stream that broke later raised
++        `OSError` with both bundles already on disk — an advisory line changing the exit
++        code of an irreversible command."""
++        self._write(_SMALL, _HEAVY)
++        stream = _BrokenStream(fail_on="marked split")
++        with mock.patch.object(cli.sys, "stderr", stream), \
++             mock.patch.object(split.sys, "stderr", stream), \
++             redirect_stdout(io.StringIO()):
++            rc = cli._split(self.cfg, self._args("601,602"))
++        self.assertEqual(rc, 0)
++        self.assertEqual(self._bundles(), {"issue_500", "issue_601", "issue_602"})
++        self.assertGreaterEqual(stream.raised, 1, "the status write was never attempted")
++        self.assertIn("convergence report", stream.value())
++
++    def test_a_broken_stdout_changes_neither_the_exit_code_nor_the_bundles(self) -> None:
++        """`pdca split 500 --accept 2>&1 | head` breaks BOTH streams: the created-bundle
++        paths go to stdout, and an unguarded `print` there fails the same way."""
++        self._write(_SMALL, _HEAVY)
++        stream = _BrokenStream(fail_from=1)
++        with mock.patch.object(cli.sys, "stdout", stream), \
++             redirect_stderr(io.StringIO()):
++            rc = cli._split(self.cfg, self._args("601,602"))
++        self.assertEqual(rc, 0)
++        self.assertEqual(self._bundles(), {"issue_500", "issue_601", "issue_602"})
++        self.assertGreaterEqual(stream.raised, 2)
++
++    def test_a_report_that_cannot_be_produced_does_not_refuse_the_acceptance(self) -> None:
++        """Advisory in both directions: the report's own failure is named, not raised."""
++        self._write(_SMALL, _HEAVY)
++        with mock.patch("pdca_harness.split.convergence_report",
++                        side_effect=RuntimeError("boom")):
++            rc, out = self._accept_via_cli("601,602")
++        self.assertEqual(rc, 0)
++        self.assertEqual(self._bundles(), {"issue_500", "issue_601", "issue_602"})
++        self.assertIn("could not be produced", out)
++
++    # -- (e) advisory and deterministic -------------------------------------------------
++
++    def test_a_non_converging_split_is_still_accepted_in_full(self) -> None:
++        """It reports; it never blocks. The bundles, their briefs and the parent's marker
++        are exactly what they were before the report existed."""
++        self._write(_HEAVY, _HEAVY + "- **Depends on:** child-1\n")
++        rc, out = self._accept_via_cli("601,602")
++        self.assertEqual(rc, 0)
++        self.assertIn("NOT CONVERGED", out)
++        self.assertEqual(self._bundles(), {"issue_500", "issue_601", "issue_602"})
++        self.assertIn("- **Depends on:** 601",
++                      (self.cfg.bundle("602") / "brief.md").read_text(encoding="utf-8"))
++        self.assertTrue((self.cfg.bundle("601") / split.LINEAGE).is_file())
++
++    def test_the_report_writes_nothing_into_the_instance(self) -> None:
++        """`preflight` runs BEFORE `file_children`; nothing it added may leave a trace."""
++        self._write(_SMALL, _HEAVY)
++        before = {p.name for p in self.parent.iterdir()}
++        self._report()
++        self.assertEqual({p.name for p in self.parent.iterdir()}, before)
++        self.assertEqual(self._bundles(), {"issue_500"})
++
++    def test_the_report_is_deterministic(self) -> None:
++        self._write(_SMALL, _HEAVY)
++        self.assertEqual(self._report(), self._report())
++
++
++if __name__ == "__main__":
++    unittest.main()

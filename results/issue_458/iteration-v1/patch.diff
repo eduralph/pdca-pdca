@@ -1,0 +1,357 @@
+diff --git a/docs/07-crosscutting.md b/docs/07-crosscutting.md
+index 85ea037..c5c3ef3 100644
+--- a/docs/07-crosscutting.md
++++ b/docs/07-crosscutting.md
+@@ -49,14 +49,15 @@ flowchart TD
+         A3 -->|"ok / watch"| A4["No action — Do dispatches"]
+         A3 -->|"oversized"| A5{"splittable?"}
+         A5 -->|"no — patch-only, coherent"| A6["Warn: expect a large patch —<br/>Do dispatches anyway"]
+-        A5 -->|"yes"| A7["Remedy: consider pdca split first"]
++        A5 -->|"yes, and (for a split child)<br/>any declared conflict names a SIBLING"| A7i["Remedy: driven by inherited/sibling<br/>fields — prefer building, Do dispatches anyway"]
++        A5 -->|"yes, otherwise"| A7["Remedy: consider pdca split first"]
+     end
+ 
+     subgraph ENTRY_B["Entry B — backstop: state BUILT, before Check dispatches"]
+         B1["patch.diff exists"] --> B2["Size estimate: structural score<br/>+ the STORED sizer verdict (read free, not re-paid)"]
+         B2 --> B3{"combined band?"}
+         B3 -->|"ok / watch"| B4["No action — Check dispatches"]
+-        B3 -->|"oversized"| B5{"splittable?"}
++        B3 -->|"oversized"| B5{"splittable?<br/>(no sibling-conflict fork here — see below)"}
+         B5 -->|"no — patch-only, coherent"| B6["Warn: expect a large patch —<br/>Check dispatches anyway"]
+         B5 -->|"yes"| B7["Remedy: iterate-plan at sign-off,<br/>re-plan lands back at Entry P"]
+     end
+@@ -89,6 +90,17 @@ a large but coherent change — gets a different message entirely ("expect a
+ large patch," not "split this"), because splitting a coherent change produces
+ artificial seams, not a real decomposition.
+ 
++**At Entry A only, a splittable "yes" then asks one more question:** for a
++split child, does any of its *own* declared `Conflicts with:` ids name a
++SIBLING from the split that produced it? If so the message names that
++provenance instead ("driven by inherited/sibling fields; prefer building over
++re-splitting") rather than pointing at `pdca split` again — mere lineage
++(having once been split) proves nothing on its own; a split child whose score
++is carried entirely by organic conflicts still gets the ordinary remedy,
++unchanged. Entry B's route back to `iterate-plan` does not ask this question —
++a bundle that already has a patch is told to re-plan either way, provenance or
++not.
++
+ **The two backstops differ because the beat does.** At Entry A the bundle is
+ still just a brief, so `pdca split` runs directly. At Entry B a patch already
+ exists, and splitting means authoring new briefs — Plan's beat, not something
+diff --git a/template/src/pdca_harness/leaves.py b/template/src/pdca_harness/leaves.py
+index df314df..254ae1f 100644
+--- a/template/src/pdca_harness/leaves.py
++++ b/template/src/pdca_harness/leaves.py
+@@ -521,6 +521,32 @@ def do_plan(d: Path, cfg: Config, csv: str | None = None) -> None:
+     run_plan_advisory(d, cfg)  # opt-in antagonistic review of the brief (#301); no-op unless configured
+ 
+ 
++def _split_provenance_note(d: Path) -> str:
++    """One sentence of split-child provenance context, or "" — shared by the plan and
++    split prompts (issue #458).
++
++    Both prompts already tell the model to split an oversized brief; neither said the one
++    thing that keeps a split child from being told to re-split itself over evidence it
++    inherited from the split that produced it — a `Conflicts with:` entry naming a SPLIT
++    SIBLING, not organic new scope. `plan_policy.size_reasons` now makes that distinction
++    for the DRIVER's own advisory (keyed on the sibling id actually being declared, never
++    on the lineage record's mere presence — a bundle with organic-only conflicts is still
++    told to split). The model reads the same brief before that advisory runs again, so the
++    same context has to travel with the prompt or a session routinely re-proposes the
++    split the advisory would tell it not to.
++    """
++    record = split.read_lineage(d)
++    if not record or "parent" not in record:
++        return ""
++    return (
++        f"Note: this bundle is itself a split child of #{record['parent']} — if it reads "
++        "oversized mainly because of a `Conflicts with:` entry naming a SPLIT SIBLING "
++        "rather than organic new scope, that inherited size is not by itself a reason to "
++        "split again; treat it as a reason to build unless the brief's OWN new scope "
++        "independently justifies splitting.\n\n"
++    )
++
++
+ def _plan_prompt(cfg: Config, csv: str | None, d: Path) -> str:
+     fix_tpl = cfg.templates_dir / "brief.md.tpl"
+     geps_tpl = cfg.templates_dir / "design-proposal.md.tpl"
+@@ -573,6 +599,7 @@ def _plan_prompt(cfg: Config, csv: str | None, d: Path) -> str:
+         # given, and Check can only report that what it built is misshapen. Stated in the
+         # runtime prompt as well as agents/planner.md because the role file alone has
+         # twice proved insufficient — the prompt the model actually receives is built here.
++        + _split_provenance_note(d) +
+         "If this slice turns out to be several slices, SPLIT IT IN THIS BEAT — a split "
+         "produces briefs, and briefs are yours. Run `pdca split "
+         f"{issue_id}` to have the splitter draft a proposal, read it with the human, then "
+@@ -1254,6 +1281,7 @@ def _split_prompt(d: Path, cfg: Config) -> str:
+         f"You are the SPLITTER. Read {d / 'brief.md'}. This slice has been judged too "
+         "large to build as one cycle. The driver sized it "
+         f"{est.band}: {'; '.join(est.reasons) or 'no structural signal'}.{prior}\n\n"
++        + _split_provenance_note(d) +
+         f"Fill {tpl} and write the result to {d / split.PROPOSAL} — exactly one file, "
+         "nothing else. Do NOT create bundles, branches or tracker items, and do NOT edit "
+         "brief.md. The split is authored in PLAN, by the human: they read your proposal "
+diff --git a/template/src/pdca_harness/plan_policy.py b/template/src/pdca_harness/plan_policy.py
+index 9650782..9c4cc8c 100644
+--- a/template/src/pdca_harness/plan_policy.py
++++ b/template/src/pdca_harness/plan_policy.py
+@@ -51,7 +51,7 @@ from __future__ import annotations
+ import sys
+ from typing import NamedTuple
+ 
+-from . import doctor, sizing
++from . import brief, doctor, sizing, split
+ 
+ #: `[driver].size_guard` values. `hold` is NOT among them, deliberately — see
+ #: :func:`size_reasons`.
+@@ -134,20 +134,50 @@ def size_reasons(d, cfg, *, before_do: bool = True) -> list[HoldReason]:
+     splittable = (est.churn_band == sizing.OVERSIZED
+                   or est.model_band == sizing.OVERSIZED
+                   or est.patch_band != sizing.OVERSIZED)
++    extra = ""
+     if not splittable:
+         remedy = ("expect a large patch — worth a look before Do, but a large COHERENT "
+                   "change is not a split candidate")
+     elif before_do:
+         remedy = "consider `pdca split` first"
++        # The honest predicate for "this child's own score is inherited from the split
++        # that produced it" is NOT the mere presence of a lineage record (#458 round 1):
++        # every split child carries one forever, including one whose score is entirely
++        # ORGANIC — new conflicts against bundles outside the split. The record's own
++        # `siblings` edge (`split.py:493-498`) is what makes the distinction checkable: a
++        # declared `Conflicts with:` id that names a SIBLING is evidence this child's size
++        # came from the split, not from its own scope; one that names anything else is
++        # ordinary evidence and gets the ordinary remedy.
++        lineage = split.read_lineage(d)
++        if lineage and "parent" in lineage:
++            siblings = lineage.get("siblings")
++            siblings = siblings if isinstance(siblings, list) else []
++            declared = brief.conflicts_with(d / "brief.md")
++            sibling_conflicts = [c for c in declared if c in siblings]
++            if sibling_conflicts:
++                own_id = lineage.get("id") or d.name.removeprefix("issue_")
++                depth = lineage.get("depth")
++                depth = depth if isinstance(depth, int) and not isinstance(depth, bool) else "?"
++                remedy = (
++                    f"scores large for a split child (child {own_id} of a split of "
++                    f"#{lineage['parent']}, depth {depth}) — driven by inherited/sibling "
++                    "fields; prefer building over re-splitting"
++                )
++                # Named explicitly, not left to be inferred from the reasons above: a
++                # message that says "driven by inherited/sibling fields" beside its own
++                # "N conflict(s) declared" — a count that mixes sibling and organic ids —
++                # is a contradiction unless the sibling share is called out on its own.
++                extra = f"; {len(sibling_conflicts)} sibling conflict(s) not counted"
+     else:
+         # A split authors BRIEFS, and authoring briefs is what Plan does — so the route
+         # back is `iterate-plan`, which archives this brief and returns the bundle to
+         # Plan, where the split belongs. Telling the human to run `pdca split` on a bundle
+         # that already has a patch would decompose it AFTER the build the children will
+-        # not inherit.
++        # not inherit. Unaffected by provenance: a bundle with a patch is told to re-plan
++        # either way (#458) — splitting only ever happens in Plan.
+         remedy = ("if this will not converge, answer `iterate-plan` at sign-off and split "
+                   "in the re-plan — a split authors briefs, which is Plan's beat")
+-    detail = f"oversized — {remedy} ({'; '.join(est.reasons)})"
++    detail = f"oversized — {remedy} ({'; '.join(est.reasons)}{extra})"
+     if mode not in (OFF, WARN):
+         detail += (f" [size_guard={mode!r} is treated as 'warn': a blocking mode is "
+                    "unimplemented — the signal peaks at 62% precision, see #321]")
+diff --git a/template/tests/test_plan_policy_split_child.py b/template/tests/test_plan_policy_split_child.py
+new file mode 100644
+index 0000000..cf7ca11
+--- /dev/null
++++ b/template/tests/test_plan_policy_split_child.py
+@@ -0,0 +1,192 @@
++"""An honest split-child advisory, with an escape hatch that actually works (#458).
++
++`plan_policy.size_reasons` used to answer EVERY oversized split child with the same
++`consider `pdca split` first` its parent got — the exact readout a split inflates. The
++fix keys the "driven by inherited/sibling fields" line on the one thing that is actually
++evidence of it: a `Conflicts with:` id the bundle DECLARES that also names one of its own
++split SIBLINGS (`split-lineage.json`'s `siblings` edge). Two failures a first attempt at
++this fix produced, both reproduced here so they cannot recur silently:
++
++1. Keying on mere lineage PRESENCE is false for a split child whose conflicts are all
++   organic (declared against bundles outside the split) — every split child carries a
++   lineage record forever, so that predicate fires on children that should still be told
++   to split.
++2. The escape hatch has to work on the sizer this project actually SHIPS: `mode = "stub"`,
++   `leaves._stub_sizer` returning `{"band": "ok"}` unconditionally. A hatch tested only
++   through a mocked sizer proves nothing about the offline default every fresh instance
++   runs.
++"""
++
++from __future__ import annotations
++
++import json
++import shutil
++import tempfile
++import unittest
++from pathlib import Path
++
++from pdca_harness import leaves, plan_policy, sizing, split
++from pdca_harness.config import Config, LeafConfig
++
++# Difficulty=high (3) + Conflicts with (3, regardless of how many ids) + an oversized
++# brief (3, the padded Scope) = 9 >= the oversized cutoff of 7 — the same shape
++# test_size_guard.py's _OVERSIZED fixture uses. patch_band also lands on `oversized`
++# (difficulty=high AND over-size both fire), so `splittable` is True via churn_band
++# regardless — no dependence on the patch_band branch this bundle doesn't need.
++_SIBLING = "602"
++_SIBLINGS = ["602", "603"]
++_PARENT = "500"
++_DEPTH = 1
++
++
++def _child_brief(conflicts: str) -> str:
++    return (
++        "- **Slug:** split-child\n"
++        "- **Difficulty:** high\n"
++        f"- **Conflicts with:** {conflicts}\n"
++        "- **Scope:** " + ("pad " * 4000) + "\n"
++    )
++
++
++def _cfg(root: Path, guard: str = "warn") -> Config:
++    cfg = Config(
++        root=root, bundle_root=root / "results", process_dir=root / "process",
++        templates_dir=root / "templates", default_branch="main",
++        tracker_system="github", tracker_url="", issue_id_example="#1",
++        builder=LeafConfig(mode="stub"), reviewer=LeafConfig(mode="stub"),
++    )
++    cfg.size_guard = guard
++    # sizer defaults to LeafConfig(mode="stub") — the shipped offline default, left
++    # UNTOUCHED here so `leaves.run_sizer` really runs `leaves._stub_sizer` (#458 iii):
++    # the previous attempt's hatch test mocked this away and passed on the red leg too.
++    return cfg
++
++
++class SplitChildAdvisory(unittest.TestCase):
++    def setUp(self) -> None:
++        self.tmp = Path(tempfile.mkdtemp())
++        self.d = self.tmp / "results" / "issue_601"
++        self.d.mkdir(parents=True)
++
++    def tearDown(self) -> None:
++        shutil.rmtree(self.tmp, ignore_errors=True)
++
++    def _lineage(self, **over) -> None:
++        record = {"version": split.LINEAGE_VERSION, "id": "601", "parent": _PARENT,
++                  "siblings": list(_SIBLINGS), "depth": _DEPTH, **over}
++        (self.d / split.LINEAGE).write_text(json.dumps(record, indent=2, sort_keys=True)
++                                            + "\n", encoding="utf-8")
++
++    # -- (i) the load-bearing red: a sibling-conflict-carried score names the provenance --
++
++    def test_i_sibling_conflict_gets_the_honest_provenance_line(self) -> None:
++        """Child 601's own declared conflict names SIBLING 602 — the score is carried by
++        what it inherited from the split, and the message must say so, not recommend
++        splitting a bundle whose entire evidence is that it was already split."""
++        (self.d / "brief.md").write_text(_child_brief(_SIBLING), encoding="utf-8")
++        self._lineage()
++        cfg = _cfg(self.tmp, "warn")
++
++        reasons = plan_policy.size_reasons(self.d, cfg, before_do=True)
++
++        self.assertEqual([r.code for r in reasons], ["oversized"])
++        detail = reasons[0].detail
++        self.assertIn(
++            "scores large for a split child (child 601 of a split of #500, depth 1) — "
++            "driven by inherited/sibling fields; prefer building over re-splitting",
++            detail)
++        self.assertNotIn("consider `pdca split` first", detail)
++        # The exact failure mode reproduced: the honest line must NOT sit beside an
++        # uncounted "N conflict(s) declared" with no clarifying clause.
++        self.assertIn("1 sibling conflict(s) not counted", detail)
++
++    # -- (ii) zero sibling conflicts: the ordinary remedy, unchanged --------------------
++
++    def test_ii_organic_only_conflicts_get_the_ordinary_remedy(self) -> None:
++        """Four ORGANIC conflicts (none of them a sibling) must still recommend a split —
++        this child's oversized score is not inherited from anything. The rejected attempt
++        keyed on lineage presence alone and printed the inherited-fields line here too,
++        contradicting its own '4 conflict(s) declared' evidence."""
++        (self.d / "brief.md").write_text(_child_brief("811, 812, 813, 814"),
++                                         encoding="utf-8")
++        self._lineage()
++        cfg = _cfg(self.tmp, "warn")
++
++        reasons = plan_policy.size_reasons(self.d, cfg, before_do=True)
++
++        self.assertEqual([r.code for r in reasons], ["oversized"])
++        detail = reasons[0].detail
++        self.assertIn("consider `pdca split` first", detail)
++        self.assertIn("4 conflict(s) declared", detail)
++        self.assertNotIn("driven by inherited/sibling fields", detail,
++                         "an organic-only split child was told it scored large because "
++                         "of inherited fields")
++        self.assertNotIn("scores large for a split child", detail)
++
++    # -- (iii) same as (ii), but proving it against the REAL shipped stub sizer ---------
++
++    def test_iii_the_ordinary_remedy_survives_the_real_stub_sizer(self) -> None:
++        """Not a mock: `plan_policy.evaluate` drives `leaves.run_sizer` for real, which —
++        with the shipped `[leaves.sizer] mode = "stub"` default — writes `sizing.json`
++        via `leaves._stub_sizer` and returns `{"band": "ok", ...}` unconditionally. The
++        suppression in test (ii) must not depend on the operator having bought a
++        `mode = "command"` sizer, and this proves the real offline path was exercised —
++        not merely a mocked-out stand-in that could pass on the red leg too."""
++        (self.d / "brief.md").write_text(_child_brief("811, 812, 813, 814"),
++                                         encoding="utf-8")
++        self._lineage()
++        cfg = _cfg(self.tmp, "warn")
++        self.assertEqual(cfg.sizer.mode, "stub", "test no longer exercises the shipped "
++                         "default — the whole point of (iii)")
++
++        reasons = plan_policy.evaluate(self.d, cfg, before_do=True)
++
++        # The real `_stub_sizer` ran and left its artifact — not a mock.
++        verdict = json.loads((self.d / "sizing.json").read_text(encoding="utf-8"))
++        self.assertEqual(verdict.get("band"), "ok")
++        self.assertTrue(verdict.get("stub"), "sizing.json was not written by the real "
++                        "_stub_sizer — the hatch was proven against a mock")
++
++        self.assertEqual([r.code for r in reasons], ["oversized"])
++        detail = reasons[0].detail
++        self.assertIn("consider `pdca split` first", detail)
++        self.assertNotIn("driven by inherited/sibling fields", detail)
++
++    # -- (iv) before_do=False keeps the iterate-plan wording, provenance or not ---------
++
++    def test_iv_after_do_still_routes_through_iterate_plan(self) -> None:
++        """A bundle that already has a patch is told to re-plan, not to `pdca split` —
++        and that holds even when the score IS sibling-carried: splitting only ever
++        happens in Plan, so the provenance fork must not leak into this branch."""
++        (self.d / "brief.md").write_text(_child_brief(_SIBLING), encoding="utf-8")
++        self._lineage()
++        cfg = _cfg(self.tmp, "warn")
++
++        reasons = plan_policy.size_reasons(self.d, cfg, before_do=False)
++
++        detail = reasons[0].detail
++        self.assertIn("iterate-plan", detail)
++        self.assertNotIn("pdca split` first", detail)
++        self.assertNotIn("driven by inherited/sibling fields", detail)
++
++    # -- (vi) no lineage at all: byte-identical to today ---------------------------------
++
++    def test_vi_no_lineage_is_byte_identical_to_today(self) -> None:
++        """A bundle that was never split must get exactly the pre-existing message —
++        the sibling-conflict check must never fire without a lineage record to check
++        against, even when the declared conflict happens to equal what would be a
++        sibling id in some OTHER split."""
++        (self.d / "brief.md").write_text(_child_brief(_SIBLING), encoding="utf-8")
++        self.assertIsNone(split.read_lineage(self.d))
++        cfg = _cfg(self.tmp, "warn")
++
++        reasons = plan_policy.size_reasons(self.d, cfg, before_do=True)
++
++        est = sizing.combine(sizing.estimate(self.d / "brief.md", cfg),
++                             leaves.run_sizer(self.d, cfg), cfg)
++        expected = f"oversized — consider `pdca split` first ({'; '.join(est.reasons)})"
++        self.assertEqual(reasons[0].detail, expected)
++
++
++if __name__ == "__main__":
++    unittest.main()

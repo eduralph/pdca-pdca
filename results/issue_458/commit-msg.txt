@@ -1,0 +1,37 @@
+fix(plan): stop telling oversized split children to split again
+
+Splitting an oversized bundle inflates the very readout the size
+advisory keys on: each child inherits the parent's difficulty, its
+dependency tokens, and `Conflicts with:` entries naming its own
+siblings — ordering metadata the splitter wrote, not scope the child
+acquired. The advisory answered that readout with the same ``consider
+`pdca split` first`` the parent was given, at every depth of the
+recursion, and the planner and splitter prompts then pointed the next
+session at `pdca split` again.
+
+Key the remedy on the honest signal instead:
+b4c924d6832bba0450ff39e4c7bf2d8c2d96a112 (#457) made sizing exclude a
+child's sibling conflicts from the score and publish their count. When
+that count is non-zero before Do, the advisory now names the
+provenance — "scores large for a split child (child N of a split of
+#X, depth D) — driven by inherited/sibling fields; prefer building
+over re-splitting" — and discloses the uncounted number beside the
+scored reasons, instead of recommending another split.
+
+The count, not the mere presence of a lineage record, is the
+predicate: every child carries lineage forever, so presence would tell
+a child whose conflicts are all organic that its size was inherited,
+beside its own contradicting conflict count. Keying on the count also
+keeps the ordinary remedy reachable on the sizer this project ships —
+the stub sizer answers `ok` unconditionally, so gating recovery on the
+sizer's own verdict would be dead config on every offline instance.
+A child with no sibling conflicts is advised exactly like any other
+bundle, and the ordinary advice returns by itself once the siblings
+land and their entries leave the brief.
+
+Bundles with no lineage produce byte-identical advisories, and a
+bundle that already has a patch keeps its iterate-plan wording. The
+same one-sentence provenance note now travels with the planner and
+splitter prompts, and the process flowchart documents the new fork.
+
+Fixes #458

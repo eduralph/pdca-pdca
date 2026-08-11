@@ -1,0 +1,25 @@
+fix(flow): apply a recorded sign-off decision before re-asking
+
+A sign-off decision is written into the issue's directory as soon as it is
+given, but the driver only ever read it back through the variable of the call
+that opened the session. If the run ended in between — a Ctrl-C, a crash, a
+dropped connection — the decision stayed on disk, unrecorded and unapplied,
+and the issue was still waiting for sign-off.
+
+Every later pass and every later run then offered that issue a fresh sign-off
+session, and the new session's write replaced the answer already given. One
+instance reported making the same call three times with none of them recorded.
+A batch run could repeat this once per pass until its pass budget ran out, and
+an automatic rebuild could overwrite a decision it had not authored.
+
+Both drive paths now read the decision already on file before offering a
+session: the recorded answer is applied, the issue moves on, and no session is
+opened. The automatic rebuild declines while such an answer is waiting. Both
+say what they did and for which issue, so nothing happens silently. The one
+case that still asks again is an acceptance the guard refuses because
+unresolved items remain — there the human genuinely has to come back.
+
+Nothing about how a decision is recorded changed: every apply goes through the
+existing record-and-transition path, with the same guard and the same author.
+
+Fixes #453

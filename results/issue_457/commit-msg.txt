@@ -1,0 +1,41 @@
+fix(sizing): exclude a split child's sibling conflicts from churn
+
+Every materialised split child banded `oversized` before anyone read its
+scope. The splitter writes a `Conflicts with` entry into each child
+naming its siblings — the ordering between children is the point of a
+split — and the parent's `Difficulty: high` and external-dependency
+tokens are copied down, so three of the estimate's five weighted
+features were artifacts the process itself installed: 3+3+3 = 9 against
+a cutoff of 7, with the one de-escalating term being one a split child
+never has. The weight behind `conflicts_with` was calibrated over
+organic bundles, so the estimator was scoring the split's own
+scheduling metadata as churn — and handing back the very advice, split
+this, that produced the child in the first place.
+
+The estimate now excludes declared conflicts that name the bundle's own
+siblings, read from the lineage record the split writes (#456). Organic
+conflicts — any id that is not a sibling, including the parent — still
+score at full weight, and a bundle with no lineage record scores
+exactly what it scored before, reasons included.
+
+The excluded count is exposed on the estimate as `sibling_conflicts`
+and carried through a model escalation rather than recomputed. It no
+longer moves the score, but it is not decoration: children that all
+conflict pairwise are the splitter's own statement that the split
+separated nothing, and a reader keyed on mere presence of lineage would
+report that non-convergence identically to a clean split.
+
+`scripts/size-calibrate` imports that same exclusion, so its
+`conflicts_with` column measures the quantity the engine actually
+scores; the excluded amount is reported beside it but deliberately not
+correlated. Without that, the next retune of the weight would be fitted
+to a number the engine no longer uses for split children — and nothing
+would show it, because both sides would stay self-consistent.
+
+The lineage record is a hand-editable file, so the exclusion is total:
+values that are not string ids are ignored and keep scoring at full
+weight — the direction that under-corrects — and a malformed record
+degrades the hint rather than crashing the estimate. No weight or
+cutoff changes; retuning stays with the existing calibration procedure.
+
+Fixes #457

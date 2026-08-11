@@ -1,0 +1,39 @@
+# Adversarial review — issue_469 (flow: adopt split children mid-run)
+
+Advisory only; nothing here gates. Evidence re-run at `$PDCA_TARGET`
+(`/home/eddie/pdca/pdca-harness.pdca-wt`) with python3 3.14.4, offline.
+
+## Evidence check (red→green) — attempted refutation, could not
+
+Reproduced independently: the whole `template/` copied to a scratch dir with **only** the
+four production files reverted to `HEAD` (`flow.py`, `cli.py`, `config.py`, `leaves.py`)
+and the new test kept — **23 of 26 fail** pre-fix, **26/26 pass** post-fix. The three that
+stay green pre-fix (`test_a_run_that_adopts_nothing_keeps_a_full_budget_per_wave`,
+`test_a_named_id_list_keeps_its_strict_scheduling_contract`,
+`test_an_unreadable_close_marker_never_kills_the_run`) are *don't-break* regression guards,
+which is the correct shape for them. The suite drives through `cli._flow` and builds its
+fixtures with the production `split.accept` — not a parallel re-implementation. Full driver
+suite at the target: `Ran 1659 tests … OK (skipped=2)`, so the T3 row reproduces.
+
+## Findings
+
+- **NEEDS-HUMAN — `template/src/pdca_harness/flow.py:1216` (`budget = allowance * max(1, len(wave_list))`) with `flow.py:1236` (`if spent >= budget: break`): an adopted child can now starve an id the operator explicitly NAMED, in a run that drove it before the patch.** The pool is sized off the *pre-adoption* schedule, but adoption both adds waves to it and can insert a child **ahead** of a named id in the re-levelled tail (`_reschedule` re-runs `conflict_map`, and a conflict naming a not-yet-existing child is dropped pre-adoption and becomes real post-adoption — `waves.py:104-118`). Concrete, reproduced both legs: bundles `500` (splits into `601`), `810` briefed `Depends on: 500` + `Conflicts with: 601`, run `pdca flow 500 810 --max-passes 2`, `601` costing two passes. Pre-fix: waves `[[500],[810]]`, `810` → **COMPLETE**, rc 0. Post-fix: waves `[[500],[601]]`, pool spent (`"the run's pass budget is spent (4 pass(es) over 2 wave(s))"`), `810` left **PLANNED**, rc 1. It is loud, not silent — but the policy question is a human one: the brief asked for "ONE run-wide `max_passes` budget" and says nothing about adopted work pre-empting the ids the operator typed. Either the pool should be re-sized when the schedule grows, or named waves should be served before adopted ones; both are scope decisions, not a slip.
+
+- **NEEDS-HUMAN — `template/src/pdca_harness/flow.py:1029` (`scheduled = [c for c in children if c.name in wave_of]`) and the assertion at `template/tests/test_flow_adopt_split.py:980` (`assertEqual(rc, 0)`): a run whose split stranded its only child still reports total success to automation.** Reproduced: `500` splits into a single child `601` whose brief names an unresolvable `Depends on: GHOST`. Result — results map `{'500': 'COMPLETE'}`, stdout `COMPLETE\t…/issue_500`, **rc 0**, `601` left PLANNED on disk. Only stderr carries `issue_601 held this run`. That is precisely the #449 symptom the brief set out to remove (a split whose children never get driven), now invisible to any caller that reads the exit code or stdout. The brief *did* ask for held children to be excluded from the results map, and the builder flags the consequence in the `_adopt_split_children` docstring (`flow.py:1000` region) — so this is a fitness-to-purpose call for the human at sign-off, not a coding error.
+
+- **NEEDS-HUMAN [impl] — `template/src/pdca_harness/cli.py:669-670` (`_report_single`): the single-id shape can print `COMPLETE` on stdout and exit 1, never naming on stdout the bundle that caused it.** Reproduced with the suite's own walk-away fixture (`pdca flow 500`, child `602` left AWAITING_SIGNOFF): stdout is exactly one line, `COMPLETE\t…/issue_500`, and rc is 1. The rc now depends on map entries the presentation never prints, which is new — pre-patch the single-id map only ever held the typed id, so stdout and rc could not disagree. The `state<TAB>path` line is the documented machine-readable contract of this shape (`cli.py:665`); automation that trusts it reads success from a failed run. Cheap fix while iterating: print the adopted children's dispositions (or one summary line naming what made the rc non-zero) alongside the typed id.
+
+- **NEEDS-HUMAN [impl] — `template/src/pdca_harness/flow.py:1009` (`known=batch_names | taken`): the `taken` half of the dedup key is load-bearing but unpinned — deleting it passes all 26 tests.** Mutation `known=batch_names | taken` → `known=batch_names` leaves `python3 -m unittest tests.test_flow_adopt_split` fully green. It is not dead code: with two parents splitting in the **same** wave and the second's record also naming the first's child (`500`→`601,602`, `700`→`601,801`, `pdca flow 500 700`), the mutant announces `issue_700 split → adopted children issue_601, issue_801 into wave 1` — one bundle adopted under two parents, entered twice into `bundles` (hence the results map's source list and the closing `_sweep_quietly`). The docstring at `flow.py:979-984` asserts both halves are needed and cites `test_a_child_adopted_earlier_is_not_re_adopted_by_a_later_parent` — but that test's two adoptions happen in **separate** calls (`k=-1` seed, then wave 0), so it exercises only the `batch_names` half. One test with both parents in one wave closes the gap and corrects the citation.
+
+- **NEEDS-HUMAN — `check-gates.json` row "T4 PR body has a user-impact opener + tracker id in both artifacts": `result: pass`, `gating: true`, and `path_line: ""` — the only gating row with no recorded oracle output.** C4/T2/T3 each carry an evidence string; T4 carries none, and no `commit-msg.txt` / `pr-description.md` exists in the target worktree (`git status` shows only the seven patched files plus the new test), so the required opener and tracker linkage cannot be reproduced from the supplied inputs. This is the **third consecutive iteration** in which T4's PASS has been recorded without reproducible evidence (see the iteration-1 and iteration-2 carry-forwards in `brief.md:105,111`). Verdict on T4 is provisional at best.
+
+## Attempted and could not refute
+
+- **Real wave indices** — mutating `flow.py:1028` to a hardcoded `k + 1` fails 10 tests.
+- **Lineage-cycle bound** (`examined`, `flow.py:1005-1007`) — the SIGALRM deadline test is a genuine termination assertion, and `_watch_examined` spies the production `_children_of_split` rather than inferring from the run returning.
+- **Path escape** (`flow.py:878-880`) — I could not construct a child id that keeps `d.parent == cfg.bundle_root` while resolving outside it; `cfg.bundle` is `bundle_root / f"issue_{id}"` (`config.py:469-471`), so any separator or `..` moves the parent.
+- **Total catches** — `_is_split_parent`'s bare `except` (`flow.py:827`) matches `split.read_lineage`'s own documented total catch (`split.py:397-399`); `BaseException` still propagates, and the watchdog in the test suite correctly uses a `BaseException` so `_isolate` cannot swallow the hang it proves.
+- **"One drive path / every shape"** in `docs/07-crosscutting.md` and `template/agents/planner.md.jinja` — `flow.flow` has **no** production callers (only `tests/test_flow_slice.py`, `tests/test_sweep.py`), so its deliberate non-adoption cannot be reached from any CLI shape; `flow_batch` and both `flow_ids` shapes all land on `_drive_and_act`.
+- **Fold boundary** — `k < len(wave_list) - 1` read live (`flow.py:1322`); reverting to a cached `last` is caught.
+- **Pool hand-down** — `min(allowance, budget - spent)` (`flow.py:1270`) and `_drive_wave` returning `used` on *both* un-finished exits (`flow.py:1099`, `flow.py:1138`) are each pinned.
+- **Strict admission for named ids** — `compute_waves` still runs before any adoption (`flow.py:1210`), so a cycle in the id list is refused regardless of on-disk lineage.

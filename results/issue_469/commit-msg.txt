@@ -1,0 +1,60 @@
+feat(flow): adopt a mid-run split's children into the run that caused it
+
+A bundle that reached `close-disposition = split` while a flow was
+driving it stranded its own children. The parent went terminal, `pdca
+split --accept` materialised the children fully briefed, and the run
+never looked at them: `flow_ids` built the drive set once and
+`_drive_and_act` computed its wave list once, so work created after that
+point could not enter either. The operator restarted by hand with `pdca
+flow <child-ids>`, and a run interrupted before that restart left the
+children sitting PLANNED with nothing but the lineage record pointing at
+them.
+
+Now the drive set grows. When a bundle in the run reaches that
+disposition, the flow reads its `split-lineage.json`
+(`split.read_lineage`), drops the children it cannot drive (no brief,
+already terminal, already in this run's set, an id that resolves outside
+the bundle root, a duplicate entry), re-levels what is left of the run
+together with them (`waves.partition_schedulable` + `compute_waves`) and
+splices the result into the waves AFTER the one that split — never the
+wave being driven, whose fold has a base about to move. From there the
+children are ordinary members of the run: pointed at the same per-target
+integration branch by the existing `_point_at_integration`, published and
+folded by the same code, covered by the same abandoned-work reporting,
+and announced with the wave index read back from the recomputed schedule
+rather than an assumed parent+1.
+
+Naming a parent that is ALREADY terminal on a split does the same thing,
+which is how a run that stopped before its children were driven is
+recovered. The walk is transitive through a terminal generation, and an
+adopted child that splits again is adopted in its turn. It is bounded: a
+parent is examined once, a child adopted once, and every wave — original
+or adopted — spends ONE run-wide pass pool sized off the schedule the run
+set out to drive, so a split can never multiply `max_passes`. Adoption
+follows the lineage edge only and never widens into a sweep of
+`results/`.
+
+Because both CLI shapes reach one drive path, this is one
+implementation: `pdca flow <id>`, an explicit id list and the CSV batch
+inherit identical child states, announcements and exit code. A child that
+cannot be scheduled is held with its reason, left in flight and excluded
+from the results map while the run carries on — a split never aborts the
+flow that caused it; a parent marked `split` whose record cannot be read
+is reported and skipped rather than guessed at.
+
+One exit rule is tightened as a consequence: the single-id shape's
+"stopping for the human who typed this is not a failure" leniency now
+applies to the id that was typed rather than to the whole results map, so
+an adopted child left AWAITING_SIGNOFF fails the run at either arity
+instead of being reported as total success.
+
+Also makes `template/tests/test_verify_base.py` hermetic. It reads the
+three base exports back out of a real gate subprocess, whose environment
+is `{**os.environ, **exports}`, so one of them already present in the
+ambient environment is read back as though the driver had set it. That is
+not hypothetical for a harness that drives itself: an outer run exporting
+`PDCA_VERIFY_BASE` turned 11 of those tests red with nothing wrong in the
+code under test. The module now drops exactly those three variables for
+the duration of each test and restores them afterwards.
+
+Fixes #469

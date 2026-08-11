@@ -1,0 +1,618 @@
+diff --git a/template/src/pdca_harness/cli.py b/template/src/pdca_harness/cli.py
+index 6a89505..6923761 100644
+--- a/template/src/pdca_harness/cli.py
++++ b/template/src/pdca_harness/cli.py
+@@ -652,13 +652,30 @@ def _report_single(cfg: Config, iid: str, results: dict[str, str]) -> int:
+     was given, so a disk read here would be a SECOND authority — the one that let the two
+     shapes disagree about the same bundle. If the key is ever missing the map contract is
+     broken and the loud KeyError is the correct outcome, not a quietly divergent report.
++
++    That first line answers only for ``iid`` — but since split adoption (#469) ``results``
++    can carry OTHER ids too, a child this run adopted. A caller reading only that one line
++    could see `COMPLETE` on stdout next to a non-zero exit with nothing on stdout naming
++    why (#473): the rc below already accounts for every entry in the map, so whenever it
++    disagrees with the single line already printed, the entries responsible are named on
++    stdout too, in the same `state<TAB>path` shape — the documented machine contract never
++    reads success from a run that failed.
+     """
+     final, d = results[iid], cfg.bundle(iid)
+     print(f"{final}\t{d}")
+     if final == state.AWAITING_SIGNOFF:
+         for it in signoff.open_needs_human(d / "SUMMARY.md"):
+             print(f"    {it}")
+-    return _results_rc(results, ok=(*_FLOW_OK, state.AWAITING_SIGNOFF))
++    ok = (*_FLOW_OK, state.AWAITING_SIGNOFF)
++    rc = _results_rc(results, ok=ok)
++    if rc != 0:
++        # `iid`'s own disposition was already printed above (ok or not); this names
++        # whichever OTHER entries — adopted children, almost always — are why the run
++        # failed even though that first line may read a clean terminal state.
++        for name, st in sorted(results.items()):
++            if name != iid and st not in ok:
++                print(f"{st}\t{cfg.bundle(name)}")
++    return rc
+ 
+ 
+ def _report_batch(results: dict[str, str]) -> int:
+diff --git a/template/src/pdca_harness/flow.py b/template/src/pdca_harness/flow.py
+index 682210d..f9865cd 100644
+--- a/template/src/pdca_harness/flow.py
++++ b/template/src/pdca_harness/flow.py
+@@ -804,10 +804,12 @@ def _report_held(held: dict[str, str]) -> None:
+ # every wave the children join spends the SAME run's pass budget, which is what stops a
+ # chain of splits from running forever.
+ #
+-# A bundle ALREADY terminal on a split when the run STARTS is the separate, deliberately
+-# out-of-scope case (recovering children an earlier run stranded): ``flow_ids`` still skips
+-# such an id with :func:`_terminal_hint`'s ``pdca flow <child-ids>`` advice, and a later
+-# child of this issue makes it an adoption seed.
++# A bundle ALREADY terminal on a split when the run STARTS is a RECOVERY seed (#473):
++# ``flow_ids`` still skips it as work to drive — it is already terminal, nothing to
++# build — but hands it to :func:`_drive_and_act` as an ``adopt_seeds`` entry, examined by
++# this SAME mechanism at ``k=-1`` ("the wave before wave 0"), so a crashed or interrupted
++# run's stranded brood is recovered by naming the parent again, not by hand-typing every
++# child id (#449 iteration-1 RULING (b)).
+ # ----------------------------------------------------------------------------
+ #: The close-disposition ``split.accept`` writes into a parent it has decomposed
+ #: (``split.py:635``). Spelled here rather than imported because the split command owns
+@@ -1083,7 +1085,11 @@ def _adopt_split_children(cfg: Config, candidates: list[Path], *, k: int,
+                           wave_list: list[list[Path]], bundles: list[Path],
+                           batch_names: set[str], named: frozenset[str]) -> None:
+     """Splice the children of any bundle in ``candidates`` that has split into the waves
+-    AFTER ``k``, and announce each child's REAL wave. ``k`` is the wave just driven.
++    AFTER ``k``, and announce each child's REAL wave. ``k`` is the wave just driven; ``-1``
++    is :func:`_drive_and_act`'s recovery pre-pass over ``adopt_seeds`` (#473) — a bundle
++    ALREADY terminal on a split when the run started — whose children then join in FRONT of
++    everything else (``wave_list[0:]``), exactly as a mid-run split's children join AFTER
++    the wave that caused it.
+ 
+     Mutates the run's state in place: ``wave_list[k+1:]`` is replaced by the recomputed
+     remainder (so the children join a wave AFTER the one their parent was in — never the
+@@ -1313,6 +1319,48 @@ def _drive_wave(cfg: Config, wave: list[Path], *, by: str, today: str,
+     return used
+ 
+ 
++def _run_pool(allowance: int, wave_list: list[list[Path]], named: frozenset[str]) -> int:
++    """The run-wide pass pool (#473 — resolves the v3 adversary's starvation finding):
++    ``allowance`` per wave, sized through the LAST wave that still holds a bundle the
++    caller actually NAMED — never ``len(wave_list)`` outright.
++
++    A named bundle's ORIGINAL position is always reachable under a pool sized off the
++    schedule the run set out to drive: each of the ``k`` waves ahead of it spends at most
++    ``allowance``, so the run's spend after ``k`` waves is at most ``k * allowance <
++    (k + 1) * allowance``, which is the pool a schedule of ``k + 1`` waves gets. Splicing a
++    wave of adopted work in front of a named bundle still waiting its turn moves it PAST
++    the wave the ORIGINAL sizing reserved for it (bundle ``810``, `Depends on: 500` +
++    `Conflicts with: 601`: `601`'s splice inserts a wave ahead of it, and a pool sized off
++    the two-wave original schedule runs out with `810` still un-driven) — so this is
++    recomputed at every splice, against the schedule as it stands right then, rather than
++    once off the schedule the run started with.
++
++    A wave of PURELY adopted work — nothing the caller named beyond it — draws on whatever
++    is left of the pool like any other adopted wave; it does not grow the pool itself, so a
++    chain of splits with no named bundle behind them cannot inflate it (the ordinary
++    recursive-split case: :func:`_adopt_split_children`'s recursion guard bounds it, not
++    this sizing). A run with no named bundle left in ``wave_list`` at all — a pure recovery
++    run, seeded only by an already-terminal parent (:func:`_drive_and_act`'s
++    ``adopt_seeds``) — gets one wave's worth regardless of how many the adopted children
++    end up needing: the same ceiling ``pdca flow <parent>`` has always had.
++
++    This is a PURE function of the schedule as it stands right now — it does not know the
++    pool's PREVIOUS size, so the caller takes ``max(budget, _run_pool(...))`` at every
++    recompute, never the bare return value. That matters for a named bundle the
++    reschedule's tolerance (:func:`_reschedule` → ``waves.partition_schedulable``) HOLDS
++    for an unresolved dependency: a held bundle leaves ``wave_list`` entirely (it is not
++    scheduled anywhere), so a naive re-assignment would read this as "no named bundle past
++    wave 0" and SHRINK the pool below what an earlier, wider schedule already reserved —
++    ending the run's OWN prior guarantee to a bundle merely waiting on something un-terminal,
++    not on the pool (`test_a_named_id_in_the_re_scheduled_tail_is_held_not_lost`).
++    """
++    last = -1
++    for k, wave in enumerate(wave_list):
++        if any(d.name in named for d in wave):
++            last = k
++    return allowance * (last + 1 if last >= 0 else 1)
++
++
+ def _drive_and_act(
+     cfg: Config,
+     bundles: list[Path],
+@@ -1322,6 +1370,7 @@ def _drive_and_act(
+     by: str,
+     today: str,
+     max_passes: int | None = None,
++    adopt_seeds: list[Path] | None = None,
+ ) -> dict[str, str]:
+     """Drive a set of in-flight bundles through the full cycle to Act, in waves.
+ 
+@@ -1336,13 +1385,22 @@ def _drive_and_act(
+     The drive set is no longer frozen (#469): a bundle that reaches
+     ``close-disposition = split`` while this run is driving it hands its children back to
+     the run, spliced into the waves after its own (:func:`_adopt_split_children`).
++    ``adopt_seeds`` extends that to bundles this call is NOT driving but must still examine
++    for stranded children (#473): an id the caller named that was ALREADY terminal on a
++    split when the run started — how a run that stopped before its children were driven is
++    recovered, by naming the parent again instead of every child by hand.
+ 
+     ``max_passes`` (``[driver].max_passes``) keeps its meaning — the allowance ONE wave
+     gets — and additionally sizes the run's **pool**: ``max_passes`` × the waves the run set
+     out to drive, spent down by every wave in turn, adopted ones included. A run that adopts
+     nothing cannot reach that pool (each of its waves is separately capped at
+-    ``max_passes``), so it behaves exactly as before; a run whose drive set GROWS draws the
+-    extra waves from the same pool, so a split can never multiply what the operator allowed.
++    ``max_passes``), so it behaves exactly as before. The pool is RE-SIZED at every splice
++    (#473, :func:`_run_pool`) — through the last wave that still holds a bundle the caller
++    actually NAMED, not simply the live wave count — so a splice that pushes a named id
++    LATER (an adopted child inserted ahead of it) grows the pool to keep covering that id,
++    while a splice that adds only adopted work AFTER every named id leaves the pool exactly
++    where it was: adoption itself is bounded (the recursion guard, never a reset), so it is
++    what keeps a chain of splits from spending an unbounded pool, not the sizing formula.
+     Running the pool out stops the run and names what it walked away from (#260's
+     discipline).
+ 
+@@ -1378,11 +1436,22 @@ def _drive_and_act(
+     # that same re-levelling goes the other way — out of the drive set again, so it is not
+     # reported as this run's work (`_adopt_split_children`, `named` above).
+     wave_list = waves.compute_waves(cfg, bundles)  # validates (raises) + levels the batch
+-    # The run's pass pool (#469). Sized off the ORIGINAL schedule, so it is exactly the
+-    # allowance this run would have had with no adoption at all — provably non-binding
+-    # there (each wave spends ≤ `allowance`, and there are `len(wave_list)` of them), and
+-    # the ceiling on a run whose waves multiply.
+-    budget = allowance * len(wave_list)
++    # The run's pass pool (#469, re-sized at every splice — #473, :func:`_run_pool`), sized
++    # off the schedule the caller's own ids produced before any recovery seed is examined.
++    budget = _run_pool(allowance, wave_list, named)
++    # Recovery seeds (#473): an id ALREADY terminal on a split when this run started — not
++    # itself work to drive, but examined by the SAME lineage-scoped mechanism a mid-run
++    # split uses. `k=-1` is "the wave before wave 0": the splice puts the seeds' adoptable
++    # children in FRONT of everything else, exactly as a mid-run split's `k` puts its
++    # children AFTER the wave that caused it (below). A run with no seeds spends nothing
++    # extra here — `_adopt_split_children` given an empty candidate list is a no-op.
++    _adopt_split_children(cfg, list(adopt_seeds or []), k=-1, wave_list=wave_list,
++                          bundles=bundles, batch_names=batch_names, named=named)
++    if not bundles:
++        return {}                    # nothing to drive, and nothing was adoptable
++    # `max(...)`, never a bare re-assignment — see `_run_pool`'s docstring on why a splice
++    # must never SHRINK the pool below what an earlier, wider schedule already promised.
++    budget = max(budget, _run_pool(allowance, wave_list, named))
+     # `wave_list` is iterated by a LIST iterator on purpose (#469): adoption splices the
+     # recomputed remainder into `wave_list[k+1:]` after wave k drives, and the iterator —
+     # which simply indexes forward — picks the new tail up. So "how many waves are left" is
+@@ -1433,6 +1502,14 @@ def _drive_and_act(
+         # restarting by hand with `pdca flow <child-ids>`.
+         _adopt_split_children(cfg, runnable, k=k, wave_list=wave_list, bundles=bundles,
+                               batch_names=batch_names, named=named)
++        # Re-sized (#473): the splice above may have pushed a NAMED bundle further down
++        # `wave_list` than the pool was last sized for (the v3 adversary — `810` pushed one
++        # wave later by `601`'s splice). `max(...)`, never a bare re-assignment — a named
++        # bundle the SAME splice's reschedule just HELD leaves `wave_list` entirely, and
++        # re-sizing off that narrower schedule would shrink a pool an earlier, wider one
++        # already promised it (`_run_pool`'s own docstring). A no-op splice (nothing
++        # adopted) leaves `wave_list` unchanged, so this is then a no-op too.
++        budget = max(budget, _run_pool(allowance, wave_list, named))
+         complete = [d for d in sorted(runnable, key=lambda p: p.name)
+                     if state.state(d) == state.COMPLETE]
+         _audit_wave_overlap(complete)
+@@ -1601,7 +1678,10 @@ def flow_ids(
+     **Plan pre-pass** first briefs any UNPLANNED id in the list in ONE shared interactive
+     session (``do_plan_batch`` over those ids, reading each bundle's ``notes.json``), making
+     this the id-seeded analogue of ``flow_batch``. Ids still UNPLANNED after the pre-pass
+-    (planner skipped them) and terminal ids (COMPLETE / DISCONTINUED) are left alone.
++    (planner skipped them) and terminal ids (COMPLETE / DISCONTINUED) are left alone —
++    except that an id terminal on a ``split`` is handed to ``_drive_and_act`` as a
++    RECOVERY seed (#473), so naming a bundle an earlier run already split adopts whatever
++    of its children that run left stranded, instead of only re-printing the hint.
+ 
+     Returns ``{issue_id: state}`` for **every id it was given** (issue #468), driven or
+     skipped — a skipped id's disposition is its state on disk, the same value
+@@ -1644,6 +1724,7 @@ def flow_ids(
+ 
+     bundles: list[Path] = []
+     skipped: dict[str, str] = {}   # asked for, not driven — still gets a disposition (#468)
++    seeds: list[Path] = []         # terminal ids examined for stranded children (#473)
+     for iid in ids:
+         d = cfg.bundle(iid)
+         s = state.state(d)
+@@ -1657,13 +1738,28 @@ def flow_ids(
+             if hint:
+                 print(f"  {hint}", file=sys.stderr)
+             skipped[iid] = s
++            if _is_split_parent(d):
++                # Terminal on a split is not work to drive — but its children may still be
++                # sitting exactly where the split left them (a crashed or interrupted
++                # earlier run, or this same id typed again): the pre-run short-circuit used
++                # to swallow that recovery (#449 iteration-1 RULING (b)). Hand it on as an
++                # adoption seed instead, routed through the SAME lineage-scoped mechanism a
++                # mid-run split uses (`_adopt_split_children`, `flow.py:1084`). The
++                # parent's own disposition stays in `skipped` either way, so the results
++                # map both CLI shapes report still answers for every id it was given
++                # (#468) — recovery only ADDS its children to that map, never replaces the
++                # parent's own entry.
++                print(f"  its children are examined for adoption into this run; whatever "
++                      f"cannot be adopted is named below.", file=sys.stderr)
++                seeds.append(d)
+             continue
+         bundles.append(d)
+-    if not bundles:
++    if not bundles and not seeds:
+         return skipped
+     bundles.sort(key=lambda p: p.name)
+-    return skipped | _drive_and_act(cfg, bundles, do_publish=do_publish, do_act=do_act,
+-                                    by=by, today=today, max_passes=max_passes)
++    return skipped | _drive_and_act(cfg, bundles, adopt_seeds=seeds, do_publish=do_publish,
++                                    do_act=do_act, by=by, today=today,
++                                    max_passes=max_passes)
+ 
+ 
+ def _bundle_dirs(cfg: Config) -> set[str]:
+diff --git a/template/tests/test_flow_adopt_recovery.py b/template/tests/test_flow_adopt_recovery.py
+new file mode 100644
+index 0000000..27b63cd
+--- /dev/null
++++ b/template/tests/test_flow_adopt_recovery.py
+@@ -0,0 +1,365 @@
++"""Recovery, budget honesty and stdout honesty for split adoption (#469 → #473).
++
++The adoption CORE (detect / validate / splice / report, `flow._adopt_split_children`) is
++child-1's (#472) and is reused here as-is, never re-derived. Two gaps remained after it:
++
++**Recovery.** A run handed an id whose bundle is ALREADY terminal on a split — a crashed
++or interrupted earlier run's, or simply `pdca flow 500` typed a second time — hit the
++pre-run short-circuit in `flow_ids` and stopped there: the parent's own disposition was
++reported, but its stranded children were never examined (#449 iteration-1 RULING (b)).
++This module pins that the SAME lineage-scoped mechanism now adopts them, and that the
++mid-run and recovery shapes agree on the states, exit code and announcement SHAPE they
++produce on equivalent disk state.
++
++**Honesty.** Two adversary-reproduced findings from #469 v3: (a) the run-wide pass pool
++was sized off the PRE-adoption schedule, so an adopted child could starve a named id
++(`810` left PLANNED, rc 1, after adoption inserted `601` ahead of it) — the pool must be
++RE-SIZED at every splice; (b) the single-id CLI shape could print `COMPLETE` on stdout
++while exiting 1 over an adopted child it never named there — the `state<TAB>path`
++machine contract must never disagree with the exit code.
++
++Every drive here goes **through `cli._flow`**, mirroring `test_flow_adopt_split.py`'s own
++harness (`AdoptSplitChildren._cli`, `:154`) — the surface the operator (and any
++automation reading stdout) actually uses.
++
++Everything is the ordinary offline driver suite: all six leaves stubbed (the fixture
++mirrors `tests/test_flow_slice.py:33`, `_stub_config`), gates empty, no tracker / network
++/ `gh` / container. The split itself is not simulated — `_split_now` calls the PRODUCTION
++`split.accept` (`split.py:525`).
++
++Modules are imported, never new symbols (`from pdca_harness import cli, flow, …`): a
++`from pdca_harness.flow import <new helper>` would raise ImportError on the C4 red leg,
++which `engine/scripts/run-verify.sh` classifies PDCA-UNVERIFIABLE rather than red.
++
++    cd template && PYTHONPATH=src python3 -m unittest tests.test_flow_adopt_recovery
++"""
++
++from __future__ import annotations
++
++import io
++import shutil
++import tempfile
++import unittest
++from contextlib import redirect_stderr, redirect_stdout
++from pathlib import Path
++from types import SimpleNamespace
++
++from pdca_harness import cli, flow, leaves, split, state
++from pdca_harness.config import Config, LeafConfig
++
++
++def _stub_config(root: Path) -> Config:
++    """All six leaves stubbed, gates empty (all-PASS stub rows) — the same fixture shape as
++    `tests/test_flow_slice.py:33`, including the hermetic toy checkout inside the tmp root
++    (the sibling convention would resolve to a SHARED /tmp/example-repo)."""
++    return Config(
++        root=root,
++        bundle_root=root / "results",
++        process_dir=root / "process",
++        templates_dir=root / "templates",  # empty → planner stub uses its fallback brief
++        default_branch="main",
++        tracker_system="github",
++        tracker_url="",
++        issue_id_example="#1",
++        builder=LeafConfig(mode="stub", family="claude"),
++        reviewer=LeafConfig(mode="stub", family="codex"),
++        planner=LeafConfig(mode="stub", family="claude", interactive=True),
++        signoff=LeafConfig(mode="stub", family="claude", interactive=True),
++        publisher=LeafConfig(mode="stub", family="claude", interactive=True),
++        act=LeafConfig(mode="stub", family="claude", interactive=True),
++        act_cadence=1,
++        repo_checkouts={"example-org/example-repo": str(root / "example-repo")},
++    )
++
++
++def _brief(slug: str, *extra: str) -> str:
++    """An authored brief (a filled Slug, so `state` reads PLANNED, not a placeholder)."""
++    return (f"# Brief — {slug}\n\n"
++            f"- **Slug:** {slug}\n"
++            f"- **Defect:** stub defect for {slug}.\n"
++            "- **Success criterion:** the stub test passes.\n"
++            "- **Repo + branch target:** example-repo @ main\n"
++            "- **Test file:** test_stub.py\n"
++            + "".join(line + "\n" for line in extra))
++
++
++def _proposal(*bodies: str) -> str:
++    """A `split-proposal.md` the production parser accepts (`split.parse`)."""
++    out = "<!-- pdca:split-proposal v1 -->\n# Split proposal\n\n"
++    for i, body in enumerate(bodies, 1):
++        out += f"<!-- pdca:child child-{i} -->\n{body}\n<!-- pdca:end child-{i} -->\n\n"
++    return out
++
++
++#: child-2 declares an ordering edge on its sibling LABEL — `split.accept` rewrites it to
++#: the real id, which is what makes a two-child split land in two waves.
++_CHILD_ONE = _brief("child-first")
++_CHILD_TWO = _brief("child-second", "- **Depends on:** child-1")
++
++
++class AdoptRecovery(unittest.TestCase):
++    """Harness mirrors `test_flow_adopt_split.py`'s `AdoptSplitChildren` (#472's own
++    fixture idiom, reused rather than re-derived)."""
++
++    def setUp(self) -> None:
++        self.cfg = self._instance()
++        self.err = io.StringIO()
++        self.out = io.StringIO()
++        self.passes = 0                  # one `_build_all` call == one pass of one wave
++        self._orig = (leaves.do_plan, leaves.run_signoff_batch, flow._build_all)
++
++    def tearDown(self) -> None:
++        leaves.do_plan, leaves.run_signoff_batch, flow._build_all = self._orig
++
++    # -- instance + capture -------------------------------------------------------------
++
++    def _instance(self) -> Config:
++        """A fresh, hermetic instance root, removed at teardown."""
++        tmp = Path(tempfile.mkdtemp())
++        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
++        return _stub_config(tmp)
++
++    def _reset(self) -> None:
++        """A second leg of the same test, on a clean instance and unpatched leaves."""
++        leaves.do_plan, leaves.run_signoff_batch, flow._build_all = self._orig
++        self.cfg = self._instance()
++        self.err = io.StringIO()
++        self.out = io.StringIO()
++        self.passes = 0
++
++    def _args(self, ids: list[str], *, max_passes: int | None = None) -> SimpleNamespace:
++        """The `pdca flow <ids…>` argv as `cli._flow` receives it — arity is the CLI's own
++        presentation switch (`cli.py:622`), so it has to be the thing under test rather
++        than a hand-picked `flow.*` call."""
++        return SimpleNamespace(issue_ids=ids, from_csv=None, from_briefs=None,
++                               no_publish=True, no_act=True, by="", lanes=None,
++                               max_passes=max_passes)
++
++    def _cli(self, ids: list[str], *, max_passes: int | None = None) -> int:
++        """Run `pdca flow <ids…>` through `cli._flow` and return its exit code."""
++        with redirect_stderr(self.err), redirect_stdout(self.out):
++            return cli._flow(self.cfg, self._args(ids, max_passes=max_passes))
++
++    def _fresh_output(self) -> None:
++        """Reset only the captured stdout/stderr — for a SECOND `_cli` call against the
++        SAME disk state and leaf patches (a recovery run following the one that stranded
++        it), where `_reset()` would wrongly start a new instance."""
++        self.err, self.out = io.StringIO(), io.StringIO()
++
++    def _state(self, issue_id: str) -> str:
++        return state.state(self.cfg.bundle(issue_id))
++
++    def _adoptions(self) -> list[str]:
++        return [ln.split("flow: ")[-1] for ln in self.err.getvalue().splitlines()
++                if "split → adopted children" in ln]
++
++    # -- the split, exactly as `pdca split --accept` leaves it --------------------------
++
++    def _split_now(self, parent: Path, ids: list[str], bodies: list[str]) -> None:
++        """Decompose `parent` into `ids` through the PRODUCTION `split.accept`: child
++        bundles + each child's lineage record, the parent's merged `children` record, its
++        build-notes breadcrumb and its `close-disposition = split` marker."""
++        parent.mkdir(parents=True, exist_ok=True)
++        if not (parent / "brief.md").exists():
++            (parent / "brief.md").write_text(_brief("parent-slice"), encoding="utf-8")
++        (parent / split.PROPOSAL).write_text(_proposal(*bodies), encoding="utf-8")
++        split.accept(parent, ids, self.cfg)
++
++    def _arm(self, splits: dict[str, list[str]], *,
++             bodies: dict[str, list[str]] | None = None, iterate_once: str = "") -> None:
++        """Stub the leaves so each id in `splits` splits mid-flight, into its child ids —
++        the documented Entry B: sign-off records `iterate-plan`, the driver re-opens the
++        bundle to UNPLANNED, and the next pass's Plan pre-pass concludes it is too large
++        and splits it (mirrors `test_flow_adopt_split.py:189-246`, `_arm`)."""
++        bodies = bodies or {}
++        real_plan, real_signoff_batch, real_build_all = self._orig
++        done: set[str] = set()
++
++        def splitting_plan(d: Path, cfg: Config, csv: str | None = None) -> None:
++            iid = d.name.removeprefix("issue_")
++            if iid in splits and f"split:{iid}" not in done:
++                done.add(f"split:{iid}")
++                self._split_now(d, splits[iid], bodies.get(iid, [_CHILD_ONE, _CHILD_TWO]))
++                return
++            real_plan(d, cfg, csv)
++
++        def decide(d: Path) -> bool:
++            iid = d.name.removeprefix("issue_")
++            if iid in splits and f"replan:{iid}" not in done:
++                done.add(f"replan:{iid}")
++                (d / leaves.SIGNOFF_DECISION).write_text(
++                    "iterate-plan\nthis slice is too large — decompose it\n",
++                    encoding="utf-8")
++                return True
++            if iid == iterate_once and "iterate" not in done:
++                done.add("iterate")
++                (d / leaves.SIGNOFF_DECISION).write_text(
++                    "iterate-do\none more round\n", encoding="utf-8")
++                return True
++            return False
++
++        def signoff_batch(cfg: Config, bundles: list[Path]) -> None:
++            real_signoff_batch(cfg, [d for d in bundles if not decide(d)])
++
++        def counting(cfg: Config, wave: list[Path]) -> None:
++            self.passes += 1
++            real_build_all(cfg, wave)
++
++        leaves.do_plan = splitting_plan
++        leaves.run_signoff_batch = signoff_batch
++        flow._build_all = counting
++
++    def _briefed(self, iid: str, *extra: str) -> Path:
++        d = self.cfg.bundle(iid)
++        d.mkdir(parents=True, exist_ok=True)
++        (d / "brief.md").write_text(_brief(f"slice-{iid}", *extra), encoding="utf-8")
++        return d
++
++    # -- criterion (1): recovery — an ALREADY-terminal split's children are adopted ------
++
++    def test_recovery_adopts_the_stranded_children_of_an_already_terminal_split(
++            self) -> None:
++        """`pdca flow 500` a SECOND time, after an earlier run already left 500 terminal
++        on a split with 601 stranded PLANNED — the pre-run short-circuit in `flow_ids`
++        must not swallow that recovery (#449 iteration-1 RULING (b)): it hands 500 on as
++        an adoption seed and 601 is driven to a terminal state within THIS call."""
++        self._briefed("500")
++        self._arm({"500": ["601"]}, bodies={"500": [_CHILD_ONE]})
++
++        # Leg A — an earlier run reaches the split but never adopts (a crash before the
++        # post-wave adopt step existed for it, or simply an older build): patch
++        # `_adopt_split_children` to a no-op for this call only, so 500 reaches COMPLETE
++        # on its split with 601 left exactly where `split.accept` put it.
++        real_adopt = flow._adopt_split_children
++        flow._adopt_split_children = lambda *a, **kw: None
++        try:
++            self._cli(["500"])
++        finally:
++            flow._adopt_split_children = real_adopt
++
++        self.assertEqual(self._state("500"), state.COMPLETE)
++        self.assertEqual(self._state("601"), state.PLANNED)   # stranded, as an old run left it
++
++        # Leg B — the recovery run: naming the ALREADY-terminal parent again adopts 601.
++        self._fresh_output()
++
++        rc = self._cli(["500"])
++
++        self.assertEqual(self._state("601"), state.COMPLETE)
++        self.assertEqual(rc, 0)
++        err = self.err.getvalue()
++        self.assertIn("flow: issue_500 — already terminal (COMPLETE), skipped", err)
++        self.assertIn("its children are examined for adoption into this run", err)
++        self.assertIn("issue_500 split → adopted children issue_601 into wave 0", err)
++        # The parent's OWN disposition is still on stdout — recovery adds 601, never
++        # replaces 500's own answer (issue #468's total-results-map contract).
++        self.assertIn(f"{state.COMPLETE}\t{self.cfg.bundle('500')}", self.out.getvalue())
++
++    def test_mid_run_and_recovery_shapes_agree_on_states_and_exit_code(self) -> None:
++        """The two ways a run can end up adopting 601 — mid-run (500 splits while THIS
++        run drives it) and recovery (500 was ALREADY terminal on the split when this run
++        started) — must not diverge on what they deliver: the same child states, the same
++        exit code, and the same SHAPE of adoption announcement. Only the wave index
++        differs, because a recovery run drives no wave of its own for the parent — the
++        child joins in front of everything else (`k=-1`) rather than after the parent's
++        wave (`k=0`)."""
++        # Leg A — mid-run.
++        self._briefed("500")
++        self._arm({"500": ["601"]}, bodies={"500": [_CHILD_ONE]})
++
++        rc_mid = self._cli(["500"])
++
++        mid_states = (self._state("500"), self._state("601"))
++        mid_err = self.err.getvalue()
++
++        # Leg B — recovery: the SAME split, adopted only by a SECOND run.
++        self._reset()
++        self._briefed("500")
++        self._arm({"500": ["601"]}, bodies={"500": [_CHILD_ONE]})
++        real_adopt = flow._adopt_split_children
++        flow._adopt_split_children = lambda *a, **kw: None
++        try:
++            self._cli(["500"])
++        finally:
++            flow._adopt_split_children = real_adopt
++        self._fresh_output()
++
++        rc_recovery = self._cli(["500"])
++
++        recovery_states = (self._state("500"), self._state("601"))
++        recovery_err = self.err.getvalue()
++
++        self.assertEqual(mid_states, (state.COMPLETE, state.COMPLETE))
++        self.assertEqual(recovery_states, (state.COMPLETE, state.COMPLETE))
++        self.assertEqual(rc_mid, 0)
++        self.assertEqual(rc_recovery, 0)
++        self.assertIn("issue_500 split → adopted children issue_601 into wave 1", mid_err)
++        self.assertIn("issue_500 split → adopted children issue_601 into wave 0",
++                      recovery_err)
++
++    # -- criterion (2): the run-wide pool is re-sized so adoption cannot starve a named id
++
++    def test_the_run_wide_pool_is_resized_so_adoption_cannot_starve_a_named_id(
++            self) -> None:
++        """The v3 adversary's starvation scenario: `500` splits into `601`; `810`,
++        explicitly typed, declares `Depends on: 500` and `Conflicts with: 601` so
++        adoption inserts `601` into a wave AHEAD of it. Sizing the pool off the
++        PRE-adoption schedule (two named waves × `--max-passes 2` = 4) left `810` PLANNED
++        at rc 1 once `601`'s own two passes were spent — the pool must be RE-SIZED at the
++        splice that pushes `810` one wave later, so `810` still reaches COMPLETE."""
++        self._briefed("500")
++        self._briefed("810", "- **Depends on:** 500", "- **Conflicts with:** 601")
++        self._arm({"500": ["601"]}, bodies={"500": [_CHILD_ONE]}, iterate_once="601")
++
++        rc = self._cli(["500", "810"], max_passes=2)
++
++        self.assertEqual(self._adoptions(),
++                         ["issue_500 split → adopted children issue_601 into wave 1"])
++        self.assertEqual(self._state("601"), state.COMPLETE)
++        self.assertEqual(self._state("810"), state.COMPLETE)   # not starved by the adoption
++        self.assertEqual(rc, 0)
++        self.assertNotIn("pass budget is spent", self.err.getvalue())
++
++    # -- criterion (3): the single-id shape never reports success it did not deliver ----
++
++    def test_single_id_stdout_names_the_adopted_bundle_that_made_the_run_fail(
++            self) -> None:
++        """`pdca flow 500`: 500 itself reaches COMPLETE, but the run still fails because
++        602 — a child it adopted, dependent on its sibling 601 — was left PLANNED short
++        of the run's budget. Printing only `COMPLETE\\t<500's path>` on stdout while
++        exiting 1 is exactly the contract violation #473 fixes: a caller reading stdout
++        of a failed run must see the bundle that failed there too."""
++        self._briefed("500")
++        self._arm({"500": ["601", "602"]})   # 602 depends on 601 (default bodies)
++
++        rc = self._cli(["500"], max_passes=3)
++
++        self.assertEqual(self._state("500"), state.COMPLETE)
++        self.assertEqual(self._state("601"), state.COMPLETE)
++        self.assertEqual(self._state("602"), state.PLANNED)
++        self.assertEqual(rc, 1)
++        printed = self.out.getvalue()
++        self.assertIn(f"{state.COMPLETE}\t{self.cfg.bundle('500')}", printed)
++        self.assertIn(f"{state.PLANNED}\t{self.cfg.bundle('602')}", printed)
++        # Only the FAILING entries are named — 601 already agrees with a successful exit
++        # code, and repeating every adopted child on stdout would bury the one that
++        # matters behind ones that do not.
++        self.assertNotIn(f"{state.COMPLETE}\t{self.cfg.bundle('601')}", printed)
++
++    def test_single_id_stdout_prints_only_the_one_line_when_the_run_succeeds(
++            self) -> None:
++        """The honesty fix must not turn a CLEAN run chatty: with nothing to explain, the
++        single-id shape prints exactly the one documented `state<TAB>path` line, same as
++        before adoption existed."""
++        self._briefed("500")
++        self._arm({"500": ["601"]}, bodies={"500": [_CHILD_ONE]})
++
++        rc = self._cli(["500"])
++
++        self.assertEqual(rc, 0)
++        lines = [ln for ln in self.out.getvalue().splitlines() if ln.strip()]
++        self.assertEqual(lines, [f"{state.COMPLETE}\t{self.cfg.bundle('500')}"])
++
++
++if __name__ == "__main__":
++    unittest.main()
