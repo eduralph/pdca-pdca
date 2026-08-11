@@ -6,6 +6,12 @@
     }
   },
   "permissions": {
+    "additionalDirectories": [
+      "/home/eddie/pdca/pdca-harness",
+      "/home/eddie/pdca/pdca-harness.pdca-wt",
+      "/home/eddie/pdca/pdca-harness.pdca-wt-l0",
+      "/home/eddie/pdca/pdca-harness.pdca-wt-l1"
+    ],
     "allow": [
       "Read",
       "Grep",
