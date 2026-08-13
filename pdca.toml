@@ -626,11 +626,17 @@ argv = ["claude", "-p", "--agent", "sizer", "--allowedTools", "Read", "Write", "
 # answer is exactly when a stronger model earns its cost; nothing in the brief predicts it.
 # At most one escalation runs: this is a corroborating signal, not a search.
 #
-# [[leaves.sizer_escalation]]
-# on_band = ["watch"]
-# on_confidence = ["low"]
-# effort = "medium"
-# argv = ["claude", "-p", "--agent", "sizer", "--allowedTools", "Read", "Write", "--model", "sonnet"]
+# LIVE 2026-08-13, with the sizer itself. Note what changed by turning that leaf on: the
+# stub hardcoded `confidence: "low"` into every bundle, so `on_confidence` would have fired
+# on all 44 of them and escalated every time. With the real sizer answering, a low
+# confidence is a real one and this triggers on the bundles that genuinely are unclear —
+# which is the case the escalation was designed for and the only one worth paying sonnet
+# for over the haiku first pass.
+[[leaves.sizer_escalation]]
+on_band = ["watch"]
+on_confidence = ["low"]
+effort = "medium"
+argv = ["claude", "-p", "--agent", "sizer", "--allowedTools", "Read", "Write", "--model", "sonnet"]
 
 [leaves.reviewer]
 mode = "command"
@@ -1236,6 +1242,20 @@ checks = [
   # read it as an absent gate rather than an unresolvable one (upstream #441). The wrapper
   # resolves venv → source tree → PATH, so the row works in every documented layout.
   { id = "T4-contribution", tier = "T4", label = "PR body has a user-impact opener + tracker id in both artifacts", cmd = "./scripts/pdca contribcheck", gating = true, scope = "bundle" },
+
+  # C5 — the reference #154 lens, ADVISORY: does a newly added test import the production
+  # package, or might it be green against a hand-ported copy? `scripts/checks/
+  # test_exercises_production.py` has shipped here since the render commit, with its own
+  # suite (tests/test_prod_path_gate.py), and was never registered — C5 had no mechanical
+  # gate at all, only "reviewer + human sign-off".
+  #
+  # Wrapped rather than called directly: the target has two test roots and the question is
+  # fair in only one. `template/tests/` exercises the package (72 of 78 import it) —
+  # `tests/` RENDERS the template and drives it as a subprocess, so not importing is
+  # correct there (1 of 3 does), and asking would file a §6 item against correct code. The
+  # wrapper scopes to the driver suite and hands the rest of the reference's logic back
+  # unmodified. Advisory and exits 0 always, by the reference's construction.
+  { id = "C5-prod-path", tier = "C5", label = "added test exercises production, not a copy", cmd = "PDCA_PROD_PACKAGE=pdca_harness ./engine/scripts/run-prod-path.py", gating = false, scope = "bundle" },
 ]
 
 
