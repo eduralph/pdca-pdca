@@ -78,14 +78,20 @@ criteria those reviews set. The review itself is still owed.
   the sole remaining `make check` failure. **Not a regression: it predates the
   update** — the pre-update baseline was 4 failures, of which v0.57.0 fixes one
   (`test_remote_control_docs.test_it_stays_off_by_default`) and this change
-  fixes two (the `[driver.size_signal]` example pair).
+  fixes two (the `[driver.size_signal]` example pair). Filed upstream as
+  **eduralph/pdca-harness#507** (bug, Milestone 0.60.0).
 - **The same #386 class, hit during the update:** v0.57.0's new
   `test_verify_red_leg.py` / `test_verify_base.py` assert the C4 *skeleton's*
   prose is present in `engine/scripts/run-verify.sh` — wording a filled-in gate
-  legitimately replaces. Resolved locally by restoring the published contract
-  above this instance's implementation (defensible: the harness has no other
-  channel for the rule), but the tests would fail for any instance that fills
-  the gate in without knowing to keep it.
+  legitimately replaces, and which the skeleton (`:2`) and `engine/README.md`
+  (`:31`, `:84`) tell every instance to replace. Eight failures. Resolved by
+  restoring the published contract above this instance's implementation; kept
+  on the human's call pending the upstream fix, and marked TEMPORARY in the file.
+  **Correction to the first reading:** that restoration is defensive, not
+  necessary — `engine/README.md` also ships to instances, is not a fill-in file,
+  and carries the same contract and truth table (`:56-67`), so the rule survives
+  for any instance that replaces the skeleton. Documented inside #507 rather
+  than filed separately, so the split stays the maintainer's call.
 - **`host_ci` fetches the network at publish.** The target's `render_site.py`
   pulls mermaid, mirroring the target's own CI. A network blip now blocks a
   push rather than failing a PR check after the fact.

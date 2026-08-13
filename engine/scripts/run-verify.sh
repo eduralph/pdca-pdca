@@ -14,9 +14,16 @@
 #
 # ---------------------------------------------------------------------------------
 # The published C4 contract, verbatim from the template skeleton. This instance FILLED
-# the gate in (below), but the rule it implements is stated here — that wording is the
-# harness's only way to publish it, and tests/test_verify_red_leg.py + 
-# tests/test_verify_base.py hold it in place in every rendered instance.
+# the gate in (below) — which is what the skeleton itself, and engine/README.md, tell
+# every instance to do — but tests/test_verify_red_leg.py and tests/test_verify_base.py
+# (new in v0.57.0) assert this wording is present in THIS file, so a filled-in gate that
+# drops it turns the T3 suite red. Kept verbatim to satisfy them.
+#
+# TEMPORARY, pending eduralph/pdca-harness#507. The rule does NOT depend on this block:
+# engine/README.md ships to every instance, is not a fill-in file, and states the same
+# contract and truth table at engine/README.md:56-67 — the suite asserts against it in
+# parallel. So once #507 scopes these assertions to the template checkout, delete this
+# block and the section marker below; nothing is lost.
 # ---------------------------------------------------------------------------------
 # The driver exports $PDCA_BUNDLE = the bundle dir (results/issue_<id>/), which
 # holds patch.diff and the brief that names the test. It also exports, when set:
