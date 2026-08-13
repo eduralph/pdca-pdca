@@ -1278,8 +1278,17 @@ checks = [
 # cannot use the `./engine/scripts/…` form the rows above use. $PDCA_BUNDLE is the only
 # absolute path in a gate's environment; the script resolves the instance root from its own
 # location and must not cd — it is already standing in the tree under test.
+#
+# `timeout_secs` on the ROW, not left to `[gates] default_timeout_secs` above: the default
+# reaches a row only through `gates._run_one(default_timeout=…)`, and the PUBLISH-time
+# re-run does not pass it (`publish.py:930` — the Check-time call at `gates.py:427` does).
+# So the fallback covers this row at Check and NOT at the seam where it matters most, with
+# a push waiting on it. A row-level value travels in the check dict itself
+# (`gates._gate_timeout` reads `chk["timeout_secs"]` first) and therefore binds in both.
+# 900s rather than the hour: the real run is seconds, and the thing being bounded is
+# `render_site.py` hanging on its mermaid fetch, not honest work.
 host_ci = [
-  { id = "host-ci-docs", tier = "T2", label = "host CI parity: target docs-check.yml on the pushed tree", cmd = "\"$PDCA_BUNDLE/../../engine/scripts/run-host-ci.sh\"" },
+  { id = "host-ci-docs", tier = "T2", label = "host CI parity: target docs-check.yml on the pushed tree", cmd = "\"$PDCA_BUNDLE/../../engine/scripts/run-host-ci.sh\"", timeout_secs = 900 },
 ]
 
 # Reverse registry-consistency (issue #205). The FORWARD direction (a source file a patch
