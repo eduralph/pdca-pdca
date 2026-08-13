@@ -1,9 +1,17 @@
-"""Engine tests: run-suite.sh keeps the T3 evidence a red leaves behind (issue #31 item 2).
+"""Engine tests: run-suite.sh declares its T3 verdict as evidence (issue #402).
 
-The frozen record keeps only a gate's LAST output line, so a red T3 used to freeze as
-`driver suite FAILED (rc 1)` and nothing else — no failing test name, no traceback. These
-cases pin the interim log the script writes alongside the bundle, and the last-line rule
-the 2026-08-02 verdict stopgap depends on.
+A gate's frozen evidence used to be its LAST output line, which this suite could not
+control: the target's tests print scratch bundle paths to stdout and, under a pipe,
+that block-buffered stream flushes after unittest's own (stderr) report — so a GREEN
+run was filed as `/tmp/…/split-proposal.md`. The v0.57.0 driver scans for a declared
+`PDCA-EVIDENCE:` line instead (gates.py:91), and persists every gate's full combined
+output to `gate-logs/<rule_id>.log` itself (issue #370, gates.py:192).
+
+So the two 2026-08-02/08-06 stopgaps this file used to pin — the script's own tee into
+the bundle, and the "verdict must be the last line" ordering — are gone. What is left to
+pin is the contract that replaced them: the declaration carries the verdict for BOTH
+suites, and the failing test names still reach the script's own output stream, which is
+what the driver captures.
 
 Both suites are stubbed: the script resolves its interpreter as `$(pwd)/.venv/bin/python3`
 before it cds into the worktree, so a throwaway instance root with a stub there drives the
@@ -25,7 +33,8 @@ INSTANCE = Path(__file__).resolve().parents[2]
 SCRIPT = INSTANCE / "engine" / "scripts" / "run-suite.sh"
 
 # Stands in for `python3 -m unittest …`: writes to BOTH streams (unittest puts its report,
-# the part worth keeping, on stderr) and exits with a caller-chosen status.
+# the part worth keeping, on stderr) and exits with a caller-chosen status. The stdout line
+# is the decoy — the scratch path that used to be filed as a green run's evidence.
 STUB = """\
 #!/bin/sh
 echo "stdout: {tmp}/results/issue_500/split-proposal.md"
@@ -63,46 +72,54 @@ class RunSuite(unittest.TestCase):
             capture_output=True, text=True,
         )
 
-    @property
-    def _log(self) -> Path:
-        return self.bundle / "gate-logs" / "T3-suite.log"
+    @staticmethod
+    def _evidence(r: subprocess.CompletedProcess[str]) -> str:
+        """The declared evidence line, resolved the way the driver resolves it: the LAST
+        line starting with the marker, over the combined stream."""
+        declared = [ln for ln in (r.stdout + r.stderr).splitlines()
+                    if ln.startswith("PDCA-EVIDENCE:")]
+        assert declared, f"no PDCA-EVIDENCE line:\n{r.stdout}\n{r.stderr}"
+        return declared[-1]
 
-    def test_red_suite_leaves_the_failing_test_name_behind(self) -> None:
+    def test_red_suite_leaves_the_failing_test_name_on_the_gate_output(self) -> None:
+        # The driver persists this stream verbatim to gate-logs/T3-suite.log, so a red
+        # T3 stays diagnosable without the script teeing anything itself.
         self._stub_python(1)
         r = self._run()
         self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertTrue(self._log.exists(), r.stdout + r.stderr)
-        log = self._log.read_text(encoding="utf-8")
-        # The whole point: stderr's report survives the freeze, per suite.
-        self.assertIn("FAIL: test_the_one_that_broke", log)
-        self.assertIn("template-repo suite", log)
-        self.assertIn("offline driver suite", log)
+        combined = r.stdout + r.stderr
+        self.assertIn("FAIL: test_the_one_that_broke", combined)
+        self.assertIn("template-repo suite", combined)
+        self.assertIn("offline driver suite", combined)
 
-    def test_verdict_is_still_the_last_line(self) -> None:
-        # The 2026-08-02 stopgap: the frozen evidence is the last line, and it must be the
-        # verdict — not a scratch path the target's tests printed to stdout.
+    def test_the_declaration_carries_the_verdict_not_the_decoy_path(self) -> None:
         self._stub_python(1)
         r = self._run()
-        last = r.stdout.strip().splitlines()[-1]
-        self.assertIn("== T3: root suite FAILED", last)
-        self.assertIn("driver suite FAILED", last)
-        self.assertNotIn("split-proposal.md", last)
+        evidence = self._evidence(r)
+        self.assertIn("root suite FAILED", evidence)
+        self.assertIn("driver suite FAILED", evidence)
+        self.assertNotIn("split-proposal.md", evidence)
 
-    def test_green_suite_logs_and_exits_zero(self) -> None:
+    def test_green_suite_declares_green_and_exits_zero(self) -> None:
         self._stub_python(0)
         r = self._run()
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertIn("Ran 3 tests", self._log.read_text(encoding="utf-8"))
-        self.assertIn("== T3: root suite OK, driver suite OK",
-                      r.stdout.strip().splitlines()[-1])
+        self.assertEqual("PDCA-EVIDENCE: root suite OK, driver suite OK",
+                         self._evidence(r))
+
+    def test_the_script_writes_nothing_into_the_bundle(self) -> None:
+        # Gate-log retention is the driver's job now (issue #370). The script must not
+        # write a competing file next to the bundle.
+        self._stub_python(1)
+        self._run()
+        self.assertEqual([], list(self.bundle.iterdir()))
 
     def test_runs_without_a_bundle(self) -> None:
-        # By hand, outside the driver: no $PDCA_BUNDLE, no log, and no failure over it.
+        # By hand, outside the driver: no $PDCA_BUNDLE and no failure over its absence.
         self._stub_python(0)
         r = self._run(bundle=False)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertFalse(self._log.exists())
-        self.assertIn("FAIL: test_the_one_that_broke", r.stdout)  # still on the gate's output
+        self.assertIn("FAIL: test_the_one_that_broke", r.stdout + r.stderr)
 
 
 if __name__ == "__main__":

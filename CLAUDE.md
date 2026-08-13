@@ -8,9 +8,9 @@ read it for tracker, branch targets, fixtures, and the conformance ruleset.
 
 ## The driver
 
-`pdca` advances a result bundle through the cycle (`pdca status`, `pdca run <id>`,
-`pdca signoff <id> --accept`, `pdca publish <id>`), or runs it as one continuous
-Claude-driven flow (`pdca flow <id> [--from-csv …] [--no-publish] [--no-act]`). State is
+`pdca` advances a result bundle through the cycle (`pdca-pdca status`, `pdca-pdca run <id>`,
+`pdca-pdca signoff <id> --accept`, `pdca-pdca publish <id>`), or runs it as one continuous
+Claude-driven flow (`pdca-pdca flow <id> [--from-csv …] [--no-publish] [--no-act]`). State is
 the files in `results/issue_<id>/`; nothing is hidden in a database.
 
 The driver is deterministic — **no model decides control flow**. The cycle has exactly
@@ -28,7 +28,7 @@ their own:
 The leaves fill *artifacts*; the state transitions, the gates, and the C6 accept-guard
 stay deterministic code. Each leaf is configurable in `pdca.toml` (`[leaves.*]`,
 `mode = stub|command`, `interactive`); `PDCA_LEAVES_MODE=stub` forces the offline
-placeholders for CI / `make`. In `pdca flow`, an accept continues to publish then
+placeholders for CI / `make`. In `pdca-pdca flow`, an accept continues to publish then
 optional Act; `--no-publish` stops at COMPLETE.
 
 ## Do (the builder leaf) — your scope when implementing
@@ -46,11 +46,11 @@ optional Act; `--no-publish` stops at COMPLETE.
 ## Check sign-off (human) — not the model's to perform
 
 The driver assembles `SUMMARY.md` and stops at AWAITING_SIGNOFF. The human clears
-§6 NEEDS-HUMAN, weighs the advisory review, and records §9. `pdca signoff
+§6 NEEDS-HUMAN, weighs the advisory review, and records §9. `pdca-pdca signoff
 --accept` refuses while §6 has open items (C6). On an accept, **publish** (Check's
 closing step) drafts the commit-msg + PR description and the driver opens a **draft
-PR** — it never marks ready or merges; that stays the human's. `pdca publish <id>`
-runs it standalone; `pdca flow` does it automatically on accept (`--no-publish` to skip).
+PR** — it never marks ready or merges; that stays the human's. `pdca-pdca publish <id>`
+runs it standalone; `pdca-pdca flow` does it automatically on accept (`--no-publish` to skip).
 
 ## Act (human) — separate, cross-cycle
 

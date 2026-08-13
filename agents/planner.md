@@ -144,31 +144,40 @@ session is the one deciding.
 When the answer is "yes, this is several slices":
 
 ```
-pdca split <id>              # the splitter drafts split-proposal.md — children, with
+pdca-pdca split <id>              # the splitter drafts split-proposal.md — children, with
                              # their inter-child `Depends on:` / `Conflicts with:`
                              # …read it with the human, edit it if it is wrong…
-pdca split <id> --accept     # files one tracker issue per child as a SUB-ISSUE of this
+pdca-pdca split <id> --accept     # files one tracker issue per child as a SUB-ISSUE of this
                              # one, materialises a bundle per child, marks this parent
-                             # split, and prints the `pdca flow …` command for them
+                             # split, and prints the `pdca-pdca flow …` command for them
 ```
 
 You do **not** leave the session to file issues by hand. `--accept` does it (pass `--ids`
 instead only when the issues already exist, or when the tracker is not one the driver can
 reach — it will say so plainly rather than skipping).
 
-What happens next depends on how this run was started, and the difference is worth
-knowing:
+What happens next no longer depends on how this run was started:
 
-- **A CSV-driven batch run** (`pdca flow --csv …`, no ids) re-enumerates every in-flight
-  bundle *from disk* after the Plan beat, so the children you just created are picked up by
-  the same run and scheduled into waves automatically — independent ones in parallel,
-  dependent ones stacked. Nothing further is needed from you.
-- **Every other shape** — `pdca flow <id>`, and an explicit list like `pdca flow 500 501` —
-  drives exactly the ids it was given and never looks for new ones. `--accept` prints the
-  exact `pdca flow <child-ids>` command; run it, and the children are driven as waves.
-
-An explicit id list looks like a batch and is not one on this point: it iterates the ids
-you named, so children born during its Plan beat are not among them.
+- **The run you are in adopts them.** A bundle that reaches `close-disposition = split`
+  while a flow is driving it has its children read from the split's lineage record and
+  spliced into the waves *after* its own — independent ones in parallel, dependent ones
+  stacked — and driven in the same run. That holds for every shape: a CSV-driven batch
+  (`pdca-pdca flow --csv …`), an explicit list like `pdca-pdca flow 500 501`, and a
+  single `pdca-pdca flow <id>`. Nothing further is needed from you.
+- **Every wave the split creates is funded, none of them twice.** `max_passes` is the
+  allowance one wave gets, and the run's pool holds one per wave its schedule currently
+  has — re-sized when a split grows it, so an adopted wave is neither starved by
+  arithmetic done before it existed nor handed a second allowance. Whatever a wave does
+  not finish is named on stderr with the command that resumes it.
+- **A child the run could not schedule is held, not dropped.** One whose declared
+  `Depends on:` cannot be resolved is named on stderr and left in flight; resolve it and
+  re-run that one.
+- **A split an earlier run left behind is recovered by naming the parent.** If the run that
+  accepted the split ended before its children were driven, `pdca-pdca flow <parent-id>`
+  picks them up — the parent is still skipped as finished, its children (and theirs, through
+  a generation that already closed) are adopted into that run.
+- **`--accept` still prints the `pdca-pdca flow <child-ids>` command.** That is the remedy
+  for whatever a run could not adopt, and for a child that was held.
 
 Either way the `Depends on:` / `Conflicts with:` fields between children are what makes the
 scheduling work, which is why they are the part to get right.
@@ -260,7 +269,7 @@ run it per `brief.md`, and run the file-set-vs-wave-order check across the batch
 
 ## Ending the session
 
-You are one beat of an automated flow (`pdca flow`): once `brief.md` is written, **verified
+You are one beat of an automated flow (`pdca-pdca flow`): once `brief.md` is written, **verified
 (above)**, and the human is satisfied, **your job is done**. Do not tell the human to run any
 `pdca` / driver command — the flow continues to **Do automatically** as soon as
 this session ends. Conclude with one line confirming the brief is written and that

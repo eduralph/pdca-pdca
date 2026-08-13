@@ -29,6 +29,73 @@
 - The next Do phases should not recreate <specific issue>. Watch the next K cycles.
 -->
 
+# Maintenance record — 2026-08-13 — template update to v0.57.0
+
+**Not an Act review** — no bundle was considered and no disposition was touched.
+This records the discharge of the open Act item carried by the last five reviews
+(2026-08-05 through 2026-08-10), so the next review can judge the effectiveness
+criteria those reviews set. The review itself is still owed.
+
+## What was done
+- `copier update` v0.56.0 → **v0.57.0**; `.copier-answers.yml` now pins it.
+- **The two standing stopgap reverts, per the 2026-08-02 criterion.** The T3
+  verdict-line hack and the #31 gate-log tee are gone from
+  `engine/scripts/run-suite.sh`: #370 (native `gate-logs/<rule_id>.log`) and
+  #402/#428 (a gate declares its own evidence) both ship in the release. All
+  three engine gates now end on a `PDCA-EVIDENCE:` line.
+- Wired from the release: `dependency_halt`, `leaf_memory_max = "16G"`,
+  `[gates] default_timeout_secs = 3600`, a `host_ci` row running the target's
+  docs-check.yml on the pushed tree, and `[records] mode = "commit"`.
+
+## What the next review must judge (the criteria the earlier reviews set)
+- The T2/T3/T4-oracle-unreproducible and C4-false-unverifiable §6 classes should
+  stop recurring. **Recurrence after this date is the signal**; before it is not.
+- T4 Check rows should read `deferred`, not a vacuous PASS. Confirmed on the
+  offline selftest; confirm it on real bundles.
+- A red T3 should carry an inspectable `gate-logs/` file. Confirmed present.
+- The 2026-08-02 criterion for the stopgap revert: if the decoy-path evidence
+  reappears now that `PDCA-EVIDENCE:` carries it, **reopen upstream #402 rather
+  than re-adding the stopgap**.
+
+## Carried forward, unchanged
+- **#474 did not make the cut.** The `PDCA_BASE` ambient-env leak — the
+  classified cause of the recurring T3 red on stacked bundles — is still open
+  upstream. A stacked-bundle T3 red after this update is #474, not a regression.
+- **The size-signal re-tighten is now due but NOT done.** v0.57.0 carries #446,
+  so the discounting is live; re-tightening is a calibration judgment against
+  the corpus (`scripts/size-calibrate`), not a config edit, and belongs to the
+  next review. The loosened thresholds stand until then.
+
+## Found while updating — new, for the next review to route
+- **A shipped test pair cannot both pass in an instance that enables
+  `[leaves.sandbox]`** (this instance enabled it at the 2026-08-01 review, for
+  the T5 prior-art check). `test_families.test_leaves_sandbox_is_declared_exactly_once`
+  requires exactly one `[leaves.sandbox]` header counting commented ones;
+  `test_the_commented_example_parses_when_uncommented` requires a commented one
+  to exist. Activating the table makes them mutually exclusive — demonstrated,
+  not inferred. This is the issue **#386** class (a suite that ships into
+  instances may assert only what holds in every sanctioned posture) and it is
+  the sole remaining `make check` failure. **Not a regression: it predates the
+  update** — the pre-update baseline was 4 failures, of which v0.57.0 fixes one
+  (`test_remote_control_docs.test_it_stays_off_by_default`) and this change
+  fixes two (the `[driver.size_signal]` example pair). Filed upstream as
+  **eduralph/pdca-harness#507** (bug, Milestone 0.60.0).
+- **The same #386 class, hit during the update:** v0.57.0's new
+  `test_verify_red_leg.py` / `test_verify_base.py` assert the C4 *skeleton's*
+  prose is present in `engine/scripts/run-verify.sh` — wording a filled-in gate
+  legitimately replaces, and which the skeleton (`:2`) and `engine/README.md`
+  (`:31`, `:84`) tell every instance to replace. Eight failures. Resolved by
+  restoring the published contract above this instance's implementation; kept
+  on the human's call pending the upstream fix, and marked TEMPORARY in the file.
+  **Correction to the first reading:** that restoration is defensive, not
+  necessary — `engine/README.md` also ships to instances, is not a fill-in file,
+  and carries the same contract and truth table (`:56-67`), so the rule survives
+  for any instance that replaces the skeleton. Documented inside #507 rather
+  than filed separately, so the split stays the maintainer's call.
+- **`host_ci` fetches the network at publish.** The target's `render_site.py`
+  pulls mermaid, mirroring the target's own CI. A network blip now blocks a
+  push rather than failing a PR check after the fact.
+
 # Act review — 2026-08-10 — cycles considered: issue_413, issue_458, issue_459, issue_472, issue_473
 
 Seventh Act review — five bundles frozen since the 2026-08-09 review (the index

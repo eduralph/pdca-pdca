@@ -208,13 +208,17 @@ or add to* a generic rule — never weaken one — as running cycles surface the
 
 The four `interactive = true` leaves — planner, sign-off, publisher, Act — hand the terminal
 to a human+model REPL and block there. That means the human has to be at the terminal the
-flow runs in, for the whole batch: a `pdca flow` over several bundles can park on one
+flow runs in, for the whole batch: a `pdca-pdca flow` over several bundles can park on one
 sign-off adjudication for hours because nobody is at that machine.
 
-Claude Code's `--remote-control` flag removes the constraint. Append it to an interactive
-leaf's `argv` in `pdca.toml` and that leaf becomes answerable from another enrolled device;
-nothing else changes — `signoff-decision`, the §6 ticks and the C6 accept-guard all run the
-same code path, and only the human's location differs.
+Claude Code's `--remote-control` flag removes the constraint. Add it to an interactive
+leaf's `argv` in `pdca.toml` — anywhere but last: the driver appends the seed prompt as a
+positional after the argv, and `--remote-control` takes an optional `[name]` value, so as
+the final token it would swallow the whole seed as the RC session name (issue #396; the
+claude-family spawn also inserts `--` before the seed as a backstop, but no flag with an
+optional value should ever sit last). With the flag in place that leaf becomes answerable
+from another enrolled device; nothing else changes — `signoff-decision`, the §6 ticks and
+the C6 accept-guard all run the same code path, and only the human's location differs.
 
 Enabling Remote Control in your own shell does **not** reach the leaves: each is a separate
 `claude` subprocess whose argv comes from `pdca.toml`. That is the whole reason this needs
