@@ -20,3 +20,9 @@ echo "== T2: site render + internal-link audit"
 OUT="$(mktemp -d)"
 trap 'rm -rf "$OUT"' EXIT
 "$PY" docs/publishing/tools/render_site.py --check --out "$OUT/site"
+
+# DECLARED evidence (issue #402, gates.py:91). `set -e` means reaching here IS the
+# pass; without a declaration the row's evidence would be whichever line the renderer
+# happened to flush last — a temp path under $OUT that no longer exists by the time
+# anyone reads the frozen bundle.
+echo "PDCA-EVIDENCE: docs lint clean, site render + internal-link audit clean"

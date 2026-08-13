@@ -124,7 +124,9 @@ class RunVerify(unittest.TestCase):
             SMOKE_TEST: CAPTURING_TEST,
         }))
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertIn("C4 PASS", r.stdout)
+        # DECLARED (issue #402): the verdict is what the driver files as the row's
+        # evidence, not whichever line the sub-runs happened to flush last.
+        self.assertIn("PDCA-EVIDENCE: C4 PASS", r.stdout)
         # restore left base + full patch in place for later gates
         self.assertIn(INIT_MARKER, (self.wt / INIT_PROD).read_text(encoding="utf-8"))
 
