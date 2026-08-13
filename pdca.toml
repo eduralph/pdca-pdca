@@ -590,17 +590,32 @@ argv = ["codex", "exec", "--sandbox", "workspace-write", "--skip-git-repo-check"
 # by itself (#358). Pass `--ids 640,641` instead when the issues already exist — or when the
 # tracker is not a GitHub one this can reach, in which case it says so rather than skipping.
 [leaves.splitter]
-mode = "stub"
+# LIVE 2026-08-13. Stubbed since render — never flipped when the six cycle leaves went to
+# command mode (this one and the sizer arrived later). The cost of that showed up as work:
+# four bundles carry a HAND-WRITTEN split-proposal.md (332, 448, 449, 469), which is the
+# artifact this leaf exists to draft. v0.57.0 also made the rest of the split path real —
+# lineage, child-aware sizing/plan-policy, convergence reporting, mid-run child adoption —
+# and every one of those is downstream of a splitter that actually runs.
+#
+# Interactive by design: it proposes seams at the terminal and never cuts them. The
+# deterministic half stays `pdca-pdca split <id> --accept`.
+mode = "command"
 family = "claude"
 interactive = true
 agent = "splitter"
 argv = ["claude", "--agent", "splitter", "--permission-mode", "acceptEdits"]
 
 [leaves.sizer]
-# Switch `mode` to "command" to enable — the argv below is ACTIVE so that one edit is
-# enough. `--allowedTools Read Write`: the leaf reads brief.md and must WRITE sizing.json,
-# and a Read-only grant would let it run and produce nothing.
-mode = "stub"
+# LIVE 2026-08-13. `--allowedTools Read Write`: the leaf reads brief.md and must WRITE
+# sizing.json, and a Read-only grant would let it run and produce nothing.
+#
+# Stubbed since render, which was not free: the stub wrote `{"band": "ok", "confidence":
+# "low", "stub": true}` into 44 bundles, and nothing reads that `stub` flag — sizing.py
+# and plan_policy.py consume the placeholder like a verdict and append "sizer says ok
+# (confidence low)" to the record. It masked nothing (sizing.py:536 combines
+# escalate-only, and model_weight is clamped at 0 so a model band can never LOWER a
+# structural one), but every bundle carried a model opinion nobody had asked a model for.
+mode = "command"
 family = "claude"
 interactive = false
 agent = "sizer"
@@ -774,6 +789,31 @@ model = "opus"
 effort = "xhigh"
 argv = ["claude", "-p", "--agent", "adversary", "--permission-mode", "acceptEdits", "--allowedTools", "Read,Bash,Grep,Glob"]
 when = { field = "difficulty", substring = "high" }
+
+# LIVE 2026-08-13 (issue #64). Shipped in agents/code-review.md since render, never
+# invoked — the same paper-only state the adversary was in.
+#
+# UNGATED, deliberately. The template's example gates on a `Review depth` brief field;
+# this instance's brief template has no such field (templates/brief.md.tpl — it has
+# Difficulty, not review depth), so that gate would match nothing and wire nothing. And
+# unlike refutation, this lens does not want gating: the bugs it looks for — a correctness
+# slip the patch introduces, a helper it duplicated — are not correlated with blast radius,
+# so the ~80% the adversary skips is exactly where they hide.
+#
+# Decorrelated by ROLE, like the adversary: the codex reviewer judges ADEQUACY (does the
+# evidence support the claim), the adversary REFUTES it, this reads the DIFF for defects
+# the fix introduced and for reuse it missed. Three different questions, so a third vendor
+# buys nothing here. sonnet/high rather than the adversary's opus/xhigh: reading a diff for
+# bugs is not the job where a weaker model rubber-stamps — that risk is specific to being
+# asked to attack a verdict.
+[[leaves.advisory]]
+id = "code-review"
+role = "correctness bugs introduced by the patch + reuse/simplification/efficiency cleanups"
+mode = "command"
+family = "claude"
+model = "sonnet"
+effort = "high"
+argv = ["claude", "-p", "--agent", "code-review", "--permission-mode", "acceptEdits", "--allowedTools", "Read,Bash,Grep,Glob"]
 #
 # Advisory-selection policy (issue #64 default vs. issue #200). Unset ⇒ every advisory leaf
 # above whose `when` matches runs. Opt into `vendor-complement` to make cross-vendor
@@ -803,14 +843,34 @@ when = { field = "difficulty", substring = "high" }
 # is no builder telemetry), so plan validation is cross-vendor automatically; no
 # different-family leaf ⇒ same-vendor fallback + a decorrelation note. Advisory — never
 # gates; off (commented) by default.
-# [[leaves.plan_advisory]]
-# id = "plan-reviewer"
-# role = "refute the brief: wrong root cause, untestable success criterion, hidden scope"
-# mode = "stub"
-# family = "claude"
-# argv = ["claude", "-p", "--agent", "plan-reviewer", "--permission-mode", "acceptEdits", "--allowedTools", "Read,Bash,Grep,Glob"]
-# when = { field = "difficulty", substring = "high" }
+# LIVE 2026-08-13 (issue #301). Shipped in agents/plan-reviewer.md since render, never
+# invoked.
 #
+# UNGATED. The example gates on difficulty=high, but a brief's Difficulty is asserted BY
+# the brief this leaf exists to refute — gating on it trusts the document under review to
+# nominate itself for review, and the expensive failure (Do burns a build on a brief whose
+# root cause is wrong) is not the one anybody labelled high.
+#
+# sonnet/high, not the adversary's opus/xhigh: start at the cheaper tier and let the
+# evidence decide. This leaf ships its own effectiveness telemetry —
+# plan-advisory-benefit.json records the findings count and whether the brief was revised,
+# surfaced in SUMMARY §10 — so Act can judge over a few cycles whether it earns a stronger
+# model, rather than paying for one on a guess.
+[[leaves.plan_advisory]]
+id = "plan-reviewer"
+role = "refute the brief: wrong root cause, untestable success criterion, hidden scope"
+mode = "command"
+family = "claude"
+model = "sonnet"
+effort = "high"
+argv = ["claude", "-p", "--agent", "plan-reviewer", "--permission-mode", "acceptEdits", "--allowedTools", "Read,Bash,Grep,Glob"]
+
+# Left UNSET on purpose. vendor-complement anchors on the PLANNER's family (claude) and
+# runs the single leaf whose family differs; with one claude leaf declared it would fall
+# back to same-vendor on every bundle AND file the decorrelation lapse as a §6 NEEDS-HUMAN
+# — a permanent §6 item saying "we did what you configured". Unset ⇒ every matching leaf
+# runs, which with one leaf is exactly what we want. Set it if a codex/gemini entry is
+# ever added beside it.
 # [leaves.plan_advisory_selection]
 # mode = "vendor-complement"   # anchor: the PLANNER family (the brief's author)
 
