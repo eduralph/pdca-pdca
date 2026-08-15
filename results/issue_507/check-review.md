@@ -1,0 +1,15 @@
+Task under review: make shipped template suites accept every sanctioned rendered-instance posture while retaining template-only wording checks and duplicate-sandbox protection.
+
+| Item | Verdict | Basis |
+|------|---------|-------|
+| C1 Spec | PASS | The brief defines all five positive/negative postures, preserves the two-active-table protection, and declares no external dependency. |
+| C2 Reproduction (red pre-fix) | PASS | With the patch stashed, the active/no-example and active/kept-example fixtures each produced one failure and the filled-in gate produced all eight expected failures; the patched fixtures are grounded at `template/tests/test_families.py:462`, `template/tests/test_families.py:471`, and `template/tests/test_verify_red_leg.py:204`. |
+| C3 Change | FAIL | Broaden active-header recognition before shipping — `^\[leaves\.sandbox\]` ignores TOML-valid leading whitespace, so the shipped suite is green for two indented active tables while `tomllib` rejects that same file as a duplicate declaration (`template/tests/test_families.py:337`). |
+| C4 Verification (red→green) | NEEDS-HUMAN | Decide whether the independent synthetic red→green is sufficient for this test-only change — the project C4 gate exited 77 because there is no behavioral production hunk to revert (`gate-logs/C4-verify.log:10`). |
+| C5 Causal adequacy | PASS | The causal approach scopes replaceable-skeleton assertions to the template posture while retaining the instance-level README contract, rather than probing or guarding an optional capability (`template/tests/test_verify_red_leg.py:73`, `template/tests/test_verify_red_leg.py:223`). |
+| T1 Structure | PASS | The patch remains confined to the three brief-listed shipped test modules, with posture helpers and regressions colocated with the assertions they exercise (`template/tests/test_families.py:330`, `template/tests/test_verify_base.py:55`, `template/tests/test_verify_red_leg.py:32`). |
+| T2 Shape | PASS | Independent `git diff --check`, docs lint, and site render/link audit were clean, matching the frozen shape evidence (`gate-logs/T2-docs.log:16`). |
+| T3 Runtime | PASS | The targeted run passed 71 tests, the full offline suite passed independently, and the frozen render/update-compat plus driver suites report green (`gate-logs/T3-suite.log:1612`). |
+| T4 Contribution | N/A | Contribution artifacts are absent by design at Check and the mandatory publish-time audit owns the substantive verdict (`gate-logs/T4-contribution.log:10`). |
+| T5 Judgment | PASS | The change is one logical, brief-scoped test-posture correction; affected-path commit history and open/closed PR searches found no competing or rejected implementation, with merged PR #426 serving only as the established precedent. |
+| Validation — fitness-to-purpose | NEEDS-HUMAN | Decide whether template-default assertions should be scoped out of rendered instances while preserving only cross-posture protections — this policy changes what every generated project treats as a shipped invariant (`template/tests/test_families.py:363`). |

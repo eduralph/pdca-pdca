@@ -1,0 +1,33 @@
+{
+  "attempts": [
+    {
+      "n": 1,
+      "builder": "claude",
+      "family": "claude",
+      "model": "sonnet",
+      "effort": "high"
+    },
+    {
+      "n": 1,
+      "builder": "claude",
+      "family": "claude",
+      "model": "sonnet",
+      "effort": "high"
+    },
+    {
+      "n": 1,
+      "builder": "claude",
+      "family": "claude",
+      "model": "sonnet",
+      "effort": "high"
+    },
+    {
+      "n": 1,
+      "builder": "claude",
+      "family": "claude",
+      "model": "sonnet",
+      "effort": "high"
+    }
+  ],
+  "iterations_to_pass": 4
+}

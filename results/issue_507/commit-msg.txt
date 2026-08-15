@@ -1,0 +1,36 @@
+fix(tests): stop shipped suites failing sanctioned instance postures
+
+Three assertions the template ships into every rendered instance pin the
+template's own DEFAULT posture, so an instance that follows the template's
+published instructions inherits permanently red tests in its offline suite:
+
+- test_families.py counted commented [leaves.sandbox] headers alongside
+  active ones and separately required a commented example to exist. An
+  instance that enables the sandbox seam — the sanctioned opt-in the
+  block's own comment invites — has no green option: drop the example and
+  one test fails; keep it beside the active table and the other counts
+  two headers. The pair dates to
+  5f656d400ce03905a010614cb5e3d5c85fa81cd4.
+- test_verify_red_leg.py (7 cases, from
+  edd9352e9fc466226df635cbc1f151b26e0df4f5) and test_verify_base.py's
+  base-ladder case (from e79d10986268fd4b88557718ab2e3a3580d3aad3)
+  string-match the wording of engine/scripts/run-verify.sh — the one file
+  every instance is told to replace ("SKELETON. Fill this in for your
+  project."). A filled-in gate means exactly 8 failures on updating to
+  v0.57.0.
+
+A suite shipped into renders may assert only what holds in every posture
+the template sanctions — the rule
+75294d17190177f720d5989b1f65a79561f5d54e established for the
+remote-control docs. Applied here: the sandbox tests now assert what
+binds everywhere (pdca.toml stays loadable — at most one ACTIVE table,
+and a commented example that is still present round-trips to valid TOML),
+while "the example is still present" and the skeleton's wording bind the
+template checkout only and skip once rendered. New posture-regression
+classes drive the real TestCases in-process (no subprocess) against
+synthetic text for each sanctioned posture, keep the two-active-headers
+defect (PR #292) red everywhere, and prove each skip with a negative
+control. EngineReadmeExplainsTheRule — the instance-binding half of the
+two-facts rule — is untouched and still binds every render.
+
+Fixes #507
