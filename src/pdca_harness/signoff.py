@@ -180,8 +180,20 @@ def record(summary_path: Path, *, action: str, by: str, date: str, delta: str = 
     def set_field(body: str, label: str, value: str) -> tuple[str, int]:
         """``(body, substitutions)`` — the count matters for ``Outcome``, see below."""
         pat = re.compile(rf"^(- {re.escape(label)}:).*?$", re.MULTILINE)
-        repl = rf"\g<1> {value}" if value else r"\g<1>"
-        new, n = pat.subn(repl, body, count=1)
+        # LOCAL PATCH over the generated file — upstream eduralph/pdca-harness#529. Drop it
+        # at the `copier update` that brings the harness fix down; keeping it after that
+        # only makes this file conflict on every later update.
+        #
+        # A CALLABLE replacement, never a template string. ``value`` carries the human's
+        # own prose — §9's `Iteration delta` is the sign-off rationale verbatim — and
+        # `re.sub` reads backslash escapes in a template. A rationale that quoted a regex
+        # (issue #506's did: ``^\W*``) raised `re.PatternError: bad escape \W`. That is
+        # not a ValueError, so `record`'s callers did not catch it; `flow._isolate` did,
+        # and the bundle stranded at AWAITING_SIGNOFF — every later pass re-read the same
+        # `signoff-decision` file and failed identically until the pass budget ran out.
+        # A callable's return value is used literally, so no text can be a template.
+        new, n = pat.subn(
+            lambda m: f"{m.group(1)} {value}" if value else m.group(1), body, count=1)
         return (new, n) if n else (body, 0)
 
     section = _section(text, SIGNOFF_HEADING, whole_on_missing=False)
