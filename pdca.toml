@@ -870,14 +870,47 @@ argv = ["claude", "-p", "--agent", "code-review", "--permission-mode", "acceptEd
 # plan-advisory-benefit.json records the findings count and whether the brief was revised,
 # surfaced in SUMMARY §10 — so Act can judge over a few cycles whether it earns a stronger
 # model, rather than paying for one on a guess.
-[[leaves.plan_advisory]]
-id = "plan-reviewer"
-role = "refute the brief: wrong root cause, untestable success criterion, hidden scope"
-mode = "command"
-family = "claude"
-model = "sonnet"
-effort = "high"
-argv = ["claude", "-p", "--agent", "plan-reviewer", "--permission-mode", "acceptEdits", "--allowedTools", "Read,Bash,Grep,Glob"]
+# DISABLED 2026-08-16 (issue #51) — the leaf cannot write on this host, so it produced
+# nothing in 9 of 9 bundles (462, 466, 474, 475, 476, 494, 495, 497, 506): one md5 across
+# all nine `plan-advisory-plan-reviewer.md` artifacts, the NOT-COMPLETED placeholder.
+#
+# HOST PREREQUISITE, undocumented until now, which is precisely why it took nine bundles
+# to notice. This is the ONE leaf whose sandbox is seeded fail-closed (harness
+# `leaves.py`: `sandbox.enabled: true`, `allowUnsandboxedCommands: false`,
+# `failIfUnavailable: true`), so it REQUIRES a working vendor sandbox — which needs
+# unprivileged user namespaces:
+#
+#     $ sysctl kernel.apparmor_restrict_unprivileged_userns   # Ubuntu default: 1
+#     $ unshare -Ur true                                      # must succeed
+#
+# This host denies them, so bubblewrap cannot start and EVERY Bash call inside the leaf
+# fails — `echo hello` included. With `--allowedTools Read,Bash,Grep,Glob` and no
+# Write/Edit, Bash was its only write route. It then exits 0, so the harness files the
+# emptiness as a SUBSTANTIVE finding whose own text reads "do not assume an infra blip"
+# — about an infra blip. Cost: ~6.5 min of sonnet/high per bundle for nothing, plus one
+# false §6 adjudication each.
+#
+# Not a wiring fault: `plan-advisory-plan-reviewer.memory.jsonl` shows the process alive
+# under its own scope for the full run in every bundle.
+#
+# TO RE-ENABLE: either grant the host userns (`sudo sysctl -w
+# kernel.apparmor_restrict_unprivileged_userns=0`, persisted in /etc/sysctl.d/, or an
+# AppArmor profile granting `bwrap` userns create) — a host-hardening decision, not this
+# repo's — or wait for eduralph/pdca-harness#526, which fixes the misclassification
+# upstream. Then uncomment the block below.
+#
+# Read `plan-advisory-benefit.json`'s "0 findings" history as UNINTERPRETABLE, not as a
+# verdict on plan review: it means the leaf never ran. The signal that it works is a wave
+# whose artifacts DIFFER from each other, with a non-zero findings count somewhere.
+#
+# [[leaves.plan_advisory]]
+# id = "plan-reviewer"
+# role = "refute the brief: wrong root cause, untestable success criterion, hidden scope"
+# mode = "command"
+# family = "claude"
+# model = "sonnet"
+# effort = "high"
+# argv = ["claude", "-p", "--agent", "plan-reviewer", "--permission-mode", "acceptEdits", "--allowedTools", "Read,Bash,Grep,Glob"]
 
 # Left UNSET on purpose. vendor-complement anchors on the PLANNER's family (claude) and
 # runs the single leaf whose family differs; with one claude leaf declared it would fall
