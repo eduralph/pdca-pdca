@@ -1,5 +1,5 @@
 {
-  "count": 42,
+  "count": 51,
   "reviewed": [
     "issue_311",
     "issue_316",
@@ -39,10 +39,19 @@
     "issue_457",
     "issue_458",
     "issue_459",
+    "issue_462",
+    "issue_466",
     "issue_468",
     "issue_469",
     "issue_472",
-    "issue_473"
+    "issue_473",
+    "issue_474",
+    "issue_475",
+    "issue_476",
+    "issue_494",
+    "issue_495",
+    "issue_497",
+    "issue_507"
   ],
   "fingerprints": {
     "issue_311": "18d7bf1a64397f124f84204b36451e1ffca0ca4191f19c124095ed352f1f26be",
@@ -83,10 +92,19 @@
     "issue_457": "42108088fecc25aefdeba13fe6d6a91693f1e4d537f06bc38cbae90505b1d1d0",
     "issue_458": "da363f3abe7fed63d4d0058d60dde10a7818be2c46fe145fb7a85c3251384f5d",
     "issue_459": "41fccde0e426ccc98d595b3693522909b885f294ac5053ab86ec75fcada0de89",
+    "issue_462": "06d796921f48c86c80810124076eeb322df971228cbfe801b7bdb348dcdb094e",
+    "issue_466": "49b9e7e383b8ff1a97a6b4e89d088161097ab8a6f95c2c74bed27a7f26c7f941",
     "issue_468": "abcfe3473e2f9b1e3625b0aa2ef7e76e52f99c86eba9e5480d02375dc44b9766",
     "issue_469": "cc62ca795630ccb81cb3668493f581219ef44ee23c37dc4c9cb8df4f053f262b",
     "issue_472": "9e345851c1fd1de22294560217eaf9b11ea3a656194d248e9058ab07b89d9c15",
-    "issue_473": "0746e239c70b8ea832e71a7e3fe36bcc769cb7221af1931b69b387992447a5e9"
+    "issue_473": "0746e239c70b8ea832e71a7e3fe36bcc769cb7221af1931b69b387992447a5e9",
+    "issue_474": "c6ed28e82c7fc4c3f5c421c57eb1ec4311760965858a46b24a3db1429df66862",
+    "issue_475": "6af9c276e9751e0292f274fd066a9f8aa74931ba5cd20cc7c7dc64bf12884b68",
+    "issue_476": "e1e5fe62383d591ca83b513e0696c6543e7521bca9ec61ec47e9c90b8764dc81",
+    "issue_494": "0b6912a4349b37b60ada06efba4be15c9e408c2ba4b6a5c04b7573c3c9f8f8c2",
+    "issue_495": "cc995ad9daaa8f9073206df80cb4b23cd4a80119313970548699233cd1bfac71",
+    "issue_497": "1bb5910d4da99006c30afd38df95b2ca43d13b32e87bd6633c36fe8c584921be",
+    "issue_507": "fc55452d9df0e0db685f329a36d5492875201bb178d9366e4315fdc11df4e54b"
   },
-  "last_review_date": "2026-08-10"
+  "last_review_date": "2026-08-15"
 }

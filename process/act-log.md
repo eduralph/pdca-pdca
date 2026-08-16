@@ -29,6 +29,186 @@
 - The next Do phases should not recreate <specific issue>. Watch the next K cycles.
 -->
 
+# Act review — 2026-08-15 — cycles considered: issue_462, issue_466, issue_474, issue_475, issue_476, issue_494, issue_495, issue_497, issue_507
+
+Eighth Act review — nine bundles frozen since the 2026-08-10 review (the index
+carried all 51; the 42 previously reviewed were considered only for effectiveness
+follow-up). All nine merged-wider. This is the **first wave after the 2026-08-13
+v0.57.0 update**, so it is the wave that judges the criteria the last five reviews
+set — and they are met, decisively. One new finding dominates instead: **a leaf
+that has never once run**. Two deltas are proposed and located below but **not
+applied** — the human's decision on both was still outstanding when the session's
+exit contract came due; nothing was changed unilaterally. Three follow-ups routed.
+
+## What the cycles' records exposed
+
+- **Every class the v0.57.0 update was meant to clear is gone — 0 of 9.** The
+  criteria from the 2026-08-13 maintenance record are discharged:
+
+  | class | before | this wave |
+  |---|---|---|
+  | T2/T3/T4 oracle-unreproducible (`run-docs-check.sh` / `run-suite.sh` / contribcheck absent) | 3–4 §6 items per bundle | **0 of 9** |
+  | T4 recorded as a vacuous PASS at Check | 9 of 9 at the first review | **0 of 9** |
+  | copier absent → 7 render/update tests skipped | 4 of 5 last wave | **0 of 9** |
+  | C4 false `unverifiable` (mid-line marker, #428) | recurring | **0** |
+  | size backstop fired | 2 of 5 last wave | **0 of 9** |
+
+  The three C4 items that remain (476 docs-only, 495 test-only, 507 test-only) are
+  the *genuine* structural case — no production hunk to revert — and issue_507's
+  §6 cites `gate-logs/C4-verify.log:10`, i.e. the human is now handed the gate's
+  own output. That is the #370/#403 log retention working end to end. Ledger rows
+  for the cleared classes marked CONFIRMED CLEARED.
+
+- **The plan-advisory leaf has never produced a single review — 9 of 9 bundles,
+  and the record tells the human the opposite.** Every bundle since the leaf went
+  live on 2026-08-13 carries `- NEEDS-HUMAN — plan-advisory leaf 'plan-reviewer'
+  did not produce findings (produced no artifact)`, and all nine
+  `plan-advisory-plan-reviewer.md` files are the **byte-identical** NOT-COMPLETED
+  placeholder (one md5 across 462/466/474/475/476/494/495/497/506). Reproduced at
+  this review rather than inferred — three facts compose:
+  1. `_seed_plan_sandbox_settings` (`src/pdca_harness/leaves.py:2419-2454`) makes
+     this the **only** leaf that turns the vendor sandbox **on**, fail-closed
+     (`allowUnsandboxedCommands: false`, `failIfUnavailable: true`) with
+     `--setting-sources project`. The Check-side advisory leaves call
+     `_seed_sandbox_settings`, which writes **no file at all** when the instance
+     grants nothing (`leaves.py:2282-2285`) — so they inherit the operator's
+     ambient, sandbox-off settings and work fine. That is why this hid.
+  2. This host denies unprivileged user namespaces —
+     `kernel.apparmor_restrict_unprivileged_userns = 1` (Ubuntu default);
+     `unshare -Ur true` → `Operation not permitted` — so bubblewrap cannot start
+     and **every** Bash call in that leaf fails, `echo hello` included.
+  3. The leaf has **no other write route**: argv `--allowedTools
+     Read,Bash,Grep,Glob` (`pdca.toml:880`) and `agents/plan-reviewer.md`
+     frontmatter `tools: Read, Bash, Grep, Glob`, while both the driver prompt
+     (`leaves.py:2915`) and the agent's "## Output" section require it to *write a
+     file*.
+
+  The probe run answered: *"The Bash tool is entirely non-functional in this
+  environment (sandbox setup itself fails with a seccomp/userns permission error
+  before any command runs — even `echo hello` fails). I have no Write/Edit tool
+  available… The write did not succeed."* — **rc 0**. So `leaves.py:3152-3155`
+  takes the `else` branch and files it at `_FAIL_SUBSTANTIVE`, whose placeholder
+  reads *"The leaf ran but did not yield a usable verdict; do not assume an infra
+  blip."* It is an infra blip. Cost: ~6.5 min of sonnet/high per bundle producing
+  nothing, ×9, plus a false §6 adjudication each.
+
+- **The same leaf's effectiveness telemetry is a trap right now.** §10 carries
+  `Plan advisory: 0 finding(s); brief revised: no` in 8 of 9 bundles and the
+  driver registered it as a recurring signal — which reads as "plan review earns
+  nothing" when it actually means "plan review never happened". Recorded in the
+  ledger so a future review does not retire `[[leaves.plan_advisory]]` on it.
+
+- **§6 keeps only the first physical line of a multi-line NEEDS-HUMAN bullet —
+  recurring across two waves.** issue_462 §6 shows two items that end
+  mid-sentence (`` `template/src/pdca_harness/merge.py:143-160`
+  (`_wait_for_green`): ``, `` `template/tests/test_merge.py`: every new/updated
+  case that ``); issue_472 carried four last wave. The source is a well-formed
+  advisory finding (`results/issue_462/check-advisory-code-review.md:9-20`) whose
+  body is indented continuation lines; `assemble.py:465-468` iterates
+  `splitlines()` and never joins them. Sibling of closed #336 (which fixed §1–8
+  for multi-line *brief* fields); §6 was never covered. The human clears a
+  question that ends mid-sentence.
+
+- **The size backstop's re-tighten is now calibrated.** Carried from 2026-08-13
+  as due. `scripts/size-calibrate` over the 53-bundle corpus: median patch 24.7 KB,
+  p90 48.6 KB, p95 71.2 KB, max 124.8 KB; only 2 bundles ever churned (≥3 rounds).
+
+## Process deltas
+
+**Both are located and evidenced; NEITHER is applied — the human's decision was
+outstanding when the exit contract came due, and Act does not change the system
+unilaterally.** Nothing is being missed meanwhile: the backstop fired 0 times this
+wave, and the plan leaf is inert either way.
+
+- **Proposed — Gates/config:** `pdca.toml [driver.size_signal] patch_kb = 125 → 80`;
+  `rounds` stays 3; `patch_files` stays 25. Evidence: 80 KB fires on exactly
+  {issue_472 (124.8 KB, 4 rounds), issue_473 (90.6 KB, 3 rounds)} — both true
+  positives, and it catches them on the *first* round rather than after the rounds
+  accumulate — with **0 false positives** (largest converged patch: issue_331 at
+  71.2 KB). File count is deliberately left loose because it does **not**
+  discriminate here: converged bundles reach 13 files (331, 375, 401) while both
+  churners are 6–8, so tightening it would only manufacture §6 items. Note that
+  125 was set so loosely that issue_472 — the bundle everyone agrees was oversized
+  — missed it by 0.2 KB.
+- **Proposed — Leaf config / host prerequisite:** the plan-advisory leaf
+  (`pdca.toml:873-880`) is inert on this host until one of two things happens:
+  (a) the host is allowed to start the vendor sandbox
+  (`kernel.apparmor_restrict_unprivileged_userns=0`, or an AppArmor profile for
+  `bwrap`) — a hardening decision that is the human's, not Act's; or (b) the leaf
+  is commented out until upstream #526 lands, so it stops burning a leaf and a
+  false §6 item per bundle. Either way the config block should carry a located
+  note recording the host prerequisite, which is currently documented nowhere.
+
+## Follow-ups routed (not process deltas — work handed to an owner)
+
+- Harness/driver issue (upstream — the machinery is template-owned, per the
+  template-vs-instance boundary): plan-advisory leaf inert on a userns-restricted
+  host; fail-closed sandbox kills its only write route and the empty result is
+  misclassified as substantive → filed
+  **https://github.com/eduralph/pdca-harness/issues/526** (Milestone 0.60.0, bug;
+  full reproduction included).
+- Harness/driver issue (upstream): SUMMARY §6 keeps only the first physical line
+  of a multi-line NEEDS-HUMAN bullet (`assemble.py:465`) → filed
+  **https://github.com/eduralph/pdca-harness/issues/527** (Milestone 0.60.0, bug).
+- Harness/driver issue (upstream), **found by this session's own exit contract**:
+  a conforming Act session cannot pass `/handoff`. `process/act-log.md.jinja:7`
+  ships "Newest entries on top", so the entry is *prepended*; `handoff.py:190-194`
+  looks for the entry id only in `text[prev_len:]`, i.e. text appended at the
+  **end**, and FAILs with "'2026-08-15' appears only in act-log text that predates
+  this session". First Act review since the v0.57.0 baseline shipped, first
+  failure. → filed **https://github.com/eduralph/pdca-harness/issues/528**
+  (Milestone 0.60.0, bug). Workaround until it lands: the labelled
+  `<!-- act-session marker -->` trailer at the bottom of this file — the entry
+  itself stays where the convention puts it.
+- Harness/driver issue (upstream, **no duplicate filed**): no preflight checks
+  that a leaf which *requires* the vendor sandbox can start one on this host —
+  added as a concrete row to the existing #452 ("validate the whole setup before a
+  flow runs") →
+  https://github.com/eduralph/pdca-harness/issues/452#issuecomment-5306571380.
+  This is the #375/#403 "nobody probes the sandbox interior" class again, one
+  layer down: the instance was configured correctly; the host could not honour it.
+- Another bug (this instance, its own tracker): the plan-reviewer half of
+  **eduralph/pdca-pdca#48** ("Activate the four leaves that shipped stubbed") is
+  activated in *configuration only* — nine bundles, zero reviews. Recorded on the
+  issue so it is not closed on the strength of the config edit, with the exit
+  criterion it still owes (a wave whose artifacts differ from each other) →
+  https://github.com/eduralph/pdca-pdca/issues/48#issuecomment-5306596659.
+  Also noted there: split children never get the plan-advisory pass at all
+  (upstream https://github.com/eduralph/pdca-harness/issues/480, open, pre-existing).
+- The two proposed deltas above are **tracked, not left as loose Act items** — at
+  the human's request they were filed on this instance's own tracker so the
+  decisions carry an owner and a record rather than a bullet in this log:
+  - **https://github.com/eduralph/pdca-pdca/issues/50** — re-tighten the size
+    backstop to `patch_kb = 80` (full calibration evidence in the issue), or record
+    that we keep it loose. Either answer closes it; silence carries it to a fourth
+    review.
+  - **https://github.com/eduralph/pdca-pdca/issues/51** — the plan-advisory leaf
+    runs on every bundle but cannot write on this host: option A (allow the host to
+    start the vendor sandbox) or option B (disable the leaf until harness#526), plus
+    the config-block note recording the host prerequisite either way.
+
+  Owner: the human. Neither is applied; nothing in `pdca.toml` was touched.
+- Open Act item (carried, unchanged): triage rubric should state five buckets
+  explicitly (issue_316 §10) — no triage-class brief has run since, so there is
+  still nothing to judge.
+
+## How effectiveness will be judged
+
+- **The plan leaf is the next review's headline.** If the host is fixed or #526
+  lands, the next wave must show `plan-advisory-plan-reviewer.md` files that
+  *differ from each other* and a `plan-advisory-benefit.json` with a non-zero
+  findings count somewhere. Nine identical placeholders again = the routing failed.
+- **The v0.57.0 clearances are now the baseline, not a hypothesis.** Any
+  reappearance of the oracle-unreproducible / vacuous-T4 / copier-skip classes is a
+  regression to file, not a known-open item to re-record.
+- **If the size delta is applied**, the next review checks that it fires only on
+  bundles that genuinely churned; a firing on a bundle that converged in 0 rounds
+  is a false positive and the threshold goes back up.
+- **#527 (§6 truncation)** is verifiable by eye: no §6 item in a future bundle
+  should end mid-sentence.
+
+---
+
 # Maintenance record — 2026-08-13 — template update to v0.57.0
 
 **Not an Act review** — no bundle was considered and no disposition was touched.
@@ -910,3 +1090,4 @@ First Act review of the instance — nine frozen bundles, all merged-wider.
 
 ---
 
+<!-- act-session marker — 2026-08-15: this session's entry is the "# Act review — 2026-08-15" section at the TOP of this file, per the header's "Newest entries on top". This trailer exists only because the exit-contract check looks for the entry id in text appended AFTER the session baseline (src/pdca_harness/handoff.py:190-194), which a prepended entry can never satisfy — filed upstream as https://github.com/eduralph/pdca-harness/issues/528. Remove it when that lands. -->
