@@ -1,0 +1,27 @@
+docs: describe the lineage reader as it actually behaves
+
+The split-lineage paragraph of `docs/07-crosscutting.md` promised something the
+reader has never done: it listed "a `depth` that isn't a number" among the cases
+where `split.read_lineage` returns `None`. The reader abstains only on a file it
+cannot turn into a version-1 record — absent, unreadable, malformed JSON, a
+non-object payload, an unrecognised `version`. A record such as
+`{"depth": "one"}` is valid JSON of the right version, so it comes straight
+back; the unusable value is absorbed one layer down, where the depth arithmetic
+counts it as unknown and the child lands at depth 1, while the parent's own
+record keeps `"one"` verbatim because the merge copies an existing `depth`
+through rather than recomputing it.
+
+That claim has been carried unchanged since the lineage feature landed in
+5c83070060c2b3a4b54b3bab8d74012ad1361d3a, and it costs real review time: anyone
+holding the implementation against this paragraph concludes that correct code is
+broken and reports it, which is exactly what happened. The paragraph now states
+the two-layer story the code implements — the reader abstains on what it cannot
+parse or shape-check, the arithmetic absorbs a value it cannot compute with —
+and keeps the rationale that provenance which can throw into a beat is worse
+than provenance that abstains.
+
+Documentation only: `split.py` is unchanged and stays correct, and every
+behaviour the corrected wording describes is already pinned by
+`template/tests/test_split_lineage.py`.
+
+Fixes #476

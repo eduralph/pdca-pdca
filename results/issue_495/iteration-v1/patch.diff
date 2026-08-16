@@ -1,0 +1,421 @@
+diff --git a/tests/_copier_probe.py b/tests/_copier_probe.py
+new file mode 100644
+index 0000000..ea217a9
+--- /dev/null
++++ b/tests/_copier_probe.py
+@@ -0,0 +1,105 @@
++"""Shared copier-availability probe (issue #495).
++
++`tests/test_render_and_run.py`, `tests/test_update_compat.py` and
++`tests/test_render_cli_name.py` each carried a byte-identical
++`try: from copier import run_copy ... HAVE_COPIER = True/False` probe and, on
++failure, reported `"copier not installed"`. That is not the proposition the
++probe actually tests: it only proves the *running interpreter* cannot import
++copier. A pipx-style install — the documented way to install copier — puts an
++executable on `PATH` whose shebang points at a private venv, so `import
++copier` fails in the system interpreter while copier is installed and
++working. This module gives the three suites one shared probe that (a) reports
++the proposition it actually tested, naming where an executable was found on
++`PATH` if one was, and (b) decides whether an all-skipped module is allowed to
++look like a pass: never, when the suite is running as a gate.
++"""
++
++from __future__ import annotations
++
++import os
++import shutil
++import sys
++from dataclasses import dataclass
++from typing import Callable, Optional
++
++
++def _default_import_copier() -> None:
++    from copier import run_copy, run_update  # noqa: F401
++
++
++@dataclass(frozen=True)
++class CopierProbe:
++    """The verdict, kept apart from the human-readable reason for it."""
++
++    available: bool
++    reason: str
++
++
++def probe_copier(
++    *,
++    import_copier: Callable[[], None] = _default_import_copier,
++    which: Callable[[str], Optional[str]] = shutil.which,
++    executable: str = sys.executable,
++) -> CopierProbe:
++    """Try to import copier; report the proposition actually tested.
++
++    `import_copier` and `which` are injectable so a test can drive both
++    postures — importable / not importable, an executable on `PATH` / none —
++    against a synthetic environment instead of depending on the ambient host
++    happening to have (or lack) a pipx-style copier install.
++    """
++    try:
++        import_copier()
++    except Exception:
++        found = which("copier")
++        if found:
++            return CopierProbe(
++                False,
++                f"copier is not importable in this interpreter ({executable}); "
++                f"a copier executable was found on PATH at {found} — that is a "
++                "pipx/venv-style install this interpreter cannot see, not a "
++                "missing copier. Run the suite with the interpreter copier is "
++                "installed into (e.g. .venv/bin/python3 in this project).",
++            )
++        return CopierProbe(
++            False,
++            f"copier is not importable in this interpreter ({executable}), and "
++            "no copier executable was found on PATH either.",
++        )
++    return CopierProbe(True, "copier is importable in this interpreter")
++
++
++def in_gate_context(environ: Optional[dict] = None) -> bool:
++    """True when the suite is running as a PDCA gate rather than a bare dev run.
++
++    `$PDCA_BUNDLE` is what the driver exports to every gate command it runs;
++    its absence is what makes a bare `python3 -m unittest discover -s tests`
++    a developer run instead.
++    """
++    env = os.environ if environ is None else environ
++    return bool(env.get("PDCA_BUNDLE"))
++
++
++def classify(probe: CopierProbe, *, gate: bool) -> str:
++    """What the three suites must each do: `"run"`, `"skip"`, or `"fail"`.
++
++    - copier available -> "run": exercise the module exactly as always.
++    - unavailable, bare dev run -> "skip": nothing to fail against, and a
++      skip is the honest, non-silent report of a missing precondition.
++    - unavailable, gate run -> "fail": a wholesale skip must not be reported
++      as an ordinary pass when the suite supplies a gate its evidence.
++    """
++    if probe.available:
++        return "run"
++    if gate:
++        return "fail"
++    return "skip"
++
++
++def unverifiable_message(probe: CopierProbe) -> str:
++    """The failure text a gate-context caller raises instead of skipping."""
++    return (
++        "PDCA-UNVERIFIABLE: " + probe.reason + " Every render/update case in "
++        "this module would skip, and a gate run ($PDCA_BUNDLE is set) must "
++        "not report that as a pass."
++    )
+diff --git a/tests/test_copier_probe.py b/tests/test_copier_probe.py
+new file mode 100644
+index 0000000..09fa9a3
+--- /dev/null
++++ b/tests/test_copier_probe.py
+@@ -0,0 +1,141 @@
++"""Regression test for the shared copier-availability probe (issue #495).
++
++Drives `tests._copier_probe` directly with the import and the `PATH` lookup
++both controlled, so the two postures at stake — copier importable, and
++copier NOT importable in this interpreter while a pipx-style executable
++sits on `PATH` — are deterministic regardless of what this host actually has
++installed (brief criterion iv: "obtainable without re-running the suite").
++It does not re-run `test_render_and_run.py` / `test_update_compat.py` /
++`test_render_cli_name.py`; what those 7 tests assert is out of this slice's
++scope, only the probe they share and what a wholesale skip reports.
++"""
++
++from __future__ import annotations
++
++import unittest
++from pathlib import Path
++
++try:
++    from tests._copier_probe import (
++        CopierProbe,
++        classify,
++        in_gate_context,
++        probe_copier,
++        unverifiable_message,
++    )
++except ImportError:  # pragma: no cover - `unittest discover -s tests` puts tests/ on sys.path
++    from _copier_probe import (
++        CopierProbe,
++        classify,
++        in_gate_context,
++        probe_copier,
++        unverifiable_message,
++    )
++
++ROOT = Path(__file__).resolve().parent
++
++
++class ProbeCopierReason(unittest.TestCase):
++    """(i): the reason states the proposition actually tested."""
++
++    def test_importable_reports_available(self) -> None:
++        probe = probe_copier(import_copier=lambda: None, which=lambda name: None)
++        self.assertTrue(probe.available)
++        self.assertIn("importable", probe.reason)
++
++    def test_unimportable_with_path_executable_names_it_and_never_claims_uninstalled(
++        self,
++    ) -> None:
++        """The pipx posture reproduced on this host: import fails, `copier` is on PATH."""
++
++        def boom() -> None:
++            raise ModuleNotFoundError("No module named 'copier'")
++
++        probe = probe_copier(
++            import_copier=boom,
++            which=lambda name: "/home/x/.local/bin/copier" if name == "copier" else None,
++            executable="/usr/bin/python3",
++        )
++        self.assertFalse(probe.available)
++        self.assertIn("/usr/bin/python3", probe.reason)
++        self.assertIn("/home/x/.local/bin/copier", probe.reason)
++        self.assertIn("not importable in this interpreter", probe.reason)
++        # The defect this regresses: telling the reader to install a tool that
++        # is already there. "not installed" must never appear once an
++        # executable was actually found on PATH.
++        self.assertNotIn("not installed", probe.reason)
++
++    def test_unimportable_with_no_path_executable_reports_truly_absent(self) -> None:
++        def boom() -> None:
++            raise ModuleNotFoundError("No module named 'copier'")
++
++        probe = probe_copier(import_copier=boom, which=lambda name: None)
++        self.assertFalse(probe.available)
++        self.assertIn("no copier executable was found on PATH", probe.reason)
++
++
++class GateContext(unittest.TestCase):
++    """`$PDCA_BUNDLE` — the driver's own gate-vs-dev-run signal — decides posture."""
++
++    def test_pdca_bundle_set_is_a_gate_run(self) -> None:
++        self.assertTrue(in_gate_context({"PDCA_BUNDLE": "/tmp/bundle"}))
++
++    def test_pdca_bundle_unset_is_a_bare_run(self) -> None:
++        self.assertFalse(in_gate_context({}))
++
++    def test_pdca_bundle_empty_string_is_still_a_bare_run(self) -> None:
++        self.assertFalse(in_gate_context({"PDCA_BUNDLE": ""}))
++
++
++class Classify(unittest.TestCase):
++    """(ii)+(iii): a wholesale skip is a pass only outside a gate."""
++
++    def test_available_always_runs(self) -> None:
++        probe = CopierProbe(True, "copier is importable in this interpreter")
++        self.assertEqual(classify(probe, gate=False), "run")
++        self.assertEqual(classify(probe, gate=True), "run")
++
++    def test_unavailable_bare_run_skips(self) -> None:
++        probe = CopierProbe(False, "copier is not importable here")
++        self.assertEqual(classify(probe, gate=False), "skip")
++
++    def test_unavailable_gate_run_fails_not_skips(self) -> None:
++        probe = CopierProbe(False, "copier is not importable here")
++        self.assertEqual(classify(probe, gate=True), "fail")
++
++    def test_unverifiable_message_carries_the_harness_gate_vocabulary(self) -> None:
++        probe = CopierProbe(False, "copier is not importable in this interpreter")
++        msg = unverifiable_message(probe)
++        self.assertTrue(msg.startswith("PDCA-UNVERIFIABLE:"))
++        self.assertIn(probe.reason, msg)
++
++
++class AllThreeModulesShareTheProbe(unittest.TestCase):
++    """Self-test: the invariant is about the run as a whole, not one module.
++
++    A partial fix — correcting the reason in one module while the other two
++    still carry the byte-identical `HAVE_COPIER = True/False` probe and the
++    old `"copier not installed"` skip reason — would leave two thirds of the
++    suite still silently green under a gate. This reads the module source
++    (no import of copier, no interpreter dependency), so it binds on every
++    host regardless of whether copier happens to be importable here.
++    """
++
++    MODULES = ("test_render_and_run.py", "test_update_compat.py", "test_render_cli_name.py")
++
++    def test_none_carry_the_old_bare_have_copier_probe(self) -> None:
++        for name in self.MODULES:
++            text = (ROOT / name).read_text(encoding="utf-8")
++            with self.subTest(module=name):
++                self.assertNotIn(
++                    'skipUnless(HAVE_COPIER, "copier not installed")',
++                    text,
++                    f"{name} still reports the old false reason",
++                )
++                self.assertIn(
++                    "_copier_probe", text, f"{name} does not use the shared probe"
++                )
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/tests/test_render_and_run.py b/tests/test_render_and_run.py
+index 5c7b51a..b838a52 100644
+--- a/tests/test_render_and_run.py
++++ b/tests/test_render_and_run.py
+@@ -1,8 +1,10 @@
+ """Template-repo test: render with copier, then run the generated slice.
+ 
+ This verifies the *template* (copier.yml + .jinja rendering) and the generated
+-driver together. Skips cleanly if copier isn't importable, so a bare checkout
+-without dev deps still collects. Run with: python -m unittest discover -s tests
++driver together. Skips cleanly if copier isn't importable on a bare developer
++run, so a checkout without dev deps still collects; under a gate run it
++refuses to let that skip look like a pass (issue #495). Run with:
++python -m unittest discover -s tests
+ """
+ 
+ from __future__ import annotations
+@@ -22,15 +24,24 @@ def _git(cwd: Path, *args: str) -> None:
+ 
+ try:
+     from copier import run_copy  # type: ignore
+-
+-    HAVE_COPIER = True
+ except Exception:  # pragma: no cover - environment without copier
+-    HAVE_COPIER = False
++    run_copy = None  # type: ignore
++
++try:
++    from tests._copier_probe import classify, in_gate_context, probe_copier, unverifiable_message
++except ImportError:  # pragma: no cover - `unittest discover -s tests` puts tests/ on sys.path
++    from _copier_probe import classify, in_gate_context, probe_copier, unverifiable_message
++
++_COPIER_PROBE = probe_copier()
++_COPIER_VERDICT = classify(_COPIER_PROBE, gate=in_gate_context())
++HAVE_COPIER = _COPIER_VERDICT == "run"
+ 
+ 
+-@unittest.skipUnless(HAVE_COPIER, "copier not installed")
++@unittest.skipIf(_COPIER_VERDICT == "skip", _COPIER_PROBE.reason)
+ class RenderAndRun(unittest.TestCase):
+     def test_render_then_slice(self) -> None:
++        if _COPIER_VERDICT == "fail":
++            self.fail(unverifiable_message(_COPIER_PROBE))
+         tmp = Path(tempfile.mkdtemp())
+         try:
+             # Render from a tagged git copy so copier records a version (what
+diff --git a/tests/test_render_cli_name.py b/tests/test_render_cli_name.py
+index 612b205..b33b43f 100644
+--- a/tests/test_render_cli_name.py
++++ b/tests/test_render_cli_name.py
+@@ -7,8 +7,9 @@ source that quotes the default name literally (e.g. the CI re-gate's
+ `run: pdca gates --working-tree`, issue #375) breaks every such instance:
+ CI fails command-not-found on every PR. This renders with a namespaced answer
+ and asserts no file rendered from a template/**/*.jinja source still carries a
+-bare `pdca <subcommand>` invocation. Skips cleanly if copier isn't importable.
+-Run with: python -m unittest tests.test_render_cli_name
++bare `pdca <subcommand>` invocation. Skips cleanly if copier isn't importable
++on a bare developer run; under a gate run it refuses to let that skip look
++like a pass (issue #495). Run with: python -m unittest tests.test_render_cli_name
+ """
+ 
+ from __future__ import annotations
+@@ -43,15 +44,24 @@ def _git(cwd: Path, *args: str) -> None:
+ 
+ try:
+     from copier import run_copy  # type: ignore
+-
+-    HAVE_COPIER = True
+ except Exception:  # pragma: no cover - environment without copier
+-    HAVE_COPIER = False
++    run_copy = None  # type: ignore
++
++try:
++    from tests._copier_probe import classify, in_gate_context, probe_copier, unverifiable_message
++except ImportError:  # pragma: no cover - `unittest discover -s tests` puts tests/ on sys.path
++    from _copier_probe import classify, in_gate_context, probe_copier, unverifiable_message
++
++_COPIER_PROBE = probe_copier()
++_COPIER_VERDICT = classify(_COPIER_PROBE, gate=in_gate_context())
++HAVE_COPIER = _COPIER_VERDICT == "run"
+ 
+ 
+-@unittest.skipUnless(HAVE_COPIER, "copier not installed")
++@unittest.skipIf(_COPIER_VERDICT == "skip", _COPIER_PROBE.reason)
+ class RenderCliName(unittest.TestCase):
+     def test_namespaced_cli_name_reaches_every_rendered_command(self) -> None:
++        if _COPIER_VERDICT == "fail":
++            self.fail(unverifiable_message(_COPIER_PROBE))
+         tmp = Path(tempfile.mkdtemp())
+         try:
+             # Render from a tagged git copy of the working tree (the same harness
+diff --git a/tests/test_update_compat.py b/tests/test_update_compat.py
+index ae5b1ec..599b313 100644
+--- a/tests/test_update_compat.py
++++ b/tests/test_update_compat.py
+@@ -12,8 +12,10 @@ single commit of the *current* tree and tags only `v0test`, so there is no prior
+ render from. Here the throwaway repo carries two commits — a genuine prior release tree
+ (`git archive <tag>`) and the current working tree — tagged so copier can move between them.
+ 
+-Skips cleanly when copier is missing, or when the checkout has no release tags (a shallow
+-CI clone: `actions/checkout` needs `fetch-depth: 0` for this to run).
++Skips cleanly on a bare developer run when copier isn't importable, or when the checkout
++has no release tags (a shallow CI clone: `actions/checkout` needs `fetch-depth: 0` for this
++to run). Under a gate run, a copier-unimportable interpreter no longer skips silently
++(issue #495).
+ """
+ 
+ from __future__ import annotations
+@@ -31,10 +33,17 @@ REPO = Path(__file__).resolve().parents[1]
+ 
+ try:
+     from copier import run_copy, run_update  # type: ignore
+-
+-    HAVE_COPIER = True
+ except Exception:  # pragma: no cover - environment without copier
+-    HAVE_COPIER = False
++    run_copy = run_update = None  # type: ignore
++
++try:
++    from tests._copier_probe import classify, in_gate_context, probe_copier, unverifiable_message
++except ImportError:  # pragma: no cover - `unittest discover -s tests` puts tests/ on sys.path
++    from _copier_probe import classify, in_gate_context, probe_copier, unverifiable_message
++
++_COPIER_PROBE = probe_copier()
++_COPIER_VERDICT = classify(_COPIER_PROBE, gate=in_gate_context())
++HAVE_COPIER = _COPIER_VERDICT == "run"
+ 
+ 
+ def _git(cwd: Path, *args: str) -> None:
+@@ -140,7 +149,7 @@ def apply_instance_edits(out: Path) -> None:
+     (out / "pdca.toml").write_text("\n".join(lines) + "\n", encoding="utf-8")
+ 
+ 
+-_PROBE = r"""
++_CONFIG_DUMP_SCRIPT = r"""
+ import json, sys
+ sys.path.insert(0, "src")
+ from pathlib import Path
+@@ -194,7 +203,7 @@ def load_updated_config(out: Path) -> tuple[dict | None, str]:
+     disappears with it. Asserting on the loaded config rather than on file text is the
+     point: a merge that leaves parseable TOML but drops a row is exactly what this catches.
+     """
+-    r = subprocess.run([sys.executable, "-c", _PROBE], cwd=out,
++    r = subprocess.run([sys.executable, "-c", _CONFIG_DUMP_SCRIPT], cwd=out,
+                        capture_output=True, text=True)
+     if r.returncode != 0:
+         return None, r.stderr
+@@ -229,12 +238,14 @@ def render_prior_edit_and_update(tmp: Path, prior: str) -> tuple[dict | None, st
+     return load_updated_config(out)
+ 
+ 
+-@unittest.skipUnless(HAVE_COPIER, "copier not installed")
++@unittest.skipIf(_COPIER_VERDICT == "skip", _COPIER_PROBE.reason)
+ class UpdateCompat(unittest.TestCase):
+     """`copier update` from the previous release must not silently change an instance."""
+ 
+     @classmethod
+     def setUpClass(cls) -> None:
++        if _COPIER_VERDICT == "fail":
++            raise AssertionError(unverifiable_message(_COPIER_PROBE))
+         cls.prior = prior_release_ref()
+         if cls.prior is None:  # pragma: no cover - shallow clone
+             raise unittest.SkipTest(

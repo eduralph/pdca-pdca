@@ -1,0 +1,33 @@
+Rejected on the defect both review lenses converged on (reviewer C3/C5/T1/T5 FAIL +
+advisory code-review NEEDS-HUMAN [impl]): `_admission_set`'s final
+`return dirs or _known_targets(cfg)` (leaves.py:889-898) applies the known-targets
+fallback to ALL SIX spawns, but the brief scopes it to the planner only — criterion (ii),
+"the planner spawns, where no brief exists yet", and Scope decision 3. As shipped, a
+run_signoff / run_signoff_batch / run_act / run_publish session over a bundle whose brief
+names a repo not checked out on this host does not admit nothing, as criteria (i)/(iv)
+require: it silently admits the instance's OTHER, unrelated checkouts
+([publisher.checkouts] union every other brief's resolved primary). That is precisely the
+over-admission the invariant forbids for a session that already has a bundle to be about.
+
+What to change next:
+- Scope the fallback to Plan. Either gate it on `not bundles` plus an explicit planner
+  flag, or split `_admission_set` into a resolve-only variant (signoff single/batch, act,
+  publish) and a resolve-or-known-targets variant (do_plan, do_plan_batch). The second is
+  preferable: it puts the role boundary in the type, which is the T1 finding.
+- Fix the blind fixture. `test_a_target_that_is_not_on_disk_is_not_admitted`
+  (test_leaf_workspace_admission.py:510-517) passes by accident — its instance has no other
+  known target either (empty `checkouts=`, and the single brief in the bundle_root is the
+  unresolvable one), so it cannot distinguish "admits nothing" from "fell back to a
+  known-targets list that happens to be empty". Add a second, RESOLVABLE bundle/checkout
+  alongside the unresolvable one and assert the sign-off spawn admits nothing; that fixture
+  is what turns this from a passing test into a real negative.
+
+Keep as-is — do not re-do this part: the seam is right and the slice is correctly sized.
+All six call sites are wired correctly through the existing `_invoke(extra_argv=)`
+parameter, landing before the interactive `--`/seed tail; cwd stays `cfg.root` and the
+handoff env is untouched (criterion vi). `_primary_checkout` deliberately avoids
+`_reviewer_target`/`worktree.path()`, so criterion (iii) — never a lane worktree — holds
+structurally rather than by one test. `_workspace_grant`'s empty-`grounding_flag` early
+return gives the `generic` family a byte-identical argv (criterion v). The `run_publish`
+profile reuse is good. This is one wrong conditional and one blind fixture, not a
+re-design.

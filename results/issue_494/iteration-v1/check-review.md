@@ -1,0 +1,17 @@
+Review of issue 494: admit exactly the configured target checkout(s) needed by every interactive planner, sign-off, publisher, and Act leaf spawn.
+
+| Item | Verdict | Basis |
+|------|---------|-------|
+| C1 Spec | NEEDS-HUMAN | Decide how a pre-brief single/batch planner identifies the exact target before spawn—granting all configured checkouts weakens least privilege, while the current resolver deliberately returns no grant until `brief.md` exists (`template/src/pdca_harness/leaves.py:2017`). |
+| C2 Reproduction (red pre-fix) | PASS | The independently stashed production change leaves the new test in place and reproduces 8 failures, including absent target argv at sign-off, publish, Act, and a target-resolved planner (`gate-logs/C4-verify.log:16`). |
+| C3 Change | FAIL | The batch Plan REPL remains an interactive `_invoke` with no `extra_argv`, so the promised “every interactive leaf” category is not implemented (`template/src/pdca_harness/leaves.py:972`). |
+| C4 Verification (red→green) | PASS | The focused suite independently transitions from 8 failures with `leaves.py` stashed to 8 passes after `stash pop`; the frozen gate records the same red→green, but only for the covered paths (`gate-logs/C4-verify.log:100`). |
+| C5 Causal adequacy | FAIL | The tests omit `do_plan_batch` and make the normal pre-brief planner’s empty grant an expected success, leaving a production planner path that is instructed to inspect target source without admission (`template/tests/test_leaf_workspace_admission.py:120`, `template/src/pdca_harness/leaves.py:972`). |
+| T1 Structure | PASS | A single helper centralizes ordered, deduplicated target resolution and the patched call sites retain their existing cwd/environment contracts (`template/src/pdca_harness/leaves.py:2006`, `template/src/pdca_harness/leaves.py:3295`). |
+| T2 Shape | PASS | For covered spawns, argv is target-only, ordered/deduplicated, and an empty grounding flag contributes no bytes because `_invoke` normalizes both `None` and `[]` to no extra argv (`template/src/pdca_harness/leaves.py:2026`, `template/src/pdca_harness/leaves.py:611`). |
+| T3 Runtime | PASS | The full offline driver suite passed independently, and the frozen environment also reports both root and driver suites green (`gate-logs/T3-suite.log:1612`). |
+| T4 Contribution | N/A | Contribution artifacts do not exist at Check by design; the substantive PR-body/tracker audit is mandatory at publish (`gate-logs/T4-contribution.log:10`). |
+| T5 Judgment | NEEDS-HUMAN | Run the patched sign-off and publisher sessions against the sibling checkout and attempt the target reads; confirm Claude proceeds without a repeated permission prompt, the outcome argv tests cannot observe (`template/src/pdca_harness/leaves.py:3295`, `template/src/pdca_harness/leaves.py:3502`). |
+| Validation — fitness-to-purpose | NEEDS-HUMAN | Decide whether the security/functionality tradeoff is acceptable only after resolving the pre-brief planner admission model and covering batch Plan—otherwise green covered paths still leave the stated operator workflow incomplete (`template/src/pdca_harness/leaves.py:972`). |
+
+Prior-art evidence: exhaustive affected-path enumeration over open plus closed/merged GitHub PRs found no open or rejected attempt touching either changed path; merged history contains prior `leaves.py` work but no `test_leaf_workspace_admission.py` history.

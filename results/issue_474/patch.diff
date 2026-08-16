@@ -1,0 +1,212 @@
+diff --git a/template/engine/scripts/run-verify.sh b/template/engine/scripts/run-verify.sh
+index 30224e8..6ba90ec 100755
+--- a/template/engine/scripts/run-verify.sh
++++ b/template/engine/scripts/run-verify.sh
+@@ -13,9 +13,11 @@
+ # holds patch.diff and the brief that names the test. It also exports, when set:
+ #   - $PDCA_WORKTREE   — the tree Do edited (worktree isolation, #94); run/reset here.
+ #   - $PDCA_BASE / $PDCA_VERIFY_BASE / $PDCA_BRIEF_BASE — the base to reset to before
+-#       applying patch.diff. The driver sets EXACTLY ONE of these for every bundle-scoped
+-#       gate: the test base must never diverge from the base publish will commit to. Each is
+-#       already a fully-qualified remote-tracking ref (`<remote>/<branch>`) — use it as-is,
++#       applying patch.diff. The driver sets EXACTLY ONE of these for the PER-FIX VERIFIER
++#       row — this script, wired as tier "C4" above — and NONE for any other configured
++#       gate (issue #474): the test base must never diverge from the base publish will
++#       commit to, and only the row that resets to it has any use for it. Each is already
++#       a fully-qualified remote-tracking ref (`<remote>/<branch>`) — use it as-is,
+ #       never `origin/$VAR` (that doubles the remote).
+ #         * $PDCA_BASE (issue #54) — the brief's `Onto branch`. Publish appends the fix as a
+ #           commit to that existing PR head, so the gate must prove red->green on IT.
+diff --git a/template/pdca.toml.jinja b/template/pdca.toml.jinja
+index 0ca0504..643ad90 100644
+--- a/template/pdca.toml.jinja
++++ b/template/pdca.toml.jinja
+@@ -908,6 +908,15 @@ argv = []
+ # C4 — the per-fix CORRECTNESS gate (bundle-scoped, GATING). Applies the bundle's
+ # patch.diff and runs ONLY its test, asserting red-without-fix / green-with-fix.
+ # This is what makes a cycle mean something — it validates THIS change.
++#
++# THE BASE LADDER (issue #474) — `$PDCA_BASE` / `$PDCA_VERIFY_BASE` / `$PDCA_BRIEF_BASE`,
++# the base a per-fix verifier resets to before applying `patch.diff` — is exported to this
++# row ONLY, never to any other configured row (repo-scoped or bundle-scoped). A row is the
++# verifier iff `verifies_base = true` is set explicitly, OR (undeclared) iff its `tier` is
++# `"C4"` — which the row below already is, so this default costs a rendered instance
++# NOTHING: your existing C4 row keeps receiving the base with no edit here. Give a
++# differently-tiered row `verifies_base = true` only if IT is the one that resets to and
++# tests against the base (rare — most projects have exactly one such row, this one).
+ # [[gates.checks]]
+ # id = "C4-verify"
+ # tier = "C4"
+diff --git a/template/src/pdca_harness/gates.py b/template/src/pdca_harness/gates.py
+index 39d8052..0a7f4bf 100644
+--- a/template/src/pdca_harness/gates.py
++++ b/template/src/pdca_harness/gates.py
+@@ -470,6 +470,31 @@ def _gate_timeout(chk: dict, default: int | None) -> int | None:
+     return secs if secs > 0 else None
+ 
+ 
++def _verifies_base(chk: dict) -> bool:
++    """True iff ``chk`` is **the per-fix verifier** — the one row the base ladder
++    (``PDCA_BASE`` / ``PDCA_VERIFY_BASE`` / ``PDCA_BRIEF_BASE``, :func:`_run_one` below)
++    is exported to (issue #474).
++
++    Declared explicitly, either direction, via ``verifies_base`` on the ``[[gates.checks]]``
++    row — the same shape :func:`_deferrable`'s ``at_publish`` already uses for a row-level
++    override. Undeclared, it defaults to ``tier == "C4"``: not scope, because scope alone
++    does not separate the verifier from an ordinary bundle-scoped row (a repo's own T3
++    row can be bundle-scoped too), and tier because ``"C4"`` is already, by convention,
++    reserved for exactly this row — the skeleton's own comment names it "the per-fix
++    CORRECTNESS gate" (``template/pdca.toml.jinja:908-917``) and every shipped example row
++    (there and in ``tests/test_verify_base.py``'s ``_ECHO_BASES``) tags it ``tier = "C4"``.
++
++    **Compatibility rule (issue #474):** an instance whose C4 row predates this change
++    carries no ``verifies_base`` key at all, so it falls through to the ``tier == "C4"``
++    default and keeps receiving the base with NO config edit — the tier it already
++    declares is the declaration. Only a row that is NEITHER tagged ``tier = "C4"`` NOR
++    explicitly opted in with ``verifies_base = true`` loses the export; a row that used to
++    (wrongly) receive it only because it happened to be bundle-scoped never had a
++    contractual claim to it in the first place.
++    """
++    return bool(chk.get("verifies_base", chk.get("tier") == "C4"))
++
++
+ def _run_one(chk: dict, *, cfg: Config, cwd: Path, bundle: Path | None, runner: str = "",
+              worktree_path: Path | None = None,
+              default_timeout: int | None = None,
+@@ -521,8 +546,12 @@ def _run_one(chk: dict, *, cfg: Config, cwd: Path, bundle: Path | None, runner:
+     #
+     # Exporting more than one would tell the gate to verify against the integration branch
+     # while publish commits to the Onto branch — exactly the divergence #54 exists to prevent
+-    # (PR #282 review). Exactly one is set for every bundle-scoped gate invocation.
+-    if bundle is not None:
++    # (PR #282 review). Exactly one is set for every bundle-scoped gate invocation of the
++    # per-fix VERIFIER row — and, since issue #474, of that row alone: a repo-scoped
++    # whole-suite row, a docs-lint row, or ANY OTHER bundle-scoped row (scope does not
++    # separate them — this project's own T3 row is bundle-scoped too) never asked to
++    # reconstruct a base and must not observe one (see :func:`_verifies_base`).
++    if bundle is not None and _verifies_base(chk):
+         onto = brief.onto_branch(bundle / "brief.md")
+         if onto is not None:
+             env = {**(env or {}), "PDCA_BASE": f"{onto[0]}/{onto[1]}"}
+diff --git a/template/tests/test_verify_base.py b/template/tests/test_verify_base.py
+index a30a968..6092fc9 100644
+--- a/template/tests/test_verify_base.py
++++ b/template/tests/test_verify_base.py
+@@ -50,6 +50,23 @@ _ECHO_BASES = {
+             '"${PDCA_BRIEF_BASE-UNSET}" > "$PDCA_BUNDLE/bases.txt"'),
+ }
+ 
++
++def _echo_row(id_: str, *, tier: str, scope: str, filename: str,
++              verifies_base: bool | None = None) -> dict:
++    """A row shaped like ``_ECHO_BASES`` but writing to its OWN file (``filename``) and, by
++    default, tagged a tier OTHER than ``"C4"`` — a non-verifier row (issue #474). Pass
++    ``verifies_base`` to declare the key explicitly in either direction."""
++    row = {
++        "id": id_, "tier": tier, "label": f"record bases ({id_})", "scope": scope,
++        "gating": False,
++        "cmd": ('printf "%s\\n%s\\n%s\\n" "${PDCA_BASE-UNSET}" "${PDCA_VERIFY_BASE-UNSET}" '
++                f'"${{PDCA_BRIEF_BASE-UNSET}}" > "$PDCA_BUNDLE/{filename}"'),
++    }
++    if verifies_base is not None:
++        row["verifies_base"] = verifies_base
++    return row
++
++
+ # The C4 skeleton every rendered instance fills in: it publishes the ladder gate scripts
+ # follow, so it is where an instance learns whether to read the export or parse the brief.
+ _TEMPLATE_ROOT = Path(__file__).resolve().parents[1]
+@@ -306,6 +323,83 @@ class VerifyBaseExport(unittest.TestCase):
+                 set_bases = {k: v for k, v in bases.items() if v != "UNSET"}
+                 self.assertEqual(len(set_bases), 1, f"not exactly one base: {bases}")
+ 
++    # ------------------------------------------------------------------ issue #474
++    # The ladder is exported to the per-fix VERIFIER row only — no other configured row,
++    # bundle-scoped or repo-scoped, may observe it (the invariant this slice restores).
++
++    def test_only_the_verifier_row_receives_the_ladder(self) -> None:
++        """Falsifiability case (issue #474): add a second row to the config — one
++        repo-scoped, one bundle-scoped — neither tagged the verifier tier ``"C4"`` nor
++        opted in with ``verifies_base``. Both must see NONE of the three vars, even
++        though the ACTUAL verifier row (``_ECHO_BASES``, tier ``"C4"``) in the very same
++        run receives the ladder's resolved value. Before the fix every row here recorded
++        the bundle's resolved base — this is the red the brief's Falsifiability names."""
++        d = self._bundle("MULTI")
++        self._brief(d, "- **Repo + branch target:** owner/repo @ main")
++        repo_row = _echo_row("T3-repo", tier="T3", scope="repo", filename="repo_bases.txt")
++        bundle_row = _echo_row("T4-other", tier="T4", scope="bundle",
++                               filename="bundle_bases.txt")
++        self.cfg.gates_checks = [_ECHO_BASES, repo_row, bundle_row]
++        gates.run_gates(d, self.cfg)
++        verifier = (d / "bases.txt").read_text(encoding="utf-8").splitlines()[:3]
++        repo_bases = (d / "repo_bases.txt").read_text(encoding="utf-8").splitlines()[:3]
++        bundle_bases = (d / "bundle_bases.txt").read_text(encoding="utf-8").splitlines()[:3]
++        self.assertEqual(verifier, ["UNSET", "UNSET", "origin/main"])
++        self.assertEqual(repo_bases, ["UNSET", "UNSET", "UNSET"], repo_bases)
++        self.assertEqual(bundle_bases, ["UNSET", "UNSET", "UNSET"], bundle_bases)
++
++    def test_the_unconditional_brief_base_rung_also_stays_off_non_verifier_rows(self) -> None:
++        """The brief calls out rung 3 (``PDCA_BRIEF_BASE``) by name: it is exported on
++        EVERY ordinary wave-0 cycle (no ``Onto branch``, no stack-base marker), so a fix
++        that only suppressed the stacked-bundle export would guard the one symptom that
++        happened to be observed and leave this rung leaking on every ordinary cycle."""
++        d = self._bundle("ORD")
++        self._brief(d, "- **Repo + branch target:** owner/repo @ main")
++        self.assertFalse((d / publish.STACK_BASE_FILE).exists())  # wave-0, no Onto
++        bundle_row = _echo_row("T5-other", tier="T5", scope="bundle", filename="ord.txt")
++        self.cfg.gates_checks = [_ECHO_BASES, bundle_row]
++        gates.run_gates(d, self.cfg)
++        non_verifier = (d / "ord.txt").read_text(encoding="utf-8").splitlines()[:3]
++        self.assertEqual(non_verifier, ["UNSET", "UNSET", "UNSET"], non_verifier)
++
++    def test_a_predating_c4_row_keeps_its_base_with_no_config_edit(self) -> None:
++        """Compatibility rule (issue #474 iii): a rendered instance's C4 row that predates
++        this change carries no ``verifies_base`` key — exactly ``_ECHO_BASES`` above,
++        which never sets one. It must not silently lose the base: the default falls
++        through to ``tier == "C4"`` and keeps exporting to it, so an un-migrated instance
++        needs zero config changes. A silent loss here would be worse than the leak this
++        slice fixes — the test base and the deploy base diverging (#54/#273/#387)."""
++        d = self._bundle("PREDATE")
++        self._brief(d, "- **Repo + branch target:** owner/repo @ main")
++        self.assertNotIn("verifies_base", _ECHO_BASES)
++        self.assertEqual(self._recorded_bases(d)["PDCA_BRIEF_BASE"], "origin/main")
++
++    def test_an_explicitly_declared_non_c4_verifier_still_receives_the_base(self) -> None:
++        """The declaration is explicit and overrides tier in EITHER direction: a row NOT
++        tagged ``tier = "C4"`` but marked ``verifies_base = true`` is still the verifier
++        (issue #474) — the shape mirrors ``at_publish``'s own explicit override
++        (`src/pdca_harness/publish.py:767`)."""
++        d = self._bundle("EXPLICIT")
++        self._brief(d, "- **Repo + branch target:** owner/repo @ main")
++        row = _echo_row("custom-verifier", tier="T9", scope="bundle",
++                        filename="explicit.txt", verifies_base=True)
++        self.cfg.gates_checks = [row]
++        gates.run_gates(d, self.cfg)
++        recorded = (d / "explicit.txt").read_text(encoding="utf-8").splitlines()[:3]
++        self.assertEqual(recorded, ["UNSET", "UNSET", "origin/main"], recorded)
++
++    def test_a_c4_row_can_opt_out_explicitly(self) -> None:
++        """The override also runs the other way: ``verifies_base = false`` on a
++        ``tier = "C4"`` row suppresses the export even though the tier default would
++        otherwise grant it — the same both-directions shape as ``at_publish``."""
++        d = self._bundle("OPTOUT")
++        self._brief(d, "- **Repo + branch target:** owner/repo @ main")
++        row = dict(_ECHO_BASES, verifies_base=False)
++        self.cfg.gates_checks = [row]
++        gates.run_gates(d, self.cfg)
++        recorded = (d / "bases.txt").read_text(encoding="utf-8").splitlines()[:3]
++        self.assertEqual(recorded, ["UNSET", "UNSET", "UNSET"], recorded)
++
+     def test_the_c4_skeleton_names_the_export_as_the_last_rung(self) -> None:
+         """The guidance every rendered instance fills in must terminate the ladder in the
+         export, not in "parse the brief yourself" — that instruction is what made each
+@@ -316,7 +410,8 @@ class VerifyBaseExport(unittest.TestCase):
+         `engine/README.md.jinja:31,84`) — what the harness *publishes* in its skeleton,
+         not what an instance's own filled-in gate must go on quoting. (The base ladder
+         itself is unaffected — `$PDCA_BASE`/`$PDCA_VERIFY_BASE`/`$PDCA_BRIEF_BASE` are
+-        still exported to every gate subprocess by every other test in this class.)"""
++        still exported to the per-fix verifier row, tier ``"C4"``, by every other test in
++        this class — since issue #474, to that row alone.)"""
+         if self.RENDERED:
+             self.skipTest("run-verify.sh is instructed to become the instance's own "
+                           "filled-in gate once rendered — the base-ladder wording binds "

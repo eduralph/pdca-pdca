@@ -36,14 +36,29 @@ for tool in docs/publishing/tools/lint_docs.py docs/publishing/tools/render_site
   }
 done
 
-echo "== host CI parity: docs lint (Obsidian syntax)"
-"$PY" docs/publishing/tools/lint_docs.py
-
-echo "== host CI parity: site render + internal-link audit"
 OUT="$(mktemp -d)"
 trap 'rm -rf "$OUT"' EXIT
-"$PY" docs/publishing/tools/render_site.py --check --out "$OUT/site"
 
-# DECLARED evidence (issue #402, gates.py:91) — otherwise the row is filed under
-# whichever line the renderer flushed last, a path under $OUT that is already gone.
-echo "PDCA-EVIDENCE: host CI parity clean (docs lint + site render) on the patched tree"
+# Both checkers run before anything is reported (`|| rc=$?`, not `set -e`'s abort). A red
+# here BLOCKS A PUSH, so the row a human reads to find out why must carry a verdict rather
+# than whichever line a checker happened to flush last (gates.py:771 falls back to the
+# final output line when nothing is declared). Aborting at the first red would also hide
+# whether the second checker would have passed.
+lint_rc=0
+render_rc=0
+
+echo "== host CI parity: docs lint (Obsidian syntax)"
+"$PY" docs/publishing/tools/lint_docs.py || lint_rc=$?
+
+echo "== host CI parity: site render + internal-link audit"
+"$PY" docs/publishing/tools/render_site.py --check --out "$OUT/site" || render_rc=$?
+
+_verdict() {
+  if [ "$1" -eq 0 ]; then echo "clean"; else echo "FAILED (rc $1)"; fi
+}
+
+# DECLARED evidence (issue #402, gates.py:91) on every exit path, pass or fail.
+echo "PDCA-EVIDENCE: host CI parity on the patched tree — docs lint $(_verdict "$lint_rc"), site render + link audit $(_verdict "$render_rc")"
+
+[ "$lint_rc" -eq 0 ] || exit "$lint_rc"
+[ "$render_rc" -eq 0 ] || exit "$render_rc"

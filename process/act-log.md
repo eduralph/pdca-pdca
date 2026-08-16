@@ -41,8 +41,15 @@ criteria those reviews set. The review itself is still owed.
 - **The two standing stopgap reverts, per the 2026-08-02 criterion.** The T3
   verdict-line hack and the #31 gate-log tee are gone from
   `engine/scripts/run-suite.sh`: #370 (native `gate-logs/<rule_id>.log`) and
-  #402/#428 (a gate declares its own evidence) both ship in the release. All
-  three engine gates now end on a `PDCA-EVIDENCE:` line.
+  #402/#428 (a gate declares its own evidence) both ship in the release. Every
+  engine gate now declares a `PDCA-EVIDENCE:` verdict on **both** its green and
+  its red path — corrected 2026-08-13 after a codex review: the first cut left
+  `run-docs-check.sh` and `run-host-ci.sh` under `set -e`, so a failing checker
+  aborted the script before its declaration and the undeclared-evidence fallback
+  (`gates.py:771`, the last output line) stayed in force on exactly the red row a
+  human opens. `run-verify.sh`'s exit-77 paths were already correct: a
+  `PDCA-UNVERIFIABLE:` reason becomes the row's evidence through its own branch
+  at `gates.py:765`.
 - Wired from the release: `dependency_halt`, `leaf_memory_max = "16G"`,
   `[gates] default_timeout_secs = 3600`, a `host_ci` row running the target's
   docs-check.yml on the pushed tree, and `[records] mode = "commit"`.
@@ -94,7 +101,19 @@ criteria those reviews set. The review itself is still owed.
   than filed separately, so the split stays the maintainer's call.
 - **`host_ci` fetches the network at publish.** The target's `render_site.py`
   pulls mermaid, mirroring the target's own CI. A network blip now blocks a
-  push rather than failing a PR check after the fact.
+  push rather than failing a PR check after the fact. Bounded at 900s by a
+  ROW-LEVEL `timeout_secs`, not by the `[gates] default_timeout_secs` fallback —
+  see below.
+- **`[gates] default_timeout_secs` does not reach a `host_ci` row at publish**
+  (codex review, 2026-08-13). The fallback is applied by
+  `gates._run_one(default_timeout=…)`, and the Check-time caller passes it
+  (`gates.py:427`) while the publish-time re-run does not (`publish.py:930`), so
+  the parameter defaults to `None`. A row's own `timeout_secs` travels in the
+  check dict and binds in both (`gates._gate_timeout` reads it first), which is
+  how this instance now bounds the row. Left unfiled pending the maintainer's
+  view — the harness's own comment presents the fallback as covering "every row
+  without its own bound", which holds at Check and not at the seam where a push
+  is waiting.
 
 # Act review — 2026-08-10 — cycles considered: issue_413, issue_458, issue_459, issue_472, issue_473
 

@@ -1,0 +1,31 @@
+fix(merge): wait for a new PR's checks before merge mode gives up
+
+In merge mode, a non-final wave's PRs are opened and then merged seconds later,
+long before the host CI has had any chance to report on them. The check rollup
+that guards the merge therefore reads "still queued" or "nothing reported yet",
+and the run treated that as a verdict: it refused to merge, stopped, and never
+ran the later waves. Nothing was wrong — the evidence had simply not arrived.
+
+The stop was not clean either. The PR is marked ready to merge one step earlier,
+so a stopped run left it sitting non-draft, advertising a readiness no human
+granted, while every later fix in the wave kept its draft and was never touched.
+
+The wave boundary now waits for the rollup to resolve, re-reading it while it is
+pending or empty until it clears or the new [driver].merge_wait_secs budget is
+spent (default 300 seconds; 0 keeps the old single-read behaviour). A rollup
+that turns green once CI reports is merged and the run continues into the next
+wave. A failing or unreadable rollup, and one that still has not reported when
+the budget runs out, refuse and stop the run exactly as before — now with a
+message that says the checks never reported in time, which reads differently
+from a check that actually failed. On every path where the run declines to merge
+a PR it had readied, that PR is returned to draft before the run stops, so a
+stopped wave leaves nothing marked ready behind it.
+
+A malformed or negative merge_wait_secs warns and falls back to the 300s
+default rather than to 0, so a typo cannot silently buy back the old race.
+
+This extends the check-rollup gate added in
+2261b53aba207ba5492ecb9209c0664dc3f76392, which introduced the read that the
+bounded wait now feeds.
+
+Fixes #462

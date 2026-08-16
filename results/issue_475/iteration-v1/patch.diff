@@ -1,0 +1,56 @@
+diff --git a/template/src/pdca_harness/flow.py b/template/src/pdca_harness/flow.py
+index bdc2d16..70b0319 100644
+--- a/template/src/pdca_harness/flow.py
++++ b/template/src/pdca_harness/flow.py
+@@ -239,14 +239,21 @@ def _apply_recorded_decision(
+     else is :func:`_apply_decision`'s own outcome, so the callers keep the single
+     C6-guarded record/transition path and handle ``REASSEMBLE`` / ``"blocked"`` / ``None``
+     exactly as they already do after a session. Never silent: an apply with no session
+-    names the bundle and the action on stderr.
++    names the bundle and the action on stderr — but only once the C6 guard inside
++    :func:`_apply_decision` has actually let the apply through. Printed before that guard
++    runs, the notice would claim "no new session" one line ahead of the guard's own
++    refusal — a promise the very next statement can withdraw. ``"blocked"`` is the one
++    outcome where a session follows (module docstring above), so it is the one outcome
++    that must not get this notice.
+     """
+     action = leaves.signoff_decision(d)
+     if not action:
+         return UNDECIDED
+-    print(f"flow: {d.name} — applying the '{action}' sign-off decision already recorded in "
+-          f"the bundle; no new session", file=sys.stderr)
+-    return _apply_decision(cfg, d, by=by, today=today, apply_now=apply_now)
++    outcome = _apply_decision(cfg, d, by=by, today=today, apply_now=apply_now)
++    if outcome != "blocked":
++        print(f"flow: {d.name} — applied the '{action}' sign-off decision already recorded "
++              f"in the bundle; no new session", file=sys.stderr)
++    return outcome
+ 
+ 
+ def _signoff_and_apply(
+diff --git a/template/tests/test_signoff_orphan.py b/template/tests/test_signoff_orphan.py
+index 1a93eaa..e403517 100644
+--- a/template/tests/test_signoff_orphan.py
++++ b/template/tests/test_signoff_orphan.py
+@@ -183,6 +183,10 @@ class DriveWave(_Base):
+         self.assertEqual(sessions, [[d.name]], "a C6-refused accept must still fall "
+                                                "through to a fresh session")
+         self.assertEqual(state.state(d), state.COMPLETE)
++        self.assertFalse(
++            [ln for ln in self.err.getvalue().splitlines()
++             if d.name in ln and "no new session" in ln],
++            "stderr claimed no new session would be opened, then C6 opened one anyway")
+ 
+     def test_only_the_undecided_bundle_of_a_wave_is_offered_a_session(self) -> None:
+         # The pre-apply FILTERS the queue, it is not all-or-nothing: in a wave holding both
+@@ -255,6 +259,10 @@ class SignoffAndApply(_Base):
+                                              "to a fresh session")
+         self.assertEqual(applied, "accept")
+         self.assertEqual(signoff.outcome_token(d / "SUMMARY.md"), "merged-wider")
++        self.assertFalse(
++            [ln for ln in self.err.getvalue().splitlines()
++             if d.name in ln and "no new session" in ln],
++            "stderr claimed no new session would be opened, then C6 opened one anyway")
+ 
+     def test_flow_completes_an_orphaned_accept_without_reopening_signoff(self) -> None:
+         # End-to-end through the public entry (`pdca flow <id>` on a bundle whose sign-off

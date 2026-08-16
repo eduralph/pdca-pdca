@@ -1,0 +1,27 @@
+fix(split): never file tracker issues for a stub proposal
+
+A new instance starts with the splitter in offline stub mode, where
+`pdca split <id>` writes a placeholder proposal: two fixture children called
+stub-child-one and stub-child-two. Nothing in the accept path could tell that
+placeholder apart from a real splitter's work, so `pdca split <id> --accept`
+filed it as real tracker sub-issues — issues titled after the fixture text,
+parented to the bundle's own issue, with child bundles seeded from the same
+text. Tracker issues cannot be withdrawn, so an operator who tried the split
+command before switching the leaf on is left closing issues by hand.
+
+The stub now records its own provenance inside the proposal it writes, which is
+the only place that fact can survive to `--accept`: that runs as a separate
+invocation, where an in-memory flag could never reach it. The filing branch of
+`--accept` reads the marker back and refuses before it consults the tracker and
+before it creates anything, naming both the cause and the remedy
+(`[leaves.splitter] mode = "command"`). This extends the ordering established
+in a2eefe19ea68752173eefdfacec0e68d8df5cbca — everything checkable is checked
+before the first unrecallable act.
+
+Accepting with `--ids` is deliberately unchanged: that path files nothing and
+the operator supplied real issue numbers on purpose, so the offline round-trip
+over a split keeps working. And `pdca split <id>` now says on stderr, at the
+moment it runs, that it is writing the offline placeholder — until now the
+only signal that no model had run was recognising the fixture text by eye.
+
+Fixes #466

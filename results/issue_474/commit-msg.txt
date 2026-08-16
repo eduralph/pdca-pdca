@@ -1,0 +1,33 @@
+fix(gates): export the base ladder to the per-fix verifier only
+
+Gate rows with nothing to do with per-fix verification were running with a
+base-branch variable in their environment. Every configured check of a gate
+run — the whole offline suite, a docs lint, the contribution audit — saw one
+of PDCA_BASE / PDCA_VERIFY_BASE / PDCA_BRIEF_BASE, because the export was
+keyed on "this run has a fix attached" rather than on the row that actually
+resets to that base before applying the patch. An environment-sensitive
+suite in a target repo then behaved as if the harness had set the variable
+for it, so gates went red for reasons unrelated to the change under test —
+and stayed unreproducible by hand, since a manual rerun of the same command
+exports nothing.
+
+The ladder now reaches exactly one row: the per-fix verifier. A row declares
+itself with `verifies_base = true` on its [[gates.checks]] entry;
+undeclared, it defaults to `tier == "C4"`, which every shipped verifier row
+already carries. An existing instance therefore keeps its base with no
+config edit — silently losing it would let the base a fix is tested against
+diverge from the base it is committed to, the very divergence this export
+exists to prevent. A row that received the base only because it happened to
+run alongside a fix now sees none of the three variables; host-CI rows are
+included, as they never reset to a base either.
+
+Nothing else about a gate's environment changes: PDCA_BUNDLE, PDCA_WORKTREE
+and PDCA_LANE still reach every row, and the ladder's resolution order and
+fully-qualified <remote>/<branch> shape are untouched — only who receives
+the value is narrowed.
+
+Commit 96c9704d39eb3e3bfa897125dc34562fedb6ccb0 made this repo's own base
+suite hermetic against an ambient base, which hid the symptom locally; this
+removes the cause, so no downstream suite has to defend against it.
+
+Fixes #474

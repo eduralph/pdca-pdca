@@ -1,0 +1,11 @@
+{
+  "mode": "new-pr",
+  "branch": "fix/466-stub-split-never-reaches-the-tracker",
+  "pr_url": "https://github.com/eduralph/pdca-harness/pull/520",
+  "base": "main",
+  "repo": "eduralph/pdca-harness",
+  "by": "Eduard Ralph",
+  "date": "2026-08-15",
+  "id_pending": false,
+  "host_ci_base": "acb214ac525bdf5a18e52be18c7036995d9fb55e"
+}

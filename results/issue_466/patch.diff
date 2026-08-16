@@ -1,0 +1,271 @@
+diff --git a/template/src/pdca_harness/cli.py b/template/src/pdca_harness/cli.py
+index ca807d1..383bbc3 100644
+--- a/template/src/pdca_harness/cli.py
++++ b/template/src/pdca_harness/cli.py
+@@ -765,7 +765,8 @@ def _split(cfg: Config, args) -> int:
+     # verdict. Tracker issues cannot be withdrawn and a materialised bundle is barely
+     # better, so this order is the whole guarantee.
+     try:
+-        children = split.parse((d / split.PROPOSAL).read_text(encoding="utf-8"))
++        proposal_text = (d / split.PROPOSAL).read_text(encoding="utf-8")
++        children = split.parse(proposal_text)
+         split.preflight(d, children, cfg)
+     except OSError:
+         split.advisory(f"split: {d.name} has no {split.PROPOSAL} — run "
+@@ -775,6 +776,19 @@ def _split(cfg: Config, args) -> int:
+         split.advisory(f"split: {exc}")
+         return 1
+     if not ids:
++        # A stub-authored proposal must never reach the tracker (#466): refuse HERE, on
++        # the filing branch only — before `split.can_file` is consulted and before any
++        # `gh issue create` — so `--ids` (criterion (c): the operator supplied real ids
++        # deliberately, and files nothing) stays byte-identical. Never a raise into the
++        # CLI, the same shape as the `TrackerUnavailable` handler just below.
++        if split.is_stub_proposal(proposal_text):
++            split.advisory(
++                f"split: {d.name}'s {split.PROPOSAL} was written by the OFFLINE STUB "
++                "splitter — no model authored it, so this refuses to file real tracker "
++                "issues for a placeholder. Set [leaves.splitter] mode = \"command\" and "
++                f"re-run `{_prog()} split {args.issue_id}`, or pass --ids if the children "
++                "were already filed by hand.")
++            return 1
+         # No ids given: file one issue per child, parented to this bundle's issue.
+         try:
+             ids = split.file_children(d, children, cfg, prog=_prog())
+diff --git a/template/src/pdca_harness/leaves.py b/template/src/pdca_harness/leaves.py
+index 1211604..c12039d 100644
+--- a/template/src/pdca_harness/leaves.py
++++ b/template/src/pdca_harness/leaves.py
+@@ -1594,6 +1594,12 @@ def do_split(d: Path, cfg: Config) -> int:
+     if cfg.splitter.mode == "command":
+         _invoke(cfg.splitter, d, _split_prompt(d, cfg), cfg=cfg, label="splitter")
+     else:
++        # Never a silent skip (#466): the operator's only OTHER signal that no model ran
++        # is recognising the fixture text by eye, after `--accept` has already had a
++        # chance to file it. Say so here, at the moment the stub branch is taken.
++        print(f"split: [leaves.splitter] mode is {cfg.splitter.mode!r}, not \"command\" — "
++              f"writing the OFFLINE STUB proposal for {d.name}; `--accept` without --ids "
++              "will refuse to file its children", file=sys.stderr)
+         _stub_split(d)
+     if not (d / split.PROPOSAL).exists():
+         print(f"split: the splitter produced no {split.PROPOSAL} in {d}", file=sys.stderr)
+@@ -1611,6 +1617,11 @@ def _stub_split(d: Path) -> None:
+     """
+     (d / split.PROPOSAL).write_text(
+         "<!-- pdca:split-proposal v1 -->\n"
++        # Provenance that SURVIVES the process boundary (#466): `--accept` runs in a
++        # different process from `do_split`, where an in-memory "this was a stub" flag
++        # could not reach it, and this proposal is otherwise byte-identical in shape to
++        # a real splitter's output. `split.is_stub_proposal` reads this back.
++        "<!-- pdca:split-proposal-stub -->\n"
+         f"# Split proposal — {d.name}\n\n## Wave sketch\n\n"
+         "child-2 stacks on child-1 (stub).\n\n"
+         "<!-- pdca:child child-1 -->\n"
+diff --git a/template/src/pdca_harness/split.py b/template/src/pdca_harness/split.py
+index 71b66be..2f4f5fd 100644
+--- a/template/src/pdca_harness/split.py
++++ b/template/src/pdca_harness/split.py
+@@ -49,6 +49,11 @@ LINEAGE = "split-lineage.json"
+ LINEAGE_VERSION = 1
+ 
+ _VERSION_RE = re.compile(r"<!--\s*pdca:split-proposal\s+v(\d+)\s*-->")
++#: Written into a proposal by `leaves._stub_split` itself (#466), so the provenance
++#: SURVIVES the process boundary between `do_split` and `--accept` — those run in
++#: different invocations, where an in-memory "this came from a stub" flag could not
++#: reach the filing branch. See `is_stub_proposal`.
++_STUB_RE = re.compile(r"<!--\s*pdca:split-proposal-stub\s*-->")
+ _OPEN_RE = re.compile(r"^\s*<!--\s*pdca:child\s+(\S+)\s*-->\s*$")
+ _CLOSE_RE = re.compile(r"^\s*<!--\s*pdca:end\s+(\S+)\s*-->\s*$")
+ _FENCE_RE = re.compile(r"^\s*(```|~~~)")
+@@ -123,6 +128,19 @@ class Child:
+         return found or []
+ 
+ 
++def is_stub_proposal(text: str) -> bool:
++    """Whether `text` carries the OFFLINE STUB splitter's on-disk provenance (#466).
++
++    A stub proposal is otherwise byte-identical in SHAPE to a real one — same header,
++    same delimiters — so this marker is the only thing that lets a reader who never saw
++    `do_split` run (the process `--accept` runs in) tell them apart. Checked by the
++    filing branch of `cli._split` BEFORE `split.can_file` is consulted and before any
++    `gh issue create`: an irreversible tracker write must never be taken on an artifact
++    no model authored.
++    """
++    return bool(_STUB_RE.search(text))
++
++
+ def parse(text: str) -> list[Child]:
+     """The children a proposal declares, in document order.
+ 
+diff --git a/template/tests/test_split_stub_guard.py b/template/tests/test_split_stub_guard.py
+new file mode 100644
+index 0000000..685d1ef
+--- /dev/null
++++ b/template/tests/test_split_stub_guard.py
+@@ -0,0 +1,166 @@
++"""A stub-produced split proposal must never reach the tracker (issue #466).
++
++With `[leaves.splitter] mode = "stub"` (the vertical-slice default), `_stub_split`
++writes an OFFLINE PLACEHOLDER proposal that is byte-identical in shape to a real one —
++same version marker, same delimiters. Nothing on disk recorded where it came from, and
++`--accept` runs in a different process from `do_split`, where an in-memory flag could
++not reach it. Live evidence: `getwyrd/wyrd#708` / `#709`, filed as real sub-issues
++titled literally `stub-child-one` / `stub-child-two`.
++
++Tracker issues cannot be withdrawn (`split.py` docstring, #358 / #459) — the same
++irreversibility the whole `--accept` order is built around. So the fix is two-sided:
++the stub marks its OWN output (`leaves._stub_split`), and the filing branch of
++`--accept` refuses a marked proposal BEFORE `split.can_file` is consulted and before
++any `gh issue create` (`cli._split`'s `if not ids:` branch). `--ids` must stay
++untouched: that path files nothing, and the operator supplied the ids deliberately
++(#358's offline round-trip).
++
++Reuses `test_split.py`'s harness: a `Config` built from stdlib-only pieces, `subprocess`
++/ `shutil` replaced on the `pdca_harness.split` module so no real `gh` is ever invoked.
++"""
++
++from __future__ import annotations
++
++import io
++import shutil
++import tempfile
++import unittest
++from contextlib import redirect_stderr, redirect_stdout
++from pathlib import Path
++from types import SimpleNamespace
++from unittest import mock
++
++from pdca_harness import cli, leaves, split, state
++from pdca_harness.config import Config, LeafConfig
++
++TEMPLATES = Path(__file__).resolve().parents[1] / "templates"
++
++
++class StubProposalsNeverReachTheTracker(unittest.TestCase):
++    def setUp(self) -> None:
++        self.tmp = Path(tempfile.mkdtemp())
++        self.cfg = Config(
++            root=self.tmp, bundle_root=self.tmp / "results",
++            process_dir=self.tmp / "process", templates_dir=TEMPLATES,
++            default_branch="main", tracker_system="github",
++            tracker_url="https://github.com/acme/widgets", issue_id_example="#1",
++            builder=LeafConfig(mode="stub"), reviewer=LeafConfig(mode="stub"),
++            splitter=LeafConfig(mode="stub"),
++        )
++        self.parent = self.cfg.bundle("500")
++        self.parent.mkdir(parents=True)
++        (self.parent / "brief.md").write_text("- **Slug:** parent\n", encoding="utf-8")
++        self.calls: list[list[str]] = []
++
++    def tearDown(self) -> None:
++        shutil.rmtree(self.tmp, ignore_errors=True)
++
++    def _do_split(self) -> str:
++        """Run the REAL stub splitter leaf; return what it printed to stderr."""
++        err = io.StringIO()
++        with redirect_stdout(io.StringIO()), redirect_stderr(err):
++            rc = leaves.do_split(self.parent, self.cfg)
++        self.assertEqual(rc, 0)
++        return err.getvalue()
++
++    def _args(self, ids: str = "") -> SimpleNamespace:
++        return SimpleNamespace(issue_id="500", accept=True, ids=ids)
++
++    def _gh(self):
++        """A fake `gh` that records its argv — same shape as test_split.py's `_gh`."""
++        def run(cmd, capture_output=False, text=False, cwd=None):
++            self.calls.append(list(cmd))
++            n = len(self.calls)
++            return SimpleNamespace(
++                returncode=0,
++                stdout=f"https://github.com/acme/widgets/issues/{900 + n}\n", stderr="")
++        return run
++
++    def _patched(self, *, can_file_ok: bool = True):
++        """Everything the filing path could reach, all recorded/faked — never real `gh`."""
++        return (
++            mock.patch.multiple(
++                "pdca_harness.split",
++                subprocess=SimpleNamespace(run=self._gh()),
++                shutil=SimpleNamespace(which=lambda _n: "/usr/bin/gh",
++                                       rmtree=shutil.rmtree, move=shutil.move)),
++            mock.patch.object(split, "can_file",
++                              return_value=(True, "acme/widgets") if can_file_ok
++                              else (False, "unreachable")))
++
++    # -- (d) the stub announces itself on stderr the moment it runs ----------------------
++
++    def test_do_split_announces_the_stub_on_stderr_at_the_moment_it_runs(self) -> None:
++        err = self._do_split()
++        self.assertIn("stub", err.lower())
++        self.assertIn(self.parent.name, err)
++
++    def test_command_mode_prints_no_stub_notice(self) -> None:
++        """The notice belongs to the branch that CHOSE the stub — a real splitter run
++        must not carry a message that tells the operator the opposite of what happened."""
++        self.cfg.splitter = LeafConfig(mode="command", family="claude", argv=["true"])
++        err = io.StringIO()
++        with redirect_stdout(io.StringIO()), redirect_stderr(err), \
++             mock.patch.object(leaves, "_invoke",
++                               lambda *a, **k: (self.parent / split.PROPOSAL).write_text(
++                                   "<!-- pdca:split-proposal v1 -->\n"
++                                   "<!-- pdca:child child-1 -->\n- **Slug:** s\n"
++                                   "<!-- pdca:end child-1 -->\n", encoding="utf-8")):
++            leaves.do_split(self.parent, self.cfg)
++        self.assertNotIn("stub", err.getvalue().lower())
++
++    # -- (a) the proposal is self-identifying on disk -------------------------------------
++
++    def test_the_stub_proposal_is_self_identifying_on_disk(self) -> None:
++        """Not a slug-name sniff, not an in-memory flag: read the proposal FRESH, exactly
++        as `--accept` (a different process) would, and it must still be recognisable."""
++        self._do_split()
++        text = (self.parent / split.PROPOSAL).read_text(encoding="utf-8")
++        self.assertTrue(split.is_stub_proposal(text),
++                        "a stub-authored proposal is not marked as such on disk")
++
++    # -- (b) + (e): the filing branch refuses BEFORE can_file / gh issue create ----------
++
++    def test_accept_without_ids_refuses_before_filing_anything(self) -> None:
++        self._do_split()
++        patches = self._patched(can_file_ok=True)
++        err = io.StringIO()
++        with patches[0], patches[1], \
++             redirect_stdout(io.StringIO()), redirect_stderr(err):
++            rc = cli._split(self.cfg, self._args())
++
++        self.assertNotEqual(rc, 0, "a stub-authored proposal was accepted for filing")
++        self.assertEqual(self.calls, [],
++                         "gh issue create was invoked against a stub-authored proposal")
++        self.assertIn("stub", err.getvalue().lower())
++        self.assertIn('mode = "command"', err.getvalue(),
++                      "the refusal does not name the remedy")
++        # The filing branch refused, not `accept` itself: no child bundle, and the
++        # parent was never marked split.
++        self.assertEqual(list(self.cfg.bundle_root.glob("issue_[0-9]*")), [self.parent],
++                         "a child bundle was materialised despite the refusal")
++        self.assertFalse((self.parent / state.CLOSE_MARKER).exists(),
++                         "the parent was marked split despite the refusal")
++
++    def test_the_refusal_does_not_depend_on_can_file_failing(self) -> None:
++        """The failure mode worth locking: a refusal that filed the first child before
++        erroring. `can_file` says the tracker IS reachable, and still nothing is filed."""
++        self._do_split()
++        patches = self._patched(can_file_ok=True)
++        with patches[0], patches[1], \
++             redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
++            rc = cli._split(self.cfg, self._args())
++        self.assertNotEqual(rc, 0)
++        self.assertEqual(self.calls, [])
++
++    # -- (c) --ids stays byte-identical for a stub-marked proposal -----------------------
++
++    def test_ids_still_accept_a_stub_marked_proposal(self) -> None:
++        self._do_split()
++        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
++            rc = cli._split(self.cfg, self._args(ids="601,602"))
++        self.assertEqual(rc, 0)
++        self.assertEqual(self.calls, [], "--ids must never call gh")
++        self.assertTrue(self.cfg.bundle("601").is_dir())
++        self.assertTrue(self.cfg.bundle("602").is_dir())
++        self.assertTrue((self.parent / state.CLOSE_MARKER).exists())

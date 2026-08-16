@@ -1,0 +1,50 @@
+Rejected on SLICING, not on quality — four of the five patched call sites are correct,
+tested, and worth keeping. The bundle bundles two outcomes a single rebuild cannot merge
+into one, and one of them is blocked on a decision that has to be authored at Plan.
+
+WHY THIS IS NOT iterate-do
+
+The brief contradicts itself. Its defect section enumerates exactly five spawn sites
+(`do_plan`, `run_signoff`, `run_signoff_batch`, `run_publisher`, `run_act`) and does NOT
+list `do_plan_batch`; its success criterion says "every interactive leaf the harness
+spawns". The builder implemented the enumeration, the reviewer judged against the
+criterion, and both readings are defensible from the text. That is a Plan defect, so a
+rebuild against the same brief would re-litigate it every round.
+
+Worse, the missing site cannot be closed mechanically. `_target_grant` resolves through
+`_reviewer_target` -> the bundle's `brief.md`. Before a brief exists there is no target to
+resolve, and batch Plan chooses its ids MID-session (`leaves.py:965-972`). So admitting the
+batch planner requires first ANSWERING the open C1 question — grant all configured
+checkouts (weakens least privilege), grant nothing (status quo, the planner still cannot
+read target source it is told to read), or something narrower. That is a policy decision,
+and policy belongs in a brief, not in a build.
+
+SUGGESTED SPLIT (the child shape, for `pdca-pdca split`)
+
+1. Post-brief interactive admission — `run_signoff` (single), `run_signoff_batch`,
+   `run_publish`, and `do_plan` where the bundle already has a brief. The target IS
+   resolvable at spawn; this is the mechanical half. THIS ATTEMPT'S patch and
+   `test_leaf_workspace_admission.py` are a good starting point — do not throw them away.
+
+2. Pre-brief planner admission model — `do_plan` before a brief exists, and
+   `do_plan_batch`. The brief for this child must DECIDE the admission policy up front
+   (the C1 question above) and state the least-privilege rationale, then assert it. Note
+   the current resolver deliberately returns an empty grant pre-brief (`leaves.py:2017`),
+   and the present tests encode that empty grant as an expected success — so the child
+   must change the expectation deliberately, not incidentally.
+
+3. `run_act` target resolution — separable and arguably its own defect. `_reviewer_target`
+   prefers the lane worktree (`worktree.path`), and `_wt_dir` is keyed by (primary
+   checkout, lane slot) NOT by bundle, while `worktree.py:10-19` documents that worktree
+   as "reset and reused per cycle" and "a warm checkout cache, never a trusted content
+   cache". That reuse is safe for the reviewer (same cycle, runs right after its own Do)
+   but NOT for Act, which reviews bundles frozen over many prior cycles — by then the slot
+   has been reset for later work, so the directory admitted "for bundle d" can hold an
+   unrelated bundle's tree. No `worktree.owner_of` check gates the admission, and the new
+   test never reaches this branch (its fixtures have no `.pdca-wt*` directory, so only the
+   sibling-checkout fallback is covered). Either add an ownership check or resolve Act to
+   the sibling checkout only.
+
+Whichever children are authored, each brief must be internally consistent about which
+spawn sites it covers — the "every interactive leaf" phrasing versus a five-site
+enumeration is exactly what produced this round's contradictory verdicts.

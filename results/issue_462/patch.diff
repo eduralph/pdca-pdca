@@ -1,0 +1,373 @@
+diff --git a/template/pdca.toml.jinja b/template/pdca.toml.jinja
+index 0ca0504..d878f80 100644
+--- a/template/pdca.toml.jinja
++++ b/template/pdca.toml.jinja
+@@ -139,6 +139,18 @@ merge_method = "merge"
+ #       protection is again the only backstop (and an empty rollup merges). Correct only
+ #       where the host's required checks really are the whole verification.
+ merge_requires = "all"
++# Bounded wait for that same non-final check-rollup gate (issue #462). A wave boundary
++# fires SECONDS after the PR is opened, so the FIRST rollup read is routinely `pending`
++# (queued/running) or `empty` (nothing reported yet) — that is absence of evidence, not a
++# verdict. `_merge_one` re-reads the rollup until it clears pending/empty or this many
++# wall-clock seconds elapse; only then does an unresolved rollup refuse (with a message
++# that says the checks never reported in time, distinct from a check that actually failed).
++# On every refusal after the ready-mark — timeout, a red/unreadable rollup, or a failing
++# `gh pr merge` — the PR is returned to draft (`gh pr ready --undo`) before the run STOPs,
++# so a stopped wave never leaves a PR advertising a readiness no human granted.
++#   300  (default) — a sensible bound for CI to register and report on a freshly-opened PR.
++#   0    — perform no wait at all: a single read, the original immediate-refusal behaviour.
++merge_wait_secs = 300
+ # Optional integration re-gate (#wave-model). After each wave folds (stack mode), run the
+ # repo-scoped gates over the folded integration tip before the next wave builds on it, so a
+ # combination that is red though each fix was green ALONE stops the run. Off by default
+diff --git a/template/src/pdca_harness/config.py b/template/src/pdca_harness/config.py
+index 6fd834a..742ddb9 100644
+--- a/template/src/pdca_harness/config.py
++++ b/template/src/pdca_harness/config.py
+@@ -366,6 +366,14 @@ class Config:
+     # merge`'s own enforcement (whatever branch protection marks required — possibly
+     # nothing) decide, including merging with an empty rollup. [driver].merge_requires.
+     merge_requires: str = "all"
++    # Bounded wait for that same non-final check-rollup gate (issue #462). A wave boundary
++    # fires SECONDS after `_publish_bundle` opens the PR — its checks are routinely still
++    # queued or not yet registered, so a rollup read that moment is `pending` or `empty`:
++    # absence of evidence, not a verdict. `_merge_one` re-reads the rollup until it resolves
++    # or this many wall-clock seconds elapse; only an unresolved rollup at the bound (or a
++    # genuinely failing/unreadable one) refuses. `0` performs no wait at all — a single
++    # read, the original immediate-refusal behaviour. [driver].merge_wait_secs.
++    merge_wait_secs: int = 300
+     # Optional integration re-gate (#wave-model): after each wave folds onto the
+     # integration branch, run the repo-scoped gates over that tip before the next wave
+     # builds on it, so a combination that is red though each fix was green alone STOPs the
+@@ -705,6 +713,20 @@ class Config:
+             print(f"config: unknown [driver].merge_requires '{merge_requires}' — expected "
+                   "all | required; using 'all'", file=sys.stderr)
+             merge_requires = "all"
++        # Bounded wait for the rollup gate above (issue #462). A bad value degrades to the
++        # DEFAULT wait (300s), never to 0 — a typo must not silently buy back the old
++        # immediate-refusal race.
++        try:
++            merge_wait_secs = int(driver_cfg.get("merge_wait_secs", 300))
++        except (TypeError, ValueError):
++            print(f"config: [driver].merge_wait_secs must be an integer number of seconds, "
++                  f"got {driver_cfg.get('merge_wait_secs')!r} — using the default 300",
++                  file=sys.stderr)
++            merge_wait_secs = 300
++        if merge_wait_secs < 0:
++            print(f"config: [driver].merge_wait_secs must be >= 0, got {merge_wait_secs} — "
++                  "using the default 300", file=sys.stderr)
++            merge_wait_secs = 300
+         regate_between_waves = bool(driver_cfg.get("regate_between_waves", False))
+         act_cadence = max(1, int(driver_cfg.get("act_cadence", 5)))  # issue #109
+         # Footprint sweep mode (issue #297). An unknown value falls back to "clean" with a
+@@ -811,6 +833,7 @@ class Config:
+             wave_mode=wave_mode,
+             merge_method=merge_method,
+             merge_requires=merge_requires,
++            merge_wait_secs=merge_wait_secs,
+             regate_between_waves=regate_between_waves,
+             act_cadence=act_cadence,
+             sweep_worktrees=sweep_worktrees,
+diff --git a/template/src/pdca_harness/merge.py b/template/src/pdca_harness/merge.py
+index 588275f..86c7ba1 100644
+--- a/template/src/pdca_harness/merge.py
++++ b/template/src/pdca_harness/merge.py
+@@ -29,6 +29,17 @@ time. Refusing after the ready-mark is safe — a re-run resumes idempotently. A
+ rollup refuses too (absence of evidence is not green); skipped/neutral checks are
+ completed non-failures and do not block. ``[driver].merge_requires = "required"``
+ (default ``"all"``) opts back into host-config-only semantics, skipping the gate.
++
++A wave boundary fires SECONDS after the PR was opened (issue #462: getwyrd/wyrd#703, six
++seconds between create and ready_for_review), so the FIRST rollup read above is routinely
++``pending`` or ``empty`` — not a verdict, just evidence that has not arrived yet.
++``_wait_for_green`` re-reads the rollup until it resolves or ``[driver].merge_wait_secs``
++(default 300; ``0`` disables the wait — the original immediate-refusal behaviour) of
++wall-clock time elapses, through the patchable ``_sleep`` below so a test costs no real
++time. Whichever way ``_merge_one`` declines to merge a PR it already readied — the rollup
++never resolving green, a failing ``gh pr merge`` — ``_undo_ready`` marks it back to draft
++(``gh pr ready --undo``) before returning, so a stopped wave never leaves a PR advertising
++a readiness no human granted (``docs/INTEGRATION.md`` §10).
+ """
+ 
+ from __future__ import annotations
+@@ -36,11 +47,16 @@ from __future__ import annotations
+ import json
+ import subprocess
+ import sys
++import time
+ from pathlib import Path
+ 
+ from . import merged, publish, state
+ from .config import Config
+ 
++# Patchable indirection so a test can drive the wait loop below with no real wall-clock
++# cost (issue #462) — tests replace this, never `time.sleep` itself.
++_sleep = time.sleep
++
+ # `gh pr checks --json name,bucket` classifies every check into one of five buckets:
+ # pass | fail | pending | skipping | cancel (`gh pr checks --help`). "pass" and "skipping"
+ # (skipped/neutral) are completed non-failures and do not block; "pending" (running or
+@@ -124,6 +140,41 @@ def _names(checks: list) -> str:
+         for c in checks)
+ 
+ 
++def _wait_for_green(pr_url: str, wait_secs: int, *, poll_interval: int = 15) -> tuple[str, str]:
++    """Re-read ``pr_url``'s check rollup (``_check_rollup``) until it clears ``pending``/
++    ``empty`` or ``wait_secs`` of (patchable) wall-clock time is exhausted (issue #462).
++    Returns the final ``(verdict, detail)`` unchanged — this never itself decides to merge.
++
++    ``wait_secs <= 0`` performs exactly one read and returns immediately: the original
++    behaviour, for a host whose checks are known to already be in by the time the wave
++    boundary fires. Sleeps go through the module-level ``_sleep`` so a test can make the
++    whole loop cost no real time.
++    """
++    verdict, detail = _check_rollup(pr_url)
++    waited = 0
++    while verdict in ("pending", "empty") and waited < wait_secs:
++        step = min(poll_interval, wait_secs - waited)
++        _sleep(step)
++        waited += step
++        verdict, detail = _check_rollup(pr_url)
++    return verdict, detail
++
++
++def _undo_ready(pr_url: str) -> None:
++    """Return ``pr_url`` to draft (issue #462): the documented inverse of the ``gh pr
++    ready`` call in ``_merge_one``, run on every path where that function declines to merge
++    a PR it already readied, so a stopped wave never leaves a PR advertising a readiness no
++    human granted. Its own failure is reported — never masking the real reason the wave
++    stopped — but does not change the caller's already-decided non-zero return."""
++    print(f"→ gh pr ready {pr_url} --undo")
++    undo = subprocess.run(["gh", "pr", "ready", str(pr_url), "--undo"],
++                          capture_output=True, text=True)
++    if undo.returncode != 0:
++        print((undo.stderr or undo.stdout).strip(), file=sys.stderr)
++        print(f"!!! merge: could not return {pr_url} to draft after declining to merge it "
++              "— it is left marked ready; a human must re-draft it.", file=sys.stderr)
++
++
+ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
+                fetched: set[str]) -> int:
+     """Merge one bundle's recorded PR (idempotent, fail-closed). ``fetched`` dedupes the
+@@ -174,21 +225,27 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
+     # merge past a red rollup).
+     if cfg.merge_requires != "required":
+         print(f"→ gh pr checks {pr_url}")
+-        verdict, detail = _check_rollup(str(pr_url))
++        # A wave boundary fires seconds after the PR opened (issue #462), so the first read
++        # is routinely pending/empty — not a verdict yet. Wait for it to resolve, bounded by
++        # [driver].merge_wait_secs, before treating an unresolved rollup as a refusal.
++        verdict, detail = _wait_for_green(str(pr_url), cfg.merge_wait_secs)
+         if verdict != "green":
+             why = {
+                 "failing": f"a check is FAILING — {detail}",
+-                "pending": f"a check has not finished — {detail}",
+-                "empty": f"the check rollup is EMPTY — {detail}; absence of evidence is "
+-                         "not green",
++                "pending": f"a check has not finished within {cfg.merge_wait_secs}s — "
++                           f"{detail}",
++                "empty": f"the check rollup was still EMPTY after {cfg.merge_wait_secs}s "
++                         f"— {detail}; absence of evidence is not green",
+                 "unreadable": f"the check rollup could not be read — {detail}",
+             }[verdict]
+             print(f"\n!!! merge: {d.name} ({pr_url}) was NOT merged — {why}. The host's "
+                   "required-checks config is not enough: this wave's base must be green "
+                   "before the next wave builds on it. STOP: later waves are NOT run; "
+-                  "re-run once the checks are green (the run resumes idempotently — the "
+-                  "PR stays ready), or set [driver] merge_requires = \"required\" to "
+-                  "merge on the host's required checks alone.\n", file=sys.stderr)
++                  "re-run once the checks are green (the run resumes idempotently), or set "
++                  "[driver] merge_requires = \"required\" to merge on the host's required "
++                  "checks alone, or raise [driver] merge_wait_secs if the checks just take "
++                  "longer than that to report.\n", file=sys.stderr)
++            _undo_ready(pr_url)
+             return 1
+         # Positive evidence in the run log that this merge was gated, not merged blind.
+         print(f"   check rollup green ({detail})")
+@@ -201,6 +258,7 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
+               "rights on the base, or a host-required check that failed or started after "
+               "the rollup gate above. STOP: later waves are NOT run; resolve at the PR, "
+               "then re-run.\n", file=sys.stderr)
++        _undo_ready(pr_url)
+         return 1
+     # Refresh the base so the NEXT wave's worktree resets to the merged result.
+     if repo_spec and repo_spec not in fetched:
+diff --git a/template/tests/test_merge.py b/template/tests/test_merge.py
+index 2ef5c66..8069a61 100644
+--- a/template/tests/test_merge.py
++++ b/template/tests/test_merge.py
+@@ -13,6 +13,13 @@ the PR's own FULL check rollup (`gh pr checks`) after the ready-mark and immedia
+ the merge, and refuses on any failing, pending or missing check — whatever branch
+ protection is (or isn't) configured to require. `[driver].merge_requires = "required"` opts
+ back into the host-config-only behaviour.
++
++Issue #462 extends it once more: a non-final wave's PR is only seconds old, so that same
++rollup read is routinely `pending`/`empty` NOT because anything is wrong but because the
++checks have not reported yet. `_merge_one` now waits (`_wait_for_green`, bounded by
++`[driver].merge_wait_secs`, driven through the patchable `merge._sleep` so these tests cost
++no wall-clock) before treating an unresolved rollup as a refusal, and undoes the ready-mark
++(`gh pr ready --undo`) on every path where it declines to merge a PR it already readied.
+ """
+ 
+ from __future__ import annotations
+@@ -134,14 +141,22 @@ class MergeWave(unittest.TestCase):
+         # ready + the check rollup succeed; the merge itself fails (a conflict, no rights).
+         fail_merge = _gh(merge=SimpleNamespace(returncode=1, stdout="",
+                                                stderr="not mergeable"))
++        calls: list[list[str]] = []
++
++        def fake_run(cmd, **kw):
++            calls.append(cmd)
++            return fail_merge(cmd, **kw)
+ 
+-        with mock.patch("pdca_harness.merge.subprocess.run", side_effect=fail_merge), \
++        with mock.patch("pdca_harness.merge.subprocess.run", side_effect=fake_run), \
+                 mock.patch.object(merge.state, "state", return_value=state.COMPLETE), \
+                 mock.patch.object(merge.merged, "is_merged", return_value=False), \
+                 redirect_stderr(io.StringIO()) as err:
+             rc = merge.merge_wave(self.cfg, [b])
+         self.assertEqual(rc, 1)
+         self.assertIn("did not merge", err.getvalue())
++        # issue #462 (iii): a failing `gh pr merge` declines AFTER the ready-mark too, so it
++        # must be undone the same as a rollup refusal.
++        self.assertIn(["gh", "pr", "ready", "https://gh/pr/1", "--undo"], calls)
+ 
+     def test_readies_before_merging(self) -> None:
+         # #279: the publisher opens every PR --draft, but `gh pr merge` refuses a draft, so a
+@@ -219,7 +234,8 @@ class MergeWave(unittest.TestCase):
+                **by_verb: SimpleNamespace) -> tuple[int, list[list[str]], str]:
+         """Run one bundle through `merge_wave` against a stubbed `gh`. Returns the exit
+         code, every command shelled, and stderr — so a test can assert BOTH the refusal
+-        and that `gh pr merge` was never reached."""
++        and that `gh pr merge` was never reached. `_sleep` is patched to a no-op so a
++        pending/empty rollup's wait (issue #462) costs no wall-clock here."""
+         b = self._bundle(iid)
+         calls: list[list[str]] = []
+         gh = _gh(**by_verb)
+@@ -229,6 +245,7 @@ class MergeWave(unittest.TestCase):
+             return gh(cmd, **kw)
+ 
+         with mock.patch("pdca_harness.merge.subprocess.run", side_effect=fake_run), \
++                mock.patch.object(merge, "_sleep", create=True), \
+                 mock.patch.object(merge.state, "state", return_value=state.COMPLETE), \
+                 mock.patch.object(merge.merged, "is_merged", return_value=False), \
+                 redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()) as err:
+@@ -248,13 +265,66 @@ class MergeWave(unittest.TestCase):
+         self.assertFalse(self._merged(calls))
+         self.assertIn("FAILING", err)
+         self.assertIn("lint (fail)", err)              # names the offending check
++        # issue #462 (iii): a red rollup declines AFTER the ready-mark, so it must be undone.
++        self.assertIn(["gh", "pr", "ready", "https://gh/pr/1", "--undo"], calls)
+ 
+     def test_pending_check_refuses(self) -> None:
+-        # Never merge past an in-flight run: wait-or-STOP, not merge-and-hope.
++        # issue #462: "nothing was wrong, the evidence had simply not arrived" must not be a
++        # terminal verdict. `_merge_one` waits (bounded, re-reading the rollup) before it
++        # gives up — and STILL refuses, cleanly, once the bound is exhausted and the checks
++        # genuinely never reported.
+         rc, calls, err = self._drive("MD", checks=_rollup(("ci", "pending"), code=8))
+         self.assertEqual(rc, 1)
+         self.assertFalse(self._merged(calls))
+         self.assertIn("not finished", err)
++        self.assertIn(f"within {self.cfg.merge_wait_secs}s", err)   # distinguishes the two
++        self.assertNotIn("FAILING", err)                            # from "a check is red"
++        # The wait actually happened — the rollup was re-read, not just checked once.
++        checks_calls = [c for c in calls if c[:3] == ["gh", "pr", "checks"]]
++        self.assertGreater(len(checks_calls), 1)
++        # issue #462 (iii): declined after the ready-mark ⇒ the ready-mark is undone, so the
++        # stopped wave leaves no PR advertising a readiness no human granted.
++        self.assertIn(["gh", "pr", "ready", "https://gh/pr/1", "--undo"], calls)
++
++    def test_pending_then_green_merges(self) -> None:
++        # issue #462 (i): the wait pays off — a rollup that resolves green after the checks
++        # report merges, and the ready-mark is left alone (nothing to undo).
++        b = self._bundle("MD2")
++        calls: list[list[str]] = []
++        reads = {"n": 0}
++
++        def fake_run(cmd, **kw):
++            calls.append(cmd)
++            if cmd[:3] == ["gh", "pr", "checks"]:
++                reads["n"] += 1
++                return (_rollup(("ci", "pending"), code=8) if reads["n"] < 3
++                        else _rollup(("ci", "pass")))
++            return SimpleNamespace(returncode=0, stdout="", stderr="")
++
++        with mock.patch("pdca_harness.merge.subprocess.run", side_effect=fake_run), \
++                mock.patch.object(merge, "_sleep", create=True) as sleep, \
++                mock.patch.object(merge.state, "state", return_value=state.COMPLETE), \
++                mock.patch.object(merge.merged, "is_merged", return_value=False), \
++                redirect_stdout(io.StringIO()):
++            rc = merge.merge_wave(self.cfg, [b], method="merge")
++        self.assertEqual(rc, 0)
++        self.assertEqual(reads["n"], 3)               # pending, pending, then green
++        self.assertTrue(sleep.called)                 # the wait actually slept in between
++        self.assertIn(["gh", "pr", "merge", "https://gh/pr/1", "--merge"], calls)
++        self.assertNotIn(["gh", "pr", "ready", "https://gh/pr/1", "--undo"], calls)
++
++    def test_wait_bound_zero_performs_no_wait(self) -> None:
++        # 0 means "do not wait" — the original immediate-refusal behaviour, for a host
++        # whose checks are known to report before the wave boundary ever fires.
++        cfg = _cfg(self.tmp, merge_wait_secs=0)
++        rc, calls, err = self._drive("MD3", cfg=cfg,
++                                     checks=_rollup(("ci", "pending"), code=8))
++        self.assertEqual(rc, 1)
++        self.assertFalse(self._merged(calls))
++        self.assertIn("within 0s", err)
++        checks_calls = [c for c in calls if c[:3] == ["gh", "pr", "checks"]]
++        self.assertEqual(len(checks_calls), 1)         # exactly one read — no re-poll
++        self.assertIn(["gh", "pr", "ready", "https://gh/pr/1", "--undo"], calls)
+ 
+     def test_all_green_readies_then_checks_then_merges(self) -> None:
+         rc, calls, _ = self._drive("ME")
+@@ -313,6 +383,7 @@ class MergeWave(unittest.TestCase):
+             return SimpleNamespace(returncode=0, stdout="", stderr="")
+ 
+         with mock.patch("pdca_harness.merge.subprocess.run", side_effect=fake_run), \
++                mock.patch.object(merge, "_sleep", create=True), \
+                 mock.patch.object(merge.state, "state", return_value=state.COMPLETE), \
+                 mock.patch.object(merge.merged, "is_merged", return_value=False), \
+                 redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()) as err:
+@@ -320,6 +391,7 @@ class MergeWave(unittest.TestCase):
+         self.assertEqual(rc, 1)
+         self.assertFalse(self._merged(calls))
+         self.assertIn("not finished", err.getvalue())
++        self.assertIn(["gh", "pr", "ready", "https://gh/pr/1", "--undo"], calls)
+ 
+     def test_a_red_wave_member_stops_the_wave_before_later_bundles(self) -> None:
+         # Wave-level consequence of the gate: the red PR is not merged AND the next
+@@ -372,6 +444,33 @@ class MergeWave(unittest.TestCase):
+         self.assertEqual(cfg.merge_requires, "all")   # an unknown value fails CLOSED
+         self.assertIn("merge_requires", err.getvalue())
+ 
++    def test_merge_wait_secs_comes_from_the_driver_table(self) -> None:
++        # issue #462: through the REAL config loader — `[driver] merge_wait_secs` in a
++        # rendered pdca.toml has to actually reach `_merge_one` (the same plumbing as
++        # merge_requires: dataclass field, load(), constructor kwarg).
++        root = self.tmp / "instance2"
++        root.mkdir()
++        toml = root / "pdca.toml"
++        base = '[paths]\nbundle_root = "results"\n'
++
++        toml.write_text(base + '\n[driver]\nmerge_wait_secs = 30\n', encoding="utf-8")
++        self.assertEqual(Config.load(root).merge_wait_secs, 30)
++
++        toml.write_text(base, encoding="utf-8")                    # unset ⇒ the default
++        self.assertEqual(Config.load(root).merge_wait_secs, 300)
++
++        toml.write_text(base + '\n[driver]\nmerge_wait_secs = "soon"\n', encoding="utf-8")
++        with redirect_stderr(io.StringIO()) as err:
++            cfg = Config.load(root)
++        self.assertEqual(cfg.merge_wait_secs, 300)     # an unparseable value fails CLOSED
++        self.assertIn("merge_wait_secs", err.getvalue())
++
++        toml.write_text(base + '\n[driver]\nmerge_wait_secs = -5\n', encoding="utf-8")
++        with redirect_stderr(io.StringIO()) as err:
++            cfg = Config.load(root)
++        self.assertEqual(cfg.merge_wait_secs, 300)     # negative also fails CLOSED
++        self.assertIn("merge_wait_secs", err.getvalue())
++
+ 
+ if __name__ == "__main__":
+     unittest.main()

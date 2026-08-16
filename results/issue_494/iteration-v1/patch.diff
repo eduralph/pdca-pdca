@@ -1,0 +1,291 @@
+diff --git a/template/src/pdca_harness/leaves.py b/template/src/pdca_harness/leaves.py
+index 1211604..3305edd 100644
+--- a/template/src/pdca_harness/leaves.py
++++ b/template/src/pdca_harness/leaves.py
+@@ -780,7 +780,8 @@ def do_plan(d: Path, cfg: Config, csv: str | None = None) -> None:
+         # and the Stop hook can verify the brief (structure + dependency probe).
+         with handoff.session(cfg, "planner", [d]) as henv:
+             _invoke(cfg.planner, cfg.root, _plan_prompt(cfg, csv, d), cfg=cfg,
+-                    env=henv or None)
++                    env=henv or None,
++                    extra_argv=_target_grant([d], cfg, cfg.profile(cfg.planner)))
+     else:
+         _stub_plan(d, cfg)
+     run_plan_advisory(d, cfg)  # opt-in antagonistic review of the brief (#301); no-op unless configured
+@@ -2002,6 +2003,39 @@ def _reviewer_target(d: Path, cfg: Config) -> Path | None:
+         return None
+ 
+ 
++def _target_grant(bundles: list[Path], cfg: Config, profile) -> list[str]:
++    """The grounding-grant argv admitting the resolved target checkout(s) for
++    ``bundles`` — the reviewer's grant (:2495-2500) generalized to every INTERACTIVE
++    leaf the driver launches (planner, sign-off, publisher, Act), which ran with cwd
++    ``cfg.root`` and no grant at all (issue #494): a human approving an out-of-
++    workspace read there could not have that approval carry over, because it never
++    reached the session that needed it.
++
++    Resolution is :func:`_reviewer_target`'s, reused rather than re-derived: the
++    per-cycle worktree when one exists, else the sibling checkout the brief's
++    "Repo + branch target" field names via ``publish._resolve_target`` /
++    ``_checkout_path``. A bundle with no resolvable target (Plan, before the brief
++    exists) contributes nothing — the grant is never faked. Several bundles (batch
++    sign-off, Act) may each name a different target; each resolved checkout is
++    admitted once, in encounter order — never a directory the config does not name.
++
++    Skipped outright when the profile has no grounding flag (the ``generic``
++    family): that spawn stays byte-identical to today, exactly as the reviewer's
++    own conditional already does.
++    """
++    if not profile.grounding_flag:
++        return []
++    seen: list[Path] = []
++    for d in bundles:
++        target = _reviewer_target(d, cfg)
++        if target is not None and target not in seen:
++            seen.append(target)
++    extra: list[str] = []
++    for p in seen:
++        extra += [profile.grounding_flag, str(p)]
++    return extra
++
++
+ def _reviewer_repo(d: Path, target: Path, sandbox: Path) -> Path | None:
+     """A DISPOSABLE, git-self-contained copy of ``target`` inside the reviewer sandbox —
+     the tree the reviewer may re-run the red→green on (issue #419).
+@@ -3258,7 +3292,8 @@ def run_signoff(d: Path, cfg: Config) -> None:
+         # Exit contract (#331): the Stop hook verifies the bundle's decision token
+         # (+ rationale for iterate-*/discontinue) before the session may end.
+         with handoff.session(cfg, "signoff", [d]) as henv:
+-            _invoke(cfg.signoff, cfg.root, _signoff_prompt(d), cfg=cfg, env=henv or None)
++            _invoke(cfg.signoff, cfg.root, _signoff_prompt(d), cfg=cfg, env=henv or None,
++                    extra_argv=_target_grant([d], cfg, cfg.profile(cfg.signoff)))
+         return
+     _stub_signoff(d, cfg)
+ 
+@@ -3306,7 +3341,8 @@ def run_signoff_batch(cfg: Config, bundles: list[Path]) -> None:
+         # hook verifies each decision; ending early is a deliberate abandon.
+         with handoff.session(cfg, "signoff", list(bundles)) as henv:
+             _invoke(cfg.signoff, cfg.root, _signoff_batch_prompt(bundles), cfg=cfg,
+-                    env=henv or None)
++                    env=henv or None,
++                    extra_argv=_target_grant(bundles, cfg, cfg.profile(cfg.signoff)))
+         return
+     for d in bundles:
+         _stub_signoff(d, cfg)
+@@ -3398,7 +3434,8 @@ def run_act(cfg: Config, date: str) -> None:
+             # /handoff can distinguish the entry THIS session wrote from a prior one.
+             with handoff.session(cfg, "act") as henv:
+                 _invoke(cfg.act, cfg.root, _act_prompt(cfg, date, bundles=covered),
+-                        cfg=cfg, env=henv or None)
++                        cfg=cfg, env=henv or None,
++                        extra_argv=_target_grant(covered, cfg, cfg.profile(cfg.act)))
+         else:
+             _stub_act(cfg, date, bundles=covered)
+ 
+@@ -3463,7 +3500,8 @@ def run_publish(d: Path, cfg: Config) -> None:
+         with handoff.session(cfg, "publisher", [d]) as henv:
+             merged = {**(env or {}), **henv}
+             _invoke(cfg.publisher, cfg.root, _publish_prompt(d, cfg),
+-                    env=merged or None, cfg=cfg)
++                    env=merged or None, cfg=cfg,
++                    extra_argv=_target_grant([d], cfg, profile))
+         return
+     _stub_publish(d, cfg)
+ 
+diff --git a/template/tests/test_leaf_workspace_admission.py b/template/tests/test_leaf_workspace_admission.py
+new file mode 100644
+index 0000000..7a3b1a7
+--- /dev/null
++++ b/template/tests/test_leaf_workspace_admission.py
+@@ -0,0 +1,191 @@
++"""Interactive-leaf workspace admission (issue #494, stdlib unittest, no deps).
++
++Every leaf the driver spawns runs with cwd ``cfg.root`` (a claude-family CLI walks up
++from cwd to find ``.claude/agents`` + its hooks — leaves.py:1793-1802). The headless
++leaves (Do, Check reviewer/advisory) are additionally GROUNDED in whatever they must
++read outside that cwd via the family's grounding flag (``--add-dir`` for claude),
++computed at spawn from the config (leaves.py:1802, :1816, :2495-2500). The four
++INTERACTIVE leaves — planner, sign-off (single and batch), publisher, Act — were not:
++they called ``_invoke(<leaf>, cfg.root, …)`` with no ``extra_argv`` at all
++(``do_plan`` :782-783, ``run_signoff`` :3261, ``run_signoff_batch`` :3308,
++``run_publish`` :3465-3466, ``run_act`` :3400 on the pre-fix tree), so a human
++approving an out-of-workspace read (the target checkout sign-off/publish/Plan must
++read to do their job) could never have that approval carry over between sessions —
++it never reached the session that needed it.
++
++This module asserts the composed fix (``leaves._target_grant``, mirroring the
++reviewer's own conditional): every interactive spawn admits the resolved target
++checkout(s) named by the config — and *only* those (criterion ii: an unnamed
++directory is never admitted), skipped outright for a family with no grounding
++mechanism (criterion iii: the grant is never faked).
++
++Run with:
++    PYTHONPATH=src python -m unittest discover -s tests
++"""
++
++from __future__ import annotations
++
++import shutil
++import subprocess as sp
++import tempfile
++import unittest
++from pathlib import Path
++
++from pdca_harness import leaves
++from pdca_harness.config import Config, LeafConfig
++
++
++def _cfg(root: Path, **leaf_cfg) -> Config:
++    base = dict(
++        root=root,
++        bundle_root=root / "results",
++        process_dir=root / "process",
++        templates_dir=root / "templates",
++        default_branch="main",
++        tracker_system="github",
++        tracker_url="",
++        issue_id_example="1",
++        builder=LeafConfig(mode="stub"),
++        reviewer=LeafConfig(mode="stub"),
++        planner=LeafConfig(mode="stub"),
++        signoff=LeafConfig(mode="stub"),
++        publisher=LeafConfig(mode="stub"),
++        act=LeafConfig(mode="stub"),
++        base_remote="origin",
++    )
++    base.update(leaf_cfg)
++    return Config(**base)
++
++
++_CLAUDE = LeafConfig(mode="command", family="claude", argv=["claude", "-p"])
++# The `generic` profile (empty family resolves to it) has no grounding_flag at all —
++# the family with no grounding mechanism criterion (iii) requires the grant skipped
++# for, never faked.
++_GENERIC = LeafConfig(mode="command", family="", argv=["true"])
++
++
++class LeafWorkspaceAdmission(unittest.TestCase):
++    def setUp(self) -> None:
++        self.tmp = Path(tempfile.mkdtemp())
++        self.target = self.tmp / "repo"
++        self.target.mkdir()
++        sp.run(["git", "init", "-q"], cwd=self.target, check=True)
++        # A second checkout the config ALSO names (for a different repo_spec) but that
++        # no bundle in a given test targets — criterion (ii)'s negative case: config
++        # naming *something* must not admit *everything* it names.
++        self.other = self.tmp / "other"
++        self.other.mkdir()
++        sp.run(["git", "init", "-q"], cwd=self.other, check=True)
++
++        self.captured: list[dict] = []
++        self._orig_invoke = leaves._invoke
++
++        def fake_invoke(leaf, workdir, prompt, **kw):
++            self.captured.append({"workdir": workdir, "extra_argv": kw.get("extra_argv")})
++
++        leaves._invoke = fake_invoke
++
++    def tearDown(self) -> None:
++        leaves._invoke = self._orig_invoke
++        shutil.rmtree(self.tmp, ignore_errors=True)
++
++    def _bundle(self, cfg: Config, iid: str, target: str = "org/repo @ main") -> Path:
++        d = cfg.bundle(iid)
++        d.mkdir(parents=True)
++        (d / "brief.md").write_text(
++            f"- **Slug:** s{iid}\n- **Repo + branch target:** {target}\n",
++            encoding="utf-8")
++        return d
++
++    # -- planner ------------------------------------------------------------
++    def test_planner_admits_the_resolved_target_checkout(self) -> None:
++        cfg = _cfg(self.tmp, planner=_CLAUDE)
++        cfg.repo_checkouts = {"org/repo": str(self.target), "org/other": str(self.other)}
++        d = self._bundle(cfg, "1")
++        leaves.do_plan(d, cfg)
++        self.assertEqual(len(self.captured), 1)
++        self.assertEqual(self.captured[0]["workdir"], cfg.root)  # cwd unchanged (iv)
++        self.assertEqual(self.captured[0]["extra_argv"],
++                         ["--add-dir", str(self.target)])  # only the named target (ii)
++
++    def test_planner_with_no_resolvable_target_admits_nothing(self) -> None:
++        # The ordinary Plan trigger (flow._plan_if_unplanned) only ever calls do_plan on
++        # an UNPLANNED bundle — brief.md does not exist yet, so nothing is resolvable.
++        # The grant must not be faked: extra_argv carries no directory at all.
++        cfg = _cfg(self.tmp, planner=_CLAUDE)
++        d = cfg.bundle("2")
++        d.mkdir(parents=True)
++        leaves.do_plan(d, cfg)
++        self.assertEqual(len(self.captured), 1)
++        self.assertEqual(self.captured[0]["extra_argv"], [])
++
++    # -- sign-off -------------------------------------------------------------
++    def test_signoff_admits_the_resolved_target_checkout(self) -> None:
++        cfg = _cfg(self.tmp, signoff=_CLAUDE)
++        cfg.repo_checkouts = {"org/repo": str(self.target), "org/other": str(self.other)}
++        d = self._bundle(cfg, "3")
++        leaves.run_signoff(d, cfg)
++        self.assertEqual(self.captured[-1]["workdir"], cfg.root)
++        self.assertEqual(self.captured[-1]["extra_argv"], ["--add-dir", str(self.target)])
++
++    def test_signoff_batch_admits_every_bundles_target_once(self) -> None:
++        # SIGNOFF_BATCH_SIZE covers several bundles in ONE session (flow.py:73-75);
++        # each bundle's own resolved target is admitted, deduped, not just the first.
++        cfg = _cfg(self.tmp, signoff=_CLAUDE)
++        cfg.repo_checkouts = {"org/repo": str(self.target), "org/other": str(self.other)}
++        d1 = self._bundle(cfg, "4", target="org/repo @ main")
++        d2 = self._bundle(cfg, "5", target="org/other @ main")
++        leaves.run_signoff_batch(cfg, [d1, d2])
++        self.assertEqual(len(self.captured), 1)  # one seeded session over both bundles
++        self.assertEqual(self.captured[-1]["extra_argv"],
++                         ["--add-dir", str(self.target), "--add-dir", str(self.other)])
++
++    def test_signoff_batch_dedupes_a_shared_target(self) -> None:
++        cfg = _cfg(self.tmp, signoff=_CLAUDE)
++        cfg.repo_checkouts = {"org/repo": str(self.target)}
++        d1 = self._bundle(cfg, "6")
++        d2 = self._bundle(cfg, "7")
++        leaves.run_signoff_batch(cfg, [d1, d2])
++        self.assertEqual(self.captured[-1]["extra_argv"], ["--add-dir", str(self.target)])
++
++    # -- publisher --------------------------------------------------------------
++    def test_publisher_admits_the_resolved_target_checkout(self) -> None:
++        cfg = _cfg(self.tmp, publisher=_CLAUDE)
++        cfg.repo_checkouts = {"org/repo": str(self.target), "org/other": str(self.other)}
++        d = self._bundle(cfg, "8")
++        leaves.run_publish(d, cfg)
++        self.assertEqual(self.captured[-1]["workdir"], cfg.root)
++        self.assertEqual(self.captured[-1]["extra_argv"], ["--add-dir", str(self.target)])
++
++    # -- Act ----------------------------------------------------------------------
++    def test_act_admits_the_resolved_target_checkouts(self) -> None:
++        cfg = _cfg(self.tmp, act=_CLAUDE)
++        cfg.act_cadence = 1  # else act_due needs 5 frozen cycles to trigger (unrelated to this)
++        cfg.repo_checkouts = {"org/repo": str(self.target), "org/other": str(self.other)}
++        d1 = self._bundle(cfg, "9", target="org/repo @ main")
++        d2 = self._bundle(cfg, "10", target="org/other @ main")
++        orig_frozen = leaves.act_mod.frozen_bundles
++        # Act reviews COMPLETE (frozen) bundles; state machinery to reach COMPLETE is
++        # unrelated to what this module tests (workspace admission), so the covered
++        # set is substituted the way a fixture substitutes any unrelated collaborator —
++        # `run_act`'s own admission call (the code under test) still runs unmocked.
++        leaves.act_mod.frozen_bundles = lambda cfg: [d1, d2]
++        try:
++            leaves.run_act(cfg, "2026-08-15")
++        finally:
++            leaves.act_mod.frozen_bundles = orig_frozen
++        self.assertEqual(len(self.captured), 1)
++        self.assertEqual(self.captured[-1]["extra_argv"],
++                         ["--add-dir", str(self.target), "--add-dir", str(self.other)])
++
++    # -- criterion (iii): a family with no grounding mechanism is untouched -------
++    def test_generic_family_spawn_is_byte_identical(self) -> None:
++        cfg = _cfg(self.tmp, signoff=_GENERIC)
++        cfg.repo_checkouts = {"org/repo": str(self.target)}
++        d = self._bundle(cfg, "11")
++        leaves.run_signoff(d, cfg)
++        self.assertEqual(self.captured[-1]["extra_argv"], [])  # the grant is skipped, not faked
++
++
++if __name__ == "__main__":
++    unittest.main()

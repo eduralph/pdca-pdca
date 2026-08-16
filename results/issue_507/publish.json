@@ -1,0 +1,11 @@
+{
+  "mode": "new-pr",
+  "branch": "fix/507-shipped-suites-assert-only-sanctioned-postures",
+  "pr_url": "https://github.com/eduralph/pdca-harness/pull/518",
+  "base": "main",
+  "repo": "eduralph/pdca-harness",
+  "by": "Eduard Ralph",
+  "date": "2026-08-15",
+  "id_pending": false,
+  "host_ci_base": "645c315156bee9a7a6ca6384037877d18c7708ef"
+}

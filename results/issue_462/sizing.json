@@ -1,0 +1,13 @@
+{
+  "band": "watch",
+  "independent_outcomes": [
+    "Bounded, configurable wait/re-check of the rollup verdict at a non-final wave boundary, so a pending/empty rollup that resolves green within the bound merges instead of STOPping immediately (new [driver] config knob, plumbed through Config like merge_requires).",
+    "Restore the PR to draft on every path where merge.merge_wave declines to merge a PR it already readied (rollup refusal, bound expiry, failing gh pr merge), via gh pr ready --undo, so a stopped wave never leaves a readied PR advertising a readiness no human granted."
+  ],
+  "proposed_seams": [
+    "Seam at merge.py:127-204 \u2014 the 'restore draft on decline' behavior (success criterion iii) touches every decline branch generically and has its own test assertions and its own defect (ready-mark never reversed today); it does not require the bounded-wait feature to exist and could land first as its own PR.",
+    "The bounded-wait feature (success criterion i-ii plus the new [driver] config plumbing in config.py:361-368/703-707/813 and pdca.toml.jinja) is a second, separable outcome \u2014 its own config surface, its own defaulting/coercion logic, and its own red case (test_pending_check_refuses inversion) distinct from the undo-on-decline mechanics."
+  ],
+  "confidence": "medium",
+  "brief_sha": "d6f9dc471c8f25a9"
+}

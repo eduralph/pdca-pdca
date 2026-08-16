@@ -1,0 +1,29 @@
+fix(leaves): stop prompting for the target checkout every session
+
+The interactive leaves are told to read the target repository checkout: the
+planner cites the root cause against it, sign-off and publish read the source
+the patch was built on. The driver spawned all six of those sessions without
+admitting that directory to them, so each one opened by asking the human to
+approve the same out-of-workspace reads, one path at a time — and the answer
+never carried over. A permission granted by hand lands in the untracked
+.claude/settings.local.json, which a lane worktree never materializes and which
+--setting-sources project drops by design, so the next session asked again.
+
+Each interactive spawn now carries the family's grounding flag for exactly the
+checkouts that session is about: the primary checkout each of its bundles'
+briefs resolves to. Plan, which runs before a brief exists to name a repo, gets
+the instance's known targets instead — the paths [publisher.checkouts] names,
+plus the checkouts the existing briefs resolve to. A session that already has a
+bundle never widens to the instance's other, unrelated checkouts; a lane
+worktree and a directory that neither the configuration nor a brief names are
+never admitted; and a family with no grounding mechanism is spawned exactly as
+before rather than handed a flag its CLI does not have.
+
+The headless builder, reviewer and advisory spawns have always granted their
+directories this way, so the interactive half now follows the pattern the
+codebase already had rather than introducing a second mechanism. `make setup`
+remains the one-time grant for what genuinely stays outside the workspace — a
+build output directory, a docs toolchain, a checkout no brief mentions — and
+its documentation no longer offers the target checkout as its example.
+
+Fixes #494
