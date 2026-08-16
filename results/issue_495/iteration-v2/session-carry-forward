@@ -1,0 +1,32 @@
+Rejected on the advisory code-review's NEEDS-HUMAN [impl] finding, which is verified rather
+than suspected: `tests/test_update_compat.py:245-247` leaks a `tempfile.mkdtemp()` directory
+on exactly the pipx posture this slice exists to serve (copier on PATH, not importable by the
+running interpreter). Removing the class-level `@unittest.skipUnless` was right for criterion
+(ii), but it left `cls.tmp = Path(tempfile.mkdtemp())` (:245) executing BEFORE the copier check
+now reached via `render_prior_edit_and_update` (:247, :210). When `import_copier()` raises
+`SkipTest` out of `setUpClass`, `unittest.suite` sets `_classSetupFailed` and `tearDownClass`
+is never called, so the `shutil.rmtree` at :250-252 does not run. This fires twice per
+invocation during the bundle's own T3 gate run, just below what that gate inspects.
+
+What to change next:
+- Hoist the copier check above the temp-dir creation in `UpdateCompat.setUpClass` — call
+  `import_copier()` as the first statement, or wrap :245-247 in try/except SkipTest that
+  removes `cls.tmp` before re-raising. Mirror the ordering the two sibling call sites in this
+  same patch already use: `tests/test_render_and_run.py:37-38` and
+  `tests/test_render_cli_name.py:57-58` both import before `mkdtemp()`.
+- Close the coverage gap that let it through. `NoVerdictBeforeATestBodyRuns.
+  test_modules_import_and_collect_with_copier_unimportable` only inspects `__unittest_skip__`
+  and never runs `setUpClass`; `BareDeveloperRunIsUnchanged`'s two cases do run it but assert
+  only pass/fail/skip-reason. Add an assertion that the pipx-posture run leaves no temp
+  directory behind — that is what turns this from an invisible leak into a caught regression.
+
+Keep as-is — do not re-do this part: the diagnosis and the no-evidence outcome are both right
+and independently confirmed. The lazy point-of-use import in `tests/copier_support.py`, the
+truthful reason carrying the real ImportError plus the PATH lookup, the `tests/run_root_suite.py`
+process-boundary classification (its testsRun / per-test-skip / setUpClass-skip accounting was
+checked against `unittest.suite` and is correct for both shapes this repo produces), the exit-77
+`PDCA-UNVERIFIABLE:` contract, the untouched bare-`unittest` behaviour (criterion iv), and both
+in-repo consumers (`render-check.yml`, `CONTRIBUTING.md`) are all correct. The repeated
+try/except import shape across five files is inherent to the two mandatory invocation shapes,
+not duplication to factor out. This is one statement in the wrong order plus the assertion that
+would have caught it.

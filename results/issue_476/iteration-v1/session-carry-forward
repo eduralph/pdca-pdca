@@ -1,0 +1,33 @@
+Rejected because the corrected paragraph still does not match the reader it documents —
+the precise failure this bundle exists to end. Three concrete changes for the rebuild:
+
+1. The enumeration omits the NON-OBJECT case. `read_lineage` returns `None` on three
+   grounds (`template/src/pdca_harness/split.py:606-611`): any exception during
+   read/parse; `not isinstance(data, dict)`; and a wrong `version`. The patched sentence
+   lists only "absent, unreadable, malformed or wrong-version file". The brief's own
+   success criterion names "non-object" explicitly — the patch misses its stated
+   criterion, and the omission was inherited from the pre-patch text rather than fixed.
+
+2. The organising idea does not cover that case either. The patch says `None` comes back
+   "for *any* way of failing to **parse** it" — but a valid-JSON non-object such as
+   `[1,2,3]` parses fine and is rejected on SHAPE, not on parse. Reword so the framing
+   spans both "could not parse it" and "parsed, but is not the right shape/version",
+   otherwise adding "non-object" to the list contradicts the sentence around it.
+
+3. Reuse the wording that is already correct: `read_lineage`'s own docstring
+   (`split.py:586-587`) already reads "absent, unreadable, malformed JSON, a non-object
+   payload and an unrecognised `version` all return `None`". The correct sentence exists
+   in the file being documented — align the prose to it rather than re-deriving it.
+
+Also fix the prose-precision nit while in there: the patch attributes both consequences
+to the depth arithmetic ("treats it as unknown (`0`) so the child lands at depth 1 and
+the parent's own record is left untouched"). The parent's record surviving is a DIFFERENT
+mechanism — `_merge_parent_lineage` (`split.py:643-657`) copies `depth` through verbatim
+and never calls `_recorded_depth`; it would survive regardless of the arithmetic. Split
+into two independent clauses so no causal link is implied. Given this brief exists because
+imprecision in this exact paragraph produced false reviewer findings on issue_456, an
+implied-but-untrue causal link is the same class of defect being fixed.
+
+Scope is unchanged: still docs-only, still the one lineage paragraph of
+`docs/07-crosscutting.md`; `split.py` stays untouched and correct. C4 remaining
+"unverifiable" for a docs-only patch is accepted and is not a reason for this iterate.

@@ -1,0 +1,21 @@
+fix(flow): say "no new session" only once the decision is applied
+
+A run picks up a sign-off decision the bundle already carries and applies it
+without opening a session (09e4a6677b763380da8f264a2aae947f719c0bcb). It
+announced that up front — "applying the '<action>' sign-off decision already
+recorded in the bundle; no new session" — before anything had been applied,
+so the very next line could contradict it. An accept the C6 guard refuses
+(§6 NEEDS-HUMAN still open) does fall through to a fresh sign-off session; a
+bundle that lost its SUMMARY.md has its decision dropped; an unsignable
+SUMMARY.md is quarantined and the bundle goes back to reassemble. In all
+three the operator read a promise and its withdrawal one line apart, on the
+path that asks them to come back and judge the bundle again.
+
+The notice is now printed after the apply, and only when the decision really
+was recorded. Nothing else moves: the C6 refusal message, the fall-through
+to a fresh session, the return values and every state transition are
+unchanged, and a decision that genuinely is applied without a session is
+still reported in the same terms — on both the single-issue path and the
+batch sweep, which share this function.
+
+Fixes #475

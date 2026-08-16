@@ -1,0 +1,55 @@
+Rejected on SLICING. Criterion (i) — the truthful skip reason — is delivered and was
+live-verified on this host's real pipx posture; it alone removes the misdiagnosis that
+cost four cycles of §6 noise. Criterion (ii) is not met, and cannot be met inside the
+scope this brief declared.
+
+WHY (ii) IS UNREACHABLE AS SCOPED
+
+Criterion (ii) requires an all-skipped render/update leg to land as EVIDENCE-ABSENT under
+a gate. The only channel that produces that row is the process EXIT CODE the classifier
+reads. `gates.py:729-733` is explicit, and it is a deliberate hardening from issue #329:
+"The marker is honoured only for an exit code that is not a failure — 0, or the dedicated
+UNVERIFIABLE_RC. A gate that exits non-zero FAILED, whatever its output happens to
+contain, and saying otherwise masked real red."
+
+The patch emits the `PDCA-UNVERIFIABLE:` marker via `self.fail(unverifiable_message(...))`,
+which exits 1 — so the marker is ignored BY DESIGN and the row lands as `fail`. The patch
+adopts the harness's evidence-absent vocabulary on a channel the harness deliberately
+refuses to read at that exit code.
+
+That is not a build mistake. `python3 -m unittest discover` exits 0 or 1 and nothing in
+`tests/` can make the process exit 77, while the brief puts `engine/scripts/run-suite.sh`
+— the only in-reach place that could map an all-skipped leg onto UNVERIFIABLE_RC —
+explicitly OUT OF SCOPE. The brief demanded an outcome and scoped out the sole means of
+producing it; its own "declares itself unverifiable / fails" slash then licensed the half
+that was reachable. A rebuild against this brief hits the same wall.
+
+EVIDENCE THAT "fails" IS THE WRONG HALF
+
+This bundle's own reviewer leaf ran the patched tree in the pipx posture, got 2 failures +
+1 error / exit 1, and filed T3 FAIL calling it "a false red rather than the intended
+unverifiable runtime result". The first real consumer of the new behaviour misread it as
+genuine breakage. Shipping as-is converts intermittent §6 confusion into a recurring
+stream of FALSE FAIL verdicts from the reviewer leaf on any pipx host — louder than the
+silent green, and no more truthful.
+
+WHAT TO AUTHOR AT PLAN — pick one, do not leave it to the builder
+
+A. Widen scope to include the suite-runner boundary, so an all-skipped render/update leg
+   under `$PDCA_BUNDLE` maps to UNVERIFIABLE_RC (77) and the row lands evidence-absent as
+   #329 intends. Note the runner lives in this instance, not the target repo
+   (`docs/INTEGRATION.md` §2) — the brief must say which repo carries the change, which is
+   the question that pushed it out of scope in the first place.
+
+B. Split: land the truthful-reason half (criterion (i) plus the shared probe and its
+   regression test — all sound, keep this attempt's `tests/_copier_probe.py` and
+   `tests/test_copier_probe.py`) as its own bundle, and raise the silent-green half
+   separately once A's repo-boundary question is answered.
+
+Either way the child brief must resolve the open C5 question rather than inherit it:
+whether an eager capability probe is the right treatment at all, or whether copier should
+be imported lazily on first real use so capability detection stops standing in for
+execution. Also fold in the two dead-code observations, both harmless but free to fix:
+`HAVE_COPIER` is now computed in all three modules and read by none, and each module still
+runs its own top-level copier import alongside the probe's, so the two could drift about
+availability.

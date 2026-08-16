@@ -1,0 +1,35 @@
+fix(tests): truthful copier skips and no green without evidence
+
+On a host where copier is installed as a CLI in its own venv — the pipx-style
+install the docs recommend — the three root suites reported "copier not
+installed" and the run finished OK. Both halves were wrong. Copier was there;
+it just could not be imported by the interpreter running the tests, so the
+advice was to install a tool the reader already had. And a run in which no
+render or copier-update case executed exited 0, indistinguishable from a run
+that had rendered the template and updated an instance for real.
+
+The skip now states the condition that actually stopped the coverage — this
+interpreter cannot import copier — and carries the real import error together
+with the copier executable found on PATH, so the reader is pointed at the
+install that would fix it. That decision is made where copier is used rather
+than at collection time, so nothing about availability is settled before a
+test body runs.
+
+A run that produced no such evidence is no longer reported as success.
+`python3 -m tests.run_root_suite` is the entry point for the root template
+suite: it exits 77 with a leading PDCA-UNVERIFIABLE: line when no
+copier-dependent case executed, and behaves exactly as before — 0 on success,
+non-zero on a real failure — when they did. CONTRIBUTING.md names it and
+render-check.yml runs it for both of its steps, keeping their current module
+selection, so the workflow can no longer pass having verified nothing about
+rendering. This is the same class of silent green that
+2946428ae19e6fd58380db8e6b933277834d9507 already treated as a bug for shallow
+clones.
+
+The bare `python3 -m unittest discover -s tests` is deliberately untouched: it
+still skips, still exits 0, so a developer without copier is not failed by dev
+dependencies they never installed. On an interpreter that can import copier —
+CI, and any venv with copier installed — all three suites run exactly the
+seven cases they ran before, with the same assertions and no new dependency.
+
+Fixes #495

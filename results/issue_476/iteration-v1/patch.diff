@@ -1,0 +1,22 @@
+diff --git a/docs/07-crosscutting.md b/docs/07-crosscutting.md
+index c4aca43..4315906 100644
+--- a/docs/07-crosscutting.md
++++ b/docs/07-crosscutting.md
+@@ -276,10 +276,13 @@ file, independent optional edges, no `role` discriminator — a bundle can
+ legitimately be both a child and a parent, and one filename carrying one role
+ could only ever record half of it. It's read back through one tolerant reader,
+ `split.read_lineage`, which returns `None` for an absent, unreadable, malformed
+-or wrong-version file rather than raising — for *any* way of failing to read
+-it, down to bytes that aren't valid UTF-8, and for a `depth` that isn't a
+-number: provenance that can throw into a beat is worse than provenance that
+-abstains, so a hand-edited record degrades the hint and never the run. The
++or wrong-version file rather than raising — for *any* way of failing to
++**parse** it, down to bytes that aren't valid UTF-8. A `depth` it parses fine
++but can't compute with, like `"one"`, is handed straight back by the reader
++and absorbed one layer down instead, by the depth arithmetic, which treats it
++as unknown (`0`) so the child lands at depth 1 and the parent's own record is
++left untouched: provenance that can throw into a beat is worse than provenance
++that abstains, so a hand-edited record degrades the hint and never the run. The
+ record sits deliberately *outside* `DOWNSTREAM_OF_BRIEF` — it describes the
+ split, not an attempt's output, so an `iterate-plan` that archives a rejected
+ attempt leaves it alone. It is covered by the same transactional guarantee as

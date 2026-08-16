@@ -1,0 +1,535 @@
+diff --git a/template/src/pdca_harness/leaves.py b/template/src/pdca_harness/leaves.py
+index 1211604..d8b63bb 100644
+--- a/template/src/pdca_harness/leaves.py
++++ b/template/src/pdca_harness/leaves.py
+@@ -730,6 +730,115 @@ def _format_leaf_attempt(exc: Exception, attempt: int) -> str:
+     return f"----- attempt {attempt} — exit {rc} -----\n{body}\n\n"
+ 
+ 
++# ----------------------------------------------------------------------------
++# Workspace admission for the INTERACTIVE leaves (issue #494).
++#
++# Every directory the harness INSTRUCTS a leaf to read must be admitted to that
++# leaf's workspace BY THE HARNESS, via the family's grounding flag. The headless
++# half already does it — the builder's worktree and bundle dir (:1802, :1816), the
++# reviewer's resolved target (:2499-2500), the two advisories — but the six
++# interactive spawns (Plan single/batch, sign-off single/batch, Act, publish) passed
++# no ``extra_argv`` at all, while their prompts point at the target checkout
++# (`_plan_prompt`'s citation line, planner.md.jinja, publisher.md.jinja). Their cwd
++# is ``cfg.root``, so that checkout was outside the workspace and the human was asked
++# to approve the same out-of-workspace read every session, with no way to make the
++# approval stick: a hand-granted rule lives in the operator's untracked
++# ``.claude/settings.local.json``, which a lane worktree never materializes and
++# ``--setting-sources project`` (families.py:100-102) drops by design. The spawn's
++# argv is the durable channel, and it is the one the headless half already uses.
++#
++# The set is DERIVED, never guessed, and both edges of the confinement doctrine bind:
++# under-admission asks the human for a decision that cannot take effect, on the one
++# band that cannot be retried unattended; over-admission hands a leaf reach the
++# configuration never granted (`_plan_fallback_target` :3029-3035 refuses exactly
++# that). So the only sources are the bundles' own briefs and the instance config.
++# ----------------------------------------------------------------------------
++def _primary_checkout(d: Path, cfg: Config) -> Path | None:
++    """The primary target checkout bundle ``d``'s brief names, or ``None``.
++
++    Resolved the way :func:`_plan_fallback_target` resolves it (``publish._resolve_target``
++    → ``publish._checkout_path``, guarded) — deliberately NOT :func:`_reviewer_target`,
++    which the interactive band must not reuse: it prefers ``worktree.path()``, and these
++    leaves run SERIALLY, so ``lane.current()`` is ``None`` (lane.py:26-28) and
++    ``worktree._wt_dir`` (:107-112) names the *unsuffixed* ``<name>.pdca-wt`` — a
++    harness-owned tree left at whatever commit its last user built, owned by no bundle,
++    and not the checkout the human has open in front of them. ``_reviewer_target`` also
++    ``git fetch``es (:1996-1999) for a grounding freshness these leaves do not need,
++    against the human's own checkout, on every spawn.
++
++    Best-effort, like every other grounding resolution here: no brief yet, an
++    unresolvable target field, or a checkout that is not a directory on this disk ⇒
++    ``None``, contributing nothing. The grant is never faked or guessed.
++    """
++    from . import publish  # lazy: publish imports leaves, avoid an import cycle
++    try:
++        repo_spec, _base, _slug = publish._resolve_target(d)
++        if not repo_spec:
++            return None
++        p = publish._checkout_path(cfg, repo_spec)
++    except Exception:  # noqa: BLE001 — admission is best-effort, never fatal
++        return None
++    return p if p.is_dir() else None
++
++
++def _known_targets(cfg: Config) -> list[Path]:
++    """The instance's KNOWN target checkouts — the fallback set for a session with no
++    brief to resolve, which is what Plan is (it authors the first one; the CSV/default
++    batch path picks its ids mid-session, :956-972).
++
++    ``[publisher.checkouts]`` — read through the same ``publish._checkout_path``, so a
++    relative entry resolves against the project root exactly as publish resolves it —
++    union the distinct primaries the instance's EXISTING briefs resolve to, active and
++    archived. Every element is therefore a directory the configuration or an artifact
++    already on disk names: it never derives a repo from the tracker URL, never guesses a
++    sibling that no brief mentions, and never admits a parent.
++    """
++    from . import publish  # lazy: publish imports leaves, avoid an import cycle
++    out: list[Path] = []
++    for spec in sorted(cfg.repo_checkouts):
++        try:
++            p = publish._checkout_path(cfg, spec)
++        except Exception:  # noqa: BLE001 — one bad mapping must not cost the others
++            continue
++        if p.is_dir() and p not in out:
++            out.append(p)
++    for b in sorted(cfg.bundle_root.glob("issue_*")) + \
++            sorted(cfg.bundle_root.glob("completed/issue_*")):
++        p = _primary_checkout(b, cfg)
++        if p is not None and p not in out:
++            out.append(p)
++    return out
++
++
++def _admission_set(bundles: list[Path], cfg: Config) -> list[Path]:
++    """The directories one interactive session may read outside ``cfg.root``: the
++    resolved primary checkout of each bundle the session is ABOUT, deduped, in
++    encounter order — falling back to :func:`_known_targets` when none resolves."""
++    dirs: list[Path] = []
++    for d in bundles:
++        p = _primary_checkout(d, cfg)
++        if p is not None and p not in dirs:
++            dirs.append(p)
++    return dirs or _known_targets(cfg)
++
++
++def _workspace_grant(bundles: list[Path], cfg: Config,
++                     profile: families.FamilyProfile) -> list[str]:
++    """The ``extra_argv`` admitting :func:`_admission_set` to an interactive spawn.
++
++    Shaped on the reviewer's own grant (:2495-2500): the flag is emitted ONLY when the
++    family has one. A family with no grounding mechanism (``generic``, families.py:44
++    /:126) is spawned byte-identically to before this existed — the grant is skipped,
++    not faked with a flag the CLI does not have.
++    """
++    if not profile.grounding_flag:
++        return []
++    extra: list[str] = []
++    for p in _admission_set(bundles, cfg):
++        extra += [profile.grounding_flag, str(p)]
++    return extra
++
++
+ # ----------------------------------------------------------------------------
+ # Notes-fetch (issue #65): retrieve a bundle's tracker thread before the Plan beat.
+ # ----------------------------------------------------------------------------
+@@ -779,8 +888,11 @@ def do_plan(d: Path, cfg: Config, csv: str | None = None) -> None:
+         # The session's exit contract (#331): register the bundle + role so /handoff
+         # and the Stop hook can verify the brief (structure + dependency probe).
+         with handoff.session(cfg, "planner", [d]) as henv:
++            # Admit what this session is told to read (#494): pre-brief nothing
++            # resolves from `d`, so this is the instance's known target set.
+             _invoke(cfg.planner, cfg.root, _plan_prompt(cfg, csv, d), cfg=cfg,
+-                    env=henv or None)
++                    env=henv or None,
++                    extra_argv=_workspace_grant([d], cfg, cfg.profile(cfg.planner)))
+     else:
+         _stub_plan(d, cfg)
+     run_plan_advisory(d, cfg)  # opt-in antagonistic review of the brief (#301); no-op unless configured
+@@ -965,11 +1077,15 @@ def do_plan_batch(cfg: Config, csv: str | None = None, ids: list[str] | None = N
+         # brief.md) and say why" as legitimate, so an absent brief passes at Stop while
+         # a malformed one never does. CSV/default: the planner chooses ids MID-session,
+         # so no set can be registered — the session names its work via /handoff.
+-        with handoff.session(cfg, "planner",
+-                             [cfg.bundle(i) for i in (ids or [])],
++        seeded = [cfg.bundle(i) for i in (ids or [])]
++        with handoff.session(cfg, "planner", seeded,
+                              require_artifact=False) as henv:
++            # Same admission as the single-bundle Plan (#494): an id-seeded batch is
++            # normally UNPLANNED and the CSV/default path has no ids at all, so both
++            # fall through to the instance's known targets.
+             _invoke(cfg.planner, cfg.root, _plan_batch_prompt(cfg, csv, ids), cfg=cfg,
+-                    env=henv or None)
++                    env=henv or None,
++                    extra_argv=_workspace_grant(seeded, cfg, cfg.profile(cfg.planner)))
+         if ids is None:
+             _warn_unseeded_briefs(cfg, before)
+     else:
+@@ -3258,7 +3374,10 @@ def run_signoff(d: Path, cfg: Config) -> None:
+         # Exit contract (#331): the Stop hook verifies the bundle's decision token
+         # (+ rationale for iterate-*/discontinue) before the session may end.
+         with handoff.session(cfg, "signoff", [d]) as henv:
+-            _invoke(cfg.signoff, cfg.root, _signoff_prompt(d), cfg=cfg, env=henv or None)
++            # The bundle's own target checkout is admitted (#494): §6 items routinely
++            # ask the human to check the patch against the source it was built on.
++            _invoke(cfg.signoff, cfg.root, _signoff_prompt(d), cfg=cfg, env=henv or None,
++                    extra_argv=_workspace_grant([d], cfg, cfg.profile(cfg.signoff)))
+         return
+     _stub_signoff(d, cfg)
+ 
+@@ -3305,8 +3424,12 @@ def run_signoff_batch(cfg: Config, bundles: list[Path]) -> None:
+         # Exit contract (#331): every bundle of the batch is registered, so the Stop
+         # hook verifies each decision; ending early is a deliberate abandon.
+         with handoff.session(cfg, "signoff", list(bundles)) as henv:
++            # One session, several bundles: each bundle's own resolved checkout is
++            # admitted, exactly once (#494) — a batch may span repos.
+             _invoke(cfg.signoff, cfg.root, _signoff_batch_prompt(bundles), cfg=cfg,
+-                    env=henv or None)
++                    env=henv or None,
++                    extra_argv=_workspace_grant(list(bundles), cfg,
++                                                cfg.profile(cfg.signoff)))
+         return
+     for d in bundles:
+         _stub_signoff(d, cfg)
+@@ -3397,8 +3520,12 @@ def run_act(cfg: Config, date: str) -> None:
+             # baseline (an end-of-session check structurally cannot take one), so
+             # /handoff can distinguish the entry THIS session wrote from a prior one.
+             with handoff.session(cfg, "act") as henv:
++                # Admit the checkouts the REVIEWED bundles name (#494) — the snapshot
++                # `covered`, the same set the prompt indexes and the frontier advances
++                # over, so Act reads no repo it was not handed.
+                 _invoke(cfg.act, cfg.root, _act_prompt(cfg, date, bundles=covered),
+-                        cfg=cfg, env=henv or None)
++                        cfg=cfg, env=henv or None,
++                        extra_argv=_workspace_grant(covered, cfg, cfg.profile(cfg.act)))
+         else:
+             _stub_act(cfg, date, bundles=covered)
+ 
+@@ -3462,8 +3589,12 @@ def run_publish(d: Path, cfg: Config) -> None:
+         # both contribution artifacts (existence + the instance's deterministic lint).
+         with handoff.session(cfg, "publisher", [d]) as henv:
+             merged = {**(env or {}), **henv}
++            # The publisher is told to read the target checkout, and the deterministic
++            # half of publish already runs git against that very tree
++            # (publish.py:439-448) — admit it (#494) instead of asking the human.
+             _invoke(cfg.publisher, cfg.root, _publish_prompt(d, cfg),
+-                    env=merged or None, cfg=cfg)
++                    env=merged or None, cfg=cfg,
++                    extra_argv=_workspace_grant([d], cfg, profile))
+         return
+     _stub_publish(d, cfg)
+ 
+diff --git a/template/tests/test_leaf_workspace_admission.py b/template/tests/test_leaf_workspace_admission.py
+new file mode 100644
+index 0000000..d965a01
+--- /dev/null
++++ b/template/tests/test_leaf_workspace_admission.py
+@@ -0,0 +1,323 @@
++"""Interactive-leaf workspace admission (issue #494, stdlib unittest, no deps).
++
++Every leaf the driver spawns runs with cwd ``cfg.root`` (a claude-family CLI walks up
++from cwd to find ``.claude/agents`` + its hooks — leaves.py:1795-1802), so anything it
++is told to read outside that root has to be ADMITTED to its workspace by the driver,
++via the family's grounding flag (``--add-dir`` for claude/codex,
++``--include-directories`` for gemini — families.py:93/:112/:123). The headless half
++already does that: the builder's worktree and bundle dir (leaves.py:1802/:1816), the
++reviewer's resolved target (:2499-2500), both advisories. The six INTERACTIVE spawns —
++``do_plan``, ``do_plan_batch``, ``run_signoff``, ``run_signoff_batch``, ``run_act``,
++``run_publish`` — passed no ``extra_argv`` at all, while their prompts point straight at
++the target checkout. So the human was asked to approve the same out-of-workspace read
++every session, and could not make the approval stick: the grant would live in the
++operator's untracked ``.claude/settings.local.json``, which a lane worktree never
++materializes and ``--setting-sources project`` (families.py:100-102) drops by design.
++
++This module asserts the whole contract over the argv the driver produces — which is the
++whole of what the harness controls:
++
++* (i)   each of the six admits the primary checkout the bundles of THAT session resolve
++        to, deduped, existing-directories only;
++* (ii)  with nothing to resolve (Plan, before a brief exists) it is the instance's known
++        target set — ``[publisher.checkouts]`` ∪ what its existing briefs resolve to;
++* (iii) never a lane worktree, even with one on disk that ``worktree.path()`` returns;
++* (iv)  nothing wider — an existing sibling checkout named by neither the config nor any
++        brief is never admitted, nor is the parent directory holding them;
++* (v)   a family with no grounding mechanism (``generic``) is spawned byte-identically;
++* (vi)  no other spawn property moves — cwd stays ``cfg.root``, the handoff env survives.
++
++Run from template/:  PYTHONPATH=src python3 -m unittest tests.test_leaf_workspace_admission
++"""
++
++from __future__ import annotations
++
++import contextlib
++import io
++import shutil
++import subprocess as sp
++import tempfile
++import unittest
++from pathlib import Path
++
++from pdca_harness import handoff, leaves, worktree
++from pdca_harness.config import Config, LeafConfig
++
++# An interactive leaf on a family that HAS a grounding mechanism, and one that has none
++# (an empty family resolves to the `generic` profile, whose grounding_flag is "" —
++# families.py:44/:126). The second is criterion (v)'s subject.
++_CLAUDE = LeafConfig(mode="command", family="claude", argv=["claude"], interactive=True)
++_GENERIC = LeafConfig(mode="command", family="", argv=["true"], interactive=True)
++
++_ALL_SIX = ("planner", "planner", "signoff", "signoff", "act", "publisher")
++
++
++class LeafWorkspaceAdmission(unittest.TestCase):
++    def setUp(self) -> None:
++        self.tmp = Path(tempfile.mkdtemp())
++        self.root = self.tmp / "instance"          # the pdca instance (cwd of every leaf)
++        (self.root / "results").mkdir(parents=True)
++        # Two real target checkouts, siblings of the instance root exactly as the
++        # `<root>/../<repo>` convention resolves them (publish.py:579-587)...
++        self.target = self._checkout("repo")
++        self.other = self._checkout("other")
++        # ...and a third that neither the config nor any brief in these fixtures names.
++        # It exists, and it sits in the very directory the sibling convention searches —
++        # criterion (iv)'s negative is only worth anything because it is reachable.
++        self.unrelated = self._checkout("unrelated")
++
++        self.captured: list[dict] = []
++        self._orig_invoke = leaves._invoke
++
++        def fake_invoke(leaf, workdir, prompt, **kw):
++            self.captured.append({"workdir": workdir, "extra_argv": kw.get("extra_argv"),
++                                  "env": kw.get("env")})
++
++        leaves._invoke = fake_invoke
++
++    def tearDown(self) -> None:
++        leaves._invoke = self._orig_invoke
++        shutil.rmtree(self.tmp, ignore_errors=True)
++
++    # -- fixtures ---------------------------------------------------------------
++    def _checkout(self, name: str) -> Path:
++        p = self.tmp / name
++        p.mkdir()
++        sp.run(["git", "init", "-q", str(p)], check=True, capture_output=True)
++        return p
++
++    def _cfg(self, *, checkouts: dict | None = None, **leaf_cfg) -> Config:
++        cfg = Config(
++            root=self.root,
++            bundle_root=self.root / "results",
++            process_dir=self.root / "process",
++            templates_dir=self.root / "templates",
++            default_branch="main",
++            tracker_system="github",
++            tracker_url="",
++            issue_id_example="1",
++            builder=LeafConfig(mode="stub"),
++            reviewer=LeafConfig(mode="stub"),
++            base_remote="origin",
++            **leaf_cfg,
++        )
++        # Default: nothing configured, so a brief's target resolves by the sibling
++        # convention — the shape of the instance this defect was found in
++        # ([publisher.checkouts] empty, `../pdca-harness` next door).
++        cfg.repo_checkouts = dict(checkouts or {})
++        return cfg
++
++    def _bundle(self, cfg: Config, iid: str, target: str = "org/repo @ main") -> Path:
++        """A PLANNED bundle whose brief names ``target``."""
++        d = cfg.bundle(iid)
++        d.mkdir(parents=True)
++        (d / "brief.md").write_text(
++            f"- **Slug:** slug-{iid}\n- **Repo + branch target:** {target}\n",
++            encoding="utf-8")
++        return d
++
++    def _unplanned(self, cfg: Config, iid: str) -> Path:
++        d = cfg.bundle(iid)
++        d.mkdir(parents=True)
++        return d
++
++    def _frozen(self, cfg: Config, iid: str, target: str = "org/repo @ main") -> Path:
++        """A COMPLETE (frozen) bundle — what Act reviews (act.py:87-94)."""
++        d = self._bundle(cfg, iid, target)
++        (d / "patch.diff").write_text("--- a/x\n+++ b/x\n", encoding="utf-8")
++        (d / "check-gates.json").write_text("[]\n", encoding="utf-8")
++        (d / "SUMMARY.md").write_text(
++            "## 9. Check sign-off\n- Outcome: accepted\n", encoding="utf-8")
++        return d
++
++    # -- helpers ----------------------------------------------------------------
++    @staticmethod
++    @contextlib.contextmanager
++    def _quiet():
++        """Swallow whatever the driven production code prints — the suite's own report
++        is the only thing this module's run should say (issue #402)."""
++        buf = io.StringIO()
++        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
++            yield buf
++
++    def _admitted(self, index: int = -1) -> list[str]:
++        """The directories the ``index``-th spawn admitted (flag/value pairs stripped)."""
++        argv = self.captured[index]["extra_argv"]
++        self.assertIsNotNone(
++            argv, "the spawn passed no extra_argv at all — nothing was admitted")
++        self.assertEqual(argv[0::2], ["--add-dir"] * (len(argv) // 2),
++                         f"every admitted dir must ride the family's grounding flag: {argv}")
++        return argv[1::2]
++
++    def _admits_nothing(self, index: int, why: str) -> None:
++        """Assert the ``index``-th spawn admits no directory AND names no flag.
++
++        Empty and absent are the same spawn: ``_invoke`` folds ``extra_argv`` in with
++        ``argv += list(extra_argv or [])`` (leaves.py:611), so both produce a
++        byte-identical command line. The contract is "no grant", not a representation.
++        """
++        self.assertFalse(self.captured[index]["extra_argv"], why)
++
++    def _drive_all_six(self, cfg: Config) -> None:
++        """Run each of the six interactive spawns once, in ``_ALL_SIX`` order."""
++        cfg.act_cadence = 1
++        self._frozen(cfg, "15")          # Act reviews frozen bundles, so give it one
++        with self._quiet():
++            leaves.do_plan(self._unplanned(cfg, "10"), cfg)
++            leaves.do_plan_batch(cfg, ids=["11"])
++            leaves.run_signoff(self._bundle(cfg, "12"), cfg)
++            leaves.run_signoff_batch(cfg, [self._bundle(cfg, "13"),
++                                           self._bundle(cfg, "14", "org/other @ main")])
++            leaves.run_act(cfg, "2026-08-16")
++            leaves.run_publish(self._bundle(cfg, "16"), cfg)
++        self.assertEqual(len(self.captured), 6, "one spawn per interactive leaf")
++
++    # -- (i) the bundles the session is about -----------------------------------
++    def test_signoff_admits_the_bundles_own_checkout(self) -> None:
++        cfg = self._cfg(signoff=_CLAUDE)
++        self._bundle(cfg, "1", "org/other @ main")   # a NEIGHBOUR bundle, not this session's
++        d = self._bundle(cfg, "2")
++        with self._quiet():
++            leaves.run_signoff(d, cfg)
++        self.assertEqual(len(self.captured), 1)
++        self.assertEqual(self._admitted(), [str(self.target)])
++        self.assertEqual(self.captured[0]["workdir"], cfg.root)          # (vi) cwd unmoved
++
++    def test_publish_admits_the_bundles_own_checkout(self) -> None:
++        cfg = self._cfg(publisher=_CLAUDE)
++        d = self._bundle(cfg, "3")
++        with self._quiet():
++            leaves.run_publish(d, cfg)
++        self.assertEqual(self._admitted(), [str(self.target)])
++        self.assertEqual(self.captured[-1]["workdir"], cfg.root)
++        # (vi) the exit-contract env still rides along, unchanged by the grant.
++        self.assertEqual((self.captured[-1]["env"] or {}).get(handoff.ENV_ROLE), "publisher")
++
++    def test_signoff_batch_admits_each_targets_checkout_once(self) -> None:
++        cfg = self._cfg(signoff=_CLAUDE)
++        bundles = [self._bundle(cfg, "4"),
++                   self._bundle(cfg, "5", "org/other @ main"),
++                   self._bundle(cfg, "6")]                       # same target as issue_4
++        with self._quiet():
++            leaves.run_signoff_batch(cfg, bundles)
++        self.assertEqual(len(self.captured), 1, "one seeded session over the whole batch")
++        self.assertEqual(self._admitted(), [str(self.target), str(self.other)])
++
++    def test_act_admits_the_reviewed_bundles_checkouts_once(self) -> None:
++        cfg = self._cfg(act=_CLAUDE)
++        cfg.act_cadence = 1
++        self._frozen(cfg, "7")
++        self._frozen(cfg, "8", "org/other @ main")
++        self._frozen(cfg, "9")                                   # same target as issue_7
++        with self._quiet():
++            leaves.run_act(cfg, "2026-08-16")
++        self.assertEqual(len(self.captured), 1)
++        self.assertEqual(self._admitted(), [str(self.target), str(self.other)])
++
++    # -- (ii) the pre-brief fallback: the instance's KNOWN targets ---------------
++    def test_plan_admits_the_instances_known_targets(self) -> None:
++        # do_plan runs on an UNPLANNED bundle — there is no brief to resolve, which is
++        # the whole point of the beat. The set is what the instance already names:
++        # [publisher.checkouts] first, then what its existing briefs resolve to.
++        cfg = self._cfg(planner=_CLAUDE, checkouts={"org/repo": str(self.target)})
++        self._bundle(cfg, "20", "org/other @ main")
++        with self._quiet():
++            leaves.do_plan(self._unplanned(cfg, "21"), cfg)
++        self.assertEqual(len(self.captured), 1)
++        self.assertEqual(self._admitted(), [str(self.target), str(self.other)])
++        self.assertEqual(self.captured[0]["workdir"], cfg.root)
++
++    def test_plan_batch_admits_the_instances_known_targets(self) -> None:
++        # The CSV/default path picks its ids MID-session (leaves.py:956-972), so not even
++        # a bundle list exists to resolve from; an id-seeded batch is UNPLANNED for the
++        # same reason. Both land on the same known-target set.
++        cfg = self._cfg(planner=_CLAUDE)
++        self._bundle(cfg, "22", "org/other @ main")
++        self._unplanned(cfg, "23")
++        with self._quiet():
++            leaves.do_plan_batch(cfg, ids=["23"])
++            leaves.do_plan_batch(cfg, csv="issues.csv")
++        self.assertEqual(len(self.captured), 2)
++        self.assertEqual(self._admitted(0), [str(self.other)])
++        self.assertEqual(self._admitted(1), [str(self.other)])
++
++    def test_an_archived_brief_still_names_a_known_target(self) -> None:
++        # `results/completed/issue_*` is the archive convention (config.py:496-512): a
++        # brief there is an existing brief, so its checkout is a known target too.
++        cfg = self._cfg(planner=_CLAUDE)
++        archived = cfg.bundle_root / "completed" / "issue_24"
++        archived.mkdir(parents=True)
++        (archived / "brief.md").write_text(
++            "- **Slug:** s\n- **Repo + branch target:** org/other @ main\n", encoding="utf-8")
++        with self._quiet():
++            leaves.do_plan(self._unplanned(cfg, "25"), cfg)
++        self.assertEqual(self._admitted(), [str(self.other)])
++
++    def test_nothing_known_admits_nothing(self) -> None:
++        # No config, no briefs, nothing on disk to point at: the set is empty rather
++        # than guessed — no tracker-URL derivation, no parent, no "probably next door".
++        cfg = self._cfg(planner=_CLAUDE)
++        with self._quiet():
++            leaves.do_plan(self._unplanned(cfg, "26"), cfg)
++        self._admits_nothing(0, "an instance that names no target must grant none")
++
++    # -- (iii) never a lane worktree --------------------------------------------
++    def test_no_spawn_admits_a_lane_worktree(self) -> None:
++        cfg = self._cfg(signoff=_CLAUDE, publisher=_CLAUDE, planner=_CLAUDE, act=_CLAUDE)
++        wt = self.tmp / ("repo" + worktree.WT_SUFFIX)
++        sp.run(["git", "init", "-q", str(wt)], check=True, capture_output=True)
++        # The trap has to be live, or the negative proves nothing: run SERIALLY,
++        # `lane.current()` is None (lane.py:26-28), so `worktree._wt_dir` names the
++        # unsuffixed `<name>.pdca-wt` and `worktree.path()` hands it back — this is
++        # exactly what a `_reviewer_target`-based resolver would have admitted.
++        probe = self._bundle(cfg, "30")
++        self.assertEqual(worktree.path(probe, cfg), wt)
++        self._drive_all_six(cfg)
++        for i in range(len(self.captured)):
++            for admitted in self._admitted(i):
++                self.assertNotIn(worktree.WT_SUFFIX, admitted,
++                                 f"spawn {i} admitted a harness-owned worktree: {admitted}")
++
++    # -- (iv) nothing wider ------------------------------------------------------
++    def test_no_spawn_admits_a_directory_nobody_named(self) -> None:
++        cfg = self._cfg(signoff=_CLAUDE, publisher=_CLAUDE, planner=_CLAUDE, act=_CLAUDE,
++                        checkouts={"org/repo": str(self.target)})
++        self._drive_all_six(cfg)
++        allowed = {str(self.target), str(self.other)}
++        for i in range(len(self.captured)):
++            admitted = self._admitted(i)
++            self.assertTrue(admitted, f"spawn {i} admitted nothing at all")
++            self.assertLessEqual(set(admitted), allowed,
++                                 f"spawn {i} admitted more than the config and the briefs "
++                                 f"name: {admitted}")
++            # Named explicitly, because these two are the failure modes that matter: an
++            # unrelated checkout next door, and the parent directory holding them all.
++            self.assertNotIn(str(self.unrelated), admitted)
++            self.assertNotIn(str(self.tmp), admitted)
++
++    def test_a_target_that_is_not_on_disk_is_not_admitted(self) -> None:
++        # Existence-restricted (criterion i): a brief may name a repo this machine has
++        # no checkout of — admitting the path anyway would be a grant to nothing.
++        cfg = self._cfg(signoff=_CLAUDE)
++        d = self._bundle(cfg, "32", "org/absent @ main")
++        with self._quiet():
++            leaves.run_signoff(d, cfg)
++        self._admits_nothing(0, "a checkout that is not on this disk must not be granted")
++
++    # -- (v) a family with no grounding mechanism --------------------------------
++    def test_generic_family_spawns_are_byte_identical(self) -> None:
++        cfg = self._cfg(signoff=_GENERIC, publisher=_GENERIC, planner=_GENERIC,
++                        act=_GENERIC, checkouts={"org/repo": str(self.target)})
++        self._drive_all_six(cfg)
++        for i, spawn in enumerate(self.captured):
++            self._admits_nothing(
++                i, f"spawn {i} ({_ALL_SIX[i]}) faked a grant for a family that has no "
++                   f"grounding flag — the argv must be what it was before #494")
++            self.assertEqual(spawn["workdir"], cfg.root)
++        # (vi) again, on the leaf that merges two env sources: the exit contract still
++        # reaches a publisher whose family has no native STOP guard.
++        self.assertEqual((self.captured[5]["env"] or {}).get(handoff.ENV_ROLE), "publisher")
++
++
++if __name__ == "__main__":
++    unittest.main()

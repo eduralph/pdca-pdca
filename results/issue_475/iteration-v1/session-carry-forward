@@ -1,0 +1,25 @@
+Rejected on the findings both review lenses agree on (reviewer C3/T5 + advisory
+code-review): the new notice gate `if outcome != "blocked":` (flow.py:252-256) is
+broader than "the decision was actually applied". It also admits the two outcomes
+where the decision was explicitly NOT recorded -- `None` from the missing-SUMMARY.md
+drop (flow.py:161-165) and `REASSEMBLE`/`None` from `_repair_unsignable`
+(flow.py:114-130). On those paths the run prints "decision '<action>' not recorded
+(...); bundle returned to ... to reassemble" and then, on the very next line,
+"applied the '<action>' sign-off decision ...; no new session". That is the same
+announce-a-result-a-downstream-step-can-withdraw defect this slice exists to remove,
+reappearing one guard downstream of the C6 one it targeted.
+
+What to change next:
+- Gate on genuine success -- e.g. `if outcome == action:` -- not `!= "blocked"`.
+- Fix the docstring at flow.py:245-247, which restates the same false dichotomy
+  (it conflates "not blocked" with "successfully applied").
+- Add the missing red case: an orphaned recorded decision whose bundle also lost or
+  mangled SUMMARY.md, reached via `_apply_recorded_decision` rather than a live
+  session. C4's current red/green covers only the "blocked" case and the ordinary
+  successful applies, which is why this passed every gate undetected.
+- Minor, optional: the two new assertions re-derive inline what `_Base._announced`
+  (test_signoff_orphan.py:111-115) already computes.
+
+Keep as-is -- do not re-do this part: the targeted announce-before-decide reordering
+and the C6-refused case staying silent on "no new session" are correct and covered
+on both drive paths (single `_signoff_and_apply` and the batch sweep).
