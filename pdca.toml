@@ -309,6 +309,30 @@ leaf_memory_max = "16G"
 # edit: run `scripts/size-calibrate` at the next Act review and argue the thresholds from
 # that table. The loosened values stand until then.
 #
+# RE-TIGHTENED 2026-08-16 (issue #50) from the calibration the 2026-08-15 Act review ran over
+# the 53-bundle corpus. Only `patch_kb` moved, 125 → 80, and each leg is set from evidence:
+#
+# * `patch_kb = 80` — exactly two bundles in the corpus ever churned (≥3 rounds on one brief):
+#   issue_472 at 124.8 KB / 4 rounds and issue_473 at 90.6 KB / 3 rounds. 80 KB fires on
+#   those two and on nothing else, because the largest patch that converged in 0 rounds is
+#   issue_331 at 71.2 KB — 8.8 KB of headroom, so zero false positives over the whole
+#   history. It also fires EARLIER than the rounds leg: a 90 KB patch trips on its first
+#   round instead of after three. The old 125 was loose enough to be inert — issue_472, the
+#   bundle everyone agreed was oversized, missed it by 0.2 KB, and the size leg had never
+#   fired once.
+#
+# * `patch_files = 25` stays effectively OFF, deliberately, and this is the counter-intuitive
+#   half: file count does not discriminate here. Bundles that converged in 0 rounds reach 13
+#   files (issue_331, issue_375, issue_401) while both churners sit at 6–8. Tightening this
+#   to the corpus p90 (8) would manufacture three §6 items with no churn behind them. Leave
+#   it off until some future corpus shows a correlation this one does not have.
+#
+# * `rounds = 3` stays: corpus p95 is 2, so 3 still fires only on a genuine multi-round slice.
+#
+# How to judge it at the next review: every firing should be on a bundle that genuinely
+# churned. A firing on a bundle that converged in 0 rounds is a false positive and `patch_kb`
+# goes back up.
+#
 # The shipped defaults this instance retuned away from, for the diff (and so uncommenting
 # the block restores them exactly):
 # [driver.size_signal]
@@ -319,7 +343,7 @@ leaf_memory_max = "16G"
 # A sub-table, so it must sit after every bare [driver] key — see the note above size_guard
 # for what happens when that ordering slips.
 [driver.size_signal]
-patch_kb = 125
+patch_kb = 80
 patch_files = 25
 rounds = 3
 
