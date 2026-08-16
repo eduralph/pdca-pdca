@@ -310,6 +310,51 @@ class RecordRefusesAMalformedSummary(unittest.TestCase):
                          "the fix addressed the symptom")
 
 
+class TheRationaleIsRecordedLiterallyNotAsAReplacementTemplate(unittest.TestCase):
+    """LOCAL cover for the local patch in ``signoff.set_field`` — upstream
+    eduralph/pdca-harness#529. Retire both together at the `copier update` that brings the
+    harness fix (and its own tests) down.
+
+    The §9 fields carry the human's own prose, so no character in it may be code. ``record``
+    substituted via a template string, where `re.sub` interprets backslash escapes. Bundle
+    506's sign-off rationale quoted the regex it was rejecting (``^\\W*``) and `record` raised
+    `re.PatternError: bad escape \\W` — not a ValueError, so no caller caught it.
+    `flow._isolate` contained it and left the bundle at AWAITING_SIGNOFF with the
+    `signoff-decision` file still on disk, so every later pass re-read the same decision and
+    failed the same way until the pass budget ran out. The bundle could never be signed off.
+    """
+
+    def _signable(self) -> Path:
+        return _bundle(f"# Result\n\n{_SIX}## 9. Check sign-off\n- Outcome:\n"
+                       "- Iteration delta (if iterating):\n- By / date:\n")
+
+    def test_a_rationale_quoting_a_regex_is_recorded_verbatim(self):
+        d = self._signable()
+        rationale = r"the matcher is too broad: `^\W*` eats markdown, and \1 is not a group"
+        signoff.record(d / "SUMMARY.md", action="iterate-do", by="eddie", date="2026-07-25",
+                       delta=rationale)
+        self.assertEqual(signoff.outcome_token(d / "SUMMARY.md"), "iterated-to-Do")
+        self.assertEqual(signoff.iteration_delta(d / "SUMMARY.md"), rationale)
+
+    def test_a_backreference_in_the_rationale_is_not_expanded(self):
+        """The quiet half of #529: `\\g<1>` is a VALID template, so it never raised — it
+        silently spliced the matched field label into the human's recorded words, and the
+        driver carries that text forward into the next brief."""
+        d = self._signable()
+        signoff.record(d / "SUMMARY.md", action="iterate-plan", by="eddie", date="2026-07-25",
+                       delta=r"\g<1> should read as literal text")
+        self.assertEqual(signoff.iteration_delta(d / "SUMMARY.md"),
+                         r"\g<1> should read as literal text")
+
+    def test_the_attribution_is_recorded_literally_too(self):
+        """Same template, same exposure: `By / date` is `f"{by} / {date}"` and ``by`` comes
+        from `--by` / `[project].author`, which no code sanitises."""
+        d = self._signable()
+        signoff.record(d / "SUMMARY.md", action="accept", by=r"a\Wb", date="2026-07-25")
+        self.assertIn(r"- By / date: a\Wb / 2026-07-25",
+                      (d / "SUMMARY.md").read_text(encoding="utf-8"))
+
+
 class MalformedSummaryIsReportedNotRaisedAtTheBoundaries(unittest.TestCase):
     """``record`` refusing is only safe if every caller expects it. The batch sweep has
     ``flow._isolate``; the two DIRECT boundaries do not, and there a raise would surface as a
