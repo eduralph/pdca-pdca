@@ -1,91 +1,91 @@
 [
   {
-    "signal": "t5 judgment \u2014 confirm no closed or rejected",
-    "raw": "T5 Judgment \u2014 Confirm no closed or rejected PR already implements these affected paths\u2014merged history was checked path-by-path, but the GitHub closed-PR query could not reach `api.github.com`, so duplication risk is not mechanically settled.",
+    "signal": "t5 judgment — confirm no closed or rejected",
+    "raw": "T5 Judgment — Confirm no closed or rejected PR already implements these affected paths—merged history was checked path-by-path, but the GitHub closed-PR query could not reach `api.github.com`, so duplication risk is not mechanically settled.",
     "first_seen": "2026-08-01",
     "status": "applied",
     "applied_date": "2026-08-01",
     "location": "pdca.toml [leaves.sandbox] network_access = true (PR https://github.com/eduralph/pdca-pdca/pull/25). CONFIRMED EFFECTIVE at the second 2026-08-02 Act review: the class appears in 0 of the 9 cycles frozen since (317, 332, 356, 369, 370, 372, 379, 380, 386, 387)."
   },
   {
-    "signal": "validation \u2014 fitness-to-purpose \u2014 human sign-off must decide",
-    "raw": "Validation \u2014 fitness-to-purpose \u2014 Human sign-off must decide whether batch-recording terminal bundles is the right operational answer for preventing local-only provenance, independent of the passing offline tests (`brief.md:7`).",
+    "signal": "validation — fitness-to-purpose — human sign-off must decide",
+    "raw": "Validation — fitness-to-purpose — Human sign-off must decide whether batch-recording terminal bundles is the right operational answer for preventing local-only provenance, independent of the passing offline tests (`brief.md:7`).",
     "first_seen": "2026-08-01",
     "status": "structural",
     "applied_date": "2026-08-02",
-    "location": "By design, no delta possible: validation fitness-to-purpose is human-only (CLAUDE.md sign-off contract; SUMMARY \u00a76 is the intended surface). Recorded structural at the 2026-08-02 Act review."
+    "location": "By design, no delta possible: validation fitness-to-purpose is human-only (CLAUDE.md sign-off contract; SUMMARY §6 is the intended surface). Recorded structural at the 2026-08-02 Act review."
   },
   {
-    "signal": "t4 contribution \u2014 the owed decision is whether",
-    "raw": "T4 Contribution \u2014 The owed decision is whether the contribution artifacts satisfy project policy; `commit-msg.txt` / `pr-description.md` were not provided to this reviewer and `pdca-pdca contribcheck` could not be rerun from the artifact set.",
+    "signal": "t4 contribution — the owed decision is whether",
+    "raw": "T4 Contribution — The owed decision is whether the contribution artifacts satisfy project policy; `commit-msg.txt` / `pr-description.md` were not provided to this reviewer and `pdca-pdca contribcheck` could not be rerun from the artifact set.",
     "first_seen": "2026-08-02",
     "status": "open",
     "applied_date": null,
-    "location": "Pending upstream https://github.com/eduralph/pdca-harness/issues/401 (Check reports a default-open T4 as PASS before the publish artifacts exist; issue_387's record shows the row's evidence string is literally empty). No local delta: the reporting is harness machinery. Re-check at the next review."
+    "location": "Pending upstream https://github.com/eduralph/pdca-harness/issues/401 (Check reports a default-open T4 as PASS before the publish artifacts exist; issue_387's record shows the row's evidence string is literally empty). No local delta: the reporting is harness machinery. Re-check at the next review. CONFIRMED CLEARED at the 2026-08-15 review: the class appears in 0 of the 9 cycles frozen after the 2026-08-13 v0.57.0 update (462, 466, 474, 475, 476, 494, 495, 497, 507)."
   },
   {
     "signal": "c4 fix verified: bundle test red pre-fix, green",
-    "raw": "C4 fix verified: bundle test red pre-fix, green post-fix unverifiable \u2014 no behavioral production change to revert (test-only or docs-only patch)",
+    "raw": "C4 fix verified: bundle test red pre-fix, green post-fix unverifiable — no behavioral production change to revert (test-only or docs-only patch)",
     "first_seen": "2026-08-02",
     "status": "open",
     "applied_date": null,
-    "location": "Two halves (second 2026-08-02 Act review). (a) STRUCTURAL: a genuine test-only/docs-only patch has no production hunk to revert, so C4 cannot go red\u2192green and #165 routes it to \u00a76 by design \u2014 no delta possible. (b) DEFECT: the marker is matched anywhere in captured output, so a bundle that merely MENTIONS `PDCA-UNVERIFIABLE:` has a green gating C4 flipped to unverifiable \u2014 filed upstream as https://github.com/eduralph/pdca-harness/issues/428 (evidence: results/issue_387/check-gates.json C4 row). Close when #428 lands."
+    "location": "Two halves (second 2026-08-02 Act review). (a) STRUCTURAL: a genuine test-only/docs-only patch has no production hunk to revert, so C4 cannot go red→green and #165 routes it to §6 by design — no delta possible. (b) DEFECT: the marker is matched anywhere in captured output, so a bundle that merely MENTIONS `PDCA-UNVERIFIABLE:` has a green gating C4 flipped to unverifiable — filed upstream as https://github.com/eduralph/pdca-harness/issues/428 (evidence: results/issue_387/check-gates.json C4 row). Close when #428 lands."
   },
   {
-    "signal": "t3 runtime \u2014 decide how to treat the",
-    "raw": "T3 Runtime \u2014 Decide how to treat the gate discrepancy: `check-gates.json` records an advisory T3 failure at a transient split-proposal path, while `PYTHONPATH=src python3 -m unittest discover -s tests` passed locally and the recorded temp path is not inspectable (`check-gates.json:69`).",
+    "signal": "t3 runtime — decide how to treat the",
+    "raw": "T3 Runtime — Decide how to treat the gate discrepancy: `check-gates.json` records an advisory T3 failure at a transient split-proposal path, while `PYTHONPATH=src python3 -m unittest discover -s tests` passed locally and the recorded temp path is not inspectable (`check-gates.json:69`).",
     "first_seen": "2026-08-05",
     "status": "applied",
     "applied_date": "2026-08-02",
-    "location": "Pre-fix records only (2026-08-05 review): the split-proposal decoy path comes from cycles frozen before the 2026-08-02 verdict-line stopgap (engine/scripts/run-suite.sh:19-49). Decoy absent from all 7 cycles frozen since \u2014 stopgap CONFIRMED EFFECTIVE. Upstream fix (#402, PDCA-EVIDENCE marker) merged to main 2026-08-05; revert the stopgap once v0.57.0 is consumed."
+    "location": "Pre-fix records only (2026-08-05 review): the split-proposal decoy path comes from cycles frozen before the 2026-08-02 verdict-line stopgap (engine/scripts/run-suite.sh:19-49). Decoy absent from all 7 cycles frozen since — stopgap CONFIRMED EFFECTIVE. Upstream fix (#402, PDCA-EVIDENCE marker) merged to main 2026-08-05; revert the stopgap once v0.57.0 is consumed."
   },
   {
-    "signal": "t2 shape \u2014 decide whether to rely on",
-    "raw": "T2 Shape \u2014 Decide whether to rely on the recorded docs-check result: `check-gates.json` reports T2 pass, but no `run-docs-check.sh` exists in this target checkout to rerun the link audit here.",
+    "signal": "t2 shape — decide whether to rely on",
+    "raw": "T2 Shape — Decide whether to rely on the recorded docs-check result: `check-gates.json` reports T2 pass, but no `run-docs-check.sh` exists in this target checkout to rerun the link audit here.",
     "first_seen": "2026-08-05",
     "status": "open",
     "applied_date": null,
-    "location": "Reviewer-oracle reachability \u2014 upstream #403, CLOSED on main 2026-08-05 (this instance's issue_403 cycle) but not in any release; instance is rendered from v0.56.0. Expect the class to clear after v0.57.0 + copier update; recurrence after that is the signal."
+    "location": "Reviewer-oracle reachability — upstream #403, CLOSED on main 2026-08-05 (this instance's issue_403 cycle) but not in any release; instance is rendered from v0.56.0. Expect the class to clear after v0.57.0 + copier update; recurrence after that is the signal. CONFIRMED CLEARED at the 2026-08-15 review: the class appears in 0 of the 9 cycles frozen after the 2026-08-13 v0.57.0 update (462, 466, 474, 475, 476, 494, 495, 497, 507)."
   },
   {
-    "signal": "t2 shape \u2014 decide whether to accept the",
-    "raw": "T2 Shape \u2014 Decide whether to accept the recorded site-render pass or rerun with network/a local `MERMAID_JS` asset \u2014 lint and shell/Python syntax passed locally, but the renderer could not complete its Mermaid fetch, so its link audit was not independently reproduced (`docs/publishing/tools/render_site.py:403`).",
+    "signal": "t2 shape — decide whether to accept the",
+    "raw": "T2 Shape — Decide whether to accept the recorded site-render pass or rerun with network/a local `MERMAID_JS` asset — lint and shell/Python syntax passed locally, but the renderer could not complete its Mermaid fetch, so its link audit was not independently reproduced (`docs/publishing/tools/render_site.py:403`).",
     "first_seen": "2026-08-05",
     "status": "open",
     "applied_date": null,
     "location": "One-off environmental (issue_376, pre-network-grant): the reviewer sandbox now has network (PR #25), so the Mermaid fetch should succeed on future site-render reviews. No delta; re-check only if it recurs post-grant."
   },
   {
-    "signal": "c4 verification (red\u2192green) \u2014 the owed decision is",
-    "raw": "C4 Verification (red\u2192green) \u2014 The owed decision is whether to accept the driver C4 row despite local harness non-reproduction: the named unittest is red\u2192green locally, but the recorded oracle `./engine/scripts/run-verify.sh` is absent at target root and the only found script is a driver skeleton requiring `PDCA_BUNDLE` (`check-gates.json:33`, `template/engine/scripts/run-verify.sh:48`).",
+    "signal": "c4 verification (red→green) — the owed decision is",
+    "raw": "C4 Verification (red→green) — The owed decision is whether to accept the driver C4 row despite local harness non-reproduction: the named unittest is red→green locally, but the recorded oracle `./engine/scripts/run-verify.sh` is absent at target root and the only found script is a driver skeleton requiring `PDCA_BUNDLE` (`check-gates.json:33`, `template/engine/scripts/run-verify.sh:48`).",
     "first_seen": "2026-08-05",
     "status": "open",
     "applied_date": null,
-    "location": "Two upstream causes, both open: #419 (read-only reviewer git index blocks stash red\u2192green) and the target's run-verify.sh being a skeleton in the template checkout (the reviewer's target is the template, whose C4 wrapper is intentionally unimplemented). Related new filing: #441 (per-gate runner scaffolding/validation). Re-check next review."
+    "location": "Two upstream causes, both open: #419 (read-only reviewer git index blocks stash red→green) and the target's run-verify.sh being a skeleton in the template checkout (the reviewer's target is the template, whose C4 wrapper is intentionally unimplemented). Related new filing: #441 (per-gate runner scaffolding/validation). Re-check next review."
   },
   {
-    "signal": "t3 runtime \u2014 the owed decision is whether",
-    "raw": "T3 Runtime \u2014 The owed decision is whether the recorded runtime-suite failure is environmental/unrelated or release-relevant: `check-gates.json` reports a non-gating fail at `/tmp/tmp02bdzheb/results/issue_500/split-proposal.md`, but `./engine/scripts/run-suite.sh` is not present in this target to reproduce (`check-gates.json:69`).",
+    "signal": "t3 runtime — the owed decision is whether",
+    "raw": "T3 Runtime — The owed decision is whether the recorded runtime-suite failure is environmental/unrelated or release-relevant: `check-gates.json` reports a non-gating fail at `/tmp/tmp02bdzheb/results/issue_500/split-proposal.md`, but `./engine/scripts/run-suite.sh` is not present in this target to reproduce (`check-gates.json:69`).",
     "first_seen": "2026-08-05",
     "status": "applied",
     "applied_date": "2026-08-02",
     "location": "Same class as the other split-proposal signal: pre-fix records only. Covered by the 2026-08-02 run-suite.sh verdict-line stopgap (confirmed effective over the 7 cycles since) + upstream #402 (merged to main 2026-08-05, awaiting v0.57.0)."
   },
   {
-    "signal": "t2 shape \u2014 decide whether to accept shape",
-    "raw": "T2 Shape \u2014 Decide whether to accept shape without the configured docs wrapper: `./engine/scripts/run-docs-check.sh` was unavailable at `$PDCA_TARGET` root, so its recorded pass could not be independently re-run (`check-gates.json:29`).",
+    "signal": "t2 shape — decide whether to accept shape",
+    "raw": "T2 Shape — Decide whether to accept shape without the configured docs wrapper: `./engine/scripts/run-docs-check.sh` was unavailable at `$PDCA_TARGET` root, so its recorded pass could not be independently re-run (`check-gates.json:29`).",
     "first_seen": "2026-08-06",
     "status": "applied",
     "applied_date": "2026-08-10",
-    "location": "CLEARED by the #31 local work (resolvable ./scripts/pdca wrapper + wired engine/scripts): the oracle-absence classes appear in ZERO of the 5 cycles frozen for the 2026-08-10 review (413, 458, 459, 472, 473), after dominating every earlier wave."
+    "location": "CLEARED by the #31 local work (resolvable ./scripts/pdca wrapper + wired engine/scripts): the oracle-absence classes appear in ZERO of the 5 cycles frozen for the 2026-08-10 review (413, 458, 459, 472, 473), after dominating every earlier wave. CONFIRMED CLEARED at the 2026-08-15 review: the class appears in 0 of the 9 cycles frozen after the 2026-08-13 v0.57.0 update (462, 466, 474, 475, 476, 494, 495, 497, 507)."
   },
   {
-    "signal": "t4 contribution \u2014 decide whether to rely on",
-    "raw": "T4 Contribution \u2014 Decide whether to rely on the recorded contribution PASS \u2014 the PR-body artifacts and contribcheck oracle were not among the reviewer inputs, so tracker/opener compliance could not be independently reproduced; issue linkage is present in the test at `template/tests/test_verify_red_leg.py:2`.",
+    "signal": "t4 contribution — decide whether to rely on",
+    "raw": "T4 Contribution — Decide whether to rely on the recorded contribution PASS — the PR-body artifacts and contribcheck oracle were not among the reviewer inputs, so tracker/opener compliance could not be independently reproduced; issue linkage is present in the test at `template/tests/test_verify_red_leg.py:2`.",
     "first_seen": "2026-08-06",
     "status": "structural",
     "applied_date": "2026-08-10",
-    "location": "Split at the 2026-08-10 review: the ORACLE half is cleared (the T4 row now names the resolvable ./scripts/pdca contribcheck \u2014 #31), the ARTIFACT half is structural (commit-msg.txt / pr-description.md do not exist at Check by design) and still recurs in all 5 cycles. Reporting half upstream: https://github.com/eduralph/pdca-harness/issues/401."
+    "location": "Split at the 2026-08-10 review: the ORACLE half is cleared (the T4 row now names the resolvable ./scripts/pdca contribcheck — #31), the ARTIFACT half is structural (commit-msg.txt / pr-description.md do not exist at Check by design) and still recurs in all 5 cycles. Reporting half upstream: https://github.com/eduralph/pdca-harness/issues/401. CONFIRMED CLEARED at the 2026-08-15 review: the class appears in 0 of the 9 cycles frozen after the 2026-08-13 v0.57.0 update (462, 466, 474, 475, 476, 494, 495, 497, 507)."
   },
   {
     "signal": "confirm the close disposition 'split' (no patch was",
@@ -93,30 +93,78 @@
     "first_seen": "2026-08-09",
     "status": "structural",
     "applied_date": null,
-    "location": "by design: the split close path asks the human to confirm the disposition (\u00a76 is the intended surface); no delta possible"
+    "location": "by design: the split close path asks the human to confirm the disposition (§6 is the intended surface); no delta possible"
   },
   {
-    "signal": "size backstop \u2014 this slice is behaving oversized:",
-    "raw": "size backstop \u2014 this slice is behaving oversized: 2 round(s) already spent (threshold 2). Recommend answering `iterate-plan` at sign-off and authoring the split in the re-plan (`pdca split`), rather than `iterate-do`: a slice that is too big yields implementation-shaped findings every round, and splitting authors briefs, which is Plan's beat.",
+    "signal": "size backstop — this slice is behaving oversized:",
+    "raw": "size backstop — this slice is behaving oversized: 2 round(s) already spent (threshold 2). Recommend answering `iterate-plan` at sign-off and authoring the split in the re-plan (`pdca split`), rather than `iterate-do`: a slice that is too big yields implementation-shaped findings every round, and splitting authors briefs, which is Plan's beat.",
     "first_seen": "2026-08-09",
     "status": "applied",
     "applied_date": "2026-08-09",
-    "location": "pdca.toml [driver.size_signal] rounds=3, patch_kb=125, patch_files=25 (Act 2026-08-09). Cause routed upstream: #446 (env rounds, merged, awaits v0.57.0) + #477 (human-class rounds, filed 2026-08-09). Re-tighten with scripts/size-calibrate after both land. HOLDING at the 2026-08-10 review: fired only on issue_472 (4 rounds) and issue_473 (3 rounds), both genuinely multi-round implementation slices, and silent on 413/458/459 — no noise firing this wave."
+    "location": "pdca.toml [driver.size_signal] rounds=3, patch_kb=125, patch_files=25 (Act 2026-08-09). Cause routed upstream: #446 (env rounds, merged, awaits v0.57.0) + #477 (human-class rounds, filed 2026-08-09). Re-tighten with scripts/size-calibrate after both land. HOLDING at the 2026-08-10 review: fired only on issue_472 (4 rounds) and issue_473 (3 rounds), both genuinely multi-round implementation slices, and silent on 413/458/459 — no noise firing this wave. 2026-08-15 review: re-tighten is DUE and calibrated but NOT applied — scripts/size-calibrate over 53 bundles says patch_kb 125→80 fires on exactly {472, 473} (the two churned bundles) with 0 false positives, rounds stays 3, patch_files stays 25 (file count does not discriminate: converged bundles reach 13 files, both churners are 6–8). Awaiting the human's confirmation; 0 firings in this wave, so nothing is being missed meanwhile. Tracked as https://github.com/eduralph/pdca-pdca/issues/50 (decide or close)."
   },
   {
-    "signal": "t4 contribution \u2014 confirm the eventual commit message",
-    "raw": "T4 Contribution \u2014 Confirm the eventual commit message and PR body retain the user-impact opener and #316 tracker identity \u2014 those contribution artifacts were withheld from this artifact-only review, so the recorded contribcheck pass could not be independently rerun.",
+    "signal": "t4 contribution — confirm the eventual commit message",
+    "raw": "T4 Contribution — Confirm the eventual commit message and PR body retain the user-impact opener and #316 tracker identity — those contribution artifacts were withheld from this artifact-only review, so the recorded contribcheck pass could not be independently rerun.",
     "first_seen": "2026-08-10",
     "status": "structural",
     "applied_date": null,
-    "location": "Same class as the two other T4 entries above (2026-08-10 review): the contribution artifacts do not exist at Check by design, so no reviewer can reproduce the row. Structural here; the reporting half is upstream https://github.com/eduralph/pdca-harness/issues/401."
+    "location": "Same class as the two other T4 entries above (2026-08-10 review): the contribution artifacts do not exist at Check by design, so no reviewer can reproduce the row. Structural here; the reporting half is upstream https://github.com/eduralph/pdca-harness/issues/401. CONFIRMED CLEARED at the 2026-08-15 review: the class appears in 0 of the 9 cycles frozen after the 2026-08-13 v0.57.0 update (462, 466, 474, 475, 476, 494, 495, 497, 507)."
   },
   {
     "signal": "supply `copier` and decide whether render/update compatibility is",
-    "raw": "T3 Runtime \u2014 Supply `copier` and decide whether render/update compatibility is green \u2014 the entire 7-test root suite skipped because that dependency was absent. CLASS: the reviewer cannot exercise the render/update suites; 4 of the 5 cycles in the 2026-08-10 wave (413, 458, 459, 472), under FOUR different normalized keys.",
+    "raw": "T3 Runtime — Supply `copier` and decide whether render/update compatibility is green — the entire 7-test root suite skipped because that dependency was absent. CLASS: the reviewer cannot exercise the render/update suites; 4 of the 5 cycles in the 2026-08-10 wave (413, 458, 459, 472), under FOUR different normalized keys.",
     "first_seen": "2026-08-10",
     "status": "open",
     "applied_date": null,
-    "location": "Registered BY HAND at the 2026-08-10 Act review: the driver's first-8-words signal identity split this class into four keys, so `register_signals` never saw a recurrence (filed as https://github.com/eduralph/pdca-harness/issues/501). Cause: the copier skip guards probe library importability and report tool installation, so a CLI-installed copier reads as absent \u2014 filed https://github.com/eduralph/pdca-harness/issues/495. No local delta: the gate leg genuinely runs the 7 tests (run-suite.sh uses .venv/bin/python3; [install].extra_bootstrap provisions copier there \u2014 evidence in every bundle's gate-logs/T3-suite.log), and v0.57.0's #403 seeding gives the reviewer that log. Recurrence AFTER the update is the signal."
+    "location": "Registered BY HAND at the 2026-08-10 Act review: the driver's first-8-words signal identity split this class into four keys, so `register_signals` never saw a recurrence (filed as https://github.com/eduralph/pdca-harness/issues/501). Cause: the copier skip guards probe library importability and report tool installation, so a CLI-installed copier reads as absent — filed https://github.com/eduralph/pdca-harness/issues/495. No local delta: the gate leg genuinely runs the 7 tests (run-suite.sh uses .venv/bin/python3; [install].extra_bootstrap provisions copier there — evidence in every bundle's gate-logs/T3-suite.log), and v0.57.0's #403 seeding gives the reviewer that log. Recurrence AFTER the update is the signal. CONFIRMED CLEARED at the 2026-08-15 review: the class appears in 0 of the 9 cycles frozen after the 2026-08-13 v0.57.0 update (462, 466, 474, 475, 476, 494, 495, 497, 507)."
+  },
+  {
+    "signal": "validation — fitness-to-purpose — the human must decide",
+    "raw": "Validation — fitness-to-purpose — The human must decide whether the shipped timeout semantics satisfy the real 19h hung-gate operational problem without over-scoping into #370/#372 behavior (`brief.md:47`).",
+    "first_seen": "2026-08-15",
+    "status": "open",
+    "applied_date": null,
+    "location": ""
+  },
+  {
+    "signal": "validation — fitness-to-purpose — human must decide whether",
+    "raw": "Validation — fitness-to-purpose — Human must decide whether the exercised namespaced Copier render represents the real multi-instance CI deployment closely enough for release — acceptance determines whether the observed workflow result at `tests/test_render_cli_name.py:79` is fit for its operational purpose.",
+    "first_seen": "2026-08-15",
+    "status": "open",
+    "applied_date": null,
+    "location": ""
+  },
+  {
+    "signal": "validation — fitness-to-purpose — decide whether the resulting",
+    "raw": "Validation — fitness-to-purpose — Decide whether the resulting Remote Control workflow is fit for real operator use — automated red→green proves argv construction, but only an enrolled interactive session can confirm both Remote Control startup and visible seeded REPL behavior (`template/pdca.toml.jinja:557`).",
+    "first_seen": "2026-08-15",
+    "status": "open",
+    "applied_date": null,
+    "location": ""
+  },
+  {
+    "signal": "plan advisory: 0 finding(s); brief revised: no (plan-advisory-*.md)",
+    "raw": "Plan advisory: 0 finding(s); brief revised: no (plan-advisory-*.md)",
+    "first_seen": "2026-08-15",
+    "status": "open",
+    "applied_date": null,
+    "location": "NOT a verdict on the feature: the benefit telemetry is uninterpretable while the leaf cannot run at all (see the two signals below and upstream #526). Do not retire [[leaves.plan_advisory]] on '0 findings × 9' — re-judge after the first wave in which the leaf actually produces artifacts."
+  },
+  {
+    "signal": "leaf produced no usable verdict (needs a human)",
+    "raw": "leaf produced no usable verdict (needs a human) — plan-advisory leaf 'plan-reviewer' did not produce findings (produced no artifact); re-run it or adjudicate by hand.",
+    "first_seen": "2026-08-15",
+    "status": "open",
+    "applied_date": null,
+    "location": "Cause reproduced at the 2026-08-15 Act review and routed upstream as https://github.com/eduralph/pdca-harness/issues/526: the plan-advisory leaf is the only leaf whose sandbox is seeded fail-closed (leaves.py:2419), this host denies unprivileged userns (apparmor_restrict_unprivileged_userns=1) so every Bash call in it fails, and the leaf has no Write/Edit — Bash was its only write route. It exits 0, so the harness files the empty result as 'substantive — do not assume an infra blip', which is exactly wrong. 9 of 9 bundles. Instance-side decision tracked as https://github.com/eduralph/pdca-pdca/issues/51; activation status recorded on https://github.com/eduralph/pdca-pdca/issues/48."
+  },
+  {
+    "signal": "plan-reviewer produced no artifact in all 5 bundles",
+    "raw": "plan-reviewer produced no artifact in all 5 bundles of this sign-off batch (466/474/497/475/506) — systemic, not per-bundle: those briefs reached Do with no advisory pass, and each cost a human §6 adjudication. Act: find the leaf's failure mode, and decide whether a no-artifact plan advisory should hold Plan rather than pass through.",
+    "first_seen": "2026-08-15",
+    "status": "open",
+    "applied_date": null,
+    "location": "Cause reproduced at the 2026-08-15 Act review and routed upstream as https://github.com/eduralph/pdca-harness/issues/526: the plan-advisory leaf is the only leaf whose sandbox is seeded fail-closed (leaves.py:2419), this host denies unprivileged userns (apparmor_restrict_unprivileged_userns=1) so every Bash call in it fails, and the leaf has no Write/Edit — Bash was its only write route. It exits 0, so the harness files the empty result as 'substantive — do not assume an infra blip', which is exactly wrong. 9 of 9 bundles. Instance-side decision tracked as https://github.com/eduralph/pdca-pdca/issues/51; activation status recorded on https://github.com/eduralph/pdca-pdca/issues/48."
   }
 ]
