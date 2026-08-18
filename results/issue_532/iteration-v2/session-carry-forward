@@ -1,0 +1,95 @@
+Rejected on the implementation, not the slice. The shape is right and all six of the
+previous round's carry-forwards are genuinely closed with real red->green tests; what
+remains are local code defects, each confirmed by reading patch.diff directly. Do NOT
+re-cut this slice and do NOT re-attempt the previous approach unchanged.
+
+Must close before re-submission:
+
+1. The retry starts even when the attempt record failed to write — criterion (ii)
+   head-on. `_write_attempt_records` catches OSError, prints, and returns None; the loop
+   computes `retry = retry_when(exc) and attempt < attempts and owned` BEFORE the write
+   and never learns it failed, so attempt N+1 launches with attempt N's account absent
+   from disk. Make starting attempt N+1 contingent on attempt N's record being durably
+   written (return the write's success and fold it into `retry`, the same way `owned`
+   already gates it). This is the patch's central invariant having a fail-open branch —
+   it is the reviewer's C3/T3/T5 FAIL, which are one defect counted three times. Note
+   `do_build`'s `if not _has_content(error_log)` guard does still capture the FINAL
+   failure; what is lost is the per-attempt account during the retry window, and
+   everything if the run is killed in that window.
+
+2. An unguarded stderr write can replace the exception criterion (i) pins.
+   `_report_exhausted_do_retries(d, exc)` sits OUTSIDE `do_build`'s
+   `try: ... except OSError: pass` ("never let error-capture mask the real failure"),
+   immediately before `raise`. BrokenPipeError is an OSError subclass, so a broken stderr
+   turns the LeafError into a BrokenPipeError on the way out; the retry notice inside
+   `_invoke_leaf_resilient` has the same shape. Criterion (i) requires the final failure
+   to be captured and re-raised either way. Bring both prints under the guard.
+
+3. The exhausted-retry message asserts authorship it cannot know. `_do_residue` is a pure
+   existence check with no provenance, but the caller prints "the interrupted attempt
+   left ...". A transient death by definition produced nothing, so those files are
+   usually an EARLIER run's — making that sentence false in the one place the brief's
+   invariant governs ("nothing the harness tells the operator about that residue may be
+   false"). Name the files without claiming authorship, e.g. "the bundle holds ..., which
+   may predate this attempt". Carry-forward item 6 asked for these files to be named, not
+   for their provenance to be invented.
+
+4. The signal-death carve-out is one wrapper deep — the previous round's item 3 reached
+   through a different door. `_builder_retryable` excludes only `rc < 0`, but a wrapper
+   argv (`sh -c`, `docker run`, the documented `local-build` shape) reports its child's
+   OOM SIGKILL as 137 — positive. That is retried three times while stderr asserts "infra
+   the harness absorbs" and build.error.log says `Killed`. The docstring's premise
+   ("subprocess reports a signal death as a NEGATIVE returncode") holds only when argv[0]
+   is the process that dies. Either widen the exclusion (128+n) or state explicitly why
+   the hole is left to #510 — but do not leave it made silently. Worth a test either way.
+
+5. A leaf that finished is left flagged "in flight" (one-line fix). On the
+   deliberately-retained-log path — a dead attempt's artifact was withdrawn and the
+   winning attempt wrote none — the last write was `in_flight=True` and the success path
+   does not re-flush, so `leaf_run_incomplete()` returns True for a loop that finished,
+   contradicting its own docstring. Re-flush with `in_flight=False` before returning
+   success. Related fragility worth a look while you are there: that predicate is a
+   substring sniff over a body that now embeds up to 20 000 characters of the leaf's own
+   artifact, so a verdict that QUOTES the marker makes a completed log read as
+   interrupted.
+
+SCOPE CONSTRAINT — LEAVE THE PROSE ALONE (decided at sign-off, binding on this rebuild):
+Do NOT touch the `_invoke_leaf_resilient` DOCSTRING or the retry-backoff PRINT line
+(`leaves.py:693-704` and `:728-730` on the base). Those two prose sites belong to sibling
+issue_533, which is landing its own rewrite of them, and which has been told at sign-off
+to keep them. This child owns the FUNCTION BODY, `do_build`, and the harvest sites — the
+mechanism, not the wording.
+
+Why this is binding and not a style note: verified mechanically at sign-off that the two
+patches collide. Both rewrite the same retry-print line, and the collision is SEMANTIC as
+well as textual — this round's version keeps "with no output (transient)", which is
+exactly the definition 533 exists to retire, so if this child lands second and wins that
+hunk the operator-facing prose silently regresses to the wrong contract. This round's
+patch also rewrites the docstring 533 rewrites, and deletes an `error_log.write_text(...)`
+line that sits in 533's trailing context.
+
+Keep the label-prefix improvement if it is still wanted (`kw.get('label') or
+workdir.name` — a real fix, since `workdir` names the sandbox or the harness root, not the
+bundle), but apply it WITHOUT restating the transient definition: take 533's wording for
+the classification clause and change only the name. Recommended merge order is unchanged
+(this child first, then 533), so expect 533's prose to land on top.
+
+Related, and worth settling with the sibling rather than alone: the signal-death boundary.
+This child's `_builder_retryable` excludes `rc < 0` but misses a positive 137; 533's
+`died_of_reported_infra` excludes neither. Same boundary, opposite holes, two children
+each inventing half of it. 533's carry-forward carries the mirror of this note.
+
+Non-blocking, close if cheap: `driver.py:152-155` still documents the old recovery rule
+("no artifact, no error log") — the reading this patch had to abandon, and the last
+sentence in the codebase stating the old contract; `_do_residue`'s docstring overclaims
+parity with `_stub_build`'s `Path("test_stub.py")` fallback, which it does not share.
+
+C5 remains vacuously green ("patch adds no new test file") for the second round running,
+because the brief directs appending to existing files. Not a reason to reject, and the C4
+red/green log does make the appended cases adjudicable — but it means C5 is carrying no
+weight on this bundle and should not be read as evidence.
+
+Section 6 (Validation — fitness-to-purpose) is deliberately left OPEN: no real interrupted
+provider session was induced. Findings 2, 3 and 4 above are each a case where the
+operator-facing wording is factually wrong, which is that item's substance and should be
+re-examined once they are closed.

@@ -1,0 +1,45 @@
+Rejected on the open findings in this bundle's own Check record, not on the approach:
+the slice's shape is right, the implementation is not yet correct.
+
+Must close before re-submission:
+
+1. Fail-closed artifact ownership (`leaves.py:783`) — the reviewer's C3/T3 FAIL. When the
+   rename AND the fallback unlink both raise, the error is suppressed and control
+   continues, leaving a dead attempt's artifact harvestable — the opposite of the
+   invariant the code's own diagnostic claims.
+
+2. The #369 trap-door regression (`leaves.py:742`) — the per-attempt flush, which is
+   criterion (ii) itself, disarms recovery for a run killed mid-retry. `review_never_ran`
+   is "no artifact AND no error log"; attempt 1's record now exists, so the reviewer is
+   never re-run and the bundle can reach sign-off with NO review of the diff. This
+   violates criterion (vi). Decide which contract yields (an in-flight suffix, or teach
+   the discriminator that a record short of the attempt budget is not "ran and failed").
+
+3. Signal-death scope leak (`leaves.py:1883-1886`) — a builder SIGKILLed under the #420
+   memory cap exits -9 with produced=False, so it is classified transient: 3 spawns
+   instead of 1, each repeating whatever exhausted the bound, while stderr asserts it was
+   absorbed infra and build.error.log says otherwise. #510 is out of scope per the brief;
+   this patch must not extend the classifier to it.
+
+4. Exhausted-retry next action (`leaves.py:1888-1894`) — ask `state.state(d)`, do not infer
+   from `patch.diff` existence. Confirmed at sign-off by reading `state.py`: state() is a
+   waterfall, so a bundle holding patch.diff AND check-gates.json returns CHECKED, not
+   BUILT, and the printed advice is false exactly on the bundle its own previous advice
+   creates. (The code-review lens cleared this by reading only the first rung; the
+   adversary is correct.)
+
+5. `_disown_artifact` (`leaves.py:775-777`) — the rename target is inside the temp sandbox
+   that is destroyed on exit, so "stays readable beside it" is false at all three call
+   sites: a real verdict is discarded while the operator is told none was produced. Copy
+   the disowned file into the bundle.
+
+6. The `residue` list is computed and dropped on the floor in the no-patch branch
+   (`leaves.py:1887,1895-1898`) — the operator is told inputs are intact while a
+   half-written build-notes.md (and any brief-named test file) is on disk, inherited by a
+   re-driven Do without the retry note.
+
+Also: the C5-prod-path green is vacuous ("patch adds no new test file"). The appended
+cases were only hand-checked. Make production-path coverage adjudicable next round.
+
+Not iterate-plan: the four concerns (retry the builder, per-attempt accountability,
+residue awareness, operator reporting) were weighed as one outcome and kept in one slice.

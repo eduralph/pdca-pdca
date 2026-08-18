@@ -1,0 +1,34 @@
+Human rationale (sign-off, issue_532): iterate-plan to settle the C5 item.
+
+What the re-plan must author:
+
+- C5 ("added test exercises production, not a copy") has been vacuously green three
+  rounds running — "patch adds no new test file — nothing to assert" — because the
+  brief directs appending to existing test files. Round 1's sign-off carry-forward
+  already asked for this and it is still unclosed. The next brief must make
+  production-path coverage adjudicable instead of leaving C5 carrying no weight;
+  hand-reading in its place is how the two unfaithful-stub findings below survived.
+
+- Slice size: 82 KB against the 80 KB backstop, and round 3 of implementation-shaped
+  findings every round. Author the split at Plan (`pdca-pdca split 532`, then
+  `pdca-pdca split 532 --accept`) rather than re-cutting it in Do.
+
+- Criterion (iv) is not implementable as written. The exhausted-retry report is gated
+  on `_builder_retryable`, but transient means the attempt produced nothing, so the
+  BUILT / "partial patch.diff" branch is unreachable in production — while the
+  half-written-patch shape the brief's own defect bullet names is classified
+  substantive and gets no report at all. The brief must settle whether the residue +
+  next-action lines print for every failed Do, or drop the claim.
+
+- Carry into whichever child keeps the mechanism: `_format_leaf_attempt` does not run
+  `_defang_in_flight` over the captured stderr tail, so a leaf that spent its whole
+  budget but whose stderr ends on a line equal to the marker reads as merely
+  interrupted and buys extra spawns (reviewer C3/T3/T5, both advisory lenses, verified
+  end-to-end on the production path). The fix is small; the test must place the marker
+  alone on its own final line, not mid-line.
+
+- The T1 scope constraint versus sibling #533 (leave the `_invoke_leaf_resilient`
+  docstring and the retry-backoff print wording to 533) was honored this round — keep
+  it binding through the re-slice.
+
+§6 NEEDS-HUMAN items were left open — none were cleared.

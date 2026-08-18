@@ -1,0 +1,66 @@
+Rejected on SLICING, not on the mechanism. The core is sound and has survived four
+rounds of independent attack — red->green reproduced every round through the real
+subprocess path, 1780 template tests green, 9/13 and 16/16 mutations of the
+load-bearing hunks caught, the vendor contract re-derived from the shipped binary.
+KEEP ALL OF IT. Each round also genuinely closed the previous round's defects. The
+problem is that the findings have been implementation-shaped in all four rounds, which
+is what an oversized slice produces: 92 KB against the 80 KB backstop, round 4 against
+a 3-round threshold. Do not rebuild this as one slice again — split it in Plan.
+
+Proposed seams (author the briefs at the split; the sizing.json currently claims one
+indivisible outcome, which is the judgement being overridden here):
+
+  1. STREAM-SIDE classification + retention, in progress.py: read the CLI's own
+     terminal error event, classify transient by the marker/kind/status the vendor
+     sets, keep the text so it reaches the leaf's *.error.log. This is criteria
+     (i) and (iii). Self-contained and independently testable against the pinned
+     fixture.
+  2. DO-SIDE resilience, in leaves.py: put do_build on _invoke_leaf_resilient with
+     the retry note, the _has_content guard, the per-attempt _write_attempt_records
+     flush, and the _transient_do_death exhausted-retry message. This is criteria
+     (ii) and (iv). Depends on 1 but is a distinct outcome.
+  3. Optional third: the reviewer/advisory attempt-blind harvest, already deferred
+     twice and measured at ~34 lines across two files in build-notes.md:197-206.
+     File it as its own issue rather than deferring it a third time.
+
+Carry into the child briefs, unresolved this round:
+
+  - Adversary finding A (progress.py:188-191, :405, :625-636): the "the CLI recovered"
+    clearing rule is scope-blind — one trailing SUB-AGENT line restores the pre-fix
+    outcome exactly (transient=False, 1 invocation, "(no output captured)"), so
+    criteria (i) and (iii) both fail with the suite green. Containment is one line:
+    require the clearing event to be main-session (parent_tool_use_id null/absent).
+    The adversary could not establish the ordering in the wild; the gap is cheap to
+    close regardless.
+  - Adversary finding B (progress.py:580): stickiness is documented over the `result`
+    wrap-up but implemented over any later report, so a SECOND marked api-error report
+    is swallowed — a permanent 400 following a dropped connection is neither retained
+    nor read, and costs 3 spawns. Containment is one line: stick only against a
+    `result` event, let a later marked report overwrite. Already self-disclosed as a
+    known trade-off in build-notes.md; close it rather than re-disclose it.
+  - The reviewer's C3/T3 FAIL needs adjudication, not compliance. It rests on an
+    `invalid_request` event whose text says "request timed out"; the adversary walked
+    every permanent branch the vendor actually emits and found no text that matches
+    _TRANSIENT_CAUSE_RE, i.e. the probe may be a synthesised shape the CLI cannot
+    produce — the exact defect rounds 2 and 3 rejected the build for. Settle this
+    against the binary before treating it as a defect to fix.
+  - Nits, non-gating: residue is computed over both artifacts but printed only on the
+    patch.diff branch (leaves.py:1861, :1870); the top-level `error` key in
+    _claude_result_texts is unreachable against the real result schema and survives
+    mutation (progress.py:603) — same "a branch that looks like coverage and is not"
+    already removed once; the drain hot path now parses each line up to 4x
+    (progress.py:182-194).
+
+Open §6 items carry forward UNCLEARED — none was ticked at this sign-off:
+  - T1 / code-review: the attempt-blind harvest boundary (see seam 3).
+  - T5: rebase/ownership order against open PR #524 (same base SHA, same
+    post-_format_leaf_attempt boundary). Still to be decided at publish time.
+  - Validation: the stream fixture is derived from the shipped binary and a pinned
+    incident record, not observed from a live mid-response connection death. Standing
+    since round 2; a limit of the environment, not an untried option.
+  - The plan-advisory leaf produced no verdict by configuration (commit 319eb4d), not
+    by failure.
+
+Note the C5 gate row is a vacuous pass ("patch adds no new test file — nothing to
+assert") and supports no production-path claim; both advisory lenses checked the
+substance separately and it holds.

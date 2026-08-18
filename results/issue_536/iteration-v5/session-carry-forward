@@ -1,0 +1,69 @@
+WHY REJECTED — slicing, not direction.
+The fix's direction is right and its proof is sound: all gates green, C4 independently
+re-run (23 failures + 4 errors on the red leg, 31/31 green, full 1789-test suite green,
+test_leaf_resilience.py untouched as criterion (vi) required). Nothing here says the work
+is unwanted. It is rejected because the slice is too big to converge: 5 builder attempts,
+4 sign-off rounds, patch 44 -> 68 -> 79 -> 93 -> 104 KB (threshold 80), with
+implementation-shaped adversary findings every single round (4, 4, 2, 3, 2). The size
+backstop fired at v4 and again at v5.
+
+THE ERROR CLASS TO DESIGN OUT (this is the actionable insight).
+The slice redefines the meaning of a shared signal — the presence/content of *.error.log
+("the leaf ran and FAILED") is split into failed vs. merely-interrupted, plus a derived
+empty-run / leaf-status classification. That meaning has many independent readers, each
+hard-coding it at its own site. Every round converts the readers in view; the next round
+finds one more still speaking the old meaning:
+  v1 assemble.py:417   — "the reviewer RAN AND FAILED"
+  v2 driver.py:178-179 — "reviewer never ran"
+  v3 leaves.py:2910    — "retries did not recover"
+  v4 leaves.py:3176    — second #369 discriminator, unconverted
+  v5 assemble.py:85    — "leaf did not run (transient infra — safe to re-run)"
+The adversary's phrase is exact: the patch widened the sentence it could see, "then stops
+one reader short." Note the axis MOVED rather than exhausted — v5 confirmed by grep that
+the *.error.log-as-state readers are now all converted, and the new finding is on a
+different shared value (the leaf-status enum -> label mapping).
+Two related faces of the same root (no single point of truth):
+  - the patch's own new paths file false accounts — the very invariant the slice enforces
+    (v1 human-empty misfiling, v2 "inert" docstring, v3 "retries did not recover",
+    v5 the "withdrawn" line written over a file still present);
+  - twin blindness — the mechanism is hand-copied at 3 harvest sites and 2 discriminators,
+    so tests or _settle_leaf_record calls miss a twin (v1, v2 x2).
+Per-instance fixes cannot end this class. iterate-do would close the two named [impl]
+items and leave the generator intact.
+
+SPLIT SEAMS FOR THE RE-PLAN (candidates — Plan authors the briefs).
+  A. Give the redefined meaning ONE owner: a single predicate/type that every reader
+     consults (production branches, both #369 discriminators, assemble.py status labels
+     and prose, driver.py operator messages). Ends the "stops one reader short" class by
+     construction rather than by enumeration.
+  B. The _harvest_leaf helper: de-duplicate the three near-verbatim harvest sites (settle
+     ordering, _empty_run_class / error_log= wiring). Kills the twin-blindness face. The
+     code-review advisory flags this as a legitimate deferred Act candidate, refused in
+     round 3 on the express grounds that "this patch is already oversized" — that refusal
+     is the loop: the refactor that ends the class is declined because the slice is too
+     big, so the class keeps producing findings, so the slice keeps growing.
+  C. The bookkeeping half proper — per-attempt record persistence, crash-atomic flush,
+     trailer defanging (criteria (i) and (iv)). This part has converged and is stable
+     across rounds; keep it intact rather than rebuilding it.
+
+MUST BE SETTLED IN THE BRIEF, NOT LEFT TO THE BUILDER.
+leaves.py:773 — the patch narrows the shipped retry contract (measured: base spends 3
+attempts, patch stops after 1 on a bundle write refusal; base 2 -> patch 1 on an unlink
+refusal), while criterion (vi) demands the contract "holds unchanged". As written the
+builder is asked to satisfy both and cannot, which is why this surfaced as a fitness
+question with no [impl] tag. The next brief must pick one explicitly: either sanction the
+narrowing, or adopt the adversary's no-cost alternative — carry owned=False forward and
+refuse to HARVEST on the success branch (the residue is already quoted by then) instead of
+ending the run. Leaving this ambiguous will reproduce the same finding next round.
+
+DO NOT LOSE (open [impl] items, to land in whichever child slice owns the surface):
+  - assemble.py:85 — widen _LEAF_STATUS_LABEL[LEAF_STATUS_INFRA] exactly as the placeholder
+    sentence was widened; _empty_run_class now routes runs whose last attempt exited 0.
+  - leaves.py:1033-1034 — _residue_record asserts "withdrawn" as fact; false on the
+    fail-closed path this patch adds. The re-flush hook at :768-769 is already in hand;
+    the may_retry is False variant files the false line unamended.
+  - leaves.py:825-828 — recorded, not raised: a stranded .tmp.<pid> sibling is claimed by
+    no DOWNSTREAM_GLOBS pattern, so _archive_iteration never moves it either.
+
+§6 left open (3 items: T5 prior-art on the four non-leaves.py paths, fitness-to-purpose,
+size backstop). Not cleared — this is an iterate, not an accept.

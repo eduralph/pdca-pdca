@@ -1,0 +1,85 @@
+Rejected on the implementation, not the slice or the evidence. This round is well
+evidenced — C5 is a genuine pass (unlike the sibling's), the vendor grounding was
+re-derived from the shipped 2.1.233 binary rather than trusted from fixtures/README.md,
+and the suite caught eight of nine planted mutations. Both blocking defects from the
+previous round (main-session scoping, `produced`'s contract on the success path) are
+genuinely fixed, not re-worded. Do NOT re-cut this slice. What follows are local defects
+in the classifier, each confirmed by reading patch.diff directly.
+
+Must close before re-submission:
+
+1. The classifier reads prose for ANY unrecognised kind, and its own docstring says it
+   must not. Two defects in three lines of `_kind_is_transient` / `_terminal_error`:
+   (a) `kind = str(ev.get("error") or "unknown")` collapses an ABSENT `error` key into
+   the string "unknown" — but 2.1.233's queryLoop catch-all marks a message
+   (`isApiErrorMessage:!0`) while leaving `error` undefined, which is the shape ANY
+   exception escaping the loop takes; (b) the final `return any(_TRANSIENT_CAUSE_RE
+   .search(t) for t in texts)` fires for every kind outside the two frozensets, while the
+   docstring immediately above states "The text is read **only** for the kind the CLI
+   leaves ``unknown``". Consequence, verified through the production path: a dead MCP
+   server (`connect ECONNREFUSED`), `fetch failed`, `socket hang up`, `terminated` are all
+   retried to the attempt budget and the operator is told "transient infra — safe to
+   re-run" for a config failure that fails identically every time — the exact conflation
+   PR #285's review is cited against. It is also the drift hole: the CLI auto-updates and
+   the harness pins nothing, so any kind the vendor adds after 2.1.233 gets classified by
+   regex. Make the code match its docstring (`if kind != "unknown": return False` keeps
+   all 28 tests green, so the loose branch is both unnecessary and untested), and
+   distinguish an absent `error` key from a literal "unknown".
+
+2. Signal deaths are not excluded from the transient class, and the brief fences them out.
+   `died_of_reported_infra = terminal["transient"] and rc not in (0, TIMEOUT_RC)` spares
+   the run the harness killed on its WALL-CLOCK bound but not the one it killed on its
+   MEMORY bound (#420), nor one a signal took. Measured: a stub leaf that emits a work
+   event, then the incident's own `server_error` report, then dies of SIGKILL returns
+   `(-9, ..., produced=False)` -> transient -> three attempts, each of which will hit the
+   same cap. `_memory_cap_prefix` puts every capped leaf one OOM away from this. The brief
+   states a signal death "is neither #506's transient nor #421's preflight" (#510's own
+   question), so this patch must not silently reclassify it. Add the exclusion and a test.
+
+   COORDINATE WITH SIBLING issue_532 (also iterate-do this round): the two children have
+   OPPOSITE holes at the same boundary. 532's `_builder_retryable` excludes `rc < 0` but
+   misses a positive 137 (a wrapper argv — `sh -c`, `docker run`, the documented
+   `local-build` shape — reports its child's OOM SIGKILL as 137). 533 excludes neither.
+   The signal-death boundary wants deciding ONCE and spelled the same way in both, rather
+   than each child inventing half of it.
+
+3. The transcript spelling is half-supported. `_terminal_error` deliberately accepts the
+   persisted transcript spelling `isApiErrorMessage` alongside the stream's
+   `is_api_error_message`, but decides WHOSE death it was from `parent_tool_use_id` only —
+   a field the transcript shape does not carry (it carries `isSidechain`). Since `.get()`
+   returns None for an absent key, a transcript-shaped SIDECHAIN record is classified as
+   the main session's own death, retried, and the retained diagnostic names a sub-agent's
+   blip as the leaf's death. Not reachable from any 2.1.233 emitter today — which is an
+   argument for resolving the branch, not for keeping half of it: either the shape can
+   appear (then honour `isSidechain`, or treat an absent `parent_tool_use_id` as unknown
+   scope) or it cannot (then delete the transcript-spelling branch and the test asserting
+   a record no vendor emits).
+
+4. The `result` exclusion from `_WORK_EVENT_TYPES` is load-bearing but unasserted. The
+   comment claims that letting `result` count as work means "the death this fix exists for
+   is retried zero times again, with the suite green" — and mutation testing confirms
+   exactly that: adding `"result"` leaves all 28 tests green, because every wrap-up the
+   suite emits carries `is_error` and so takes the `_note_terminal` branch, never the
+   clearing `elif`. The exclusion only bites for a text-less `is_error` result
+   (`{"type":"result","subtype":"success","is_error":true,"result":""}`), which no case
+   covers. One event appended to `test_report_survives_the_wrapups_that_name_no_cause`
+   closes it.
+
+OWNERSHIP QUESTION — RESOLVED AT SIGN-OFF, this child KEEPS the prose:
+The `_invoke_leaf_resilient` docstring and retry-print edits (`leaves.py:693-704`,
+`:728-730`) stay with THIS child. Sibling issue_532 has been instructed in its own
+iterate-do carry-forward to leave those two prose sites alone. Rationale: 533 is the child
+that changes what "transient" MEANS, so it is the child that must restate it; 532's
+version of that print keeps the old "with no output (transient)" wording, which this
+child's whole purpose is to retire. Verified mechanically at sign-off that the two patches
+DO collide — both rewrite the same retry-print line and the same docstring, and 533's hunk
+carries as trailing context an `error_log.write_text(...)` line that 532 deletes. Keep
+these edits; do not hand them back.
+
+Section 6's fourth bullet is a truncated duplicate of its first ("`leaves.py:693-704` and
+`:728-730` (the `_invoke_leaf_resilient` docstring" — cut off mid-sentence). An assembly
+artifact, not a finding; noted so the next round does not chase it as a separate item.
+
+Section 6 items are left OPEN (an iterate does not require them cleared). Item 1's
+substance — the ownership question — is settled above; items T5 and Validation remain
+genuinely open and should be re-examined once 1-4 are closed.

@@ -1,0 +1,52 @@
+The approach is sound and the evidence is strong — gates green, all reviewer rows PASS,
+the adversary independently re-ran the red→green and re-derived the vendor grounding from
+the shipped binary. Rejected on one landed refutation, not on the design.
+
+Must close before re-submission:
+
+1. Scope the terminal-report reader to the main session (`progress.py:560-562`). The
+   `_REPORT` branch matches a marked api-error message without checking
+   `parent_tool_use_id`, while its sibling `_is_main_session_work` (`:660-681`) is
+   deliberately main-session-scoped. Because `_note_terminal` is newest-wins and only
+   protects a `_REPORT` from a *wrap-up*, a trailing SUB-AGENT report overwrites the main
+   session's. Confirmed by reading the patch at sign-off.
+
+   Consequence, and why it blocks: a main-session `invalid_request` followed by a
+   sub-agent `overloaded` classifies transient — a cause the vendor marked PERMANENT is
+   promoted and retried to the attempt budget — and the retained diagnostic names the
+   wrong death ("API Error: 529 the API is at capacity"). That is criterion (ii)
+   inverted, and it is the same family as the defect the brief said must not be rebuilt
+   (a second marked report swallowing the first). Retention is the point of criterion
+   (iii); a log that confidently names the wrong cause is worse than the
+   "(no output captured)" it replaces.
+
+   Fix is one predicate — scope the `_REPORT` branch to `parent_tool_use_id is None`, or
+   make `_note_terminal` prefer a main-session report — plus the missing case. The test
+   helper's `parent=` parameter (`test_terminal_error_classification.py:71-77`) already
+   exists and is passed by no test; the gap was contemplated and left unasserted.
+
+   Note the commoner variant, which needs no conjunction: a sub-agent blip in a leaf that
+   then fails on its own merits is now labelled transient. Fixing the scope closes both.
+
+2. `produced`'s documented contract is bent on the SUCCESS path. A leaf whose stream
+   carried a transient marked report and then exited 0 returns `produced=False`, while
+   the docstring (`progress.py:60-62`) still defines it as "did the child emit a
+   substantive stream event". No current call site misreads it, but #510's signal-death
+   work is the next reader of that flag. Either restore the flag on rc == 0 or restate
+   the contract.
+
+3. UNRESOLVED SCOPE QUESTION, not adjudicated at this sign-off: `leaves.py:693` and
+   `:724-726` are a fifth and sixth restatement of the definition this patch widens, and
+   both are left false — the operator sees "leaf exited 1 with no output (transient)" for
+   a leaf that produced 18 minutes of work and a report (printed verbatim in this round's
+   own green leg, gate-logs/C4-verify.log lines 12-13). The brief lists only four prose
+   sites and scopes `_invoke_leaf_resilient`'s body to sibling child-1 (issue_532). Since
+   532 also went back for rebuild this round, its scope is still movable: settle which
+   child owns these two lines before either lands, so the codebase does not ship the
+   contradiction the invariant exists to prevent.
+
+§6 fitness-to-purpose was NOT cleared and remains open for the next round. The
+main-session scoping in item 1 is what the boundary's fitness turns on. Note also that the
+expensive case in that item — replaying a long-running builder — is not reachable from
+this patch alone (the builder is not on the resilient path here); it becomes live when
+532 lands, which is a further reason to settle the two together.

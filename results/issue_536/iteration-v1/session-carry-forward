@@ -1,0 +1,55 @@
+Rejected on the crash-recovery findings, not on approach or slicing. The mechanism is
+right — C4 red→green was independently reproduced, the defang + whole-last-line match
+survived 30 impersonation payloads, and test_leaf_resilience.py stayed untouched and
+green. Same slice, same design; close the findings below.
+
+What to change:
+
+1. Make the per-attempt flush crash-atomic. `_write_attempt_records`
+   (`leaves.py:800`) truncates first and appends the `_LEAF_IN_FLIGHT` trailer last, so
+   a kill between the two writes leaves an unmarked (commonly 0-byte) log. That reads as
+   "ran and failed" to `_leaf_ran_and_failed` (`:835`), `review_never_ran` (`:2277`)
+   returns False, `driver.py:176` never recovers the reviewer, and the bundle can reach
+   sign-off with no review of the diff. The base left no log at all in that window and
+   DID recover, so this is a new failure mode the patch introduces. Use the crash-atomic
+   idiom the repo already ships: temp sibling + `os.replace` (`act.py:326`).
+
+2. Close the same window on the success path. The reviewer's C5/T3 FAILs
+   (`leaves.py:734`, `:832`) are the post-success/pre-placeholder leg of (1): a silent
+   successful retry after a withdrawal re-flushes the log without the marker, and a kill
+   before the placeholder is written yields artifact absent + non-in-flight log +
+   `review_never_ran` False. Sequence the re-flush and the placeholder so no ordering of
+   the kill leaves an interrupted Check looking spent.
+
+3. Classify an infra death as one. The new "succeeded having written nothing after a
+   withdrawal" branch (`leaves.py:2704`, twins `:3039`, `:3340`) passes `error_log=` but
+   leaves `failure=` at the `_FAIL_SUBSTANTIVE` default, so `_unavailable_classification`
+   stamps `human-empty` and tells the operator "substantive — needs a human" over a log
+   reading `overloaded_error 529`. That is the inversion #278's marker exists to prevent.
+   The wrapper only retries transient failures, so a log surviving a successful return is
+   by construction an infra death — the branch can classify it without new information.
+
+4. Close the two test-blindness gaps the adversary and the code review named; both are
+   cheap and both are the kind of gap that would let a real regression stay green:
+   - one parametrized case over `_run_advisory_sandboxed` covering the advisory
+     (`leaves.py:3028`) and plan-advisory (`:3329`) harvest sites — today only
+     `_run_review_sandboxed` is driven, so wiring either site to the bundle path instead
+     of the sandbox `out` would unlink a shipped artifact and the suite would stay green;
+   - a `Path.unlink`-failure test for `_withdraw_residue`'s fail-closed branch
+     (`leaves.py:875-883`), mirroring the existing `refuse_the_log` pattern — the
+     symmetric write-failure leg is covered, this one is asserted in prose only.
+
+5. Align the third reader of "an error log means the leaf ran and FAILED":
+   `assemble.py:417` still splits on a bare `.exists()`. Currently shadowed, not a
+   reachable bug — but it now contradicts `leaves.py:2277` and `:2986` about the same
+   file. Use `leaves._leaf_ran_and_failed`.
+
+Do NOT widen the slice:
+
+- Leave the staleness clear at `leaves.py:714` alone. The adversary is right that a
+  recovery re-run deletes the dead attempt's preserved verdict, but criterion (vi)
+  freezes that clear and fixing it is a scope change, not this iteration. Note it in
+  build-notes as a known limitation and let Act decide.
+- Do not touch the retry set, `LeafError.transient`, `progress.py`, or the builder path
+  — the sibling exclusions in the brief still hold.
+- Keep `test_leaf_resilience.py` untouched.

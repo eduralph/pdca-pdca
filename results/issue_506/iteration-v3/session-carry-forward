@@ -1,0 +1,70 @@
+Rejected on the adversary's three implementation findings — the core mechanism is SOUND and
+independently confirmed (red 26 / green 29, 1782 template tests OK, 16/16 mutations of the
+load-bearing hunks caught, pinned vendor transcript). KEEP ALL OF IT: the marker-anchored
+matcher on `is_api_error_message`, the sticky-transient rule (it survived the adversary's
+attack — the aborted-turn variant genuinely can follow the api-error message, and stickiness
+is what saves it), the per-attempt `_write_attempt_records` flush before the backoff sleep,
+the `_has_content` guard, the `capture`-exclusivity guard, and the derived `memory_log`.
+Three defects sit on top of it, all grounded in the shipped vendor binary (claude-code
+2.1.233) and measured through the production path:
+
+1. A real mid-response connection loss is classified SUBSTANTIVE and the builder is NOT
+   retried when the CLI's error kind is `unknown` (progress.py:452, :468). claude-code's
+   API-error mapper ends `return Yd({content: "API Error: " + e.message, error: "unknown"})`
+   whenever no cause code is found in its `sie`/`gde` sets — and neither set contains any
+   `UND_ERR_*` code, so Node/undici's canonical mid-response stream abort (`TypeError:
+   terminated`, cause `SocketError{code:"UND_ERR_SOCKET"}`) surfaces as
+   `{"type":"assistant","is_api_error_message":true,"error":"unknown", … "API Error:
+   terminated"}`. `_TRANSIENT_CAUSE_RE` matches none of `terminated` / `other side closed` /
+   `stream disconnected`. Measured: transient=False, 1 invocation, vs transient=True and 3
+   invocations for the pinned incident text. That is criterion (i)'s "a lost/interrupted
+   connection" left unretried — the exact category the slice promises. Add those shapes to
+   the cause set. This is SAFE in the direction iteration 1 was rejected for: the regex only
+   ever runs on text the CLI itself marked (progress.py:537), so it cannot re-open the
+   false-positive arm. While in there: the patch's own `UND_ERR_[A-Z_]+` alternative
+   (progress.py:493) is unreachable for this shape — the code lives in the event's `cause`,
+   never in the text — so either read the nested cause code or drop that alternative rather
+   than leave a branch that looks like coverage and is not.
+
+2. The `result`-branch `api_error_status` arm is dead code against the real stream, and both
+   tests that "pin" it construct an event the CLI cannot emit. progress.py:546 guards on
+   `subtype != "success"` while :551 requires `error_during_execution` PLUS an
+   `api_error_status` — but in 2.1.233 the only result carrying that field is the
+   `subtype:"success"` variant with `is_error`; the `error_during_execution` /
+   `error_max_turns` variants carry `errors:[…]` and nothing else. The CLI asserts this in
+   its own telemetry (`api_error_status: ol.subtype === "success" ? … : void 0`). So the
+   guard excludes exactly the shape that carries the field. Either re-key the arm on the
+   CLI's actual API-error ending (`subtype == "success" and is_error` — still machine-marked,
+   still no prose matching) or DELETE the arm and state that the wrap-up is retention-only.
+   Either way, remove the two impossible records at test_leaf_resilience.py:461 and :473 —
+   that is the "synthesised the shape it then parses" defect round 2 rejected, relocated into
+   the one branch the vendor fixture never covered. Do not leave a green test standing for an
+   event that cannot exist.
+
+3. The stickiness rationale cites an incident ending that was never observed
+   (progress.py:558-560) and `_WRAP_UP` (test_leaf_resilience.py:85, used at :208) encodes
+   it. An api-error ending with no thrown/aborted turn produces the SUCCESS variant with the
+   API-error text in `result`; the `error_during_execution` variant is emitted only for a
+   throw or an aborted turn and then carries `errors:["[ede_diagnostic] turn aborted (…)
+   stop_reason=…"]` — "Execution error" appears nowhere, and the pinned transcript
+   (tests/fixtures/README.md, line 345 = last event) contains no result record at all. Keep
+   the sticky RULE; restate the comment and the fixture over the aborted-turn variant that
+   actually can follow, or drop the claim. Asserted-rather-than-observed is the exact
+   standard the fixture was added to enforce.
+
+SCOPE — unchanged, do NOT expand. The reviewer/advisory attempt-blind harvest
+(leaves.py:2653, :2986, :3287) stays a follow-up issue; build-notes.md already records it
+honestly with a measured ≈28-line cost, which is what was asked for. Do not take it here.
+
+SIZE — the patch is 86 KB against the 80 KB backstop already (35 KB of it tests). These three
+fixes must not grow it: (2) deletes a dead arm and two tests, (1) and (3) are small. If the
+rebuild finds itself adding substantial new surface, say so in build-notes.md rather than
+widening the slice.
+
+Not re-litigated, still open §6 items for the next sign-off: C4's derived-stream fixture vs a
+live API death, the prior-art check on a disposable target, and fitness-to-purpose. The C5
+gate row is a vacuous pass ("patch adds no new test file — nothing to assert") and supports no
+production-path claim; the adversary checked the substance separately and it holds. The
+plan-advisory leaf produced no verdict by configuration (commit 319eb4d), not by failure.
+Optional if free: the drain hot path now parses the same line up to 4× (progress.py:182-194) —
+non-gating, a single `json.loads` passed to each classifier would do.

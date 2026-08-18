@@ -1,0 +1,1435 @@
+diff --git a/template/src/pdca_harness/driver.py b/template/src/pdca_harness/driver.py
+index a3f927a..0c19b30 100644
+--- a/template/src/pdca_harness/driver.py
++++ b/template/src/pdca_harness/driver.py
+@@ -121,10 +121,12 @@ def advance(d: Path, cfg: Config) -> None:
+         # that leaf never run — and nothing ever ran it again: assemble filled the
+         # missing-review placeholder and the only escape was hand-deleting
+         # check-gates.json, re-paying the entire gate run. Recover the never-ran leaf
+-        # (artifact AND error log both absent — the #138 failed-leaf discriminator)
+-        # before assembly, preserving the paid gate record; a leaf that ran and FAILED
+-        # left its error log and is NOT re-run. An uninterrupted cycle has every
+-        # artifact in place, so this is a no-op there.
++        # (no artifact, and no error log of a leaf that RAN OUT OF ATTEMPTS — the #138
++        # failed-leaf discriminator, #506-aware: a log flushed mid-retry belongs to a
++        # leaf this window interrupted, not to one that gave up) before assembly,
++        # preserving the paid gate record; a leaf that ran and FAILED left its complete
++        # error log and is NOT re-run. An uninterrupted cycle has every artifact in
++        # place, so this is a no-op there.
+         _resume_interrupted_check(d, cfg, close)
+         _say(f"→ {d.name}: assembling SUMMARY…")
+         assemble.assemble_summary(d, cfg)  # pure code → SUMMARY.md §1–8
+@@ -149,10 +151,14 @@ def _resume_interrupted_check(d: Path, cfg: Config, close: str) -> None:
+     dependency-halted bundle never runs model leaves — its reviewer stand-in note is
+     deterministic (``_close_review_note`` / ``dependency_halt.blocked_review_note``),
+     so a note the death window swallowed is simply rewritten. A normal bundle gets the
+-    reviewer leaf back iff it NEVER RAN (``leaves.review_never_ran`` — no artifact,
+-    no error log) and each configured advisory leaf back under the same discriminator
+-    (``only_missing``); a leaf that ran and failed left its error log (#138) and is
+-    left alone — today's behaviour for a failed leaf is unchanged.
++    reviewer leaf back iff it NEVER RAN (``leaves.review_never_ran`` — no artifact, and
++    no error log left by a leaf that spent its attempts) and each configured advisory
++    leaf back under the same discriminator (``only_missing``); a leaf that ran and
++    failed left its error log (#138) and is left alone — today's behaviour for a failed
++    leaf is unchanged. Since #506 an error log also exists while a leaf is still
++    RETRYING, and such a log (``leaves.leaf_run_incomplete``) means interrupted, not
++    spent: it recovers here exactly like a missing one, or the death window could leave
++    a bundle with no review of the diff at all.
+     """
+     if close:
+         if not (d / "check-review.md").exists():
+diff --git a/template/src/pdca_harness/leaves.py b/template/src/pdca_harness/leaves.py
+index 1211604..78c0da7 100644
+--- a/template/src/pdca_harness/leaves.py
++++ b/template/src/pdca_harness/leaves.py
+@@ -45,6 +45,7 @@ import sys
+ import tarfile
+ import tempfile
+ import time
++from collections.abc import Callable
+ from pathlib import Path
+ 
+ from . import act as act_mod
+@@ -670,6 +671,54 @@ def _invoke(
+         raise LeafError(rc, argv, output=output, produced=produced or not use_stream)
+ 
+ 
++def _transient_death(exc: Exception) -> bool:
++    """The shipped retry rule (#138): the leaf died at/near invocation having produced
++    nothing — a usage/rate limit, a 5xx, an auth or network blip — so a retry is likely
++    to succeed. Anything that produced output, and any non-LeafError, is substantive."""
++    return bool(getattr(exc, "transient", False))
++
++
++#: Attribute the retry wrapper stamps on the exception it finally returns: how many
++#: attempts that leaf ACTUALLY cost (#506). What the operator is told must be what
++#: happened, not what the bound allows — a loop that stopped early (a record that would
++#: not write, an artifact that could not be withdrawn) spent fewer than the budget.
++_ATTEMPTS_ATTR = "pdca_attempts_spent"
++
++
++def _stamp_attempts(exc: Exception, attempt: int) -> None:
++    """Record on the exception how many attempts the leaf has cost so far. Suppressed:
++    an exception type that refuses attributes (``__slots__``) must not turn a leaf's
++    failure into a bookkeeping error."""
++    with contextlib.suppress(AttributeError):
++        setattr(exc, _ATTEMPTS_ATTR, attempt)
++
++
++def _attempts_spent(exc: Exception | None) -> int:
++    """How many attempts the leaf that ended in ``exc`` cost. Unstamped ⇒ 1: a failure
++    that never went through the retry wrapper is one attempt by construction."""
++    spent = getattr(exc, _ATTEMPTS_ATTR, 1)
++    return spent if isinstance(spent, int) and spent > 0 else 1
++
++
++# The keywords beyond the #138 four, documented here rather than in the docstring below
++# (sibling #533 owns that prose; this child owns the mechanism). Each defaults to today's
++# behaviour, so a call site that passes none is byte-identical to before:
++#   ``retry_note`` — appended to the prompt from the SECOND attempt on. A retried leaf is
++#     re-invoked over whatever its dead predecessor left behind, and only the caller knows
++#     what that residue is and how its leaf should read it (`_BUILD_RETRY_NOTE`). Attempt
++#     1's prompt stays exactly what a plain `_invoke` would have been given.
++#   ``artifact`` — the file this leaf is expected to PRODUCE. The wrapper then owns it per
++#     attempt (`_withdraw_residue`): what a DEAD attempt left there is withdrawn — its text
++#     preserved in that attempt's record — so a caller harvesting the path afterwards can
++#     only be harvesting the SUCCESSFUL attempt's output. Omitted where the residue must
++#     SURVIVE for the retried leaf to inspect (the builder: it is told to verify or
++#     replace it instead).
++#   ``retry_when`` — the retry rule. The default is the shipped one; a caller narrows it
++#     where a death of its own is not the class this absorbs (`_builder_retryable`).
++# Each failed attempt's record is also flushed to ``error_log`` AS IT HAPPENS, carrying
++# `_LEAF_IN_FLIGHT` while a further attempt is pending: the account of attempt N is on disk
++# while attempt N+1 runs, and a run killed mid-retry still leaves one. Attempt N+1 starts
++# only if that write landed — an unrecorded predecessor is the fail-open this closes.
+ def _invoke_leaf_resilient(
+     leaf: LeafConfig,
+     workdir: Path,
+@@ -678,6 +727,9 @@ def _invoke_leaf_resilient(
+     error_log: Path,
+     attempts: int = 3,
+     backoff: float = 4.0,
++    retry_note: str = "",
++    artifact: Path | None = None,
++    retry_when: Callable[[Exception], bool] = _transient_death,
+     **kw,
+ ) -> Exception | None:
+     """Run a headless reviewer/advisory leaf with bounded retry + error capture (#138).
+@@ -702,25 +754,171 @@ def _invoke_leaf_resilient(
+         kw.setdefault("memory_log", memory_log)
+     records: list[str] = []
+     last: Exception | None = None
++    withdrew = False  # did a dead attempt's artifact have to be taken out of the way?
+     for attempt in range(1, attempts + 1):
+         try:
+-            _invoke(leaf, workdir, prompt, **kw)
+-            return None  # success — leave no error log behind
++            _invoke(leaf, workdir,
++                    f"{prompt}\n\n{retry_note}" if attempt > 1 and retry_note else prompt,
++                    **kw)
++            # Success — leave no error log behind, exactly as before (#280's staleness
++            # rule: a leaf that WORKED must not leave a failure this run survived). The
++            # unlink is suppressed: a log that cannot be removed must not turn a leaf
++            # that worked into a failure.
++            # One exception, and it is evidence rather than staleness: this attempt exited
++            # 0 without writing its artifact, so the only surviving copy of what a DEAD
++            # attempt produced is the text in that log — and the caller is about to report
++            # "produced no artifact". Keep it, but re-flush it WITHOUT the in-flight
++            # marker: this loop finished, and a log still claiming otherwise would read as
++            # an interrupted run to `leaf_run_incomplete`. Should that re-flush fail, the
++            # previous flush's marker stands and the leaf reads as interrupted — which
++            # recovers by RE-RUNNING it (#369) rather than by retiring an unreviewed diff.
++            if withdrew and artifact is not None and not artifact.exists():
++                _write_attempt_records(error_log, records, in_flight=False)
++            else:
++                with contextlib.suppress(OSError):
++                    error_log.unlink(missing_ok=True)
++            return None
+         except Exception as exc:  # noqa: BLE001 — a failed leaf must never crash the cycle
+             last = exc
+-            records.append(_format_leaf_attempt(exc, attempt))
+-            transient = getattr(exc, "transient", False)
+-            if not transient or attempt == attempts:
++            _stamp_attempts(exc, attempt)
++            # This attempt is dead, so anything at the artifact path is ITS residue: take
++            # its claim away (keeping its text) before another attempt can be mistaken for
++            # its author. `owned` False ⇒ the residue is still there ⇒ stop retrying.
++            residue, owned = _withdraw_residue(artifact, attempt)
++            withdrew = withdrew or bool(residue)
++            records.append(_format_leaf_attempt(exc, attempt) + residue)
++            may_retry = retry_when(exc) and attempt < attempts and owned
++            # Attempt N+1 starts only once attempt N's account is DURABLY on disk: a retry
++            # whose predecessor's record never landed is the fail-open this rule exists to
++            # close — the next attempt runs, and a run killed in that window leaves the
++            # bundle no account of either.
++            recorded = _write_attempt_records(error_log, records, in_flight=may_retry)
++            if not (may_retry and recorded):
+                 break
+             delay = backoff * (2 ** (attempt - 1))
+-            print(f"leaves: {workdir.name} — leaf exited {getattr(exc, 'returncode', '?')} "
+-                  f"with no output (transient); retry {attempt}/{attempts - 1} in "
+-                  f"{delay:.0f}s", file=sys.stderr)
++            # Guarded: a broken stderr raises BrokenPipeError, an OSError — reporting the
++            # failure must never REPLACE it, since the exception returned here is what the
++            # caller captures and re-raises.
++            with contextlib.suppress(OSError):
++                print(f"leaves: {workdir.name} — leaf exited {getattr(exc, 'returncode', '?')} "
++                      f"with no output (transient); retry {attempt}/{attempts - 1} in "
++                      f"{delay:.0f}s", file=sys.stderr)
+             time.sleep(delay)
+-    error_log.write_text("".join(records), encoding="utf-8")
+     return last
+ 
+ 
++#: Trailer on an error log whose leaf has NOT finished its retry loop (#506). The record of
++#: the attempt that just failed is flushed BEFORE the next attempt starts, so a run killed
++#: in that window leaves a log for a leaf that neither succeeded nor gave up. Without this
++#: marker the #369 discriminator ("an error log means the leaf ran and FAILED") would retire
++#: a leaf that was merely interrupted — and a bundle could reach sign-off with NO review.
++_LEAF_IN_FLIGHT = "<!-- pdca:leaf-attempt in-flight — the retry loop had not finished -->"
++
++
++def _defang_in_flight(text: str) -> str:
++    """Neutralize the in-flight marker inside text the harness QUOTES back (a dead
++    attempt's artifact — which, in this repo, may well be a review discussing this very
++    marker). Whether a run finished is a property of the harness's own trailer, never of
++    something a leaf happened to write."""
++    return text.replace(_LEAF_IN_FLIGHT, _LEAF_IN_FLIGHT.replace("pdca:", "pdca-quoted:"))
++
++
++def _write_attempt_records(error_log: Path, records: list[str], *, in_flight: bool) -> bool:
++    """Persist the failed attempts so far; ``True`` iff the write landed (#506).
++
++    Called after EVERY failure, so the account of attempt N is on disk while attempt N+1
++    runs (a retried leaf can be pointed at it) and a run killed mid-retry still leaves one
++    — instead of only once the loop ends. ``in_flight`` marks a log whose leaf has neither
++    succeeded nor given up yet.
++
++    The return value is load-bearing: the caller must not start another attempt over a
++    record that did not land. A failed write is reported, never raised — it must not mask
++    the leaf's own failure, which reaches the caller either way.
++    """
++    body = "".join(records)
++    if in_flight:
++        body += _LEAF_IN_FLIGHT + "\n"
++    try:
++        error_log.write_text(body, encoding="utf-8")
++    except OSError as exc:
++        note = (" — not starting another attempt without its predecessor's account on "
++                "disk" if in_flight else "")
++        with contextlib.suppress(OSError):  # see the retry notice: reporting never masks
++            print(f"leaves: could not write {error_log.name} ({exc}){note}; the leaf's "
++                  "own failure is returned unchanged", file=sys.stderr)
++        return False
++    return True
++
++
++def leaf_run_incomplete(error_log: Path) -> bool:
++    """True iff ``error_log`` was left by a leaf INTERRUPTED mid-retry (#506).
++
++    Its last write was a per-attempt flush with a retry still pending, so the run ended
++    without the leaf either succeeding or exhausting its budget. Read off the LAST
++    non-empty line — the one place the wrapper writes the marker: the body above it quotes
++    the leaf's own text (up to `_RESIDUE_KEEP` of it), so a substring sniff would let a
++    leaf that MENTIONED the marker describe its own run. Absent/unreadable ⇒ False: a file
++    that is not there says nothing about an in-flight retry."""
++    try:
++        lines = error_log.read_text(encoding="utf-8").splitlines()
++    except OSError:
++        return False
++    tail = [line.strip() for line in lines if line.strip()]
++    return bool(tail) and tail[-1] == _LEAF_IN_FLIGHT
++
++
++def _leaf_ran_and_failed(error_log: Path) -> bool:
++    """The #138 failed-leaf discriminator, #506-aware: an error log means the leaf ran and
++    FAILED — *unless* it is still in flight, which is "interrupted", not "gave up"."""
++    return error_log.exists() and not leaf_run_incomplete(error_log)
++
++
++#: How much of a dead attempt's artifact is kept in the error log. Bounded: the log is read
++#: by a human and shipped in the bundle, and a runaway leaf could write an arbitrarily large
++#: file. Big enough for a full 5/5/1 verdict table many times over.
++_RESIDUE_KEEP = 20_000
++
++
++def _withdraw_residue(artifact: Path | None, attempt: int) -> tuple[str, bool]:
++    """Take a dead attempt's claim on ``artifact`` away, keeping its text: ``(record, ok)``.
++
++    Attempt ownership (#506): the harvest sites copy their artifact ``if it exists``, with
++    no notion of WHICH attempt wrote it — so a truncated verdict a dead attempt left in the
++    sandbox is adopted as the output of the attempt that succeeded. Called after a FAILED
++    attempt, so whatever stands at that path is that attempt's residue and nothing else.
++
++    Preserved, not merely deleted: the text goes into the record this attempt is about to
++    write to the bundle's ``*.error.log`` — bundle-local (the sandbox around it is a
++    :class:`~tempfile.TemporaryDirectory` that dies with the run), archived per round
++    (``state.DOWNSTREAM_GLOBS``) and already named by the failed-leaf placeholder. A real
++    verdict must not be destroyed while the operator is told none was produced.
++
++    Fail **closed**: ``ok`` is False iff the file is still there afterwards, and the caller
++    stops retrying rather than run another attempt over a path it no longer owns —
++    continuing would be exactly the adoption this exists to prevent.
++    """
++    if artifact is None or not artifact.exists():
++        return "", True
++    try:
++        text = artifact.read_text(encoding="utf-8", errors="replace")
++    except OSError as exc:
++        text = f"(unreadable: {exc})"
++    if len(text) > _RESIDUE_KEEP:
++        text = f"{text[:_RESIDUE_KEEP]}\n… truncated ({len(text)} characters in all)"
++    record = (f"----- attempt {attempt} — the {artifact.name} it left behind "
++              f"(withdrawn: a dead attempt's artifact is never harvested) -----\n"
++              f"{_defang_in_flight(text.strip())}\n\n")
++    try:
++        artifact.unlink()
++    except OSError as exc:
++        with contextlib.suppress(OSError):  # reporting never masks the leaf's failure
++            print(f"leaves: could not withdraw the {artifact.name} attempt {attempt} left "
++                  f"behind ({exc}) — stopping the retries rather than run another attempt "
++                  "over a file that would be harvested as its output", file=sys.stderr)
++        return record, False
++    return record, True
++
++
+ def _format_leaf_attempt(exc: Exception, attempt: int) -> str:
+     """One attempt's record for the error log: the captured stderr tail, or the
+     exception text when nothing was captured (e.g. command not found)."""
+@@ -730,6 +928,16 @@ def _format_leaf_attempt(exc: Exception, attempt: int) -> str:
+     return f"----- attempt {attempt} — exit {rc} -----\n{body}\n\n"
+ 
+ 
++def _has_content(path: Path) -> bool:
++    """Does ``path`` already hold an account worth keeping? An absent, unreadable or empty
++    file answers False, so a second writer can tell "nothing on disk yet" from "someone
++    else's evidence here" instead of overwriting it blind."""
++    try:
++        return path.stat().st_size > 0
++    except OSError:
++        return False
++
++
+ # ----------------------------------------------------------------------------
+ # Notes-fetch (issue #65): retrieve a bundle's tracker thread before the Plan beat.
+ # ----------------------------------------------------------------------------
+@@ -1770,19 +1978,154 @@ def do_build(d: Path, cfg: Config) -> None:
+             _do_build_command(d, cfg, builder, n)
+     except Exception as exc:  # noqa: BLE001 — capture, then re-raise for the caller
+         try:
+-            error_log.write_text(_format_leaf_attempt(exc, 1), encoding="utf-8")
++            # An INVOCATION failure is already on disk attempt by attempt, written by
++            # `_invoke_leaf_resilient` as each one happened (#506); overwriting it with a
++            # single record would destroy the very post-mortem the retries just built.
++            # What is left for this capture is a Do that died AROUND the leaf — its setup
++            # (`worktree.ensure`, the lane lock) or a wrapper that could not write — which
++            # otherwise has nothing bundle-local at all.
++            if not _has_content(error_log):
++                error_log.write_text(_format_leaf_attempt(exc, 1), encoding="utf-8")
+             print(f"leaves: {d.name} — Do failed; captured the error tail in "
+                   f"{BUILD_ERROR_LOG}", file=sys.stderr)
+         except OSError:
+             pass  # never let error-capture mask the real failure
++        if _builder_retryable(exc):
++            # …and only then: the death was in the class the harness absorbs, so the
++            # retries ran. Saying so for a failure that was NOT retried (a signal death, a
++            # build that failed on the merits) would assert an absorption that never
++            # happened. Suppressed for the same reason as the capture above — a broken
++            # stderr is an OSError, and reporting the failure must not replace it.
++            with contextlib.suppress(OSError):
++                _report_transient_do_death(d, exc)
+         raise
+ 
+ 
++def _builder_retryable(exc: Exception) -> bool:
++    """The builder's retry rule: :func:`_transient_death`, minus a death the child did not
++    choose (#506, scope-bounded by #510).
++
++    A leaf killed from outside — the #420 memory cap's SIGKILL is the shipped way to earn
++    one — emits no stream event, so it reads ``transient``. Retrying that is not absorbing
++    infrastructure: it re-runs, twice more, the very build that exhausted its bound, and
++    tells the operator the failure was absorbed infra while ``build.error.log`` says
++    ``Killed``. #510 states a signal death "is neither #506's transient nor #421's
++    preflight" — its own question — so this does not classify it: it declines to retry it,
++    leaving that case exactly where it is today (one spawn, the failure re-raised).
++    """
++    rc = getattr(exc, "returncode", None)
++    return _transient_death(exc) and not (isinstance(rc, int) and _died_of_a_signal(rc))
++
++
++def _died_of_a_signal(rc: int) -> bool:
++    """Both spellings of "this process was killed; it did not choose to exit".
++
++    * **negative** — ``subprocess`` reports a signal death of the process IT spawned as
++      ``-N``, and ``progress.TIMEOUT_RC`` (the harness's own kill) sits there too.
++    * **128+N** — the POSIX shell convention. The moment ``argv[0]`` is a WRAPPER (``sh
++      -c …``, ``docker run``, the ``local-build`` executor docs/04-do.md:47 suggests) the
++      process that dies is the wrapper's child, and what reaches the harness is its own exit
++      status: 137 for a SIGKILL, 143 for a SIGTERM. Excluding only the negative form left
++      that door open — an OOM kill retried three times, each repeating what exhausted the
++      bound. The cost of reading 128..255 as a signal is that a leaf choosing such an exit
++      status of its own is not retried: one spawn, re-raised, exactly today's behaviour.
++    """
++    return rc < 0 or rc >= 128
++
++
++def _do_residue(d: Path) -> list[str]:
++    """The Do artifacts actually present in the bundle: patch.diff, build-notes.md and the
++    test file(s) the brief names (``brief.test_files`` — no fallback, so a brief naming
++    none contributes none). Read only — naming residue is this module's job; deciding its
++    fate is the operator's."""
++    names = ["patch.diff", "build-notes.md"]
++    names += [str(t) for t in brief.test_files(d / "brief.md")]
++    return [n for n in names if (d / n).exists()]
++
++
++def _report_transient_do_death(d: Path, exc: Exception) -> None:
++    """What the operator reads when Do's builder died of transient infra and the harness
++    has stopped retrying (#506).
++
++    The incident that opened this got ``build/check failed (LeafError: Command '[…]'
++    returned non-zero exit status 1)`` — an argv and an exit status — for an API connection
++    that dropped. So: name the CLASS of failure, say what it cost and where each attempt's
++    account is, name what is in the bundle without inventing who wrote it, and give a next
++    action that is true of the bundle as it now stands. Reporting only: nothing here
++    removes the builder's artifacts. They may be worth reading, and destroying evidence to
++    make a sentence simpler is not a fix.
++    """
++    print(f"leaves: {d.name} — the builder leaf died of a TRANSIENT infrastructure failure "
++          f"(exit {getattr(exc, 'returncode', '?')}) — infra the harness absorbs, not a "
++          "build that failed on the merits — and it has stopped after "
++          f"{_attempts_spent(exc)} attempt(s). Every attempt's own account is in "
++          f"{BUILD_ERROR_LOG}.", file=sys.stderr)
++    residue = _do_residue(d)
++    if residue:
++        # No authorship claim: a transient death produced nothing by definition, so these
++        # files may well be an earlier round's. The harness does not know which attempt
++        # wrote them — and telling the operator otherwise is the kind of false statement
++        # this whole report exists to replace.
++        print(f"leaves: {d.name} — the bundle holds {', '.join(residue)}, which may "
++              "predate this attempt. Nothing here deletes them; read them as an unfinished "
++              "attempt's residue, never as a finished build — a re-driven Do inherits them "
++              "WITHOUT the retry notice this run gave its own retries.", file=sys.stderr)
++    print(f"leaves: {d.name} — next: {_next_action_after_a_dead_do(d)}", file=sys.stderr)
++
++
++def _next_action_after_a_dead_do(d: Path) -> str:
++    """What a plain re-run would ACTUALLY do next — asked of the state machine (#506).
++
++    Never inferred from the residue's shape: ``state.state`` is a waterfall
++    (state.py:202-233), so patch.diff alone reads BUILT while patch.diff plus
++    check-gates.json reads CHECKED, and a guess from "is there a patch.diff" is false
++    exactly on the bundle the previous advice creates. ``driver.advance`` (driver.py:69-130)
++    is what each state then costs.
++    """
++    issue = d.name.removeprefix("issue_")
++    now = state.state(d)
++    beat = {
++        state.PLANNED: f"`pdca run {issue}` re-drives Do from the top.",
++        state.BUILT: (f"`pdca run {issue}` runs CHECK on the residue patch.diff — gates, "
++                      "reviewer, adversary — NOT Do. To rebuild instead, move patch.diff "
++                      "aside first; or let Check run and record `iterate-do` at sign-off, "
++                      "which archives this attempt to iteration-v<N>/ and rebuilds."),
++        state.CHECKED: (f"`pdca run {issue}` ASSEMBLES SUMMARY.md over the residue and "
++                        "stops at sign-off — no Do. Record `iterate-do` there to archive "
++                        "this attempt and rebuild."),
++    }.get(now, f"`pdca status` names the beat that follows {now} for this bundle.")
++    return f"the bundle now reads {now}; {beat}"
++
++
++#: Appended to the builder's prompt on every attempt after the first (#506).
++#: `worktree.ensure` runs once, before the retry wrapper, so attempt 2 opens a worktree
++#: still carrying attempt 1's edits — and a bundle that may already hold patch.diff,
++#: build-notes.md and the brief's test file. Unwarned, a retried builder can read that
++#: residue as a finished build, exit 0, and a half-written attempt is then reported as this
++#: leaf's success: the retry would cost more than the failure it repairs. Saying so is the
++#: bounded fix at Do level — no lane reset, no new knob, and attempt 1's prompt unchanged.
++#: The pointer at BUILD_ERROR_LOG is an instruction the retried leaf can act on only because
++#: `_invoke_leaf_resilient` flushes each attempt's record as it happens; pointing a leaf at
++#: a file written only after the LAST attempt would be a false instruction, worse than none.
++_BUILD_RETRY_NOTE = (
++    "RETRY NOTICE — a previous attempt at this task died MID-FLIGHT on a transient "
++    "infrastructure failure, not because the work was finished or wrong; its own account "
++    f"of that death is in {BUILD_ERROR_LOG} in the bundle directory. It may have left "
++    "edits in the worktree and a partial patch.diff / build-notes.md / test file in the "
++    "bundle. Treat every one of those as INCOMPLETE RESIDUE of an interrupted attempt, "
++    "NOT as evidence the work is done: verify each against the brief's Success criterion, "
++    "complete or replace whatever does not hold, and re-run the test red→green yourself "
++    "rather than trusting a result you did not observe."
++)
++
++
+ def _do_build_command(d: Path, cfg: Config, builder: LeafConfig, n: int) -> None:
+-    """Run Do on a command backend: set up isolation, then invoke the leaf.
++    """Run Do on a command backend: set up isolation, then invoke the leaf resiliently.
+ 
+-    Every failure here — setup or invocation — is captured to `build.error.log` by the
+-    caller and re-raised, so `flow._isolate` still contains it and drops just this bundle.
++    Every failure here still reaches `build.error.log` and is still re-raised, so
++    `flow._isolate` contains it and drops just this bundle — an INVOCATION failure written
++    attempt by attempt by `_invoke_leaf_resilient` (#506), a SETUP failure by the caller's
++    capture.
+     """
+     _record_loop_attempt(d, n, builder, cfg)
+     # Isolate Do in a per-cycle worktree off the base (issue #94) so the host's
+@@ -1820,15 +2163,35 @@ def _do_build_command(d: Path, cfg: Config, builder: LeafConfig, n: int) -> None
+         # A family without its own PreToolUse STOP hook gets the driver's `gh`
+         # PATH shim — the same builder_guard rules, enforced vendor-neutrally.
+         env = guard.shim_env(cfg, env)
++    # The builder runs on the SAME resilient path as the reviewer/advisory leaves (#506):
++    # bounded retry with backoff for a death in the class the harness absorbs, every
++    # attempt's error text kept in `build.error.log`. It was the one leaf still on plain
++    # `_invoke`, so NO builder failure was ever retried — on the leaf where an attempt is
++    # most expensive (an escalated opus/max tier runs for tens of minutes) and where a burnt
++    # attempt costs a whole cycle round. A substantive failure is still not retried, nor is
++    # a death the child did not choose (`_builder_retryable`), and the final exception is
++    # still raised — so `do_build`'s capture and `flow._isolate` see what they see today.
++    # The wrapper's shipped attempts/backoff defaults are reused as they are (this slice
++    # adds no knob it has no evidence to tune), and `memory_log` is left to the wrapper's
++    # `_memory_log_for` derivation — the identical `build.memory.jsonl` (#420 unchanged),
++    # the same way the other three call sites get theirs.
++    # NO `artifact=`: the harvest sites hand the wrapper their expected output so a dead
++    # attempt's file cannot be adopted, but Do's residue must stay exactly where it is —
++    # the retried builder is told to verify or replace it (`_BUILD_RETRY_NOTE`), and the
++    # exhausted-retry report describes the bundle as it actually is.
+     # Watch the bundle d so the heartbeat shows patch.diff / build-notes.md appearing.
+-    _invoke(
++    err = _invoke_leaf_resilient(
+         builder, workdir, _build_prompt(d, cfg, worktree_root=wt),
++        error_log=d / BUILD_ERROR_LOG,
++        retry_note=_BUILD_RETRY_NOTE,
++        retry_when=_builder_retryable,
+         label=f"Do {d.name}",
+         status=lambda: progress.bundle_activity(d, ("patch.diff", "build-notes.md")),
+         stream_json=True,  # Tier 3: show the builder's live tool-use
+         env=env, extra_argv=extra, cfg=cfg,
+-        memory_log=d / BUILD_MEMORY_LOG,  # scope telemetry, active only when capped
+     )
++    if err is not None:
++        raise err
+ 
+ 
+ def _build_prompt(d: Path, cfg: Config | None = None, *,
+@@ -2099,9 +2462,15 @@ def review_never_ran(d: Path) -> bool:
+     successful run removed any stale log. So *both* artifacts absent means the beat
+     died in the window between the gate write and the reviewer leaf — "not yet run",
+     never "ran and failed" — and the leaf is safe (and necessary) to run now.
++
++    Since #506 that log also exists WHILE the leaf is still retrying, so "the log is
++    there" alone would retire a reviewer the death window merely interrupted — the leaf
++    would never be re-run and the bundle could reach sign-off with NO review of the diff.
++    An in-flight log (:func:`leaf_run_incomplete`) is therefore not a run that failed; it
++    is a run that never finished, and it recovers exactly like a missing one.
+     """
+     return (not (d / "check-review.md").exists()
+-            and not (d / state.REVIEW_ERROR_LOG).exists())
++            and not _leaf_ran_and_failed(d / state.REVIEW_ERROR_LOG))
+ 
+ 
+ def _seed_sandbox_agents(cfg: Config, sandbox: Path) -> None:
+@@ -2502,11 +2871,15 @@ def _run_review_sandboxed(d: Path, cfg: Config) -> None:
+         # the leaf its ambient sandbox, #290); the codex network grant does not (#291).
+         extra_argv += _sandbox_argv(cfg, profile, seeded=seeded)
+         error_log = d / state.REVIEW_ERROR_LOG
++        produced = sandbox / "check-review.md"
+         # A transient (no-output) reviewer failure is retried with backoff before it
+         # degrades to a §6 placeholder; the failed attempts' stderr lands in error_log.
++        # `artifact=` makes the harvest below attempt-aware (#506): a check-review.md a
++        # DEAD attempt left in the sandbox is withdrawn — its text kept in error_log — so
++        # what is copied out can only be the work of the attempt that succeeded.
+         err = _invoke_leaf_resilient(
+             cfg.reviewer, sandbox, _REVIEW_PROMPT + rubric_mod.for_reviewer(d, cfg),
+-            error_log=error_log,
++            error_log=error_log, artifact=produced,
+             label=f"Check review {d.name}",
+             status=lambda: progress.bundle_activity(sandbox, ("check-review.md",)),
+             stream_json=True,  # Tier 3 (no-op unless the reviewer family has a stream)
+@@ -2516,11 +2889,15 @@ def _run_review_sandboxed(d: Path, cfg: Config) -> None:
+             _review_unavailable(d, f"reviewer leaf failed: {err}",
+                                 failure=_failure_class(err), error_log=error_log)
+             return
+-        produced = sandbox / "check-review.md"
+-        if produced.exists():
++        if produced.exists():  # the SUCCESSFUL attempt's file — see `artifact=` above
+             shutil.copy2(produced, d / "check-review.md")
+         else:
+-            _review_unavailable(d, "reviewer produced no check-review.md")
++            # `error_log` because a leaf that exited 0 having written nothing may still
++            # have had a predecessor that wrote something: the wrapper keeps that
++            # withdrawn text here rather than let it die with the sandbox (#506). Absent,
++            # the placeholder is byte-identical to before.
++            _review_unavailable(d, "reviewer produced no check-review.md",
++                                error_log=error_log)
+ 
+ 
+ # How a reviewer / advisory leaf failed (#138, #278). The split that matters downstream is
+@@ -2793,12 +3170,15 @@ def run_advisory_leaves(d: Path, cfg: Config, *, only_missing: bool = False) ->
+     ``vendor-complement`` (#200) only one of the pool runs, so an unselected leaf's
+     absent artifact is legitimate, never "missing"; filtering the pool by absence
+     before selecting would instead promote an excluded leaf. On an uninterrupted
+-    bundle every selected leaf's artifact exists, so this mode is a no-op."""
++    bundle every selected leaf's artifact exists, so this mode is a no-op. The error-log
++    half of the discriminator is #506-aware (:func:`_leaf_ran_and_failed`): a log left
++    mid-retry belongs to a leaf the death window interrupted, which this mode exists to
++    recover, not to a leaf that ran out of attempts."""
+     applicable = [spec for spec in cfg.advisory_leaves if _advisory_applies(spec, d)]
+     for spec in _select_advisory(applicable, d, cfg):
+         leaf_id = spec.get("id") or "advisory"
+         if only_missing and (advisory_artifact(d, leaf_id).exists()
+-                             or advisory_error_log(d, leaf_id).exists()):
++                             or _leaf_ran_and_failed(advisory_error_log(d, leaf_id))):
+             continue
+         leaf = _advisory_leaf(spec, "advisory", leaf_id)
+         if leaf.mode == "command":
+@@ -2840,7 +3220,7 @@ def _run_advisory_sandboxed(d: Path, cfg: Config, leaf: LeafConfig, spec: dict,
+         err = _invoke_leaf_resilient(
+             leaf, sandbox,
+             _advisory_prompt(spec, leaf_id, rubric_mod.for_reviewer(d, cfg)),
+-            error_log=error_log,
++            error_log=error_log, artifact=out,  # attempt-aware harvest (#506)
+             label=f"Advisory {leaf_id} {d.name}",
+             status=lambda: progress.bundle_activity(sandbox, (out.name,)),
+             stream_json=True, env=env, extra_argv=extra, cfg=cfg)
+@@ -2848,10 +3228,10 @@ def _run_advisory_sandboxed(d: Path, cfg: Config, leaf: LeafConfig, spec: dict,
+             _advisory_unavailable(d, leaf_id, f"leaf failed: {err}",
+                                   failure=_failure_class(err), error_log=error_log)
+             return
+-        if out.exists():
++        if out.exists():  # the SUCCESSFUL attempt's file, never a dead one's (#506)
+             shutil.copy2(out, advisory_artifact(d, leaf_id))
+-        else:
+-            _advisory_unavailable(d, leaf_id, "produced no artifact")
++        else:  # `error_log` may hold a dead attempt's withdrawn artifact — see the reviewer
++            _advisory_unavailable(d, leaf_id, "produced no artifact", error_log=error_log)
+ 
+ 
+ def _stub_advisory(d: Path, spec: dict, leaf_id: str) -> None:
+@@ -3141,7 +3521,7 @@ def _run_plan_advisory_sandboxed(d: Path, cfg: Config, leaf: LeafConfig, spec: d
+         error_log = d / f"plan-advisory-{leaf_id}.error.log"
+         err = _invoke_leaf_resilient(
+             leaf, sandbox, _plan_advisory_prompt(spec, leaf_id),
+-            error_log=error_log,
++            error_log=error_log, artifact=out,  # attempt-aware harvest (#506)
+             label=f"Plan advisory {leaf_id} {d.name}",
+             status=lambda: progress.bundle_activity(sandbox, (out.name,)),
+             stream_json=True, env=env, extra_argv=extra, cfg=cfg)
+@@ -3149,10 +3529,11 @@ def _run_plan_advisory_sandboxed(d: Path, cfg: Config, leaf: LeafConfig, spec: d
+             _plan_advisory_unavailable(d, leaf_id, f"leaf failed: {err}",
+                                        failure=_failure_class(err), error_log=error_log)
+             return
+-        if out.exists():
++        if out.exists():  # the SUCCESSFUL attempt's file, never a dead one's (#506)
+             shutil.copy2(out, plan_advisory_artifact(d, leaf_id))
+-        else:
+-            _plan_advisory_unavailable(d, leaf_id, "produced no artifact")
++        else:  # `error_log` may hold a dead attempt's withdrawn artifact — see the reviewer
++            _plan_advisory_unavailable(d, leaf_id, "produced no artifact",
++                                       error_log=error_log)
+ 
+ 
+ def _stub_plan_advisory(d: Path, spec: dict, leaf_id: str) -> None:
+diff --git a/template/tests/test_build_error_log.py b/template/tests/test_build_error_log.py
+index 91ea35e..fd8d883 100644
+--- a/template/tests/test_build_error_log.py
++++ b/template/tests/test_build_error_log.py
+@@ -7,6 +7,16 @@ of a failed batch depended on terminal scrollback. `do_build` now captures the t
+ `build.error.log`, symmetric with the review leaves, and still re-raises so the flow's
+ `_isolate` drops just that bundle.
+ 
++Since #506 the builder runs under `_invoke_leaf_resilient` like every other leaf, so this
++file also pins what that does to the log's SHAPE: one record per attempt, written as each
++attempt fails, and no log at all left behind by a build a retry recovered.
++
++Production path exercised: `leaves.do_build` → `_do_build_command` → the real
++`_invoke_leaf_resilient` retry loop and the real `do_build` capture. The classes below
++differ only in where the stand-in sits — `_invoke` (the vendor spawn) for the capture
++cases, nothing at all for `StreamlessFamiliesAreDiagnosableToo`, which spawns a real
++child. `time.sleep` is patched throughout to skip the backoff's wall clock only.
++
+ Offline: no model, no network. Run from the project root:
+     PYTHONPATH=src python -m unittest discover -s tests
+ """
+@@ -18,6 +28,7 @@ import os
+ import shutil
+ import sys
+ import tempfile
++import time
+ import unittest
+ from contextlib import redirect_stderr, redirect_stdout
+ from pathlib import Path
+@@ -26,6 +37,18 @@ from unittest import mock
+ from pdca_harness import driver, leaves, worktree
+ from pdca_harness.config import Config, LeafConfig
+ 
++_REAL_SLEEP = time.sleep
++
++
++def _skip_backoff(seconds: float) -> None:
++    """Stand-in for `time.sleep` that skips only the retry BACKOFF (>= 1s, #506): a
++    transient builder death is retried now, so every failing case here would otherwise
++    spend the shipped 4s + 8s. The wrapper's defaults stay exactly as they ship — only
++    their wall clock is skipped — and sub-second polls elsewhere still sleep (patching
++    those away turns `run_with_heartbeat`'s wait into a busy-loop)."""
++    if seconds < 1:
++        _REAL_SLEEP(seconds)
++
+ 
+ def _cfg(root: Path) -> Config:
+     return Config(
+@@ -50,6 +73,12 @@ class BuildErrorLog(unittest.TestCase):
+         self.d = self.cfg.bundle("ERR")
+         self.d.mkdir(parents=True)
+         (self.d / "brief.md").write_text("- **Slug:** e\n", encoding="utf-8")
++        # A transient builder death is RETRIED now (#506), so these cases would each spend
++        # the shipped backoff (4s + 8s) in real time. Patch the sleep, not the wrapper's
++        # defaults: the retry logic under test still runs exactly as it ships.
++        slept = mock.patch.object(leaves.time, "sleep", side_effect=_skip_backoff)
++        slept.start()
++        self.addCleanup(slept.stop)
+ 
+     def tearDown(self) -> None:
+         shutil.rmtree(self.tmp, ignore_errors=True)
+@@ -69,6 +98,29 @@ class BuildErrorLog(unittest.TestCase):
+         self.assertIn("panic: could not open the worktree", text)
+         self.assertIn("exit 1", text)
+ 
++    def test_every_attempts_own_account_survives_in_the_log(self) -> None:
++        """#506. The builder is retried now, and `build.error.log` is the bundle's whole
++        post-mortem: it must carry EVERY attempt's account. The wrapper writes them as they
++        happen — so `do_build`'s outer capture, which used to be the only writer, must not
++        overwrite them with a single record of the last one."""
++        self._run_failing_build(
++            leaves.LeafError(1, ["claude"], output="overloaded_error 529"))
++        text = (self.d / leaves.BUILD_ERROR_LOG).read_text(encoding="utf-8")
++        self.assertIn("attempt 1", text)
++        self.assertIn("attempt 3", text)  # the shipped budget, each attempt on the record
++        self.assertEqual(text.count("overloaded_error 529"), 3)
++
++    def test_a_transient_death_a_retry_recovers_leaves_no_log(self) -> None:
++        """#506. The log's staleness rule end to end: a build that failed transiently and
++        then SUCCEEDED on a retry is a build that worked, so the bundle must look exactly
++        like one that never failed — no top-level log describing a failure this Do
++        survived (the #280 review rule, now reachable within a single Do)."""
++        with mock.patch.object(leaves, "_invoke", side_effect=[
++                leaves.LeafError(1, ["claude"], output="overloaded_error 529"), None]), \
++                redirect_stderr(io.StringIO()):
++            leaves.do_build(self.d, self.cfg)  # must NOT raise
++        self.assertFalse((self.d / leaves.BUILD_ERROR_LOG).exists())
++
+     def test_a_missing_binary_is_captured_too(self) -> None:
+         # The [Errno 2] 'claude' shape — no output to capture, so the exception text is.
+         self._run_failing_build(FileNotFoundError(2, "No such file or directory", "claude"))
+@@ -174,6 +226,10 @@ class StreamlessFamiliesAreDiagnosableToo(unittest.TestCase):
+         self.d = self.cfg.bundle("ERR")
+         self.d.mkdir(parents=True)
+         (self.d / "brief.md").write_text("- **Slug:** e\n", encoding="utf-8")
++        slept = mock.patch.object(leaves.time, "sleep",  # see BuildErrorLog.setUp (#506)
++                                  side_effect=_skip_backoff)
++        slept.start()
++        self.addCleanup(slept.stop)
+ 
+     def tearDown(self) -> None:
+         shutil.rmtree(self.tmp, ignore_errors=True)
+diff --git a/template/tests/test_leaf_resilience.py b/template/tests/test_leaf_resilience.py
+index 97f98b1..896548a 100644
+--- a/template/tests/test_leaf_resilience.py
++++ b/template/tests/test_leaf_resilience.py
+@@ -1,24 +1,53 @@
+-"""Reviewer/advisory leaf resilience (issue #138) — stdlib unittest, no deps.
++"""Leaf resilience (issues #138, #506) — stdlib unittest, no deps.
+ 
+ A Check reviewer/advisory leaf that exits non-zero used to collapse to an opaque §6
+ placeholder whose only diagnostic was the exit code, and a transient `claude -p`
+ blip (usage/rate limit, 5xx) wedged sign-off the same as a substantive failure.
+ `_invoke_leaf_resilient` now: (1) persists the failed attempts' stderr tail to an
+ error log, (2) retries a *transient* (no-output) failure with backoff before
+-degrading, and (3) classifies the placeholder transient-vs-substantive. Run with:
++degrading, and (3) classifies the placeholder transient-vs-substantive.
++
++#506 makes **an attempt the unit of accountability** for every leaf the harness
++spawns: the *builder* runs under the same wrapper (it was the only leaf never
++retried), each attempt's record is flushed — and must LAND — before the next attempt
++starts, a retried builder is told its predecessor died mid-flight and that any
++artifact present is that attempt's residue, an exhausted retry says so and names a
++next action true for the residue actually on disk, and no artifact a dead attempt
++left behind is harvested as a live one's output.
++
++Production path exercised (nothing here re-implements what it asserts — the only
++stand-ins are `time.sleep`, i.e. the backoff's wall clock, and `_invoke`, i.e. the
++vendor spawn, where a stub *leaf process* would not add anything):
++
++    BuilderRetriesLikeEveryOtherLeaf  → leaves.do_build → _do_build_command →
++        _invoke_leaf_resilient → _invoke → progress.run_with_heartbeat → subprocess
++        (the "leaf" is a real python3 child; nothing in leaves.py is stubbed)
++    AKilledLeafIsRecoveredNotRetired  → leaves._run_review_sandboxed +
++        leaves.run_advisory_leaves + driver._resume_interrupted_check →
++        leaves.review_never_ran / _leaf_ran_and_failed / leaf_run_incomplete
++    DeadAttemptOutputIsNeverHarvested → leaves._run_review_sandboxed /
++        _run_advisory_sandboxed / run_plan_advisory → _invoke_leaf_resilient →
++        _withdraw_residue → the sites' `if produced.exists()` harvest
++
++Run with:
+     PYTHONPATH=src python -m unittest discover -s tests
+ """
+ 
+ from __future__ import annotations
+ 
++import io
++import os
+ import shutil
+ import sys
+ import tempfile
++import time
+ import unittest
++from contextlib import redirect_stderr, redirect_stdout
+ from pathlib import Path
++from unittest import mock
+ 
+-from pdca_harness import leaves
+-from pdca_harness.config import LeafConfig
++from pdca_harness import driver, leaves, state
++from pdca_harness.config import Config, LeafConfig
+ 
+ # A claude-family leaf so the stream path engages (that is the only path that yields
+ # the "did a session start" signal). argv is a python interpreter running an inline
+@@ -34,6 +63,37 @@ _SUBSTANTIVE = (  # ran (emitted a stream event on stdout) then failed
+     "print('{\"type\": \"assistant\"}'); sys.stderr.write('boom\\n'); sys.exit(1)"
+ )
+ 
++_REAL_SLEEP = time.sleep
++
++
++def _skip_backoff(seconds: float) -> None:
++    """Stand-in for `time.sleep` that skips only the retry BACKOFF (>= 1s, #506), so a case
++    driving a leaf to its attempt budget costs no wall clock — without weakening the
++    wrapper's shipped defaults, and without turning any sub-second poll elsewhere in the
++    process into a busy-wait."""
++    if seconds < 1:
++        _REAL_SLEEP(seconds)
++
++
++def _kill_during_backoff(seconds: float) -> None:
++    """A run killed WHILE it waits to retry — Ctrl-C, an OOM kill, a closed session. That
++    window is what the per-attempt flush exists for. `KeyboardInterrupt` is not an
++    `Exception`, so it tears the wrapper down without its handlers catching it, exactly as
++    a signal would. Sub-second waits are the harness's own polling, not the backoff."""
++    if seconds < 1:
++        _REAL_SLEEP(seconds)
++        return
++    raise KeyboardInterrupt
++
++
++class _BrokenStderr(io.StringIO):
++    """A console that is gone — the shape a detached/piped-away run leaves behind. Every
++    write raises `BrokenPipeError`, which IS an `OSError`, so an unguarded report can
++    replace the very failure it was reporting."""
++
++    def write(self, _s: str) -> int:
++        raise BrokenPipeError(32, "Broken pipe")
++
+ 
+ def _leaf(script: str) -> LeafConfig:
+     return LeafConfig(mode="command", family="claude",
+@@ -102,5 +162,602 @@ class LeafResilience(unittest.TestCase):
+         self.assertIn("substantive", txt)
+ 
+ 
++# ---------------------------------------------------------------------------------
++# #506 — the builder is a leaf too, and an attempt is the unit of accountability.
++# ---------------------------------------------------------------------------------
++
++#: A builder that dies transiently (stderr only, no stream event → `produced is False`),
++#: instrumented from the inside: it counts its invocations in $CNT and saves, under $PROBE,
++#: the prompt it was given and the CONTENT OF $ERRLOG AT THAT MOMENT. $RESIDUE (os.pathsep-
++#: separated) names files it half-writes before dying — a builder that wrote patch.diff and
++#: then lost its API connection.
++_DYING_BUILDER = (
++    "import os, sys; "
++    "cnt = os.environ['CNT']; "
++    "n = len(open(cnt).read()) + 1 if os.path.exists(cnt) else 1; "
++    "open(cnt, 'a').write('x'); "
++    "probe = os.environ['PROBE']; "
++    "open(os.path.join(probe, 'prompt%d' % n), 'w').write(sys.stdin.read()); "
++    "log = os.environ['ERRLOG']; "
++    "open(os.path.join(probe, 'errlog%d' % n), 'w')"
++    ".write(open(log).read() if os.path.exists(log) else '(absent)'); "
++    "[open(p, 'w').write('half\\n') "
++    " for p in os.environ.get('RESIDUE', '').split(os.pathsep) if p]; "
++    "sys.stderr.write('overloaded_error 529\\n'); "
++    "sys.exit(1)"
++)
++
++#: Same counter, but it emits a stream event first: it RAN and then failed on the merits.
++_SUBSTANTIVE_BUILDER = (
++    "import os, sys; "
++    "open(os.environ['CNT'], 'a').write('x'); sys.stdin.read(); "
++    "print('{\"type\": \"assistant\"}'); "
++    "sys.stderr.write('the brief contradicts itself\\n'); sys.exit(1)"
++)
++
++#: Killed from OUTSIDE mid-run — the shape a leaf gets from the #420 memory cap's OOM
++#: SIGKILL. No stream event either, so `.transient` is True for it as well; the returncode
++#: is what tells them apart (negative: the child did not choose its own exit status).
++_SIGKILLED_BUILDER = (
++    "import os, signal, sys; "
++    "open(os.environ['CNT'], 'a').write('x'); sys.stdin.read(); "
++    "sys.stderr.write('Killed\\n'); "
++    "os.kill(os.getpid(), signal.SIGKILL)"
++)
++
++#: The same death one wrapper deep: `argv[0]` is a shell / `docker run` / a local-executor
++#: script, and what the harness sees is the WRAPPER's exit status for a child killed by
++#: signal N — 128+N, a POSITIVE number (137 = SIGKILL).
++_WRAPPER_KILLED_BUILDER = (
++    "import os, sys; "
++    "open(os.environ['CNT'], 'a').write('x'); sys.stdin.read(); "
++    "sys.stderr.write('Killed\\n'); sys.exit(137)"
++)
++
++#: Dies transiently on attempt 1, then builds on attempt 2 (writes $RESIDUE, exits 0).
++_FLAKY_BUILDER = (
++    "import os, sys; "
++    "cnt = os.environ['CNT']; "
++    "n = len(open(cnt).read()) + 1 if os.path.exists(cnt) else 1; "
++    "open(cnt, 'a').write('x'); sys.stdin.read(); "
++    "sys.stderr.write('overloaded_error 529\\n') if n == 1 else None; "
++    "sys.exit(1) if n == 1 else None; "
++    "[open(p, 'w').write('whole\\n') "
++    " for p in os.environ.get('RESIDUE', '').split(os.pathsep) if p]; "
++    "print('{\"type\": \"result\"}')"
++)
++
++
++def _cfg(root: Path, *, builder: LeafConfig, reviewer: LeafConfig | None = None,
++         plan_advisory: list[dict] | None = None,
++         advisory: list[dict] | None = None) -> Config:
++    cfg = Config(
++        root=root,
++        bundle_root=root / "results",
++        process_dir=root / "process",
++        templates_dir=root / "templates",
++        default_branch="main",
++        tracker_system="github",
++        tracker_url="",
++        issue_id_example="#1",
++        builder=builder,
++        reviewer=reviewer or LeafConfig(mode="stub", family="codex"),
++        worktree=False,          # edit in place — keep the slice free of git
++    )
++    cfg.plan_advisory_leaves = list(plan_advisory or [])
++    cfg.advisory_leaves = list(advisory or [])
++    return cfg
++
++
++def _command_leaf(script: str) -> LeafConfig:
++    """A claude-family COMMAND leaf that is a Python interpreter, so the stream path — the
++    only one that yields the "did a session start" signal — engages."""
++    return LeafConfig(mode="command", family="claude",
++                      argv=[sys.executable, "-c", script], interactive=False)
++
++
++class BuilderRetriesLikeEveryOtherLeaf(unittest.TestCase):
++    """#506 (i)/(ii)/(iii)/(iv). `_do_build_command` called plain `_invoke`, so the ONE leaf
++    the harness never retried was the most expensive one to lose. These drive the real
++    `do_build` → `_invoke_leaf_resilient` → `_invoke` → `progress` → `subprocess` path with
++    a builder that is a Python interpreter; only `time.sleep` is patched, so the shipped
++    attempt/backoff defaults are exercised as they ship, without spending their wall clock."""
++
++    def setUp(self) -> None:
++        self.tmp = Path(tempfile.mkdtemp())
++        self.probe = self.tmp / "probe"
++        self.probe.mkdir()
++        self.cnt = self.tmp / "count.txt"
++        self.cfg = _cfg(self.tmp, builder=_command_leaf(_DYING_BUILDER))
++        self.d = self.cfg.bundle("506")
++        self.d.mkdir(parents=True)
++        (self.d / "brief.md").write_text(
++            "- **Slug:** attempt-accountability\n"
++            "- **Test file:** `test_attempts.py`\n", encoding="utf-8")
++        self.log = self.d / leaves.BUILD_ERROR_LOG
++        slept = mock.patch.object(leaves.time, "sleep",  # the backoff, minus its wall clock
++                                  side_effect=_skip_backoff)
++        slept.start()
++        self.addCleanup(slept.stop)
++        environ = mock.patch.dict(os.environ, {
++            "CNT": str(self.cnt), "PROBE": str(self.probe), "ERRLOG": str(self.log)})
++        environ.start()
++        self.addCleanup(environ.stop)
++
++    def tearDown(self) -> None:
++        shutil.rmtree(self.tmp, ignore_errors=True)
++
++    def _runs(self) -> int:
++        return len(self.cnt.read_text()) if self.cnt.exists() else 0
++
++    def _probe(self, name: str) -> str:
++        path = self.probe / name
++        return path.read_text(encoding="utf-8") if path.exists() else ""
++
++    def _failing_build(self) -> str:
++        """Run Do to its final failure; return what the operator saw on stderr."""
++        err = io.StringIO()
++        with redirect_stdout(io.StringIO()), redirect_stderr(err):
++            with self.assertRaises(leaves.LeafError):  # still re-raised for flow._isolate
++                leaves.do_build(self.d, self.cfg)
++        return err.getvalue()
++
++    def test_a_transient_builder_death_is_retried_to_the_attempt_budget(self) -> None:
++        out = self._failing_build()
++        self.assertEqual(self._runs(), 3)      # the wrapper's shipped budget, not 1
++        self.assertIn("retry 1/2 in 4s", out)  # …with the shipped backoff between attempts
++        self.assertIn("retry 2/2 in 8s", out)
++        text = self.log.read_text(encoding="utf-8")
++        self.assertEqual(text.count("overloaded_error 529"), 3)  # every attempt accounted
++        self.assertIn("attempt 3", text)
++
++    def test_a_substantive_builder_failure_is_still_not_retried(self) -> None:
++        self.cfg.builder = _command_leaf(_SUBSTANTIVE_BUILDER)
++        out = self._failing_build()
++        self.assertEqual(self._runs(), 1)  # it read the brief and failed on the merits
++        self.assertNotIn("retry", out)     # …so nothing is retried, exactly as today
++        self.assertIn("the brief contradicts itself",
++                      self.log.read_text(encoding="utf-8"))
++        self.assertNotIn("TRANSIENT", out)  # nor is it reported as absorbed infra
++
++    def test_a_builder_killed_by_a_signal_is_not_retried(self) -> None:
++        """#510 stays #510. A leaf SIGKILLed from outside — the #420 memory cap's OOM kill
++        is the shipped way to earn one — produced no stream event either, so it reads
++        `transient`. Retrying it would re-run, twice more, the very build that exhausted
++        its bound, and would tell the operator the failure was absorbed infra while
++        build.error.log says otherwise. One spawn, re-raised: exactly today's behaviour."""
++        self.cfg.builder = _command_leaf(_SIGKILLED_BUILDER)
++        out = self._failing_build()
++        self.assertEqual(self._runs(), 1)
++        self.assertNotIn("retry", out)
++        self.assertNotIn("TRANSIENT", out)  # no claim that the harness absorbed it
++
++    def test_a_signal_death_reported_one_wrapper_deep_is_not_retried_either(self) -> None:
++        """The same kill, seen through a wrapper argv (`sh -c …`, `docker run`, a local
++        executor): the harness gets the WRAPPER's status for a child killed by signal N —
++        128+N, positive — so an exclusion written as `returncode < 0` misses it entirely
++        and the OOM is repeated three times. `_died_of_a_signal` reads both spellings."""
++        self.cfg.builder = _command_leaf(_WRAPPER_KILLED_BUILDER)
++        out = self._failing_build()
++        self.assertEqual(self._runs(), 1)
++        self.assertNotIn("retry", out)
++        self.assertNotIn("TRANSIENT", out)
++        self.assertIn("Killed", self.log.read_text(encoding="utf-8"))
++
++    def test_a_recovered_build_is_reported_exactly_as_a_clean_one(self) -> None:
++        # The retry that works must leave the bundle indistinguishable from a build that
++        # never failed: patch.diff present, no error log, nothing raised.
++        self.cfg.builder = _command_leaf(_FLAKY_BUILDER)
++        with mock.patch.dict(os.environ, {"RESIDUE": str(self.d / "patch.diff")}), \
++                redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
++            leaves.do_build(self.d, self.cfg)  # must NOT raise
++        self.assertEqual(self._runs(), 2)
++        self.assertTrue((self.d / "patch.diff").exists())
++        self.assertFalse(self.log.exists(), "a leaf that worked leaves no error log")
++
++    def test_each_attempts_account_is_on_disk_before_the_next_one_starts(self) -> None:
++        # (ii) Read from INSIDE the child: what did build.error.log hold while attempt 2
++        # ran? Written only after the loop, the answer is "nothing" — and the retry note
++        # that points the retried builder at that file would be a false instruction.
++        self._failing_build()
++        self.assertEqual(self._probe("errlog1"), "(absent)")  # nothing failed yet
++        during_2 = self._probe("errlog2")
++        self.assertIn("attempt 1", during_2)
++        self.assertIn("overloaded_error 529", during_2)
++        self.assertIn("attempt 2", self._probe("errlog3"))
++
++    def test_a_retry_never_starts_without_its_predecessors_account_on_disk(self) -> None:
++        """(ii) is a CONTINGENCY, not merely a flush order: attempt N+1 may start only once
++        attempt N's account is DURABLY on disk. A wrapper that writes best-effort and
++        retries regardless leaves exactly the window it exists to close — the next attempt
++        runs while nothing on disk explains the first, and a run killed in that window
++        leaves the bundle no account of either."""
++        real_write = Path.write_text
++
++        def refuse_the_log(self_, *a, **kw):
++            if self_.name == leaves.BUILD_ERROR_LOG:
++                raise OSError("read-only bundle")
++            return real_write(self_, *a, **kw)
++
++        with mock.patch.object(Path, "write_text", refuse_the_log):
++            out = self._failing_build()
++        self.assertEqual(self._runs(), 1, "no second attempt over an unrecorded first")
++        self.assertIn("could not write", out)
++        self.assertIn("not starting another attempt", out)
++        # …and the SAME builder against a writable bundle does retry: what stopped it was
++        # the unrecorded predecessor, not the failure class.
++        self.cnt.unlink()
++        self._failing_build()
++        self.assertEqual(self._runs(), 3)
++
++    def test_a_broken_stderr_never_replaces_the_builders_own_failure(self) -> None:
++        """Criterion (i): the final failure is captured and RE-RAISED either way. Every
++        report this path added goes to stderr, and a console that is gone raises
++        BrokenPipeError — an OSError — so an unguarded print hands `flow._isolate` an
++        exception about REPORTING the failure instead of the failure itself. The spawn is
++        stubbed here so the only stderr writers left are the ones this slice added."""
++        with mock.patch.object(leaves, "_invoke", side_effect=leaves.LeafError(
++                1, ["claude"], output="overloaded_error 529")) as invoked, \
++                redirect_stdout(io.StringIO()), redirect_stderr(_BrokenStderr()):
++            with self.assertRaises(leaves.LeafError):
++                leaves.do_build(self.d, self.cfg)
++        self.assertEqual(invoked.call_count, 3)   # …and the retries still ran
++        self.assertIn("overloaded_error 529", self.log.read_text(encoding="utf-8"))
++
++    def test_the_retried_builder_is_told_it_is_looking_at_a_dead_attempts_residue(self) -> None:
++        # (iii) `worktree.ensure` ran once, before the wrapper: attempt 2 opens a tree
++        # still carrying attempt 1's edits and a bundle that may already hold patch.diff.
++        self._failing_build()
++        first, second = self._probe("prompt1"), self._probe("prompt2")
++        self.assertNotIn("RETRY NOTICE", first)   # attempt 1's prompt is unchanged
++        self.assertIn("You are the Do builder", first)
++        self.assertIn("You are the Do builder", second)  # …and still the whole task
++        for expected in ("RETRY NOTICE", "died MID-FLIGHT", "INCOMPLETE RESIDUE",
++                         "patch.diff", leaves.BUILD_ERROR_LOG):
++            self.assertIn(expected, second)
++        self.assertIn("RETRY NOTICE", self._probe("prompt3"))
++
++    def test_the_exhausted_report_is_true_for_the_residue_actually_left(self) -> None:
++        # (iv) The builder wrote a partial patch.diff and then died: the bundle now reads
++        # BUILT, so a plain re-run would run CHECK on that partial patch, not Do. Saying
++        # "just re-run Do" there would be false — and nothing may delete the patch to make
++        # the simpler sentence true.
++        with mock.patch.dict(os.environ, {"RESIDUE": str(self.d / "patch.diff")}):
++            out = self._failing_build()
++        self.assertIn("TRANSIENT", out)                 # the class of failure, named
++        self.assertIn("after 3 attempt(s)", out)        # what it actually cost
++        self.assertIn(leaves.BUILD_ERROR_LOG, out)      # where its account is
++        self.assertIn("reads BUILT", out)               # what the residue did to the bundle
++        self.assertIn("runs CHECK", out)                # what a plain re-run would do
++        self.assertIn("iterate-do", out)                # a next action that actually works
++        self.assertTrue((self.d / "patch.diff").exists(),
++                        "the report describes the bundle; it never edits it")
++        # …and the claim is TRUE of the real state machine, not just a nice sentence.
++        self.assertEqual(state.state(self.d), state.BUILT)
++
++    def test_the_exhausted_report_asks_the_state_machine_not_the_residues_shape(self) -> None:
++        """The advice must be derived from `state.state`, not from "is there a patch.diff".
++        `state.state` is a waterfall: patch.diff AND check-gates.json reads CHECKED, whose
++        next beat is assembly — so a patch-shaped guess is false exactly on the bundle its
++        own previous advice creates (let Check run, then Do dies again)."""
++        (self.d / "check-gates.json").write_text("{}\n", encoding="utf-8")
++        with mock.patch.dict(os.environ, {"RESIDUE": str(self.d / "patch.diff")}):
++            out = self._failing_build()
++        self.assertEqual(state.state(self.d), state.CHECKED)
++        self.assertIn("reads CHECKED", out)
++        self.assertIn("ASSEMBLES SUMMARY.md", out)
++        self.assertNotIn("runs CHECK on the residue", out)  # that sentence is false here
++
++    def test_the_exhausted_report_names_the_residue_without_inventing_its_author(self) -> None:
++        # No patch.diff, so the bundle still reads PLANNED and a plain re-run DOES re-drive
++        # Do — over a half-written build-notes.md and the brief's test file, which that
++        # fresh builder gets with no retry notice attached. Say so; do not report "inputs
++        # intact" while an unfinished attempt's residue sits in the bundle. And do not
++        # claim WHO wrote it: a transient death produced nothing by definition, so these
++        # files are as likely an earlier round's, and the harness cannot tell.
++        residue = [self.d / "build-notes.md", self.d / "test_attempts.py"]
++        with mock.patch.dict(os.environ, {"RESIDUE": os.pathsep.join(map(str, residue))}):
++            out = self._failing_build()
++        self.assertEqual(state.state(self.d), state.PLANNED)
++        self.assertIn("reads PLANNED", out)
++        self.assertIn("re-drives Do", out)
++        self.assertIn("build-notes.md", out)
++        self.assertIn("test_attempts.py", out)  # the file the brief names, left half-written
++        self.assertIn("which may predate this attempt", out)
++        self.assertNotIn("the interrupted attempt left", out)  # authorship it cannot know
++        self.assertIn("WITHOUT the retry notice", out)
++        self.assertTrue(all(p.exists() for p in residue))  # reported, never deleted
++
++
++class AKilledLeafIsRecoveredNotRetired(unittest.TestCase):
++    """#506 (ii) against #369. Flushing each attempt's record as it happens is what lets a
++    retried leaf — and a post-mortem — read its predecessor's account. But the error log is
++    also the #369 discriminator ("the leaf ran and FAILED"), so a log left MID-RETRY must
++    not retire a leaf the death window merely interrupted: that would leave the bundle with
++    no review of the diff at all, and it would still reach sign-off."""
++
++    def setUp(self) -> None:
++        self.tmp = Path(tempfile.mkdtemp())
++        self.cfg = _cfg(self.tmp, builder=LeafConfig(mode="stub", family="claude"),
++                        reviewer=LeafConfig(mode="command", family="claude", argv=["claude"]),
++                        advisory=[{"id": "lens", "mode": "stub", "family": "codex"}])
++        self.d = self.cfg.bundle("506")
++        self.d.mkdir(parents=True)
++        (self.d / "brief.md").write_text("- **Slug:** s\n", encoding="utf-8")
++        (self.d / "patch.diff").write_text("--- a/x\n", encoding="utf-8")
++        (self.d / "check-gates.json").write_text("{}\n", encoding="utf-8")
++        self.log = self.d / state.REVIEW_ERROR_LOG
++        slept = mock.patch.object(leaves.time, "sleep", side_effect=_skip_backoff)
++        slept.start()
++        self.addCleanup(slept.stop)
++
++    def tearDown(self) -> None:
++        shutil.rmtree(self.tmp, ignore_errors=True)
++
++    def _kill_the_reviewer_mid_retry(self) -> None:
++        """Attempt 1 dies transiently; the run is killed during the backoff."""
++        def dying(leaf, workdir, prompt, **kw):
++            raise leaves.LeafError(1, ["claude"], output="connection reset by peer")
++
++        with mock.patch.object(leaves, "_invoke", side_effect=dying), \
++                mock.patch.object(leaves.time, "sleep", side_effect=_kill_during_backoff), \
++                redirect_stderr(io.StringIO()):
++            with self.assertRaises(KeyboardInterrupt):
++                leaves._run_review_sandboxed(self.d, self.cfg)
++
++    def _reviewer_that_dies_then_writes_nothing(self, first_writes: str):
++        """Attempt 1 leaves an artifact in the sandbox and dies transiently; attempt 2 comes
++        back alive and writes nothing. The wrapper KEEPS the error log there — it is the
++        only surviving copy of the withdrawn text — so that log belongs to a loop that
++        FINISHED and must not read as one still in flight."""
++        calls: list[Path] = []
++
++        def flaky(leaf, workdir, prompt, **kw):
++            calls.append(Path(workdir))
++            if len(calls) == 1:
++                (Path(workdir) / "check-review.md").write_text(first_writes,
++                                                               encoding="utf-8")
++                raise leaves.LeafError(1, ["claude"], output="connection reset by peer")
++
++        return flaky
++
++    def test_a_reviewer_killed_mid_retry_leaves_its_account_and_is_still_recovered(self) -> None:
++        self._kill_the_reviewer_mid_retry()
++        # (ii): the dead attempt's account is on disk, written while the retry was pending.
++        self.assertIn("connection reset by peer", self.log.read_text(encoding="utf-8"))
++        self.assertTrue(leaves.leaf_run_incomplete(self.log))  # …and flagged unfinished
++        self.assertFalse((self.d / "check-review.md").exists())
++        self.assertEqual(state.state(self.d), state.CHECKED)
++
++        # #369 unchanged: the driver's CHECKED-resume must still recover the reviewer.
++        def alive(leaf, workdir, prompt, **kw):
++            (Path(workdir) / "check-review.md").write_text(
++                "| Item | Verdict | Basis |\nrecovered\n", encoding="utf-8")
++
++        with mock.patch.object(leaves, "_invoke", side_effect=alive), \
++                redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
++            driver._resume_interrupted_check(self.d, self.cfg, "")
++        self.assertIn("recovered", (self.d / "check-review.md").read_text(encoding="utf-8"))
++        self.assertFalse(self.log.exists(), "the recovered run cleared its predecessor's log")
++
++    def test_a_leaf_that_spent_its_whole_budget_is_still_not_re_run(self) -> None:
++        # The other half of the #138/#369 discriminator, unchanged: a COMPLETE error log
++        # means the leaf ran and gave up, and the resume leaves it alone. Written here by
++        # the production wrapper itself, so the two halves cannot drift apart.
++        leaf = _leaf(_TRANSIENT)
++        with mock.patch.dict(os.environ, {"CNT": str(self.tmp / "c")}), \
++                redirect_stderr(io.StringIO()):
++            leaves._invoke_leaf_resilient(
++                leaf, self.tmp, "review please", error_log=self.log,
++                attempts=2, backoff=0.0, stream_json=True)
++        self.assertFalse(leaves.leaf_run_incomplete(self.log))  # it gave up, not interrupted
++        with mock.patch.object(leaves, "_invoke") as invoked, \
++                redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
++            driver._resume_interrupted_check(self.d, self.cfg, "")
++        invoked.assert_not_called()
++        self.assertFalse((self.d / "check-review.md").exists())
++
++    def test_a_finished_loop_is_never_left_flagged_in_flight(self) -> None:
++        """The log the wrapper deliberately KEEPS (a dead attempt's artifact was withdrawn
++        and the winning attempt wrote none) is written by a loop that FINISHED. Left with
++        the in-flight trailer of its last retry, `leaf_run_incomplete` contradicts its own
++        docstring — and the #369 recovery would re-run a leaf that already ran out."""
++        dies_then_nothing = self._reviewer_that_dies_then_writes_nothing(
++            "| Item | Verdict |\nhalf")
++        with mock.patch.object(leaves, "_invoke", side_effect=dies_then_nothing), \
++                redirect_stderr(io.StringIO()):
++            leaves._run_review_sandboxed(self.d, self.cfg)
++        self.assertIn("half", self.log.read_text(encoding="utf-8"))  # evidence kept
++        self.assertFalse(leaves.leaf_run_incomplete(self.log))
++
++    def test_a_dead_attempts_artifact_ending_in_the_marker_is_not_the_trailer(self) -> None:
++        """Whether a run finished is a property of the harness's own trailer, never of what
++        a leaf wrote — and in THIS repo a verdict quoting the marker is an ordinary day.
++        The withdrawn artifact is embedded verbatim in the log, so one ending ON the marker
++        would otherwise BE the log's last line and speak for the run that quoted it."""
++        # The marker alone on the artifact's LAST line — a verdict quoting the source line
++        # it is reviewing, which is exactly where the withdrawn text lands in the log.
++        quoted = f"| Item | Verdict |\nit reads:\n{leaves._LEAF_IN_FLIGHT}\n"
++        dies_then_nothing = self._reviewer_that_dies_then_writes_nothing(quoted)
++        with mock.patch.object(leaves, "_invoke", side_effect=dies_then_nothing), \
++                redirect_stderr(io.StringIO()):
++            leaves._run_review_sandboxed(self.d, self.cfg)
++        self.assertIn("it reads:", self.log.read_text(encoding="utf-8"))  # kept, verbatim
++        self.assertFalse(leaves.leaf_run_incomplete(self.log))
++
++    def test_a_leaf_whose_stderr_quotes_the_marker_is_still_read_as_spent(self) -> None:
++        """The same hazard through the other door: the tail `_format_leaf_attempt` writes is
++        the leaf's OWN stderr — a builder editing this file, a reviewer quoting it. A leaf
++        that ran out of attempts must still read as spent, or #369 re-runs a leaf that
++        already gave up (and pays for it again)."""
++        noisy = leaves.LeafError(1, ["claude"],
++                                 output=f"echo of the source: {leaves._LEAF_IN_FLIGHT}")
++        with mock.patch.object(leaves, "_invoke", side_effect=noisy), \
++                redirect_stderr(io.StringIO()):
++            leaves._invoke_leaf_resilient(self.cfg.reviewer, self.tmp, "review please",
++                                          error_log=self.log, attempts=2, backoff=0.0)
++        self.assertIn("echo of the source", self.log.read_text(encoding="utf-8"))
++        self.assertFalse(leaves.leaf_run_incomplete(self.log))
++        # …and the #369 resume agrees: a spent leaf is not re-run.
++        with mock.patch.object(leaves, "_invoke") as invoked, \
++                redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
++            driver._resume_interrupted_check(self.d, self.cfg, "")
++        invoked.assert_not_called()
++
++    def test_an_advisory_leaf_killed_mid_retry_is_recovered_too(self) -> None:
++        # The same discriminator, second spelling (`only_missing`, leaves.py) — a leaf
++        # interrupted mid-retry is missing, not spent.
++        log = leaves.advisory_error_log(self.d, "lens")
++        with mock.patch.dict(os.environ, {"CNT": str(self.tmp / "c")}), \
++                mock.patch.object(leaves.time, "sleep", side_effect=_kill_during_backoff), \
++                redirect_stderr(io.StringIO()):
++            with self.assertRaises(KeyboardInterrupt):
++                leaves._invoke_leaf_resilient(
++                    _leaf(_TRANSIENT), self.tmp, "advise", error_log=log,
++                    attempts=3, backoff=4.0, stream_json=True)
++        self.assertTrue(log.exists())  # the interrupted attempt's account
++        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
++            leaves.run_advisory_leaves(self.d, self.cfg, only_missing=True)
++        self.assertTrue(leaves.advisory_artifact(self.d, "lens").exists())
++
++
++class DeadAttemptOutputIsNeverHarvested(unittest.TestCase):
++    """#506 (v). The three harvest sites copy their artifact `if produced.exists()`, with no
++    notion of WHICH attempt wrote it — so a truncated verdict a dead attempt left in the
++    sandbox is adopted as the output of the attempt that succeeded. These drive the real
++    harvest sites; only the vendor spawn (`_invoke`) is stubbed."""
++
++    TRUNCATED = "| Item | Verdict | Basis |\n| 1.1 Root cause | PA"
++
++    def setUp(self) -> None:
++        self.tmp = Path(tempfile.mkdtemp())
++        self.cfg = _cfg(self.tmp, builder=LeafConfig(mode="stub", family="claude"),
++                        reviewer=LeafConfig(mode="command", family="claude", argv=["claude"]),
++                        advisory=[{"id": "lens", "mode": "command", "family": "codex",
++                                   "argv": ["codex"]}])
++        self.d = self.cfg.bundle("506")
++        self.d.mkdir(parents=True)
++        (self.d / "brief.md").write_text("- **Slug:** s\n", encoding="utf-8")
++        (self.d / "patch.diff").write_text("--- a/x\n", encoding="utf-8")
++        (self.d / "check-gates.json").write_text("{}\n", encoding="utf-8")
++        slept = mock.patch.object(leaves.time, "sleep", side_effect=_skip_backoff)
++        slept.start()
++        self.addCleanup(slept.stop)
++
++    def tearDown(self) -> None:
++        shutil.rmtree(self.tmp, ignore_errors=True)
++
++    def _flaky(self, calls: list[Path], artifact: str, *, second_writes: str = ""):
++        """Attempt 1 writes half a verdict, then the connection drops. Attempt 2 comes back
++        alive and writes ``second_writes`` (by default nothing — so nothing reviewed the
++        diff, and the only file at that path is its dead predecessor's)."""
++        def flaky(leaf, workdir, prompt, **kw):
++            calls.append(Path(workdir))
++            if len(calls) == 1:
++                (Path(workdir) / artifact).write_text(self.TRUNCATED, encoding="utf-8")
++                raise leaves.LeafError(1, ["claude"], output="connection reset by peer")
++            if second_writes:
++                (Path(workdir) / artifact).write_text(second_writes, encoding="utf-8")
++        return flaky
++
++    def test_a_dead_attempts_half_written_verdict_is_not_adopted_as_the_reviews(self) -> None:
++        calls: list[Path] = []
++        with mock.patch.object(leaves, "_invoke",
++                               side_effect=self._flaky(calls, "check-review.md")), \
++                redirect_stderr(io.StringIO()):
++            leaves._run_review_sandboxed(self.d, self.cfg)
++        self.assertEqual(len(calls), 2)  # the transient death was retried, as before
++        review = (self.d / "check-review.md").read_text(encoding="utf-8")
++        self.assertNotIn("1.1 Root cause | PA", review)  # the dead attempt's file, refused
++        self.assertIn("NOT COMPLETED", review)           # the honest verdict: none produced
++        self.assertIn("NEEDS-HUMAN", review)
++
++    def test_the_withdrawn_verdict_is_readable_in_the_bundle_afterwards(self) -> None:
++        # Withdrawing a dead attempt's claim must not destroy its work: the sandbox it sat
++        # in is a TemporaryDirectory that dies with the run, so the text is kept in the
++        # bundle's own error log — the file the placeholder above already points at.
++        calls: list[Path] = []
++        with mock.patch.object(leaves, "_invoke",
++                               side_effect=self._flaky(calls, "check-review.md")), \
++                redirect_stderr(io.StringIO()):
++            leaves._run_review_sandboxed(self.d, self.cfg)
++        log = (self.d / state.REVIEW_ERROR_LOG).read_text(encoding="utf-8")
++        self.assertIn("1.1 Root cause | PA", log)
++        self.assertIn("check-review.md", log)  # …named as what it was, and whose it was
++        self.assertIn("attempt 1", log)
++
++    def test_the_live_attempts_own_artifact_is_still_harvested(self) -> None:
++        # The ownership check must not cost a leaf its own work: a retry that RE-writes the
++        # artifact is harvested exactly as today.
++        calls: list[Path] = []
++        with mock.patch.object(leaves, "_invoke", side_effect=self._flaky(
++                calls, "check-review.md",
++                second_writes="| Item | Verdict | Basis |\nfull verdict\n")), \
++                redirect_stderr(io.StringIO()):
++            leaves._run_review_sandboxed(self.d, self.cfg)
++        review = (self.d / "check-review.md").read_text(encoding="utf-8")
++        self.assertIn("full verdict", review)
++        self.assertNotIn("1.1 Root cause | PA", review)
++
++    def test_an_advisory_leafs_dead_attempt_is_refused_the_same_way(self) -> None:
++        calls: list[Path] = []
++        leaf = leaves._advisory_leaf(self.cfg.advisory_leaves[0], "advisory", "lens")
++        with mock.patch.object(leaves, "_invoke", side_effect=self._flaky(
++                calls, "check-advisory-lens.md")), redirect_stderr(io.StringIO()):
++            leaves._run_advisory_sandboxed(self.d, self.cfg, leaf,
++                                           self.cfg.advisory_leaves[0], "lens")
++        found = leaves.advisory_artifact(self.d, "lens").read_text(encoding="utf-8")
++        self.assertNotIn("1.1 Root cause | PA", found)
++        self.assertIn("NOT COMPLETED", found)
++
++    def test_the_plan_advisory_site_owns_the_file_it_later_harvests(self) -> None:
++        # The third site. Its target checkout is pinned per-run, so assert the wiring the
++        # other two prove behaviourally: the path handed to the wrapper for ownership is
++        # exactly the path the harvest copies out of the sandbox.
++        cfg = _cfg(self.tmp, builder=LeafConfig(mode="stub", family="claude"),
++                   plan_advisory=[{"id": "lens", "mode": "command", "family": "codex",
++                                   "argv": ["codex"]}])
++        d = cfg.bundle("PLAN")
++        d.mkdir(parents=True)
++        (d / "brief.md").write_text("- **Slug:** s\n", encoding="utf-8")
++        seen: dict = {}
++
++        def fake(leaf, cwd, prompt, **kw):
++            seen["artifact"] = kw.get("artifact")
++            seen["cwd"] = Path(cwd)
++            (Path(cwd) / "plan-advisory-lens.md").write_text("findings\n", encoding="utf-8")
++
++        with mock.patch.object(leaves, "_invoke_leaf_resilient", side_effect=fake), \
++                redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
++            leaves.run_plan_advisory(d, cfg)
++        self.assertEqual(seen.get("artifact"), seen["cwd"] / "plan-advisory-lens.md")
++        self.assertIn("findings", leaves.plan_advisory_artifact(d, "lens")
++                      .read_text(encoding="utf-8"))
++
++    def test_ownership_that_cannot_be_enforced_stops_the_retries(self) -> None:
++        """Fail CLOSED. If a dead attempt's file cannot be withdrawn, the next attempt would
++        run over a path the wrapper no longer owns — and a success that writes nothing would
++        hand the harvest that dead file. Stop instead: the leaf's own failure is returned,
++        the placeholder is written, and nothing dead is adopted."""
++        calls: list[Path] = []
++        real_unlink = Path.unlink
++
++        def refuse(self_, *a, **kw):  # only the artifact: the error log must still clear
++            if self_.name == "check-review.md":
++                raise OSError("read-only sandbox")
++            return real_unlink(self_, *a, **kw)
++
++        err = io.StringIO()
++        with mock.patch.object(leaves, "_invoke",
++                               side_effect=self._flaky(calls, "check-review.md")), \
++                mock.patch.object(Path, "unlink", refuse), redirect_stderr(err):
++            leaves._run_review_sandboxed(self.d, self.cfg)
++        self.assertEqual(len(calls), 1, "no further attempt over an unowned artifact path")
++        review = (self.d / "check-review.md").read_text(encoding="utf-8")
++        self.assertNotIn("1.1 Root cause | PA", review)
++        self.assertIn("NOT COMPLETED", review)
++        self.assertIn("stopping the retries", err.getvalue())
++
++
+ if __name__ == "__main__":
+     unittest.main()
