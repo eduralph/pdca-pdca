@@ -1,0 +1,35 @@
+fix(leaves): write each failed attempt's error log as it happens
+
+A leaf that fails transiently is retried, but its captured error output only
+reached disk once the retry loop had ended. A run killed while the loop was
+still going — Ctrl-C, an OOM kill, a closed session — therefore left nothing
+behind explaining any of the attempts, and anything reading the bundle during
+attempt 2 found no account of attempt 1. Each failed attempt's record is now
+written before the next attempt starts, so an interrupted run leaves a
+post-mortem.
+
+That flush alone would have broken the reader side. The mere presence of an
+error log was how the engine said "this leaf ran and exhausted its retries",
+and two of the four readers use that to decide whether a leaf still needs
+running: a log appearing mid-retry would have retired a reviewer that a death
+window had merely interrupted, and the bundle could then reach sign-off with
+no review of the diff at all. So the sentence is now stated rather than
+inferred — the harness closes a spent leaf's record with an explicit final
+line, and all four readers ask for that line instead of testing whether the
+file exists. Every other shape (absent, empty, unfinished, cut short by a
+failing write, or written by an older version) re-runs the leaf: that costs
+one leaf run, where the opposite error costs the review itself.
+
+Two supporting properties keep that honest. A record is replaced whole, via a
+sibling temp file and a rename, so a write that dies part-way leaves the last
+complete record in place instead of a truncated one, and no partial sibling is
+left in the bundle; a flush that cannot be written stays best-effort and never
+shortens the retry budget. And a leaf's own captured output can no longer
+close the harness's account of that leaf's run — a marker-shaped line from the
+leaf is quoted rather than dropped, and the marker counts only as the record's
+last non-blank line, alone.
+
+A leaf that recovers on a retry still leaves no error log behind, and the
+attempt count, the transient rule and the backoff schedule are unchanged.
+
+Fixes #540

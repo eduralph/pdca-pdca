@@ -1,0 +1,12 @@
+{
+  "mode": "stacked-pr",
+  "branch": "fix/540-per-attempt-record-and-one-error-log-meaning",
+  "pr_url": "https://github.com/eduralph/pdca-harness/pull/543",
+  "base": "pdca-integration/main",
+  "repo": "eduralph/pdca-harness",
+  "by": "Eduard Ralph",
+  "date": "2026-08-16",
+  "id_pending": false,
+  "host_ci_base": "d2938ef8a22e2c9ba75d8a80f44cd1b22ffa1f98",
+  "stacks_on": []
+}
