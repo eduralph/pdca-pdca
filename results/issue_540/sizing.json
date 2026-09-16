@@ -1,0 +1,9 @@
+{
+  "band": "ok",
+  "independent_outcomes": [
+    "Write error log records for each failed attempt before the next attempt starts, establish a single point of truth for the settled/unsettled state (so all readers consult it consistently), make writes atomic via temp file + os.replace() to prevent torn-write races, and ensure empty/contentless logs fail towards re-running"
+  ],
+  "proposed_seams": [],
+  "confidence": "high",
+  "brief_sha": "8448b30a77168359"
+}

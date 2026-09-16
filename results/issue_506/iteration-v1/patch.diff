@@ -1,0 +1,617 @@
+diff --git a/template/src/pdca_harness/leaves.py b/template/src/pdca_harness/leaves.py
+index 1211604..05c4e20 100644
+--- a/template/src/pdca_harness/leaves.py
++++ b/template/src/pdca_harness/leaves.py
+@@ -94,7 +94,10 @@ class LeafError(subprocess.CalledProcessError):
+     stream event (real work) before exiting, vs only the CLI's ``system``/``init``
+     or ``api_retry`` events. ``produced is False`` is the transient-infra signal: the
+     child died at/near invocation (usage/rate limit, 5xx, auth, network) before doing
+-    any work, so a retry is likely to succeed."""
++    any work — **or**, however much work it did first, the stream's last word was the
++    CLI's own terminal error report (``API Error: Connection lost mid-response.``,
++    an overload/5xx, a mid-session rate-limit rejection; ``progress.run_with_heartbeat``,
++    issue #506) — so a retry is likely to succeed, and ``output`` carries that report."""
+ 
+     def __init__(self, returncode: int, cmd, output: str = "", produced: bool = False):
+         super().__init__(returncode, cmd, output=output)
+@@ -663,10 +666,11 @@ def _invoke(
+             # The death explained next to the death reported: the post-mortem rides
+             # `output` into the same `*.error.log` the stderr tail lands in.
+             output = (output or "") + telemetry.post_mortem(rc)
+-        # Only the stream path gives a real "did a session start" signal. Without it
+-        # (a stream-less family) we cannot tell invocation-death from a substantive
+-        # failure, so report produced=True → not transient, not retried — preserving
+-        # the prior immediate-placeholder behavior for non-stream leaves.
++        # Only the stream path gives a real signal for HOW the leaf died — that a session
++        # started, and (#506) whether its last word was the CLI's own terminal error
++        # report. Without it (a stream-less family) we cannot tell invocation-death from a
++        # substantive failure, so report produced=True → not transient, not retried —
++        # preserving the prior immediate-placeholder behavior for non-stream leaves.
+         raise LeafError(rc, argv, output=output, produced=produced or not use_stream)
+ 
+ 
+@@ -680,16 +684,17 @@ def _invoke_leaf_resilient(
+     backoff: float = 4.0,
+     **kw,
+ ) -> Exception | None:
+-    """Run a headless reviewer/advisory leaf with bounded retry + error capture (#138).
+-
+-    A non-zero exit that produced **no output** is the transient-infra signal — the
+-    child died at/near invocation (usage/rate limit, 5xx, auth, network), not a
+-    reviewer that read the diff and couldn't decide — so retry it with exponential
+-    backoff. A failure that *did* produce output, or a non-LeafError (e.g. command
+-    not found), is substantive: do not retry. On final failure the captured stderr
+-    tail of every attempt is written to ``error_log`` so the bundle carries
+-    recoverable error text, not just an exit code. Returns ``None`` on success, else
+-    the final exception (a :class:`LeafError` exposes ``.transient``).
++    """Run a headless leaf with bounded retry + error capture (#138; the builder too, #506).
++
++    A non-zero exit the stream reader classified **transient** is retried with exponential
++    backoff: the child produced no substantive event at all (it died at/near invocation —
++    usage/rate limit, 5xx, auth, network), or it worked and then reported its own terminal
++    infrastructure death (#506). Neither is a leaf that read its input and couldn't decide.
++    A substantive failure, or a non-LeafError (e.g. command not found), is not retried.
++    On final failure the captured error text of every attempt is written to ``error_log``
++    so the bundle carries a recoverable post-mortem, not just an exit code. Returns
++    ``None`` on success, else the final exception (a :class:`LeafError` exposes
++    ``.transient``).
+ 
+     Every attempt also runs under memory telemetry when its spawn is memory-capped:
+     the ``*.memory.jsonl`` twin of ``error_log`` (`_memory_log_for`), cleared here
+@@ -713,11 +718,19 @@ def _invoke_leaf_resilient(
+             if not transient or attempt == attempts:
+                 break
+             delay = backoff * (2 ** (attempt - 1))
+-            print(f"leaves: {workdir.name} — leaf exited {getattr(exc, 'returncode', '?')} "
+-                  f"with no output (transient); retry {attempt}/{attempts - 1} in "
++            # Name the leaf by its label when it has one (`Do issue_506`): `workdir` is the
++            # reviewer's sandbox but the HARNESS ROOT for a cwd-discovery builder, which
++            # names no bundle at all.
++            print(f"leaves: {kw.get('label') or workdir.name} — leaf exited "
++                  f"{getattr(exc, 'returncode', '?')} on a transient infra failure "
++                  f"(not the leaf's own); retry {attempt}/{attempts - 1} in "
+                   f"{delay:.0f}s", file=sys.stderr)
+             time.sleep(delay)
+-    error_log.write_text("".join(records), encoding="utf-8")
++    try:
++        error_log.write_text("".join(records), encoding="utf-8")
++    except OSError as write_err:  # capture must never mask the leaf's real failure
++        print(f"leaves: could not write {error_log.name} ({write_err}); the leaf's "
++              "failure is returned unchanged", file=sys.stderr)
+     return last
+ 
+ 
+@@ -730,6 +743,15 @@ def _format_leaf_attempt(exc: Exception, attempt: int) -> str:
+     return f"----- attempt {attempt} — exit {rc} -----\n{body}\n\n"
+ 
+ 
++def _has_content(path: Path) -> bool:
++    """Does ``path`` already hold a post-mortem worth keeping? An absent, unreadable or
++    empty file answers False, so a second writer knows it is not overwriting evidence."""
++    try:
++        return path.stat().st_size > 0
++    except OSError:
++        return False
++
++
+ # ----------------------------------------------------------------------------
+ # Notes-fetch (issue #65): retrieve a bundle's tracker thread before the Plan beat.
+ # ----------------------------------------------------------------------------
+@@ -1770,19 +1792,39 @@ def do_build(d: Path, cfg: Config) -> None:
+             _do_build_command(d, cfg, builder, n)
+     except Exception as exc:  # noqa: BLE001 — capture, then re-raise for the caller
+         try:
+-            error_log.write_text(_format_leaf_attempt(exc, 1), encoding="utf-8")
++            # A leaf failure has already been written attempt-by-attempt by
++            # `_invoke_leaf_resilient` (#506); overwriting it here with a single record
++            # would destroy the very post-mortem it just kept. Only a Do that died AROUND
++            # the leaf — setup (`worktree.ensure`, the lane lock), or a wrapper that could
++            # not write — still has nothing on disk, and that is what this captures.
++            if not _has_content(error_log):
++                error_log.write_text(_format_leaf_attempt(exc, 1), encoding="utf-8")
+             print(f"leaves: {d.name} — Do failed; captured the error tail in "
+                   f"{BUILD_ERROR_LOG}", file=sys.stderr)
+         except OSError:
+             pass  # never let error-capture mask the real failure
++        if getattr(exc, "transient", False):
++            # What the operator reads must name the CLASS of failure and the next action
++            # (#506). An argv and an exit status say neither: the incident's operator saw
++            # `LeafError: Command '['claude', …]' returned non-zero exit status 1` for an
++            # API connection that dropped mid-response, and the cause was legible only in
++            # the CLI's own session transcript under ~/.claude/projects/.
++            print(f"leaves: {d.name} — Do's builder leaf died of a TRANSIENT infra failure "
++                  f"(its own terminal error, or a death before it produced anything) and "
++                  f"the bounded retries are exhausted; nothing substantive failed. The "
++                  f"leaf's account of it is in {BUILD_ERROR_LOG}. Safe to re-run: this "
++                  f"bundle keeps its inputs, so re-driving Do on {d.name} (`run` / `flow`) "
++                  f"resumes the cycle.", file=sys.stderr)
+         raise
+ 
+ 
+ def _do_build_command(d: Path, cfg: Config, builder: LeafConfig, n: int) -> None:
+-    """Run Do on a command backend: set up isolation, then invoke the leaf.
++    """Run Do on a command backend: set up isolation, then invoke the leaf resiliently.
+ 
+-    Every failure here — setup or invocation — is captured to `build.error.log` by the
+-    caller and re-raised, so `flow._isolate` still contains it and drops just this bundle.
++    Every failure here still reaches `build.error.log` and is still re-raised, so
++    `flow._isolate` contains it and drops just this bundle — the invocation's failure
++    written attempt-by-attempt by `_invoke_leaf_resilient` (#506), a SETUP failure by the
++    caller's capture.
+     """
+     _record_loop_attempt(d, n, builder, cfg)
+     # Isolate Do in a per-cycle worktree off the base (issue #94) so the host's
+@@ -1820,15 +1862,27 @@ def _do_build_command(d: Path, cfg: Config, builder: LeafConfig, n: int) -> None
+         # A family without its own PreToolUse STOP hook gets the driver's `gh`
+         # PATH shim — the same builder_guard rules, enforced vendor-neutrally.
+         env = guard.shim_env(cfg, env)
++    # The builder runs on the SAME resilient path as the reviewer/advisory leaves (#506):
++    # bounded retry with backoff for a death the leaf itself reported as transient infra,
++    # every attempt's error text kept in `build.error.log`. It was the one leaf still on
++    # plain `_invoke`, so NO builder failure was ever retried — on the leaf where an attempt
++    # is most expensive (an escalated opus/max tier runs for tens of minutes) and where a
++    # burnt attempt costs a whole cycle round. A substantive failure is still not retried,
++    # and the final exception is re-raised so `do_build`'s capture and `flow._isolate` see
++    # exactly what they see today. The wrapper's defaults are reused as they are: this
++    # slice adds no knob it has no evidence to tune.
+     # Watch the bundle d so the heartbeat shows patch.diff / build-notes.md appearing.
+-    _invoke(
++    err = _invoke_leaf_resilient(
+         builder, workdir, _build_prompt(d, cfg, worktree_root=wt),
++        error_log=d / BUILD_ERROR_LOG,
+         label=f"Do {d.name}",
+         status=lambda: progress.bundle_activity(d, ("patch.diff", "build-notes.md")),
+         stream_json=True,  # Tier 3: show the builder's live tool-use
+         env=env, extra_argv=extra, cfg=cfg,
+         memory_log=d / BUILD_MEMORY_LOG,  # scope telemetry, active only when capped
+     )
++    if err is not None:
++        raise err
+ 
+ 
+ def _build_prompt(d: Path, cfg: Config | None = None, *,
+@@ -2590,11 +2644,11 @@ def _unavailable_classification(failure: str, error_log: Path | None) -> str:
+     }.get(failure, assemble.LEAF_STATUS_HUMAN)
+     marker = f"<!-- pdca:leaf-status {status} -->\n\n"
+     if failure == _FAIL_TRANSIENT:
+-        kind = ("**transient infra — safe to re-run.** The leaf exited non-zero with no "
+-                "output and retries did not recover, so it almost certainly hit a usage/"
+-                "rate limit or a transient API/network error rather than reviewing the "
+-                "diff; a sibling advisory leaf of a different family may already have "
+-                "covered it.")
++        kind = ("**transient infra — safe to re-run.** The leaf exited non-zero without "
++                "producing anything, or reported its own terminal API/network error, and "
++                "retries did not recover — so it hit a usage/rate limit, an overload/5xx "
++                "or a dropped connection rather than reviewing the diff (#506); a sibling "
++                "advisory leaf of a different family may already have covered it.")
+     elif failure == _FAIL_STARTUP:
+         kind = ("**startup infra — the leaf never ran.** Its configured command could not be "
+                 "launched at all (the binary is absent, or not executable), so nothing "
+diff --git a/template/src/pdca_harness/progress.py b/template/src/pdca_harness/progress.py
+index 627195c..cbd5142 100644
+--- a/template/src/pdca_harness/progress.py
++++ b/template/src/pdca_harness/progress.py
+@@ -55,15 +55,29 @@ def run_with_heartbeat(
+     stdout+stderr when ``capture`` is True (so a gate can keep its evidence line);
+     the bounded **stderr tail** when ``stream_json`` or ``tee_stderr`` is set (so a
+     failed leaf's real error — usage/rate limit, 5xx, auth — survives in the bundle
+-    instead of scrolling past on a console nobody is watching); ``""`` otherwise.
++    instead of scrolling past on a console nobody is watching), with the leaf's own
++    **terminal error text** appended when the stream carried one; ``""`` otherwise.
+     ``produced`` is whether the child emitted a **substantive** stream event — an
+-    ``assistant`` / ``user`` / ``result`` event, i.e. a session that did real work.
++    ``assistant`` / ``user`` / ``result`` event, i.e. a session that did real work —
++    and was *not* then killed by an error it reported itself.
+     Claude emits a ``system``/``init`` event (and ``system``/``api_retry`` on a
+     retryable API error) *before* doing anything, so those do NOT count: a non-zero
+     exit with ``produced is False`` is the transient-infra signal (the child died
+     at/near invocation — usage/rate limit, 5xx, auth — before any real output).
+     ``input_text``, if given, is written to stdin.
+ 
++    A stream whose **last word** is the CLI's own account of an infrastructure death —
++    ``API Error: Connection lost mid-response.``, an overload/5xx, a mid-session
++    rate-limit rejection (:func:`_terminal_error_text`) — forces ``produced`` back to
++    False however much work came first, and that text is appended to ``output`` so it
++    reaches the caller's ``*.error.log`` by the same route the stderr tail does (issue
++    #506). "Produced anything" is only a **proxy** for "died at invocation", and the
++    proxy fails for exactly the long sessions where an attempt is most expensive: an
++    18-minute leaf that then loses its connection did plenty of work and still died of
++    infrastructure it did not cause. The classifier reads what actually happened, and
++    only for a ``stream_format`` whose error shape is known — every other family keeps
++    its current classification rather than guessing.
++
+     ``timeout``, if given, is the wall-clock bound in seconds (issue #368): on expiry
+     the child's whole process GROUP is terminated (SIGTERM, then SIGKILL after a
+     grace) and the returncode slot carries :data:`TIMEOUT_RC` — a distinguishable
+@@ -142,6 +156,10 @@ def run_with_heartbeat(
+     chunks: list[str] = []
+     err_tail: deque[str] = deque(maxlen=200)  # bounded stderr tail for a failed leaf
+     produced = {"session": False}  # did a substantive stream event arrive (real work)?
++    # The leaf's OWN account of a terminal death, kept as the newest such line the stream
++    # carried and cleared again if real work follows it (#506) — "terminal" means it was
++    # the stream's last word, not merely that an error was mentioned somewhere.
++    terminal = {"error": ""}
+     latest_tool = {"label": ""}  # most recent tool-use, updated by the drain thread
+     readers: list[threading.Thread] = []
+     if capture_out:
+@@ -151,8 +169,14 @@ def run_with_heartbeat(
+                 if capture:
+                     chunks.append(line)
+                 if stream_json:
+-                    if _is_session_event(line, stream_format):
+-                        produced["session"] = True  # a startup/init line does NOT count
++                    fatal = _terminal_error_text(line, stream_format)
++                    if fatal:
++                        terminal["error"] = fatal  # the CLI reporting its own death
++                    else:
++                        if _is_session_event(line, stream_format):
++                            produced["session"] = True  # a startup/init line does NOT count
++                        if terminal["error"] and _work_continued(line, stream_format):
++                            terminal["error"] = ""  # it recovered — that error was not the end
+                     lbl = _stream_tool_label(line, stream_format)
+                     if lbl:
+                         latest_tool["label"] = lbl
+@@ -253,8 +277,14 @@ def run_with_heartbeat(
+         if stream is not None:
+             stream.close()
+     output = "".join(chunks) if capture else ("".join(err_tail) if tee_err else "")
++    if terminal["error"]:
++        # The diagnostic the incident had to be dug out of ~/.claude/projects/ rides
++        # `output` into the caller's `*.error.log` by the same route the stderr tail
++        # does, so no reader needs a special case for it (#506).
++        sep = "" if not output or output.endswith("\n") else "\n"
++        output = f"{output}{sep}{terminal['error']}\n"
+     rc = TIMEOUT_RC if timed_out else proc.returncode
+-    return rc, output, produced["session"]
++    return rc, output, produced["session"] and not terminal["error"]
+ 
+ 
+ def _terminate_group(proc: subprocess.Popen, grace: float = 2.0) -> None:
+@@ -357,6 +387,9 @@ def _group_alive(pgid: int) -> bool:
+ STREAM_FORMATS = frozenset({"claude-stream-json", "codex-stream-json"})
+ 
+ _SESSION_EVENT_TYPES = frozenset({"assistant", "user", "result"})
++# The subset that is TURN WORK — the CLI carrying on. A ``result`` event is the session's
++# wrap-up, so it must not be read as "it recovered" after an error line (#506).
++_WORK_EVENT_TYPES = frozenset({"assistant", "user"})
+ # codex `exec --json`: real work is an item/turn event; thread.started / turn.started
+ # are startup-only (like claude's ``system`` init), so they don't count as "produced".
+ _CODEX_SESSION_TYPES = frozenset({"item.started", "item.completed", "turn.completed"})
+@@ -377,6 +410,93 @@ def _is_session_event(line: str, fmt: str = "claude-stream-json") -> bool:
+     return ev.get("type") in _SESSION_EVENT_TYPES
+ 
+ 
++# A leaf's own account of a TERMINAL transient death (#506). The CLI writes it into the
++# stream as ordinary text — the incident's line was `API Error: Connection lost
++# mid-response.` after ~18 minutes of real work — so "produced anything?" alone charges an
++# infrastructure failure to the leaf, burns the attempt, and keeps nothing that explains it.
++# TWO patterns, both required: the text must READ as an error report (not prose that
++# mentions one — a builder discussing a rate limit is not dying of one) and must name an
++# infrastructure cause a re-invoke can plausibly clear.
++_ERROR_LEAD_RE = re.compile(
++    r"^\W*(?:api\s+error|error|fatal(?:\s+error)?|request\s+failed"
++    r"|connection\s+(?:error|lost|reset|closed|refused))\b", re.I)
++_TRANSIENT_CAUSE_RE = re.compile(
++    r"""connection\s+(?:error|lost|reset|closed|refused|aborted)
++      | (?:lost|interrupted)\s+mid-response
++      | overloaded
++      | rate[\s_-]?limit
++      | too\s+many\s+requests
++      | internal\s+server\s+error
++      | bad\s+gateway
++      | (?:service|server)\s+(?:is\s+)?(?:temporarily\s+)?unavailable
++      | temporarily\s+unavailable
++      | gateway\s+time-?\s?out
++      | network\s+error
++      | socket\s+hang\s*up
++      | \b(?:429|500|502|503|504|529)\b""", re.I | re.X)
++# One line of post-mortem, not a transcript: the tail is a diagnostic, the same bounded
++# retention the stderr tail already gets (``err_tail``).
++_TERMINAL_ERROR_MAX = 500
++
++
++def _terminal_error_text(line: str, fmt: str = "claude-stream-json") -> str:
++    """The leaf's own report of a TERMINAL transient failure in one stream line, or "".
++
++    The classification companion to :func:`_is_session_event`, in the same shape: dispatch
++    on the family's ``stream_format``, best-effort JSON parse, and a **degrade-to-today**
++    default. Only the claude format has a verified error shape, so codex — and every
++    stream-less family — answers "" and keeps the classification it has now instead of
++    guessing at a vendor's error text.
++    """
++    if fmt != "claude-stream-json":
++        return ""
++    try:
++        ev = json.loads(line)
++    except (ValueError, TypeError):
++        return ""
++    if not isinstance(ev, dict):
++        return ""
++    for text in _claude_event_texts(ev):
++        flat = " ".join(text.split())
++        if _ERROR_LEAD_RE.match(flat) and _TRANSIENT_CAUSE_RE.search(flat):
++            return flat[:_TERMINAL_ERROR_MAX]
++    return ""
++
++
++def _claude_event_texts(line_event: dict) -> Iterable[str]:
++    """The human-readable text a claude stream event carries — an ``assistant`` message's
++    text blocks, or a ``result`` event's summary/error. That is where the CLI puts an API
++    error it is giving up on, which is why the incident's cause was legible in the session
++    transcript and nowhere in the bundle."""
++    kind = line_event.get("type")
++    if kind == "assistant":
++        message = line_event.get("message")
++        content = message.get("content") if isinstance(message, dict) else None
++        for block in content if isinstance(content, list) else []:
++            if isinstance(block, dict) and block.get("type") == "text":
++                yield str(block.get("text") or "")
++    elif kind == "result":
++        for key in ("result", "error"):
++            val = line_event.get(key)
++            if isinstance(val, str):
++                yield val
++
++
++def _work_continued(line: str, fmt: str = "claude-stream-json") -> bool:
++    """Did this line carry TURN WORK — i.e. an earlier error line was *not* the stream's
++    last word, the CLI recovered, and whatever failed afterwards is the leaf's own (#506)?
++
++    This is what keeps the signal "terminal", not merely "an error was seen": a leaf that
++    quotes an API error and then keeps working is substantive, and must not be retried."""
++    if fmt != "claude-stream-json":
++        return False
++    try:
++        ev = json.loads(line)
++    except (ValueError, TypeError):
++        return False
++    return isinstance(ev, dict) and ev.get("type") in _WORK_EVENT_TYPES
++
++
+ def _stream_tool_label(line: str, fmt: str = "claude-stream-json") -> str:
+     """A human label for the tool-use in one stream line, or "" if none.
+     Best-effort: a non-JSON / non-tool line yields ""."""
+diff --git a/template/tests/test_build_error_log.py b/template/tests/test_build_error_log.py
+index 91ea35e..05bb3ce 100644
+--- a/template/tests/test_build_error_log.py
++++ b/template/tests/test_build_error_log.py
+@@ -55,7 +55,12 @@ class BuildErrorLog(unittest.TestCase):
+         shutil.rmtree(self.tmp, ignore_errors=True)
+ 
+     def _run_failing_build(self, exc: Exception) -> None:
++        # `do_build` puts the builder on the resilient path (#506), so a TRANSIENT failure
++        # is now retried with backoff before it lands here. These cases pin the capture, not
++        # the backoff, so spend no wall clock on the sleeps (the resilience contract itself
++        # is pinned in test_leaf_resilience.py).
+         with mock.patch.object(leaves, "_invoke", side_effect=exc), \
++                mock.patch.object(leaves.time, "sleep"), \
+                 redirect_stderr(io.StringIO()):
+             with self.assertRaises(type(exc)):      # still propagates — _isolate handles it
+                 leaves.do_build(self.d, self.cfg)
+@@ -150,6 +155,7 @@ class BuildErrorLog(unittest.TestCase):
+         # If the log itself can't be written, the builder's exception still reaches the flow.
+         with mock.patch.object(leaves, "_invoke",
+                                side_effect=leaves.LeafError(1, ["claude"], output="boom")), \
++                mock.patch.object(leaves.time, "sleep"), \
+                 mock.patch.object(Path, "write_text", side_effect=OSError("read-only fs")), \
+                 redirect_stderr(io.StringIO()):
+             with self.assertRaises(leaves.LeafError):
+@@ -193,6 +199,7 @@ class StreamlessFamiliesAreDiagnosableToo(unittest.TestCase):
+         # stderr is TEE'd (echoed live AND kept), so send the live echo to /dev/null — the
+         # assertion must read the LOG, not the console the tee also wrote to.
+         with mock.patch.dict(os.environ, {"PDCA_TEST_STDERR": self.FATAL}), \
++                mock.patch.object(leaves.time, "sleep"), \
+                 open(os.devnull, "w", encoding="utf-8") as null:
+             saved = os.dup(2)
+             os.dup2(null.fileno(), 2)
+diff --git a/template/tests/test_leaf_resilience.py b/template/tests/test_leaf_resilience.py
+index 97f98b1..20c9916 100644
+--- a/template/tests/test_leaf_resilience.py
++++ b/template/tests/test_leaf_resilience.py
+@@ -11,14 +11,18 @@ degrading, and (3) classifies the placeholder transient-vs-substantive. Run with
+ 
+ from __future__ import annotations
+ 
++import io
++import os
+ import shutil
+ import sys
+ import tempfile
+ import unittest
++from contextlib import redirect_stderr, redirect_stdout
+ from pathlib import Path
++from unittest import mock
+ 
+ from pdca_harness import leaves
+-from pdca_harness.config import LeafConfig
++from pdca_harness.config import Config, LeafConfig
+ 
+ # A claude-family leaf so the stream path engages (that is the only path that yields
+ # the "did a session start" signal). argv is a python interpreter running an inline
+@@ -34,6 +38,53 @@ _SUBSTANTIVE = (  # ran (emitted a stream event on stdout) then failed
+     "print('{\"type\": \"assistant\"}'); sys.stderr.write('boom\\n'); sys.exit(1)"
+ )
+ 
++# Issue #506 — the posture the "produced anything?" rule cannot see. A leaf that worked for
++# minutes and THEN lost its connection mid-response emits substantive events first and the
++# CLI's own account of the death last; the incident's `build.error.log` recorded only
++# "(no output captured) LeafError: Command '['claude', …]' returned non-zero exit status 1",
++# and the cause was legible only in ~/.claude/projects/. These scripts are the stub leaf of
++# the suite above (a python interpreter on claude's stream contract), emitting chosen events.
++#
++# Every asserted marker reaches the child through the ENV, never through argv:
++# `_format_leaf_attempt` echoes the failed command line into the log, so a marker written as
++# an argv literal is matched by that echo and the assertion passes with NO capture at all —
++# measured, the first cut of these tests was vacuous for exactly that reason (the same trap
++# recorded in test_build_error_log.py). Env-borne, the only way a marker can reach the log
++# is by actually being captured off the leaf's stream.
++_API_ERROR = "API Error: Connection lost mid-response."  # the incident's verbatim line
++_LEAF_STDERR = "the leaf's own assertion failure"        # a substantive death's real text
++_LEAF_ENV = {"LEAF_API_ERROR": _API_ERROR, "LEAF_STDERR": _LEAF_STDERR}
++
++_STREAM_PRELUDE = """
++import json, os, sys
++open(os.environ['CNT'], 'a').write('x')
++def event(text):
++    print(json.dumps({'type': 'assistant',
++                      'message': {'content': [{'type': 'text', 'text': text}]}}), flush=True)
++"""
++
++_TERMINAL_TRANSIENT = _STREAM_PRELUDE + """
++event('working: reading the brief')            # real work — 18 minutes of it, in one line
++event(os.environ['LEAF_API_ERROR'])            # …then the connection died mid-response
++sys.exit(1)
++"""
++
++# Precision, in both directions: prose that MENTIONS an API error (a builder working on this
++# very defect) and a session that recovered and later failed on its own merits must both stay
++# substantive — else the fix trades one misclassification for another.
++_PROSE_MENTIONING_AN_ERROR = _STREAM_PRELUDE + """
++event('I reproduced the ' + os.environ['LEAF_API_ERROR'] + ' defect and fixed it')
++sys.stderr.write(os.environ['LEAF_STDERR'] + chr(10))
++sys.exit(1)
++"""
++
++_RECOVERED_THEN_FAILED = _STREAM_PRELUDE + """
++event(os.environ['LEAF_API_ERROR'])
++event('reconnected; back on the tools')        # work CONTINUED — that error was not the end
++sys.stderr.write(os.environ['LEAF_STDERR'] + chr(10))
++sys.exit(1)
++"""
++
+ 
+ def _leaf(script: str) -> LeafConfig:
+     return LeafConfig(mode="command", family="claude",
+@@ -101,6 +152,132 @@ class LeafResilience(unittest.TestCase):
+         txt = (self.tmp / "check-review.md").read_text()
+         self.assertIn("substantive", txt)
+ 
++    # ---- issue #506: the death the leaf reported itself -------------------------------
++    def test_a_terminal_transient_error_after_real_work_is_retried(self) -> None:
++        """(i)+(iii). The leaf did substantive work and then died of infrastructure it did
++        not cause. Classified by the proxy ("did it produce anything?") that is substantive
++        and burns the attempt; classified by what actually happened — the terminal error the
++        stream itself carried — it is transient, retried, and the log explains it."""
++        err = leaves._invoke_leaf_resilient(
++            _leaf(_TERMINAL_TRANSIENT), self.tmp, "build please",
++            error_log=self.error_log, attempts=3, backoff=0.0,
++            stream_json=True, env={"CNT": str(self.cnt), **_LEAF_ENV})
++        self.assertIsInstance(err, leaves.LeafError)
++        self.assertTrue(err.transient)     # the stream's last word was the CLI's own error
++        self.assertEqual(self._runs(), 3)  # retried up to the attempt budget
++        log = self.error_log.read_text()
++        self.assertIn(_API_ERROR, log)     # the post-mortem carries the leaf's own account
++        self.assertNotIn("no output captured", log)
++
++    def test_the_error_log_carries_the_leafs_own_terminal_error(self) -> None:
++        """(iii) on its own, with the retry taken out of it (`attempts=1`): the artifact the
++        cycle keeps must carry the leaf's account of its death. Pre-fix this log reads what
++        the incident's did — `(no output captured) LeafError: Command '[…]' returned
++        non-zero exit status 1` — and the cause lived only in ~/.claude/projects/."""
++        leaves._invoke_leaf_resilient(
++            _leaf(_TERMINAL_TRANSIENT), self.tmp, "build please",
++            error_log=self.error_log, attempts=1, backoff=0.0,
++            stream_json=True, env={"CNT": str(self.cnt), **_LEAF_ENV})
++        log = self.error_log.read_text()
++        self.assertIn(_API_ERROR, log)
++        self.assertNotIn("no output captured", log)
++
++    def test_prose_that_mentions_an_api_error_is_still_substantive(self) -> None:
++        # A message ABOUT an error is not a leaf dying of one — a builder fixing this very
++        # defect says the string out loud. Retrying such a failure would trade one
++        # misclassification for another, and re-spend the most expensive leaf in the cycle.
++        err = leaves._invoke_leaf_resilient(
++            _leaf(_PROSE_MENTIONING_AN_ERROR), self.tmp, "build please",
++            error_log=self.error_log, attempts=3, backoff=0.0,
++            stream_json=True, env={"CNT": str(self.cnt), **_LEAF_ENV})
++        self.assertIsInstance(err, leaves.LeafError)
++        self.assertFalse(err.transient)
++        self.assertEqual(self._runs(), 1)
++
++    def test_an_error_the_session_recovered_from_is_not_terminal(self) -> None:
++        # The signal is TERMINAL, not "an error appeared somewhere": work after the error
++        # means the CLI carried on, so the later failure is the leaf's own.
++        err = leaves._invoke_leaf_resilient(
++            _leaf(_RECOVERED_THEN_FAILED), self.tmp, "build please",
++            error_log=self.error_log, attempts=3, backoff=0.0,
++            stream_json=True, env={"CNT": str(self.cnt), **_LEAF_ENV})
++        self.assertIsInstance(err, leaves.LeafError)
++        self.assertFalse(err.transient)
++        self.assertEqual(self._runs(), 1)
++
++
++class DoRetriesATransientBuilderDeath(unittest.TestCase):
++    """Issue #506 (ii)+(iv). `_invoke_leaf_resilient` is used by the reviewer and the two
++    advisories; `do_build` called plain `_invoke`, so NO builder failure was ever retried —
++    on the leaf where an attempt is most expensive and where the escalation ladder's deep
++    tiers run longest. These drive the real `do_build` → `_invoke` → `progress` →
++    `subprocess` path with the stub leaf above."""
++
++    def setUp(self) -> None:
++        self.tmp = Path(tempfile.mkdtemp())
++        self.cnt = self.tmp / "count.txt"
++
++    def tearDown(self) -> None:
++        shutil.rmtree(self.tmp, ignore_errors=True)
++
++    def _cfg(self, script: str) -> Config:
++        return Config(
++            root=self.tmp,
++            bundle_root=self.tmp / "results",
++            process_dir=self.tmp / "process",
++            templates_dir=self.tmp / "templates",
++            default_branch="main",
++            tracker_system="github",
++            tracker_url="",
++            issue_id_example="#1",
++            builder=_leaf(script),
++            reviewer=LeafConfig(mode="stub", family="codex"),
++            worktree=False,          # edit in place — keep the slice free of git
++        )
++
++    def _bundle(self, cfg: Config) -> Path:
++        d = cfg.bundle("506")
++        d.mkdir(parents=True)
++        (d / "brief.md").write_text("- **Slug:** s\n", encoding="utf-8")
++        return d
++
++    def _build(self, script: str) -> tuple[Path, str]:
++        cfg = self._cfg(script)
++        d = self._bundle(cfg)
++        err = io.StringIO()
++        with mock.patch.dict(os.environ, {"CNT": str(self.cnt), **_LEAF_ENV}), \
++                mock.patch.object(leaves.time, "sleep") as slept, \
++                redirect_stderr(err), redirect_stdout(io.StringIO()):
++            with self.assertRaises(leaves.LeafError):  # still re-raised for flow._isolate
++                leaves.do_build(d, cfg)
++        self.slept = slept
++        return d, err.getvalue()
++
++    def _runs(self) -> int:
++        return len(self.cnt.read_text()) if self.cnt.exists() else 0
++
++    def test_a_transient_builder_death_is_retried_bounded_with_backoff(self) -> None:
++        d, _stderr = self._build(_TERMINAL_TRANSIENT)
++        self.assertEqual(self._runs(), 3)          # retried, and bounded by the budget
++        self.assertTrue(self.slept.called)         # with backoff between the attempts
++        log = (d / leaves.BUILD_ERROR_LOG).read_text(encoding="utf-8")
++        self.assertIn(_API_ERROR, log)             # (iii) the leaf's own account survives
++        self.assertNotIn("no output captured", log)
++        self.assertEqual(log.count("----- attempt"), 3)  # every attempt recorded
++
++    def test_the_exhausted_message_names_the_class_and_the_resume(self) -> None:
++        _d, stderr = self._build(_TERMINAL_TRANSIENT)
++        self.assertIn("transient", stderr.lower())          # (iv) the classification…
++        self.assertIn("re-run", stderr.lower())             # …and what to do about it
++        self.assertIn(leaves.BUILD_ERROR_LOG, stderr)       # …and where the cause is
++
++    def test_a_substantive_builder_failure_is_still_not_retried(self) -> None:
++        d, stderr = self._build(_PROSE_MENTIONING_AN_ERROR)
++        self.assertEqual(self._runs(), 1)
++        self.assertNotIn("transient", stderr.lower())
++        log = (d / leaves.BUILD_ERROR_LOG).read_text(encoding="utf-8")
++        self.assertIn(_LEAF_STDERR, log)   # env-borne: only capture can put it here
++
+ 
+ if __name__ == "__main__":
+     unittest.main()

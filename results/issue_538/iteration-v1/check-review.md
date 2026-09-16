@@ -1,0 +1,15 @@
+Task under review: retain a Claude leaf's marked terminal error report in its preserved failure log without changing retry classification or other callers' output.
+
+| Item | Verdict | Basis |
+|------|---------|-------|
+| C1 Spec | PASS | The acceptance decision is falsifiable across retention, ownership, precedence, and unchanged retry semantics, matching the existing failure-output contract at `template/src/pdca_harness/leaves.py:657`. |
+| C2 Reproduction (red pre-fix) | PASS | The pre-fix behavior is established: stashing only the production change produced 19 retention failures, including the direct error-log assertion at `template/tests/test_terminal_error_retention.py:187`. |
+| C3 Change | PASS | The scope boundary is satisfied—one permitted production file plus the specified new tests and fixtures—so sibling work in `leaves.py` and `assemble.py` is not put at collision risk; the production seam is `template/src/pdca_harness/progress.py:175`. |
+| C4 Verification (red→green) | PASS | Independent red→green was reproduced (19 of 29 assertions failed pre-fix; all 29 passed patched), and the patched full driver suite passed 1,787 tests; the production-path assertion is at `template/tests/test_terminal_error_retention.py:194`. |
+| C5 Causal adequacy | PASS | The missing retention is corrected where stdout is already drained and where failure output is assembled, with no capability probe or retry-classification guard; see `template/src/pdca_harness/progress.py:186` and `template/src/pdca_harness/progress.py:296`. |
+| T1 Structure | PASS | File ownership remains coherent: parsing and bounded retention stay in the shared progress module while end-to-end expectations stay in the new test module at `template/tests/test_terminal_error_retention.py:1`. |
+| T2 Shape | PASS | The shape is reviewable and mechanically clean: `git diff --check`, docs lint, site render/link audit, and host-CI parity all passed; the public output contract is documented at `template/src/pdca_harness/progress.py:52`. |
+| T3 Runtime | PASS | Runtime regression risk is discharged by the targeted 29-test run and the full 1,787-test offline driver run, including raw-capture and other-family guards at `template/tests/test_terminal_error_retention.py:336`. |
+| T4 Contribution | N/A | Contribution artifacts are absent by design at Check; the frozen row is deferred and the substantive PR-description/tracker audit is owed to the mandatory publish re-gate. |
+| T5 Judgment | PASS | Overall risk is acceptable: retention is bounded, unknown formats degrade to prior behavior, and an affected-path scan of the complete closed/merged PR corpus found six merged precedents and no closed-unmerged duplicate; see `template/src/pdca_harness/progress.py:491`. |
+| Validation — fitness-to-purpose | NEEDS-HUMAN | The maintainer must decide whether a whitespace-flattened, 500-character diagnostic line is sufficient for real post-mortems—truncation can omit decisive context even though retention mechanics pass; see `template/src/pdca_harness/progress.py:615`. |

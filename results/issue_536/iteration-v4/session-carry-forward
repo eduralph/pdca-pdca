@@ -1,0 +1,50 @@
+Not a slicing problem — reading A. The slice and the design are right and have been
+stable for four rounds: C4 red->green reproduced independently, 19 of 20 mutations of
+the new logic caught, no impersonation payload flipped either discriminator, and
+test_leaf_resilience.py untouched and green. Same slice, same mechanism. Do NOT
+re-scope, do not split, do not refactor.
+
+On the size flag: it is largely the test. 857 of the 1312 added lines (49 KB of 91 KB)
+are template/tests/test_attempt_ownership.py; the production change is ~450 lines across
+four files. Keep the diff from growing — prefer the minimal edit at each site.
+
+Close these three findings, all in code this patch introduced:
+
+1. template/src/pdca_harness/leaves.py:912 — leaf_run_incomplete reads the log with
+   read_text(encoding="utf-8") and guards only OSError (:913), while its own docstring
+   promises "absent or unreadable => False" (:909-910). A non-UTF-8 log raises
+   UnicodeDecodeError straight out of a discriminator that now sits on driver.advance's
+   critical path, so the cycle aborts instead of degrading; the reachable route is the
+   patch's own premise (a log the pre-patch non-atomic write left truncated mid-multibyte,
+   read after upgrade). Fix: errors="replace" — matching _residue_record's own defensive
+   read at :1004 — or except (OSError, ValueError).
+
+2. template/src/pdca_harness/leaves.py:1004 — _residue_record reads the entire dead
+   artifact into the driver before applying the _RESIDUE_KEEP bound (:1007), and is
+   called from inside the "a failed leaf must never crash the cycle" handler (:758,
+   guard at :750) which catches only OSError (:1005). A MemoryError therefore escapes
+   the guard and leaves no placeholder and no error log — precisely the no-artifact/
+   no-account state this slice exists to eliminate. Same escape at the two advisory
+   sites (:3222). Fix: bounded read, open(...).read(_RESIDUE_KEEP + 1), and widen the
+   guard to Exception.
+
+3. template/src/pdca_harness/leaves.py:3176 — run_advisory_leaves(only_missing=True),
+   the second of the two #369 recovery discriminators criterion (v) names explicitly, is
+   exercised by no test: reverting it to the base's bare advisory_error_log(...).exists()
+   leaves the whole 1784-test driver suite green. This is the twin round 1's carry-forward
+   already asked to be covered (item 4). Add one test: seed a bundle with an in-flight
+   advisory error log and no artifact, assert the leaf is re-run.
+
+Do not widen the slice: keep test_leaf_resilience.py untouched; do not touch progress.py,
+LeafError.transient, the retry set, the builder path, or the staleness clear. The
+near-verbatim duplication across the three harvest sites stays an Act candidate, not this
+round's refactor.
+
+Optional, non-gating if it is free while in that function: _format_leaf_attempt's
+"(no output captured)" fallback body (leaves.py:1046 area) does not pass through
+_defang_in_flight — only tail does. The code-review lens judged it outside the two
+channels criterion (iv) names and declined to gate on it.
+
+The two routine NEEDS-HUMAN items (T5 prior-art overlap across the four non-leaves.py
+paths; fitness-to-purpose on re-running an interrupted reviewer) were NOT cleared and
+remain open for the next sign-off.

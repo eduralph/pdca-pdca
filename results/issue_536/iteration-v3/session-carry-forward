@@ -1,0 +1,64 @@
+Rejected on the findings, not on approach or slicing — for the third time, and the
+mechanism is holding up: C4 red→green reproduced independently, twelve targeted mutations
+of the new production logic all caught, 1780-test driver suite green, no impersonation
+payload flipped either discriminator, `test_leaf_resilience.py` untouched and green. Same
+slice, same design. Close the items below and keep the diff from growing — it is already
+flagged oversized, so prefer the minimal edit at each site over a refactor.
+
+1. Close the withdraw-before-persist kill window (the reviewer's C3/C5/T3 FAIL,
+   `leaves.py:986` / `:760`). `_withdraw_residue` reads the dead attempt's text into memory
+   and `unlink()`s the artifact, and only afterwards does the caller persist the record — a
+   kill in that gap loses BOTH the dead attempt's text and its account (`runs=1
+   bundle_artifact=False error_log=False`). It is narrower than the base's window, not a
+   regression, but it is the exact no-artifact/no-account state this slice exists to
+   eliminate, and it is cheaply closable: persist the record (residue text included) BEFORE
+   the unlink, then unlink. The ordering knot is that `in_flight` depends on `owned`, which
+   depends on the unlink having succeeded — resolve it by flushing first with
+   `in_flight = transient and attempt < attempts`, then withdrawing, then re-flushing with
+   `in_flight=False` if the unlink was refused. The fail-closed stop on a refused withdrawal
+   stays exactly as it is.
+
+2. Settle (or distrust) the log in the three `err is not None` harvest branches
+   (`leaves.py:2804-2807`, mirrored `:3167-3170`, `:3470-3473`). All three file the
+   `*_unavailable` placeholder but never call `_settle_leaf_record`, relying on the loop's
+   final `_write_attempt_records(..., in_flight=False)` having landed. When that write fails
+   on a NON-first attempt after an earlier one already landed in flight, the file keeps its
+   in-flight trailer while a "leaf failed" verdict sits in the bundle — `review_never_ran` /
+   `only_missing` then re-run and re-pay for a leaf whose outcome is already filed, which is
+   the same "one leaf recorded as two contradictory things" this change removes. Fix at
+   either end (settle in the `err` branches, or have `_write_attempt_records`'s failure path
+   strip a trailer it can no longer trust). Add the test that is missing: a write failure on
+   a middle/last attempt AFTER an earlier attempt's in-flight write landed — the existing
+   write-failure test refuses every write from attempt 1, so it never creates the stale
+   marker.
+
+3. Fix the two claim-accuracy defects — prose and rationale only, no behaviour change. In a
+   slice whose whole invariant is "never file a false account of a run", what the harness
+   tells the operator has to be true too.
+   - `leaves.py:2910`: for a run whose attempt 1 died transiently (`overloaded_error 529`)
+     and whose attempt 2 exited 0 having written nothing, `_FAIL_TRANSIENT`'s prose says
+     "retries did not recover" — but they did; the recovered attempt produced no verdict.
+     The class (`infra-empty`) and the action ("safe to re-run") are right; only the account
+     is wrong. Widen the wording, or give the empty-run shape its own. Also strengthen
+     `test_attempt_ownership.py:363-365`, which asserts only the class and the substring
+     "safe to re-run" and is therefore true of the wrong sentence too.
+   - `leaves.py:919-921` and the tests at `test_attempt_ownership.py:607-609`, `:523-525`:
+     the settle's stated justification ("otherwise a leaf that gave up looks recoverable
+     forever and is re-run and re-paid for on every advance") is unwarranted — every reader
+     short-circuits on the placeholder first, and deleting the settle leaves
+     `review_never_ran` False regardless. Restate it as what it is: archive hygiene, plus
+     the genuinely load-bearing half — settle AFTER the outcome is filed, never before —
+     which is already correct and separately proven. Fix the rationale, not the code, so a
+     later maintainer does not read the settle as a recovery guard.
+
+Do NOT widen the slice:
+- The shared `_harvest_leaf` helper the code review suggests for the three near-identical
+  harvest sites is a good idea and an Act candidate, NOT this round's work. Closing item 2
+  at three sites by hand is smaller than the refactor, and this patch is already oversized.
+- Leave the staleness clear at `leaves.py:718` alone — criterion (vi) freezes it and two
+  prior sign-offs adjudicated the recovery-re-run/preserved-text interaction as a
+  deliberate Act deferral.
+- The non-atomic `shutil.copy2` of the verdict at the three harvests and the strandable
+  `*.error.log.tmp.<pid>` remain noted, not hardened here.
+- Do not touch the retry set, `LeafError.transient`, `progress.py` (sibling #538 owns it)
+  or the builder path. Keep `test_leaf_resilience.py` untouched.

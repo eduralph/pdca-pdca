@@ -1,0 +1,42 @@
+progress: keep a failed leaf's own report of why it died
+
+A leaf that dies of an API failure has been leaving behind a post-mortem
+that explains nothing: its `*.error.log` reads "(no output captured)",
+even though the CLI had said plainly what went wrong. The CLI marks the
+message it synthesises for an API error and emits it on its stdout
+stream — a stream this harness already reads line by line, to tell
+whether real work happened and to show which tool is running, and then
+throws the line away. The only surviving copy was in the vendor's own
+session transcript under `~/.claude/projects/`, which no post-mortem
+reads, so diagnosing an 18-minute build death meant knowing that file
+existed and going to find it by hand.
+
+The stream reader now keeps the CLI's marked report and appends it to
+the output the run already returns, so it lands in the leaf's
+`*.error.log` beside the exit code and the stderr tail — the same route
+the memory post-mortem in 0881af94da437df5618f24363440becd6b4ea086
+takes, and the same output that gained the stderr tail itself in
+49f6611b432e505421b2ed38850df8d3187780c5, so nothing downstream needs a
+special case. Retention is unconditional: a marked report is kept
+whatever its cause, including one the session then recovered from,
+because a harness that is holding the text must never file "no output
+captured". A report the CLI forwarded on behalf of a sub-agent is kept
+labelled as such instead of being passed off as the leaf's own death — a
+log that confidently names the wrong death is worse than the silence it
+replaces. Where a stream carries several candidate records, the one
+nearest the leaf's own death wins in either arrival order, so a session
+wrap-up naming only the effect cannot bury the report that named the
+cause; and a report past the line budget says it was cut rather than
+present a fragment as the whole account.
+
+This keeps evidence and classifies nothing. Retry behaviour is
+unchanged for every input — a leaf retried three times before is retried
+three times now, and one retried none still is; `capture` still returns
+the child's raw stdout unmodified, so a gate's evidence line cannot pick
+up the appended text; and a family whose stream has no observed error
+shape, or no stream at all, behaves exactly as before. While in the
+reader, each stream line is now decoded once and handed to all three
+classifiers rather than re-parsed per question, which also retires three
+copies of the same "is this a JSON object" guard.
+
+Fixes #538

@@ -1,0 +1,29 @@
+Rejected on the advisory findings, not on the design: the slice is right-sized, the
+single-point-of-truth predicate is the right shape, and the red->green evidence held up
+under independent reproduction and four mutants. One local defect blocks it.
+
+1. BLOCKING — make the unsettled-record write crash-safe. `_flush_attempt_records`
+   (leaves.py) uses `Path.write_text`, i.e. open(O_TRUNC) -> write -> close, and the
+   UNSETTLED marker is the LAST thing written. So the file passes through a 0-byte state
+   and, for records larger than the buffer, prefix states — and any such partial state has
+   no trailing marker, so `state.leaf_ran_and_failed` returns True and a reviewer that
+   still had attempts left is RETIRED instead of re-run. Measured on the target tree under
+   RLIMIT_FSIZE (2048 bytes, no marker) and as a 0-byte file. On the base the same scenario
+   leaves no file and the leaf is recovered, so the docstring's "strictly no worse than
+   before" is false for the torn-write case, and state.py's "unreadable errs towards
+   re-running" does not hold for TRUNCATED — truncated errs towards retiring. That is the
+   exact catastrophe the slice exists to prevent, reintroduced by the write it added.
+   Fix inside the function the patch already added: write a sibling temp file and
+   `os.replace()` it into place, so the record is all-or-nothing. Keep it best-effort —
+   still `except OSError`, still no narrowing of the retry contract (criterion 5).
+   Add a leg pinning it: a torn/0-byte error log must recover its leaf, not retire it.
+
+2. SECONDARY — the settled/unsettled asymmetry that made (1) dangerous is worth removing
+   at the source: an EMPTY or contentless log currently reads as settled by default.
+   Consider making `_unsettled`/`leaf_ran_and_failed` fail towards re-running for a log
+   with no recognisable attempt record at all, consistent with the stated fail-direction.
+
+Not in scope for this rebuild: the observation that the mid-retry post-mortem is unlinked
+by `_invoke_leaf_resilient`'s staleness clear before `assemble` runs. The brief pre-decided
+that under criterion 4, and the adversary flagged it as a human scope call, not a rebuild
+item. Leave criterion 4 honoured and `test_leaf_resilience.py` untouched; carried to Act.

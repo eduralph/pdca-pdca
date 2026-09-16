@@ -1,0 +1,57 @@
+Rejected on the findings (reviewer C3/T3/T5 + the adversary lens). The core mechanism
+is sound and independently confirmed -- red->green reproduced, full suite green at
+base runtime, and all four mutations of the load-bearing hunks were caught, so the
+tests are not tautological. Keep that. Four defects sit on top of it:
+
+1. The matcher is wrong in BOTH directions (progress.py:420-423).
+   - Too narrow: `API Error: Connection interrupted.` and `API Error: Connection timed
+     out.` yield no classification when probed against the patched target --
+     `_TRANSIENT_CAUSE_RE` accepts "interrupted" only before "mid-response", and only
+     429/500/502/503/504/529. Criterion (i) promises lost/interrupted connections.
+   - Too broad: `_ERROR_LEAD_RE`'s `^\W*` lead plus a bare `error` word classifies
+     substantive builder deaths as transient and re-runs the builder 3x -- measured
+     through the real path with e.g. "Error: assertion failed - expected 500, got 404
+     in test_api.py". The `^\W*` also eats markdown, so a builder that QUOTES the
+     incident line at the head of a bullet or blockquote is read as dying of it.
+   Tighten the lead (require the api/fatal/connection qualifier, or anchor on the
+   CLI's literal `API Error:` prefix) and widen the cause to the promised category.
+   Add a red case for a substantive block that OPENS with the lead word, and one for
+   a leading verbatim quote: the existing guard
+   (test_leaf_resilience.py:75, :185, :519-529) only covers a mid-sentence mention, so
+   it never tests the case its own docstring claims.
+
+2. The exhausted-retry "how to resume" is false in this incident's own scenario
+   (leaves.py:1812-1817). A builder that writes patch.diff and then dies leaves the
+   bundle at BUILT (state.py:211), and driver.py:76 then runs Check, not Do, on the
+   partial patch. Fix the message (name that a partial patch.diff must be cleared
+   first). Do NOT silently delete the builder's artifacts to make the sentence true.
+
+3. Retry re-invokes the builder on the dead attempt's residue: worktree.ensure runs
+   once, before the wrapper (leaves.py:1833), so attempts 2-3 start in a worktree
+   carrying attempt 1's edits and a bundle already holding patch.diff/build-notes.md.
+   Risk: attempt 2 reads a complete-looking patch, exits 0, and a half-finished build
+   is reported as successful. HANDLE THIS AT DO LEVEL, bounded -- make the retry
+   prompt state that a previous attempt died mid-flight and that any patch.diff /
+   build-notes.md present are its incomplete residue to be verified or replaced, not
+   evidence the work is done. A lane reset or a new config knob is out of scope for
+   this iteration; if the rebuild concludes a prompt-level note is insufficient, say
+   so in build-notes.md rather than expanding the slice.
+
+4. The classifier's contract with the real vendor stream is asserted, never observed
+   -- every test synthesises the event shape it then parses
+   (test_leaf_resilience.py:63-73). If the CLI emits that death as a `system` event, a
+   `result` with no string result/error key, or on stderr, `_terminal_error_text`
+   (progress.py:442) and `_claude_event_texts` (progress.py:466) return "" and the
+   incident stays unfixed with the suite green. Pin one real transcript from
+   ~/.claude/projects/ (the brief cites it) as a fixture.
+
+Also worth closing while in there:
+- progress.py:279-285 bends the documented `capture` contract (docstring :113-114 says
+  the stream parse is mutually exclusive with capture) -- latent today, since no caller
+  sets both, but the first raw-JSONL capturer gets a trailing non-JSON line.
+- leaves.py:108-110, :2583, :2588 still describe transient as "no output" only, after
+  the patch widened the rule -- stale half of the definition.
+- leaves.py:1882 passes `memory_log=` explicitly where the other three call sites rely
+  on `_memory_log_for` deriving the identical path; drop the kwarg to match.
+- Note the C5 green is vacuous here ("patch adds no new test file -- nothing to
+  assert"), so it supports no production-path claim.

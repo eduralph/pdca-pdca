@@ -1,0 +1,999 @@
+diff --git a/template/src/pdca_harness/progress.py b/template/src/pdca_harness/progress.py
+index 627195c..c18cb7a 100644
+--- a/template/src/pdca_harness/progress.py
++++ b/template/src/pdca_harness/progress.py
+@@ -55,7 +55,8 @@ def run_with_heartbeat(
+     stdout+stderr when ``capture`` is True (so a gate can keep its evidence line);
+     the bounded **stderr tail** when ``stream_json`` or ``tee_stderr`` is set (so a
+     failed leaf's real error — usage/rate limit, 5xx, auth — survives in the bundle
+-    instead of scrolling past on a console nobody is watching); ``""`` otherwise.
++    instead of scrolling past on a console nobody is watching), **plus the leaf's own
++    terminal error report** when the stream carried one (below); ``""`` otherwise.
+     ``produced`` is whether the child emitted a **substantive** stream event — an
+     ``assistant`` / ``user`` / ``result`` event, i.e. a session that did real work.
+     Claude emits a ``system``/``init`` event (and ``system``/``api_retry`` on a
+@@ -64,6 +65,38 @@ def run_with_heartbeat(
+     at/near invocation — usage/rate limit, 5xx, auth — before any real output).
+     ``input_text``, if given, is written to stdin.
+ 
++    **The leaf's own account of its death is kept** (issue #506). The CLI *marks* the
++    message it synthesises for an API error, and that report arrives as a stream event
++    on stdout — which this function already reads, parsed for a tool label and then
++    dropped. So the marked report is retained (:func:`_terminal_error`) and appended to
++    ``output``, reaching a caller's ``*.error.log`` by the same route the stderr tail
++    takes — the one existing precedent being the #420 memory post-mortem, which appends
++    to the same string. An 18-minute leaf whose API connection dropped mid-response used
++    to file ``(no output captured)``, with the cause legible only in the CLI's session
++    transcript under ``~/.claude/projects/`` — a post-mortem artifact that explains
++    nothing. Retention only: **nothing here is classified**. ``produced``, and therefore
++    every retry decision made from it, is byte-identical to before for every input.
++
++    Three properties this retention is held to:
++
++    * it is **unconditional** — every marked report is kept whatever its cause, including
++      one the session then recovered from and one the vendor marked permanent, because a
++      harness that is holding the text must never file ``(no output captured)``;
++    * a report the CLI forwarded for a **sub-agent** (the Task's ``parent_tool_use_id``,
++      ``isSidechain`` in the persisted-transcript spelling) is kept **labelled as such**
++      (:data:`_SUBAGENT_NOTE`) — a log that confidently names the wrong death is worse
++      than the silence it replaces;
++    * where a stream carries several candidate records, the one **nearest the leaf's own
++      death** wins and a farther one — a ``result`` wrap-up naming only the effect, a
++      sub-agent's report — cannot bury it, in either arrival order
++      (:func:`_note_terminal`).
++
++    The append is skipped under ``capture``: there ``output`` is the raw stdout the
++    caller asked to keep verbatim (JSONL for a stream family, a gate's evidence line),
++    and the report is already in those bytes. Families whose stream this module has no
++    observed error shape for (codex) and stream-less families degrade to today's
++    behaviour rather than guessing at a vendor's error text.
++
+     ``timeout``, if given, is the wall-clock bound in seconds (issue #368): on expiry
+     the child's whole process GROUP is terminated (SIGTERM, then SIGKILL after a
+     grace) and the returncode slot carries :data:`TIMEOUT_RC` — a distinguishable
+@@ -142,6 +175,11 @@ def run_with_heartbeat(
+     chunks: list[str] = []
+     err_tail: deque[str] = deque(maxlen=200)  # bounded stderr tail for a failed leaf
+     produced = {"session": False}  # did a substantive stream event arrive (real work)?
++    # The leaf's OWN account of a terminal death (#506), kept for the caller's error log.
++    # ``shape`` keeps the marked records apart by how near each is to the leaf's own
++    # death, so neither the session's wrap-up nor a sub-agent's report can overwrite the
++    # main session's own account of the cause (:func:`_note_terminal`).
++    terminal = {"text": "", "shape": ""}
+     latest_tool = {"label": ""}  # most recent tool-use, updated by the drain thread
+     readers: list[threading.Thread] = []
+     if capture_out:
+@@ -151,9 +189,18 @@ def run_with_heartbeat(
+                 if capture:
+                     chunks.append(line)
+                 if stream_json:
+-                    if _is_session_event(line, stream_format):
++                    # Decoded ONCE per line, then classified three ways. This is a hot
++                    # loop — a long session streams thousands of lines — and each
++                    # classifier below used to re-parse the same bytes for itself. A
++                    # line that is no JSON object decodes to ``{}``, which every
++                    # classifier answers exactly as it answered the raw line before.
++                    ev = _stream_event(line)
++                    if _is_session_event(ev, stream_format):
+                         produced["session"] = True  # a startup/init line does NOT count
+-                    lbl = _stream_tool_label(line, stream_format)
++                    text, shape = _terminal_error(ev, stream_format)
++                    if shape:  # the CLI's own marked report — keep it, whatever its cause
++                        _note_terminal(terminal, text, shape)
++                    lbl = _stream_tool_label(ev, stream_format)
+                     if lbl:
+                         latest_tool["label"] = lbl
+         t = threading.Thread(target=_drain, daemon=True)
+@@ -253,7 +300,18 @@ def run_with_heartbeat(
+         if stream is not None:
+             stream.close()
+     output = "".join(chunks) if capture else ("".join(err_tail) if tee_err else "")
++    if terminal["text"] and not capture:
++        # The diagnostic the incident had to be dug out of ~/.claude/projects/ rides
++        # `output` into the caller's `*.error.log` by the same route the stderr tail
++        # does, so no reader downstream needs a special case for it (#506) — appended
++        # after the tail, exactly as the #420 memory post-mortem is. NOT under
++        # `capture`: that output is the child's raw stdout, which a gate keeps as its
++        # evidence line and a stream family emits as JSONL — the report is in it already.
++        sep = "" if not output or output.endswith("\n") else "\n"
++        output = f"{output}{sep}{_TERMINAL_REPORT_HEADER}\n{terminal['text']}\n"
+     rc = TIMEOUT_RC if timed_out else proc.returncode
++    # `produced` is returned exactly as before: this change RETAINS evidence and
++    # classifies nothing, so every retry decision downstream is unchanged (#506).
+     return rc, output, produced["session"]
+ 
+ 
+@@ -362,30 +420,250 @@ _SESSION_EVENT_TYPES = frozenset({"assistant", "user", "result"})
+ _CODEX_SESSION_TYPES = frozenset({"item.started", "item.completed", "turn.completed"})
+ 
+ 
+-def _is_session_event(line: str, fmt: str = "claude-stream-json") -> bool:
+-    """True iff a stream line is **substantive work** — not a startup/init event the CLI
+-    emits before doing anything. A non-zero exit having produced no such event is the
+-    transient-infra signal a retry should target (#138). Best-effort: non-JSON → False."""
++def _stream_event(line: str | dict) -> dict:
++    """One drained stream line decoded **once**: the record, or ``{}`` when the line is
++    no JSON object (a non-JSON line, a bare scalar, an empty read).
++
++    The drain reads a line and classifies it three ways — did real work happen
++    (:func:`_is_session_event`), did the leaf report its own death
++    (:func:`_terminal_error`), what tool is it running (:func:`_stream_tool_label`).
++    Each parsed the same bytes for itself, so the drain paid one ``json.loads`` per
++    classifier on every line of what is a hot loop (two before retention was a
++    question, three with it) and carried a copy of the same "is it an object" guard in
++    each, free to drift apart. They share this one decode now, and each still accepts a
++    raw line — an already-decoded record passes straight through — so a caller holding
++    only the text is unaffected.
++
++    ``{}`` rather than ``None`` for "not a record": every classifier reads the record
++    with ``.get``, so the empty one answers each of them exactly as the unparseable line
++    it came from did, with no separate not-a-record branch to keep in step.
++    """
++    if isinstance(line, dict):
++        return line
+     try:
+         ev = json.loads(line)
+     except (ValueError, TypeError):
+-        return False
+-    if not isinstance(ev, dict):
+-        return False
++        return {}
++    return ev if isinstance(ev, dict) else {}
++
++
++def _is_session_event(line: str | dict, fmt: str = "claude-stream-json") -> bool:
++    """True iff a stream line is **substantive work** — not a startup/init event the CLI
++    emits before doing anything. A non-zero exit having produced no such event is the
++    transient-infra signal a retry should target (#138). Best-effort: non-JSON → False."""
++    ev = _stream_event(line)
+     if fmt == "codex-stream-json":
+         return ev.get("type") in _CODEX_SESSION_TYPES
+     return ev.get("type") in _SESSION_EVENT_TYPES
+ 
+ 
+-def _stream_tool_label(line: str, fmt: str = "claude-stream-json") -> str:
++# ----------------------------------------------------------------------------
++# The leaf's own account of a TERMINAL failure (issue #506) — RETENTION ONLY.
++#
++# The incident: an escalated builder ran ~18 minutes, the API connection dropped
++# mid-response, the CLI exited 1, and `build.error.log` read "(no output captured)" —
++# "a post-mortem artifact that explains nothing" by the harness's own written rule. The
++# cause was legible only in the CLI's session transcript under ~/.claude/projects/,
++# which no post-mortem reads. The stream carried it the whole time: the drain parsed
++# each line for a tool label and dropped it.
++#
++# The discriminator is NOT the prose. The CLI *marks* the message it synthesises for an
++# API error, so a leaf that merely writes about an API error — a builder fixing this very
++# defect, quoting the incident line — is never mistaken for one dying of it, whatever its
++# wording. Nothing here reads a cause, a kind or a status: this module keeps the text and
++# says whose it is, and every retry decision stays exactly where it was.
++#
++# WHICH field lives on WHICH event is read out of the shipped binary (claude-code
++# 2.1.234), not assumed: a rule keyed on a field the CLI never emits is a branch that
++# looks like coverage and is not. The main loop's stream emitter is
++# `{type:"assistant", …, session_id, parent_tool_use_id: null, uuid, timestamp,
++# error: r.error, …r.isApiErrorMessage===!0 && {is_api_error_message:!0}}`; the
++# persisted transcript spells the same mark `isApiErrorMessage`. The session's `result`
++# wrap-up is built as `{subtype:"success", api_error_status: …, result: <its text>,
++# is_error: …}` or, when the turn threw, `{subtype:"error_during_execution",
++# errors:[…]}`.
++#
++# WHOSE death it is, is read out of the same binary: the mark is forwarded to a SUBAGENT's
++# messages too (the `agent_progress` branch yields `{type:"assistant",
++# parent_tool_use_id: e.parentToolUseID, …, …i.isApiErrorMessage===!0 &&
++# {is_api_error_message:!0}}`), and the CLI recovers from those itself. So a sub-agent's
++# report is kept LABELLED — never presented as the leaf's own death, and never allowed to
++# bury the main session's own report. Both spellings of the scope (the stream's
++# `parent_tool_use_id`, the transcript's `isSidechain`) are answered by one predicate,
++# `_is_subagent_event`, so they cannot drift apart.
++# (template/tests/fixtures/README.md pins the observed records and marks every claim
++# above observed or derived.)
++# ----------------------------------------------------------------------------
++#: A marked API-error message the MAIN session emitted: the CLI's own report of the
++#: failure it is giving up on — the record nearest the leaf's own death.
++_REPORT = "report"
++#: The same marked message emitted for a SUBAGENT (:func:`_is_subagent_event`). Kept as
++#: evidence, prefixed :data:`_SUBAGENT_NOTE` so the log never passes it off as the leaf's
++#: own death: the CLI has its own recovery for a subagent's API-error termination, so
++#: "a Task hit a 529" is not "the leaf died of a 529".
++_SUBAGENT_REPORT = "subagent-report"
++#: The session's ``result`` wrap-up: it records the EFFECT (the session ended, in error)
++#: — never the cause.
++_WRAPUP = "wrapup"
++#: How near each record is to the leaf's OWN death — the order :func:`_note_terminal`
++#: keeps, so a farther record cannot overwrite a nearer one, in either arrival order.
++_TERMINAL_PRECEDENCE = {_SUBAGENT_REPORT: 1, _WRAPUP: 2, _REPORT: 3}
++#: Prefix for a retained sub-agent report, so a post-mortem reader sees what it is. A log
++#: that confidently names the wrong death is worse than the "(no output captured)" this
++#: change replaces.
++_SUBAGENT_NOTE = "[sub-agent report, not the leaf's own death] "
++#: Banner for the retained report in ``output``, so a reader of the error log can tell
++#: the leaf's own stream report from the stderr tail it is appended to (the #420 memory
++#: post-mortem announces itself the same way).
++_TERMINAL_REPORT_HEADER = "----- leaf stream report -----"
++#: One line of post-mortem, not a transcript — the same bounded retention the stderr tail
++#: already gets (``err_tail``). Every observed API-error report is far shorter (the
++#: incident's was 78 characters); the bound is there for the ``result`` wrap-up, which can
++#: restate a whole final message.
++_TERMINAL_ERROR_MAX = 500
++#: Marks a report the bound above cut, so the artifact never presents a fragment as the
++#: leaf's whole account of its death — the reader is told there is more, and where the
++#: rest is (the session transcript this retention exists to stop being the only copy).
++_TRUNCATED_NOTE = f" … [report truncated at {_TERMINAL_ERROR_MAX} chars]"
++
++
++def _terminal_error(line: str | dict, fmt: str = "claude-stream-json") -> tuple[str, str]:
++    """The leaf's own report of a terminal failure in one stream line: its text, and
++    which marked record it is (:data:`_REPORT` / :data:`_SUBAGENT_REPORT` /
++    :data:`_WRAPUP`). ``("", "")`` when the line is not such a record (#506).
++
++    The retention companion to :func:`_is_session_event`, in the same shape: dispatch on
++    the family's ``stream_format``, the drain's shared best-effort decode
++    (:func:`_stream_event`), and a **degrade-to-today** default. Only the claude format
++    has an observed error shape, so codex — and every stream-less family — answers
++    ``("", "")`` and keeps exactly today's behaviour instead of guessing at a vendor's
++    error text.
++
++    Two event shapes carry it, both marked by the CLI itself:
++
++    * an ``assistant`` event flagged ``is_api_error_message`` (the stream spelling) /
++      ``isApiErrorMessage`` (the persisted transcript's), whose text is the failure the
++      CLI is giving up on. **Whose** failure it was decides which record it is
++      (:func:`_is_subagent_event`): the main loop's own emitter hard-codes
++      ``parent_tool_use_id: null`` (:data:`_REPORT`), while the ``agent_progress`` branch
++      forwards the same mark for a sub-agent with the Task's ``parent_tool_use_id`` —
++      ``isSidechain`` in the transcript spelling (:data:`_SUBAGENT_REPORT`);
++    * a ``result`` event with ``is_error`` — the session's wrap-up (:data:`_WRAPUP`),
++      which names the effect and, in the ``error_*`` variants, whatever else ended the
++      turn. Kept when it is all there is, outranked by the report that names the cause.
++
++    The text is returned for **any** such record: retention is unconditional, because the
++    cause the vendor reported is not this function's to judge, and a permanent failure
++    must explain itself in the bundle just as loudly as a transient one. Nothing here
++    feeds a retry decision — the classification half is issue #506's second child.
++    """
++    if fmt != "claude-stream-json":
++        return "", ""
++    ev = _stream_event(line)
++    if ev.get("type") == "assistant" and (ev.get("is_api_error_message")
++                                          or ev.get("isApiErrorMessage")):
++        kind = ev.get("error")
++        kind = kind.strip() if isinstance(kind, str) and kind.strip() else ""
++        text = (_report_line(_claude_message_texts(ev.get("message")))
++                or f"API error ({kind or 'no kind reported'}) reported by the leaf")
++        if _is_subagent_event(ev):
++            return f"{_SUBAGENT_NOTE}{text}", _SUBAGENT_REPORT
++        return text, _REPORT
++    if ev.get("type") == "result" and ev.get("is_error"):
++        text = _report_line(_claude_result_texts(ev))
++        # An error record with nothing to say is not evidence: keep today's silence
++        # rather than file a banner over an empty line.
++        return (text, _WRAPUP) if text else ("", "")
++    return "", ""
++
++
++def _note_terminal(terminal: dict, text: str, shape: str) -> None:
++    """Record one marked terminal record into the drain's ``terminal`` state: newest wins
++    **within a shape**, but a record farther from the leaf's own death never overwrites a
++    nearer one (:data:`_TERMINAL_PRECEDENCE`).
++
++    An api-error death does not end the stream. Two kinds of record keep arriving after
++    the report that named the cause, and read newest-wins either buries it:
++
++    * the session's ``result`` wrap-up, which names no cause — it restates the dead
++      message, or (when the turn threw or was aborted) carries only a diagnostic about
++      the turn. Let it win and the artifact records the effect while the cause, which the
++      harness was holding, is dropped again;
++    * a **sub-agent's** report — chatter from a Task that was still draining when the
++      session died. Let it win and the error log names the wrong death: a permanent
++      main-session failure reported as some Task's blip.
++
++    Precedence is by shape, not "any later record disagrees": a SECOND main-session report
++    is the leaf's newer account of its own death and wins outright. Symmetrically, a
++    farther record arriving FIRST cannot pre-empt the report — so the nearest record wins
++    in either arrival order.
++    """
++    if _TERMINAL_PRECEDENCE[shape] < _TERMINAL_PRECEDENCE.get(terminal["shape"], 0):
++        return
++    terminal.update(text=text, shape=shape)
++
++
++def _is_subagent_event(ev: dict) -> bool:
++    """Was this record emitted for a **sub-agent** (a Task), rather than by the main
++    session itself? One predicate for both spellings of the same scope, so they can never
++    drift apart.
++
++    The stream says it with ``parent_tool_use_id`` — the ``agent_progress`` branch
++    forwards the Task's tool_use id, while the main loop's own emitters hard-code
++    ``null``; the persisted transcript says it with ``isSidechain``, and carries no
++    ``parent_tool_use_id`` at all (so ``.get()`` returning ``None`` there must not be read
++    as "the main session"). Absent both, the record is the main session's own — which is
++    what every observed main-session record looks like in either spelling.
++    """
++    return ev.get("parent_tool_use_id") is not None or ev.get("isSidechain") is True
++
++
++def _claude_message_texts(message) -> Iterable[str]:
++    """The human-readable text blocks of a claude ``assistant`` event's message — where
++    the CLI puts the API failure it is giving up on."""
++    content = message.get("content") if isinstance(message, dict) else None
++    for block in content if isinstance(content, list) else []:
++        if isinstance(block, dict) and block.get("type") == "text":
++            yield str(block.get("text") or "")
++
++
++def _claude_result_texts(ev: dict) -> Iterable[str]:
++    """The error strings a claude ``result`` event carries: its ``errors`` list (the
++    ``error_*`` variants) or its ``result`` string (the ``success`` variant, where an
++    API-error ending puts the dead message's own text); a plain ``error`` key is read too,
++    as a fallback for a shape neither of those covers."""
++    errors = ev.get("errors")
++    for item in errors if isinstance(errors, list) else []:
++        if isinstance(item, str) and item.strip():
++            yield item
++    for key in ("result", "error"):
++        val = ev.get(key)
++        if isinstance(val, str) and val.strip():
++            yield val
++
++
++def _report_line(texts: Iterable[str]) -> str:
++    """The first non-empty report, whitespace-flattened and bounded — a diagnostic line
++    for the error log, not a transcript.
++
++    A line that WAS cut says so (:data:`_TRUNCATED_NOTE`). The bound keeps one death from
++    filling an error log, but a silently-cut report reads as the leaf's whole account of
++    its death, and a reader would never know to go looking for the rest.
++    """
++    for text in texts:
++        flat = " ".join(text.split())
++        if not flat:
++            continue
++        if len(flat) <= _TERMINAL_ERROR_MAX:
++            return flat
++        return flat[:_TERMINAL_ERROR_MAX] + _TRUNCATED_NOTE
++    return ""
++
++
++def _stream_tool_label(line: str | dict, fmt: str = "claude-stream-json") -> str:
+     """A human label for the tool-use in one stream line, or "" if none.
+     Best-effort: a non-JSON / non-tool line yields ""."""
+-    try:
+-        ev = json.loads(line)
+-    except (ValueError, TypeError):
+-        return ""
+-    if not isinstance(ev, dict):
+-        return ""
++    ev = _stream_event(line)
+     if fmt == "codex-stream-json":
+         return _codex_item_label(ev)
+     # claude: an ``assistant`` event's message content can hold ``tool_use`` blocks;
+diff --git a/template/tests/fixtures/README.md b/template/tests/fixtures/README.md
+new file mode 100644
+index 0000000..f7f85c5
+--- /dev/null
++++ b/template/tests/fixtures/README.md
+@@ -0,0 +1,85 @@
++# Test fixtures — provenance
++
++Pinned vendor bytes for suites that must not *synthesise* the shape they then parse.
++A rule keyed on a field the CLI never emits is a branch that looks like coverage and is
++not — so every claim the production code makes about a vendor event is recorded here as
++either **observed** (bytes a real run wrote, pinned verbatim) or **derived** (read out of
++the shipped binary's own emitter, with the expression quoted).
++
++Scope of this note: the claims `progress._terminal_error` / `progress._is_subagent_event`
++depend on — **the marker** on a terminal API-error report, **whose** report it is, and the
++`result` wrap-up that competes with it for precedence. Nothing here classifies a cause; a
++later change that reads error *kinds* or HTTP statuses appends its own provenance below.
++
++## Files
++
++| file | spelling | provenance |
++| --- | --- | --- |
++| `claude_api_error_death.transcript.jsonl` | persisted transcript | **observed** — verbatim |
++| `claude_api_error_death.stream.jsonl` | `--output-format stream-json` | **derived** from the record above |
++| `claude_api_error_permanent.transcript.jsonl` | persisted transcript | **observed** — verbatim |
++| `claude_api_error_permanent.stream.jsonl` | `--output-format stream-json` | **derived** from the record above |
++
++### Observed
++
++Both transcript records are pinned **verbatim** from a session log under
++`~/.claude/projects/`, one line each, nothing edited:
++
++* `claude_api_error_death.transcript.jsonl` — the incident this retention exists for:
++  `"error":"server_error"`, `"isApiErrorMessage":true`, and the text
++  `API Error: Connection lost mid-response. The response above may be incomplete.`
++  (written by claude-code 2.1.228; `~/.claude/projects/-home-eddie-wyrd-wyrd-pdca/`,
++  session `31fa2f21…`, 2026-08-12). The leaf that emitted it filed `(no output captured)`.
++* `claude_api_error_permanent.transcript.jsonl` — the same mark with a cause no retry can
++  clear: `"error":"model_not_found"`, `"apiErrorStatus":404`, text `There's an issue with
++  the selected model …` (written by claude-code 2.1.222;
++  `~/.claude/projects/-home-eddie-pdca-pdca-pdca/`, session `152ac920…`, 2026-08-06).
++  It is pinned because retention is **unconditional**: a permanent failure must explain
++  itself in the bundle exactly as loudly as a transient one.
++
++Also observed, and why the sub-agent scope is spelled two ways: sub-agent records in the
++persisted transcript carry `"isSidechain":true` (2080 such records across the corpus these
++two were pinned from, e.g. `…/<session>/subagents/agent-*.jsonl`) and carry **no**
++`parent_tool_use_id` key at all — which is why `_is_subagent_event` tests `isSidechain is
++True` separately instead of reading a missing `parent_tool_use_id` as "the main session".
++No marked API-error record with `isSidechain:true` appears in that corpus, so the
++*combination* is derived, not observed.
++
++### Derived (claude-code 2.1.234, the installed binary; grep the expressions to re-verify)
++
++* **The mark, stream spelling** — the main loop's own `assistant` emitter:
++  `…session_id:qt(),parent_tool_use_id:null,uuid:r.uuid,timestamp:r.timestamp,error:r.error,
++  …r.requestId!==void 0&&{request_id:r.requestId},…r.isApiErrorMessage===!0&&{is_api_error_message:!0}…`
++  → on the stream the flag is `is_api_error_message`, the main session's own record
++  hard-codes `parent_tool_use_id: null`, and the vendor's kind rides `error`.
++* **The mark, transcript spelling** — the same message written back the other way:
++  `…t.is_api_error_message===!0&&{isApiErrorMessage:!0}…`, and the schema's own words:
++  `is_api_error_message … "@internal True when this assistant message wraps an API error
++  (from internal AssistantMessage.isApiErrorMessage)."` → the two spellings are one field,
++  which is why `_terminal_error` accepts both.
++* **Whose report it is** — the `agent_progress` branch forwards the same mark for a
++  sub-agent: `if(e.data.type==="agent_progress"||e.data.type==="skill_progress"){…case
++  "assistant": … yield{type:"assistant",message:…,parent_tool_use_id:e.parentToolUseID,
++  session_id:qt(),…,error:i.error,…,…i.isApiErrorMessage===!0&&{is_api_error_message:!0}…}`
++  → a marked report may be a Task's, and the only thing that says so is the Task's
++  `parent_tool_use_id`. Hence `_SUBAGENT_NOTE`: kept as evidence, never as the leaf's death.
++* **The `result` wrap-up** — built out of the same run:
++  `variant:{subtype:"success",api_error_status:mt,result:rt?Ut:We,…}` with
++  `common:{…,is_error:rt,num_turns:ze}`, or `variant:{subtype:"error_during_execution",
++  errors:Ur}` → a `result` with `is_error` names the *effect*; the marked assistant report
++  before it names the cause. That is the whole reason for `_TERMINAL_PRECEDENCE`.
++
++### Re-verifying
++
++```sh
++B="$(readlink -f "$(command -v claude)")"          # e.g. …/versions/2.1.234
++grep -ao '.\{200\}is_api_error_message.\{240\}' "$B"
++grep -ao 'e.data.type==="agent_progress".\{0,1200\}' "$B"
++grep -ao '.\{160\}api_error_status.\{0,200\}' "$B"
++```
++
++The vendor auto-updates and this harness pins nothing, so a later CLI may add shapes. The
++production reader is written to **degrade to today's behaviour** on anything it does not
++recognise — an unmarked message, another family's stream, an unparseable line — rather
++than guess; re-running the greps above is how a maintainer checks whether the two shapes
++it does know are still emitted.
+diff --git a/template/tests/fixtures/claude_api_error_death.stream.jsonl b/template/tests/fixtures/claude_api_error_death.stream.jsonl
+new file mode 100644
+index 0000000..37e7688
+--- /dev/null
++++ b/template/tests/fixtures/claude_api_error_death.stream.jsonl
+@@ -0,0 +1 @@
++{"type":"assistant","message":{"diagnostics":null,"id":"fa964393-d4ce-4988-ad3e-b083326a03e4","container":null,"model":"<synthetic>","role":"assistant","stop_details":null,"stop_reason":"stop_sequence","stop_sequence":"","type":"message","usage":{"output_tokens_details":null,"input_tokens":0,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"server_tool_use":{"web_search_requests":0,"web_fetch_requests":0},"service_tier":null,"cache_creation":{"ephemeral_1h_input_tokens":0,"ephemeral_5m_input_tokens":0},"inference_geo":null,"iterations":null,"speed":null},"content":[{"type":"text","text":"API Error: Connection lost mid-response. The response above may be incomplete."}],"context_management":null},"session_id":"31fa2f21-4d73-4810-9c23-ba33bd860167","parent_tool_use_id":null,"uuid":"7c1013b4-87e7-4111-a82f-5d29b1f280d4","timestamp":"2026-08-12T00:29:33.021Z","error":"server_error","is_api_error_message":true}
+diff --git a/template/tests/fixtures/claude_api_error_death.transcript.jsonl b/template/tests/fixtures/claude_api_error_death.transcript.jsonl
+new file mode 100644
+index 0000000..9b42aa3
+--- /dev/null
++++ b/template/tests/fixtures/claude_api_error_death.transcript.jsonl
+@@ -0,0 +1 @@
++{"parentUuid":"73e102d0-695a-45a6-85b1-49e477d2a708","isSidechain":false,"type":"assistant","uuid":"7c1013b4-87e7-4111-a82f-5d29b1f280d4","timestamp":"2026-08-12T00:29:33.021Z","message":{"diagnostics":null,"id":"fa964393-d4ce-4988-ad3e-b083326a03e4","container":null,"model":"<synthetic>","role":"assistant","stop_details":null,"stop_reason":"stop_sequence","stop_sequence":"","type":"message","usage":{"output_tokens_details":null,"input_tokens":0,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"server_tool_use":{"web_search_requests":0,"web_fetch_requests":0},"service_tier":null,"cache_creation":{"ephemeral_1h_input_tokens":0,"ephemeral_5m_input_tokens":0},"inference_geo":null,"iterations":null,"speed":null},"content":[{"type":"text","text":"API Error: Connection lost mid-response. The response above may be incomplete."}],"context_management":null},"error":"server_error","isApiErrorMessage":true,"userType":"external","entrypoint":"sdk-cli","cwd":"/home/eddie/wyrd/wyrd.pdca-wt","sessionId":"31fa2f21-4d73-4810-9c23-ba33bd860167","version":"2.1.228","gitBranch":"fix/211-signoff-orphan"}
+diff --git a/template/tests/fixtures/claude_api_error_permanent.stream.jsonl b/template/tests/fixtures/claude_api_error_permanent.stream.jsonl
+new file mode 100644
+index 0000000..573ce96
+--- /dev/null
++++ b/template/tests/fixtures/claude_api_error_permanent.stream.jsonl
+@@ -0,0 +1 @@
++{"type":"assistant","message":{"id":"74e5e70c-885c-4cac-a98f-75cda9bcc6fd","container":null,"model":"<synthetic>","role":"assistant","stop_details":null,"stop_reason":"stop_sequence","stop_sequence":"","type":"message","usage":{"input_tokens":0,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"server_tool_use":{"web_search_requests":0,"web_fetch_requests":0},"service_tier":null,"cache_creation":{"ephemeral_1h_input_tokens":0,"ephemeral_5m_input_tokens":0},"inference_geo":null,"iterations":null,"speed":null},"content":[{"type":"text","text":"There's an issue with the selected model (claude-3-5-haiku-20241022). It may not exist or you may not have access to it. Run --model to pick a different model."}],"context_management":null},"session_id":"152ac920-829e-452d-8dca-a87c28819d7e","parent_tool_use_id":null,"uuid":"d03bb67c-1f08-4453-8aa7-49e6ad0f1e64","timestamp":"2026-08-06T00:31:03.960Z","error":"model_not_found","request_id":"req_011CdkYxEAzwbrAhQ2V9xwsX","is_api_error_message":true}
+diff --git a/template/tests/fixtures/claude_api_error_permanent.transcript.jsonl b/template/tests/fixtures/claude_api_error_permanent.transcript.jsonl
+new file mode 100644
+index 0000000..203c966
+--- /dev/null
++++ b/template/tests/fixtures/claude_api_error_permanent.transcript.jsonl
+@@ -0,0 +1 @@
++{"parentUuid":"20731903-1975-41b7-a564-6da21a71f16a","isSidechain":false,"type":"assistant","uuid":"d03bb67c-1f08-4453-8aa7-49e6ad0f1e64","timestamp":"2026-08-06T00:31:03.960Z","message":{"id":"74e5e70c-885c-4cac-a98f-75cda9bcc6fd","container":null,"model":"<synthetic>","role":"assistant","stop_details":null,"stop_reason":"stop_sequence","stop_sequence":"","type":"message","usage":{"input_tokens":0,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"server_tool_use":{"web_search_requests":0,"web_fetch_requests":0},"service_tier":null,"cache_creation":{"ephemeral_1h_input_tokens":0,"ephemeral_5m_input_tokens":0},"inference_geo":null,"iterations":null,"speed":null},"content":[{"type":"text","text":"There's an issue with the selected model (claude-3-5-haiku-20241022). It may not exist or you may not have access to it. Run --model to pick a different model."}],"context_management":null},"requestId":"req_011CdkYxEAzwbrAhQ2V9xwsX","error":"model_not_found","isApiErrorMessage":true,"apiErrorStatus":404,"userType":"external","entrypoint":"sdk-cli","cwd":"/home/eddie/pdca/pdca-pdca","sessionId":"152ac920-829e-452d-8dca-a87c28819d7e","version":"2.1.222","gitBranch":"main"}
+diff --git a/template/tests/test_terminal_error_retention.py b/template/tests/test_terminal_error_retention.py
+new file mode 100644
+index 0000000..eaf7781
+--- /dev/null
++++ b/template/tests/test_terminal_error_retention.py
+@@ -0,0 +1,504 @@
++"""A leaf's own account of its death is kept (issue #506) — stdlib unittest, no deps.
++
++`progress.run_with_heartbeat` reads every event a leaf's stream emits and used to keep
++none of it: the drain parsed each line for a session flag and a tool label, then dropped
++it. The CLI's own marked API-error report arrives as a stream event on **stdout**, so it
++was displayed and discarded, and the failed leaf's `*.error.log` fell back to
++`(no output captured)` — "a post-mortem artifact that explains nothing" by the harness's
++own rule — with the cause legible only in the CLI's session transcript under
++`~/.claude/projects/`, which no post-mortem reads.
++
++What this module holds the harness to:
++
++* the marked report reaches the leaf's `*.error.log`, by the same route the stderr tail
++  takes (appended to what `run_with_heartbeat` returns as `output`);
++* retention is **unconditional** — every marked report is kept whatever its cause,
++  including one the session then recovered from and one the vendor marked permanent;
++* a report the CLI forwarded for a **sub-agent** is kept *labelled as such*, in both
++  spellings of that scope (`parent_tool_use_id`, `isSidechain`);
++* where several candidate records arrive, the one nearest the leaf's own death wins, in
++  either arrival order;
++* **nothing is classified**: `LeafError.transient` and the retry counts are what they
++  were, and the guards below assert the invocation counts explicitly so a later change
++  cannot silently move them;
++* nothing else changes: `capture` still returns the child's raw stdout unmodified, the
++  codex stream format and a stream-less family degrade to today's behaviour, and a leaf
++  that exits 0 is spawned and reported exactly as today;
++* what is kept is bounded like the stderr tail, and a report the bound CUT says it was
++  cut — a fragment must never read as the leaf's whole account of its death;
++* the drain decodes each stream line **once** and classifies it three ways, rather than
++  each classifier re-parsing the same bytes in what is a hot loop.
++
++Every case is driven by a stub "leaf" that is a Python interpreter emitting chosen stream
++events — no vendor CLI, no API key, no network. The cases that replay pinned vendor bytes
++skip themselves when `tests/fixtures/` is absent (a red leg reverts it as production).
++
++Run from the project root: PYTHONPATH=src python -m unittest discover -s tests
++"""
++
++from __future__ import annotations
++
++import contextlib
++import io
++import json
++import os
++import shutil
++import sys
++import tempfile
++import unittest
++from pathlib import Path
++from unittest import mock
++
++from pdca_harness import leaves, progress
++from pdca_harness.config import LeafConfig
++
++FIXTURES = Path(__file__).resolve().parent / "fixtures"
++
++# A claude-family leaf so the stream path engages (the only path that reads events at
++# all). Shape copied from tests/test_leaf_resilience.py: argv is a python interpreter
++# running an inline script; `_invoke` appends --output-format/--verbose (ignored) and
++# feeds the prompt on stdin. The script counts its own invocations into $CNT so a test
++# can assert the retry count, writes $STREAM to stdout (the events), $ERR to stderr and
++# exits $RC.
++_STUB = (
++    "import os,sys\n"
++    "open(os.environ['CNT'],'a').write('x')\n"
++    "sys.stdout.write(os.environ['STREAM'])\n"
++    "sys.stdout.flush()\n"
++    "sys.stderr.write(os.environ['ERR'])\n"
++    "sys.exit(int(os.environ['RC']))\n"
++)
++
++# ---------------------------------------------------------------------------------
++# The event records. Shapes are the vendor's (see tests/fixtures/README.md, which pins
++# the observed records and quotes the emitters every field here comes from); the prose
++# is trimmed to what a test needs to tell one record from another.
++# ---------------------------------------------------------------------------------
++_WORK_TEXT = "Editing progress.py"
++_WORK = {"type": "assistant", "parent_tool_use_id": None,
++         "message": {"content": [{"type": "text", "text": _WORK_TEXT}]}}
++
++_DEATH_TEXT = ("API Error: Connection lost mid-response. "
++               "The response above may be incomplete.")
++_REPORT = {"type": "assistant", "parent_tool_use_id": None, "error": "server_error",
++           "is_api_error_message": True,
++           "message": {"content": [{"type": "text", "text": _DEATH_TEXT}]}}
++
++_PERMANENT_TEXT = ("There's an issue with the selected model "
++                   "(claude-3-5-haiku-20241022). It may not exist or you may not "
++                   "have access to it.")
++_PERMANENT = {"type": "assistant", "parent_tool_use_id": None, "error": "model_not_found",
++              "is_api_error_message": True,
++              "message": {"content": [{"type": "text", "text": _PERMANENT_TEXT}]}}
++
++_SUBAGENT_TEXT = "API Error: overloaded (the Task's own connection)"
++_SUBAGENT = {"type": "assistant", "parent_tool_use_id": "toolu_01TaskUse",
++             "error": "overloaded", "is_api_error_message": True,
++             "subagent_type": "builder",
++             "message": {"content": [{"type": "text", "text": _SUBAGENT_TEXT}]}}
++# The same record in the persisted transcript's spelling of both the mark and the scope:
++# it carries no `parent_tool_use_id` key at all, so `isSidechain` is the only thing that
++# says whose report it is.
++_SIDECHAIN = {"type": "assistant", "isSidechain": True, "error": "overloaded",
++              "isApiErrorMessage": True,
++              "message": {"content": [{"type": "text", "text": _SUBAGENT_TEXT}]}}
++
++_WRAPUP_TEXT = "[ede_diagnostic] turn aborted (stop_reason=null)"
++_WRAPUP = {"type": "result", "subtype": "error_during_execution", "is_error": True,
++           "errors": [_WRAPUP_TEXT]}
++# The same wrap-up with nothing to say: an error record carrying no text at all. There is
++# no evidence in it, so it must produce no banner — a header over an empty line is the
++# "(no output captured)" shape in a new costume.
++_MUTE_WRAPUP = {"type": "result", "subtype": "error_during_execution", "is_error": True,
++                "errors": [], "result": "   "}
++
++# A report far longer than the retained bound: it must be kept as much as the bound
++# allows AND say that it was cut, so a fragment is never read as the whole account.
++_LONG_HEAD = "API Error: the vendor said a great deal about this one."
++_LONG_TAIL = "and here is the part past the bound"
++_LONG_TEXT = f"{_LONG_HEAD} {'filler word ' * 200}{_LONG_TAIL}"
++_LONG_REPORT = {"type": "assistant", "parent_tool_use_id": None, "error": "server_error",
++                "is_api_error_message": True,
++                "message": {"content": [{"type": "text", "text": _LONG_TEXT}]}}
++
++
++def _stream(*events: dict) -> str:
++    """The events as the child will print them: one JSON record per line."""
++    return "".join(json.dumps(ev) + "\n" for ev in events)
++
++
++class _CountingJson:
++    """Counts the decodes the drain performs, delegating every one to the real
++    ``json.loads`` — the production code under it runs unchanged; only the tally is new.
++
++    Patched over ``progress.json`` alone, so nothing else in the process is affected, and
++    read after `run_with_heartbeat` has joined its drain thread."""
++
++    def __init__(self) -> None:
++        self.loads_calls = 0
++
++    def loads(self, s, *args, **kwargs):
++        self.loads_calls += 1
++        return json.loads(s, *args, **kwargs)
++
++
++def _leaf() -> LeafConfig:
++    return LeafConfig(mode="command", family="claude",
++                      argv=[sys.executable, "-c", _STUB], interactive=False)
++
++
++@contextlib.contextmanager
++def _stdout_fd_to(path: Path):
++    """Point THIS process's fd 1 at ``path`` for the block.
++
++    Needed by the stream-less case only: without ``stream_json`` the child inherits the
++    terminal's stdout (that is the behaviour under test), so its output would otherwise
++    land in the suite's own stdout — which a gate reads as the run's verdict (#402).
++    """
++    sys.stdout.flush()
++    saved = os.dup(1)
++    with open(path, "w", encoding="utf-8") as sink:
++        os.dup2(sink.fileno(), 1)
++    try:
++        yield
++    finally:
++        sys.stdout.flush()
++        os.dup2(saved, 1)
++        os.close(saved)
++
++
++class _StubLeafCase(unittest.TestCase):
++    def setUp(self) -> None:
++        self.tmp = Path(tempfile.mkdtemp())
++        self.cnt = self.tmp / "count.txt"
++        self.error_log = self.tmp / "build.error.log"
++
++    def tearDown(self) -> None:
++        shutil.rmtree(self.tmp, ignore_errors=True)
++
++    # --- driving the stub ---------------------------------------------------------
++    def _env(self, stream: str, err: str, rc: int) -> dict:
++        return {"CNT": str(self.cnt), "STREAM": stream, "ERR": err, "RC": str(rc)}
++
++    def _run_leaf(self, stream: str, *, err: str = "", rc: int = 1,
++                  attempts: int = 3) -> Exception | None:
++        """Through the production leaf path: `_invoke_leaf_resilient` → `_invoke` →
++        `run_with_heartbeat`, ending in the `*.error.log` a post-mortem reads."""
++        with contextlib.redirect_stderr(io.StringIO()):  # the tee'd child stderr
++            return leaves._invoke_leaf_resilient(
++                _leaf(), self.tmp, "build the fix", error_log=self.error_log,
++                attempts=attempts, backoff=0.0, stream_json=True,
++                env=self._env(stream, err, rc))
++
++    def _heartbeat(self, stream: str, *, err: str = "", rc: int = 1,
++                   capture: bool = False, stream_json: bool = True,
++                   tee_stderr: bool = True,
++                   fmt: str = "claude-stream-json") -> tuple[int, str, bool]:
++        """Straight at `run_with_heartbeat`, where `output` is assembled."""
++        env = {**os.environ, **self._env(stream, err, rc)}
++        with contextlib.redirect_stderr(io.StringIO()):
++            return progress.run_with_heartbeat(
++                [sys.executable, "-c", _STUB], env=env, capture=capture,
++                stream_json=stream_json, tee_stderr=tee_stderr, stream_format=fmt)
++
++    def _log(self) -> str:
++        self.assertTrue(self.error_log.exists(), "no error log was written")
++        return self.error_log.read_text(encoding="utf-8")
++
++    def _runs(self) -> int:
++        return len(self.cnt.read_text()) if self.cnt.exists() else 0
++
++    def _fixture(self, name: str) -> str:
++        path = FIXTURES / name
++        if not path.is_file():
++            self.skipTest(f"pinned vendor fixture {name} is not present")
++        return path.read_text(encoding="utf-8")
++
++
++class ReportReachesTheErrorLog(_StubLeafCase):
++    """(i) the marked report is in the artifact a post-mortem opens."""
++
++    def test_marked_report_lands_in_the_error_log(self) -> None:
++        err = self._run_leaf(_stream(_WORK, _REPORT))
++        self.assertIsInstance(err, leaves.LeafError)
++        log = self._log()
++        self.assertIn(_DEATH_TEXT, log)
++        self.assertNotIn("(no output captured)", log)
++
++    def test_report_rides_the_output_run_with_heartbeat_returns(self) -> None:
++        rc, output, _ = self._heartbeat(_stream(_WORK, _REPORT))
++        self.assertEqual(rc, 1)
++        self.assertIn(_DEATH_TEXT, output)  # the same route the stderr tail takes
++
++    def test_report_is_appended_after_the_stderr_tail_not_instead_of_it(self) -> None:
++        # The route the #420 memory post-mortem also rides: whatever is already in
++        # `output` stays, and the report is appended after it.
++        self._run_leaf(_stream(_REPORT), err="node: warning about nothing\n")
++        log = self._log()
++        self.assertIn("node: warning about nothing", log)
++        self.assertIn(_DEATH_TEXT, log)
++        self.assertLess(log.index("node: warning about nothing"), log.index(_DEATH_TEXT))
++
++    def test_a_leaf_that_reports_nothing_is_unchanged(self) -> None:
++        # No marked record anywhere: the log is exactly the stderr tail it was.
++        self._run_leaf(_stream(_WORK), err="boom\n")
++        log = self._log()
++        self.assertIn("boom", log)
++        self.assertNotIn("leaf stream report", log)
++
++    def test_an_error_record_with_nothing_to_say_files_no_banner(self) -> None:
++        # A `result`/`is_error` wrap-up carrying no text is not evidence: keeping
++        # today's silence beats announcing a report and printing an empty line — that
++        # is "(no output captured)" wearing a header.
++        self._run_leaf(_stream(_WORK, _MUTE_WRAPUP), err="boom\n")
++        log = self._log()
++        self.assertIn("boom", log)
++        self.assertNotIn("leaf stream report", log)
++
++    def test_a_report_past_the_bound_is_kept_and_says_it_was_cut(self) -> None:
++        # Bounded like the stderr tail — but a cut report must SAY it was cut, or a
++        # fragment reads as the leaf's whole account of its death.
++        self._run_leaf(_stream(_LONG_REPORT))
++        log = self._log()
++        self.assertIn(_LONG_HEAD, log)          # what was kept is really there
++        self.assertNotIn(_LONG_TAIL, log)       # and the bound really bounds
++        self.assertIn("truncated", log)         # …and the reader is told so
++
++
++class RetentionIsUnconditional(_StubLeafCase):
++    """(ii) every marked report is kept, whatever its cause."""
++
++    def test_report_kept_even_when_the_session_carried_on_afterwards(self) -> None:
++        # The CLI recovered and worked on before dying anyway. A harness holding the
++        # text must never file "(no output captured)" — whose death it was is a
++        # question for the reader, not a reason to drop the evidence.
++        self._run_leaf(_stream(_REPORT, _WORK))
++        log = self._log()
++        self.assertIn(_DEATH_TEXT, log)
++        self.assertNotIn("(no output captured)", log)
++
++    def test_report_kept_for_a_cause_no_retry_can_clear(self) -> None:
++        err = self._run_leaf(_stream(_WORK, _PERMANENT))
++        self.assertIn(_PERMANENT_TEXT, self._log())
++        # …and it is still not classified: same verdict, same one attempt, as today.
++        self.assertFalse(getattr(err, "transient", False))
++        self.assertEqual(self._runs(), 1)
++
++    def test_report_kept_when_it_is_the_only_thing_the_stream_said(self) -> None:
++        self._run_leaf(_stream(_REPORT))
++        self.assertIn(_DEATH_TEXT, self._log())
++
++
++class SubAgentReportsAreLabelled(_StubLeafCase):
++    """(iii) a sub-agent's report is evidence, never the leaf's own death."""
++
++    def _subagent_line(self, log: str) -> str:
++        lines = [ln for ln in log.splitlines() if _SUBAGENT_TEXT in ln]
++        self.assertEqual(len(lines), 1, f"sub-agent report not retained once:\n{log}")
++        return lines[0]
++
++    def test_stream_spelling_is_kept_labelled(self) -> None:
++        self._run_leaf(_stream(_WORK, _SUBAGENT))
++        line = self._subagent_line(self._log())
++        self.assertIn("sub-agent", line.lower())
++        self.assertIn("not the leaf's own death", line.lower())
++
++    def test_transcript_spelling_is_kept_labelled(self) -> None:
++        # `isSidechain` carries no `parent_tool_use_id` at all: one predicate answers
++        # both spellings, so they cannot drift apart.
++        self._run_leaf(_stream(_WORK, _SIDECHAIN))
++        line = self._subagent_line(self._log())
++        self.assertIn("sub-agent", line.lower())
++
++    def test_the_main_sessions_own_report_is_not_labelled_as_a_sub_agents(self) -> None:
++        self._run_leaf(_stream(_REPORT))
++        log = self._log()
++        self.assertIn(_DEATH_TEXT, log)
++        self.assertNotIn("sub-agent", log.lower())
++
++
++class NearestRecordWins(_StubLeafCase):
++    """(iv) the record nearest the leaf's own death wins, in either arrival order."""
++
++    def _assert_report_won(self, stream: str, buried: str) -> None:
++        self._run_leaf(stream)
++        log = self._log()
++        self.assertIn(_DEATH_TEXT, log)
++        self.assertNotIn(buried, log)
++
++    def test_wrapup_after_the_report_cannot_bury_it(self) -> None:
++        # The `result` wrap-up names the EFFECT (the session ended); the report before
++        # it names the cause, and the cause is what a post-mortem needs.
++        self._assert_report_won(_stream(_WORK, _REPORT, _WRAPUP), _WRAPUP_TEXT)
++
++    def test_wrapup_before_the_report_cannot_pre_empt_it(self) -> None:
++        self._assert_report_won(_stream(_WORK, _WRAPUP, _REPORT), _WRAPUP_TEXT)
++
++    def test_subagent_report_after_the_report_cannot_bury_it(self) -> None:
++        # Chatter from a Task still draining when the session died must not become the
++        # log's account of the death.
++        self._assert_report_won(_stream(_REPORT, _SUBAGENT), _SUBAGENT_TEXT)
++
++    def test_subagent_report_before_the_report_cannot_pre_empt_it(self) -> None:
++        self._assert_report_won(_stream(_SUBAGENT, _REPORT), _SUBAGENT_TEXT)
++
++    def test_a_newer_main_session_report_replaces_the_older_one(self) -> None:
++        # Same shape: the leaf's newer account of its own death wins outright.
++        self._run_leaf(_stream(_REPORT, _PERMANENT))
++        log = self._log()
++        self.assertIn(_PERMANENT_TEXT, log)
++        self.assertNotIn(_DEATH_TEXT, log)
++
++    def test_a_wrapup_alone_is_still_kept(self) -> None:
++        # Nothing nearer arrived, so the only record there is, is the evidence there is.
++        self._run_leaf(_stream(_WORK, _WRAPUP))
++        self.assertIn(_WRAPUP_TEXT, self._log())
++
++    def test_a_mute_wrapup_cannot_bury_the_evidence_it_has_none_to_add_to(self) -> None:
++        # An error record with NOTHING to say outranks a sub-agent's report by shape —
++        # so if emptiness were kept as a record, a `result` carrying no text at all
++        # would displace the only account of a failure the stream ever gave, and the
++        # log would be back to "(no output captured)". It is not a record.
++        self._run_leaf(_stream(_WORK, _SUBAGENT, _MUTE_WRAPUP))
++        log = self._log()
++        self.assertIn(_SUBAGENT_TEXT, log)
++        self.assertNotIn("(no output captured)", log)
++
++
++class NothingIsClassified(_StubLeafCase):
++    """(v) the guard: `transient` and the retry counts are what they were."""
++
++    def test_a_no_output_death_is_still_transient_and_retried_thrice(self) -> None:
++        err = self._run_leaf("", err="overloaded_error 529\n")
++        self.assertTrue(getattr(err, "transient", None))
++        self.assertEqual(self._runs(), 3)
++        self.assertIn("overloaded_error 529", self._log())
++
++    def test_a_report_after_real_work_is_still_substantive_and_not_retried(self) -> None:
++        err = self._run_leaf(_stream(_WORK, _REPORT))
++        self.assertFalse(getattr(err, "transient", True))
++        self.assertEqual(self._runs(), 1)
++
++    def test_a_report_alone_is_still_substantive_and_not_retried(self) -> None:
++        # The marked report IS an `assistant` event, so it has always counted as
++        # "produced" — retaining its text must not move that by a hair.
++        err = self._run_leaf(_stream(_REPORT))
++        self.assertFalse(getattr(err, "transient", True))
++        self.assertEqual(self._runs(), 1)
++
++    def test_produced_is_unmoved_by_a_retained_report(self) -> None:
++        _, _, produced = self._heartbeat(_stream(_WORK, _REPORT))
++        self.assertTrue(produced)
++        _, _, produced_report_only = self._heartbeat(_stream(_REPORT))
++        self.assertTrue(produced_report_only)
++        _, _, produced_none = self._heartbeat("", err="overloaded_error 529\n")
++        self.assertFalse(produced_none)
++
++
++class NothingElseChanges(_StubLeafCase):
++    """(vi) every other caller and family behaves exactly as today."""
++
++    def test_capture_returns_the_childs_raw_stdout_unmodified(self) -> None:
++        # `capture=True` is what the three non-leaf callers pass (a gate's evidence
++        # line, the notes fetch, publish): those bytes are the child's, verbatim.
++        stream = _stream(_WORK, _REPORT)
++        _, output, _ = self._heartbeat(stream, capture=True)
++        self.assertEqual(output, stream)
++
++    def test_a_gate_shaped_capture_is_untouched(self) -> None:
++        stream = _stream(_REPORT)
++        _, output, _ = self._heartbeat(stream, capture=True, stream_json=False,
++                                       tee_stderr=False)
++        self.assertEqual(output, stream)
++
++    def test_the_codex_stream_format_degrades_to_todays_behaviour(self) -> None:
++        # A claude record read under another family's format would be a guess. The
++        # output is the stderr tail and nothing else.
++        _, output, _ = self._heartbeat(_stream(_WORK, _REPORT), err="codex is sad\n",
++                                       fmt="codex-stream-json")
++        self.assertEqual(output, "codex is sad\n")
++
++    def test_a_stream_less_family_is_untouched(self) -> None:
++        # No stream parse at all: stdout inherits the terminal (captured here so the
++        # suite's own stdout stays clean) and `output` is exactly the stderr tail.
++        sink = self.tmp / "inherited-stdout.txt"
++        with _stdout_fd_to(sink):
++            _, output, _ = self._heartbeat(_stream(_REPORT), err="stream-less boom\n",
++                                           stream_json=False, tee_stderr=True)
++        self.assertIn(_DEATH_TEXT, sink.read_text(encoding="utf-8"))  # it WAS emitted
++        self.assertEqual(output, "stream-less boom\n")
++
++    def test_a_leaf_that_exits_zero_is_reported_exactly_as_today(self) -> None:
++        # A session that reported a blip, recovered and exited 0: no error, no log.
++        err = self._run_leaf(_stream(_REPORT, _WORK), rc=0)
++        self.assertIsNone(err)
++        self.assertFalse(self.error_log.exists())
++        self.assertEqual(self._runs(), 1)
++
++    def test_a_non_json_stream_line_is_ignored(self) -> None:
++        self._run_leaf("not json at all\n" + _stream(_REPORT), err="")
++        log = self._log()
++        self.assertIn(_DEATH_TEXT, log)
++        self.assertNotIn("not json at all", log)
++
++
++class OneDecodePerStreamLine(_StubLeafCase):
++    """The drain reads each line once, decodes it once, and classifies it three ways.
++
++    Retention is a THIRD question asked of every stream line, next to "did real work
++    happen" and "what tool is it running" — and the drain is a hot loop, a long session
++    streaming thousands of lines. Each classifier used to parse the same bytes for
++    itself: two decodes a line before retention was a question, and three had the new
++    one followed suit, each with its own copy of the same "is it an object" guard, free
++    to drift from the others. They share one decode instead — asserted here rather than
++    left to a reading of the source.
++    """
++
++    def _decodes_for(self, stream: str) -> tuple[int, str]:
++        counter = _CountingJson()
++        with mock.patch.object(progress, "json", counter):
++            _, output, _ = self._heartbeat(stream)
++        return counter.loads_calls, output
++
++    def test_a_stream_line_is_decoded_once_not_once_per_classifier(self) -> None:
++        # One line the drain must answer all three questions about, plus a line each
++        # for the records that compete for retention, plus one that is not JSON at all
++        # (a failed decode is still exactly one decode).
++        lines = ["not json at all"] + [json.dumps(ev) for ev in
++                                       (_WORK, _WRAPUP, _SUBAGENT, _REPORT)]
++        decodes, output = self._decodes_for("".join(f"{ln}\n" for ln in lines))
++        self.assertIn(_DEATH_TEXT, output)  # the drain still did all three jobs…
++        self.assertEqual(decodes, len(lines))  # …at one decode per line
++
++    def test_the_decode_count_tracks_the_line_count(self) -> None:
++        # Not a constant that happens to match: twice the lines, twice the decodes.
++        lines = (_WORK, _REPORT)
++        one, _ = self._decodes_for(_stream(*lines))
++        two, _ = self._decodes_for(_stream(*(lines * 2)))
++        self.assertEqual((one, two), (len(lines), 2 * len(lines)))
++
++
++class PinnedVendorRecords(_StubLeafCase):
++    """The same rules against bytes a real CLI wrote (tests/fixtures/README.md)."""
++
++    def test_observed_death_record_stream_spelling_is_retained(self) -> None:
++        line = self._fixture("claude_api_error_death.stream.jsonl")
++        self._run_leaf(line)
++        self.assertIn("Connection lost mid-response", self._log())
++
++    def test_observed_death_record_transcript_spelling_is_retained(self) -> None:
++        line = self._fixture("claude_api_error_death.transcript.jsonl")
++        rc, output, _ = self._heartbeat(line)
++        self.assertEqual(rc, 1)
++        self.assertIn("Connection lost mid-response", output)
++
++    def test_observed_permanent_record_is_retained_and_not_classified(self) -> None:
++        line = self._fixture("claude_api_error_permanent.stream.jsonl")
++        err = self._run_leaf(line)
++        self.assertIn("issue with the selected model", self._log())
++        self.assertFalse(getattr(err, "transient", True))
++        self.assertEqual(self._runs(), 1)
++
++
++if __name__ == "__main__":
++    unittest.main()

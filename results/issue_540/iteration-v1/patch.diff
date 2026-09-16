@@ -1,0 +1,644 @@
+diff --git a/template/src/pdca_harness/assemble.py b/template/src/pdca_harness/assemble.py
+index f029ea2..87c35d9 100644
+--- a/template/src/pdca_harness/assemble.py
++++ b/template/src/pdca_harness/assemble.py
+@@ -407,14 +407,17 @@ def _missing_review_text(d: Path) -> str:
+     """Placeholder when ``check-review.md`` is absent — flags a §6 NEEDS-HUMAN so the
+     bundle assembles and reaches sign-off but cannot be accepted without a review.
+ 
+-    Two wordings (#369), split on the error log — the engine's failed-leaf
+-    discriminator (#138: a reviewer that ran and FAILED wrote
+-    ``state.REVIEW_ERROR_LOG``; a successful run removed any stale one). Without the
+-    split, a reviewer that NEVER RAN (the beat died between the gate write and the
+-    leaf) read exactly like one that ran and failed, and the record could not
+-    distinguish "not yet run" from "ran and yielded nothing".
++    Two wordings (#369), split on ``state.leaf_ran_and_failed`` — the engine's
++    failed-leaf discriminator (#138: a reviewer that ran and SPENT its attempts left a
++    settled ``state.REVIEW_ERROR_LOG``; a successful run removed any stale one).
++    Without the split, a reviewer that NEVER RAN (the beat died between the gate write
++    and the leaf) read exactly like one that ran and failed, and the record could not
++    distinguish "not yet run" from "ran and yielded nothing". The second wording names
++    BOTH unfinished shapes (#540): no log at all, and an unsettled log left by a death
++    inside the leaf's retry loop — the discriminator treats them alike, so the prose
++    must not assert only one of them.
+     """
+-    if (d / state.REVIEW_ERROR_LOG).exists():
++    if state.leaf_ran_and_failed(d / state.REVIEW_ERROR_LOG):
+         return (
+             "# Advisory review MISSING — the reviewer RAN AND FAILED\n\n"
+             "- NEEDS-HUMAN — no check-review.md was produced: the reviewer leaf ran "
+@@ -423,12 +426,15 @@ def _missing_review_text(d: Path) -> str:
+             "accepting.\n"
+         )
+     return (
+-        "# Advisory review MISSING — the reviewer NEVER RAN\n\n"
+-        "- NEEDS-HUMAN — no check-review.md was produced and no "
+-        f"`{state.REVIEW_ERROR_LOG}` exists: the reviewer leaf NEVER RAN (the Check "
+-        "beat was interrupted before it), it did not run-and-fail. The driver "
+-        "recovers a never-ran reviewer on the next `advance` (#369); if this text "
+-        "persists, re-run the Check reviewer before accepting.\n"
++        "# Advisory review MISSING — the reviewer NEVER RAN or was INTERRUPTED\n\n"
++        "- NEEDS-HUMAN — no check-review.md was produced and no *settled* "
++        f"`{state.REVIEW_ERROR_LOG}`: either the reviewer leaf NEVER RAN (the Check "
++        "beat was interrupted before it), or it was interrupted INSIDE its retry loop "
++        f"and the `{state.REVIEW_ERROR_LOG}` in this bundle is the unfinished account "
++        "of the attempts it had made by then (#540) — read it for the post-mortem. "
++        "Neither shape is a leaf that ran and exhausted its attempts. The driver "
++        "recovers both on the next `advance` (#369); if this text persists, re-run "
++        "the Check reviewer before accepting.\n"
+     )
+ 
+ 
+diff --git a/template/src/pdca_harness/driver.py b/template/src/pdca_harness/driver.py
+index a3f927a..a5d267e 100644
+--- a/template/src/pdca_harness/driver.py
++++ b/template/src/pdca_harness/driver.py
+@@ -120,11 +120,12 @@ def advance(d: Path, cfg: Config) -> None:
+         # and a model leaf (Ctrl-C, OOM, a killed session) landed the bundle HERE with
+         # that leaf never run — and nothing ever ran it again: assemble filled the
+         # missing-review placeholder and the only escape was hand-deleting
+-        # check-gates.json, re-paying the entire gate run. Recover the never-ran leaf
+-        # (artifact AND error log both absent — the #138 failed-leaf discriminator)
+-        # before assembly, preserving the paid gate record; a leaf that ran and FAILED
+-        # left its error log and is NOT re-run. An uninterrupted cycle has every
+-        # artifact in place, so this is a no-op there.
++        # check-gates.json, re-paying the entire gate run. Recover the unfinished leaf
++        # (no artifact and no SETTLED error log — `state.leaf_ran_and_failed`, the #138
++        # failed-leaf discriminator) before assembly, preserving the paid gate record;
++        # a leaf that ran and spent its attempts left a settled error log and is NOT
++        # re-run. An uninterrupted cycle has every artifact in place, so this is a
++        # no-op there.
+         _resume_interrupted_check(d, cfg, close)
+         _say(f"→ {d.name}: assembling SUMMARY…")
+         assemble.assemble_summary(d, cfg)  # pure code → SUMMARY.md §1–8
+@@ -149,10 +150,15 @@ def _resume_interrupted_check(d: Path, cfg: Config, close: str) -> None:
+     dependency-halted bundle never runs model leaves — its reviewer stand-in note is
+     deterministic (``_close_review_note`` / ``dependency_halt.blocked_review_note``),
+     so a note the death window swallowed is simply rewritten. A normal bundle gets the
+-    reviewer leaf back iff it NEVER RAN (``leaves.review_never_ran`` — no artifact,
+-    no error log) and each configured advisory leaf back under the same discriminator
+-    (``only_missing``); a leaf that ran and failed left its error log (#138) and is
+-    left alone — today's behaviour for a failed leaf is unchanged.
++    reviewer leaf back iff it left no settled account of itself (``leaves.review_never_ran``
++    — no artifact, and no error log or an UNSETTLED one, #540) and each configured
++    advisory leaf back under the same discriminator (``only_missing``); a leaf that ran
++    and spent its attempts left a settled error log (#138) and is left alone — today's
++    behaviour for a failed leaf is unchanged.
++
++    Two shapes reach the recovery, not one: the leaf that never started (the window
++    between the gate write and the leaf) and the leaf a death interrupted INSIDE its
++    retry loop, whose unsettled record is the only account of the attempts it made.
+     """
+     if close:
+         if not (d / "check-review.md").exists():
+@@ -168,8 +174,9 @@ def _resume_interrupted_check(d: Path, cfg: Config, close: str) -> None:
+             dependency_halt.blocked_review_note(d, dependency_halt.recorded_verdicts(d))
+         return
+     if leaves.review_never_ran(d):
+-        _say(f"→ {d.name}: Check — reviewer never ran (beat was interrupted after the "
+-             f"gate write); recovering it{_headless_note(cfg.reviewer)}…")
++        _say(f"→ {d.name}: Check — reviewer left no settled account of itself (it never "
++             "ran, or a death inside its retry loop left an unfinished attempt record); "
++             f"recovering it{_headless_note(cfg.reviewer)}…")
+         leaves.run_review(d, cfg)
+     if cfg.advisory_leaves:
+         leaves.run_advisory_leaves(d, cfg, only_missing=True)
+diff --git a/template/src/pdca_harness/leaves.py b/template/src/pdca_harness/leaves.py
+index 1211604..ae3768e 100644
+--- a/template/src/pdca_harness/leaves.py
++++ b/template/src/pdca_harness/leaves.py
+@@ -686,10 +686,17 @@ def _invoke_leaf_resilient(
+     child died at/near invocation (usage/rate limit, 5xx, auth, network), not a
+     reviewer that read the diff and couldn't decide — so retry it with exponential
+     backoff. A failure that *did* produce output, or a non-LeafError (e.g. command
+-    not found), is substantive: do not retry. On final failure the captured stderr
+-    tail of every attempt is written to ``error_log`` so the bundle carries
+-    recoverable error text, not just an exit code. Returns ``None`` on success, else
+-    the final exception (a :class:`LeafError` exposes ``.transient``).
++    not found), is substantive: do not retry. Each failed attempt's captured stderr
++    tail is written to ``error_log`` as it happens (#540) — marked UNSETTLED while the
++    leaf still has attempts left (:data:`state.UNSETTLED_MARKER`), settled by the
++    final write when they are spent — so the bundle carries recoverable error text,
++    not just an exit code, and a run killed INSIDE the retry loop still leaves a
++    post-mortem instead of nothing at all. Returns ``None`` on success, else the final
++    exception (a :class:`LeafError` exposes ``.transient``).
++
++    The unsettled state lives entirely inside this function: the loop ends either by
++    failing (which settles the records) or by succeeding (which discards them), so no
++    caller ever sees one.
+ 
+     Every attempt also runs under memory telemetry when its spawn is memory-capped:
+     the ``*.memory.jsonl`` twin of ``error_log`` (`_memory_log_for`), cleared here
+@@ -705,28 +712,65 @@ def _invoke_leaf_resilient(
+     for attempt in range(1, attempts + 1):
+         try:
+             _invoke(leaf, workdir, prompt, **kw)
+-            return None  # success — leave no error log behind
++            # Success — leave no error log behind, as before (#138). Now that a failed
++            # attempt flushes its record as it happens (#540), "no error log" has to be
++            # RESTORED on the retry that recovers: an unsettled record left beside a
++            # produced artifact would describe a leaf that has since succeeded.
++            # Suppressed like the flush itself — a leaf that worked must not be turned
++            # into a failure by the cleanup of its own post-mortem.
++            with contextlib.suppress(OSError):
++                error_log.unlink(missing_ok=True)
++            return None
+         except Exception as exc:  # noqa: BLE001 — a failed leaf must never crash the cycle
+             last = exc
+             records.append(_format_leaf_attempt(exc, attempt))
+             transient = getattr(exc, "transient", False)
+             if not transient or attempt == attempts:
+                 break
++            # This attempt's account, on disk BEFORE the next one starts (#540). The
++            # only write used to be the one after the loop, so a run killed mid-retry
++            # lost every attempt's account and a leaf observing the bundle during
++            # attempt 2 found nothing about attempt 1.
++            _flush_attempt_records(error_log, records)
+             delay = backoff * (2 ** (attempt - 1))
+             print(f"leaves: {workdir.name} — leaf exited {getattr(exc, 'returncode', '?')} "
+                   f"with no output (transient); retry {attempt}/{attempts - 1} in "
+                   f"{delay:.0f}s", file=sys.stderr)
+             time.sleep(delay)
++    # The attempts are spent: the same records WITHOUT the unsettled marker, which is
++    # what makes the log read as "the leaf ran and FAILED" (state.leaf_ran_and_failed).
+     error_log.write_text("".join(records), encoding="utf-8")
+     return last
+ 
+ 
++def _flush_attempt_records(error_log: Path, records: list[str]) -> None:
++    """Persist the attempts so far as an UNSETTLED record (#540) — best-effort.
++
++    Best-effort by decision, not by omission: a flush that fails (a read-only bundle
++    dir, ENOSPC) must NOT end a run the shipped stop rule would have kept going —
++    attempt count, the transient rule and the backoff schedule are unchanged by this
++    write. The records stay in hand, so the loop's final write still persists them:
++    strictly no worse than before, when nothing reached disk until then.
++    """
++    try:
++        error_log.write_text(state.unsettled_record("".join(records)), encoding="utf-8")
++    except OSError as exc:
++        print(f"leaves: could not flush the attempt record to {error_log.name} ({exc}); "
++              "it will be written when the retry loop ends", file=sys.stderr)
++
++
+ def _format_leaf_attempt(exc: Exception, attempt: int) -> str:
+     """One attempt's record for the error log: the captured stderr tail, or the
+-    exception text when nothing was captured (e.g. command not found)."""
++    exception text when nothing was captured (e.g. command not found).
++
++    The tail is embedded through :func:`state.neutralize_leaf_text` (#540): it is the
++    leaf's own text landing in the harness's account of the leaf's own run, so a
++    marker-shaped line out of the leaf's mouth must not be able to say "this leaf has
++    not settled" on the harness's behalf."""
+     tail = (getattr(exc, "output", "") or "").strip()
+     rc = getattr(exc, "returncode", "?")
+-    body = tail if tail else f"(no output captured) {type(exc).__name__}: {exc}"
++    body = (state.neutralize_leaf_text(tail) if tail
++            else f"(no output captured) {type(exc).__name__}: {exc}")
+     return f"----- attempt {attempt} — exit {rc} -----\n{body}\n\n"
+ 
+ 
+@@ -2092,16 +2136,19 @@ def run_review(d: Path, cfg: Config) -> None:
+ 
+ 
+ def review_never_ran(d: Path) -> bool:
+-    """True iff the reviewer leaf NEVER RAN for this Check round (#369).
+-
+-    The error log is the engine's failed-leaf discriminator (#138): a reviewer that ran
+-    and FAILED wrote ``state.REVIEW_ERROR_LOG`` (and a §6 placeholder review); a
+-    successful run removed any stale log. So *both* artifacts absent means the beat
+-    died in the window between the gate write and the reviewer leaf — "not yet run",
+-    never "ran and failed" — and the leaf is safe (and necessary) to run now.
++    """True iff the reviewer leaf has no settled account of this Check round (#369/#540).
++
++    ``state.leaf_ran_and_failed`` is the engine's failed-leaf discriminator (#138): a
++    reviewer that ran and SPENT its attempts left a settled ``state.REVIEW_ERROR_LOG``
++    (and a §6 placeholder review); a successful run removed any stale log. So no
++    check-review.md and no settled log means the beat died before the reviewer leaf
++    finished — either it never started (the window between the gate write and the leaf)
++    or a death inside its retry loop left an UNSETTLED record (#540). Both are "not yet
++    run, never ran-and-failed", and the leaf is safe (and necessary) to run now: the
++    alternative is a bundle reaching sign-off with no review of the diff at all.
+     """
+     return (not (d / "check-review.md").exists()
+-            and not (d / state.REVIEW_ERROR_LOG).exists())
++            and not state.leaf_ran_and_failed(d / state.REVIEW_ERROR_LOG))
+ 
+ 
+ def _seed_sandbox_agents(cfg: Config, sandbox: Path) -> None:
+@@ -2660,9 +2707,10 @@ def advisory_artifact(d: Path, leaf_id: str) -> Path:
+ 
+ 
+ def advisory_error_log(d: Path, leaf_id: str) -> Path:
+-    """The captured-error tail an advisory leaf leaves when it ran and FAILED (#138) —
++    """The captured-error tail an advisory leaf leaves per failed attempt (#138/#540) —
+     named beside :func:`advisory_artifact` so the writer and the CHECKED-resume
+-    discriminator (#369, ``only_missing`` below) share one spelling."""
++    discriminator (#369, ``only_missing`` below) share one spelling. Whether one of
++    these means "ran and FAILED" is ``state.leaf_ran_and_failed``, never its existence."""
+     return d / f"check-advisory-{leaf_id}.error.log"
+ 
+ 
+@@ -2786,19 +2834,21 @@ def run_advisory_leaves(d: Path, cfg: Config, *, only_missing: bool = False) ->
+     check-advisory-<id>.md; failures degrade to a §6 NEEDS-HUMAN placeholder, never crash
+     the cycle (advisory, like the main reviewer).
+ 
+-    ``only_missing`` (#369) is the CHECKED-resume mode: a leaf whose artifact OR error
+-    log already exists is skipped, so only a leaf the interrupted BUILT beat never
+-    reached is run (a leaf that ran and FAILED left its error log + placeholder, #138,
+-    and is not re-run). The selection policy is re-applied FIRST — under
+-    ``vendor-complement`` (#200) only one of the pool runs, so an unselected leaf's
+-    absent artifact is legitimate, never "missing"; filtering the pool by absence
+-    before selecting would instead promote an excluded leaf. On an uninterrupted
+-    bundle every selected leaf's artifact exists, so this mode is a no-op."""
++    ``only_missing`` (#369) is the CHECKED-resume mode: a leaf whose artifact exists, or
++    whose error log is SETTLED (``state.leaf_ran_and_failed``), is skipped — so only a
++    leaf the interrupted BUILT beat never reached, or left mid-retry with an unsettled
++    record (#540), is run (a leaf that ran and spent its attempts left a settled error
++    log + placeholder, #138, and is not re-run). The selection policy is re-applied
++    FIRST — under ``vendor-complement`` (#200) only one of the pool runs, so an
++    unselected leaf's absent artifact is legitimate, never "missing"; filtering the
++    pool by absence before selecting would instead promote an excluded leaf. On an
++    uninterrupted bundle every selected leaf's artifact exists, so this mode is a
++    no-op."""
+     applicable = [spec for spec in cfg.advisory_leaves if _advisory_applies(spec, d)]
+     for spec in _select_advisory(applicable, d, cfg):
+         leaf_id = spec.get("id") or "advisory"
+         if only_missing and (advisory_artifact(d, leaf_id).exists()
+-                             or advisory_error_log(d, leaf_id).exists()):
++                             or state.leaf_ran_and_failed(advisory_error_log(d, leaf_id))):
+             continue
+         leaf = _advisory_leaf(spec, "advisory", leaf_id)
+         if leaf.mode == "command":
+diff --git a/template/src/pdca_harness/state.py b/template/src/pdca_harness/state.py
+index 43cc69b..deeedf0 100644
+--- a/template/src/pdca_harness/state.py
++++ b/template/src/pdca_harness/state.py
+@@ -58,14 +58,34 @@ DEPENDENCY_ADJUDICATION = "dependency-adjudication.json"
+ # attempt via DOWNSTREAM_OF_BRIEF below.
+ SESSION_CARRY = "session-carry-forward"
+ 
+-# The reviewer leaf's captured-error tail (#138): written when the reviewer RAN AND
+-# FAILED (retries exhausted), removed at the start of a successful run — which makes it
+-# the discriminator (#369) between a reviewer that ran-and-failed and one that NEVER ran
++# The reviewer leaf's captured-error tail (#138): written after every failed attempt
++# (#540), removed at the start of a successful run — which makes it, once SETTLED, the
++# discriminator (#369) between a reviewer that ran-and-failed and one that NEVER ran
+ # (an interrupted beat), since neither leaves a check-review.md. Named here (like
+ # CLOSE_MARKER) so the writer (``leaves``), the CHECKED-resume check (``driver``) and
+-# the §6 wording split (``assemble``) share one spelling.
++# the §6 wording split (``assemble``) share one spelling. What "settled" means is
++# :func:`leaf_ran_and_failed` below — the one place that reads these files' meaning.
+ REVIEW_ERROR_LOG = "check-review.error.log"
+ 
++# The attempt-record settlement marker (#540) — the ONE point of truth for what an
++# ``*.error.log`` means, and the reason it can exist before its leaf has finished.
++#
++# ``leaves._invoke_leaf_resilient`` now writes each failed attempt's record BEFORE the
++# next attempt starts, so a run killed inside the retry loop still leaves a post-mortem
++# (it used to write nothing until the loop ended, and a mid-retry death lost every
++# attempt's account). That makes the file's mere PRESENCE ambiguous: a record whose leaf
++# still has attempts left is emphatically NOT "the leaf ran and FAILED". So while
++# attempts remain the record carries this marker as its LAST non-blank line, and every
++# reader asks :func:`leaf_ran_and_failed` instead of testing the path's existence —
++# ``leaves.review_never_ran``, ``leaves.run_advisory_leaves(only_missing=True)``,
++# ``assemble._missing_review_text`` and ``driver._resume_interrupted_check``. Four
++# readers, one sentence, so none of them can be left speaking the old meaning.
++UNSETTLED_MARKER = "----- attempts not yet spent; this leaf has not settled -----"
++
++# What a marker-shaped line out of a LEAF's own mouth is rewritten to (see
++# :func:`neutralize_leaf_text`). Kept beside the marker: they are one decision.
++_QUOTED_SUFFIX = "(quoted from the leaf's own output — not the harness's marker)"
++
+ # The per-rule gate evidence logs (issue #370): ``gate-logs/<rule_id>.log`` — the full
+ # combined output behind each ``check-gates.json`` row, written by a bundle-scoped
+ # ``gates.run_gates``. Named here (like CLOSE_MARKER / SESSION_CARRY) so ``gates`` (the
+@@ -146,6 +166,62 @@ _OUTCOME_TO_STATE = {
+ }
+ 
+ 
++def leaf_ran_and_failed(error_log: Path) -> bool:
++    """True iff ``error_log`` is the account of a leaf that ran and SPENT its attempts.
++
++    The engine's one failed-leaf discriminator (#138 / #369 / #540) — see
++    :data:`UNSETTLED_MARKER` for why every reader asks this rather than testing the
++    path's existence. False for a log that is absent, unreadable, or still carrying the
++    marker: an unsettled record recovers its leaf exactly as an absent one does, so a
++    leaf the death window merely INTERRUPTED is re-run rather than retired — the shape
++    that would otherwise carry a bundle to sign-off with no review of the diff at all.
++    Unreadable errs the same way, towards re-running: a re-run costs a leaf, a wrong
++    "ran and failed" costs the review.
++    """
++    try:
++        text = error_log.read_text(encoding="utf-8", errors="replace")
++    except OSError:  # absent, unreadable, a directory — no settled account either way
++        return False
++    return not _unsettled(text)
++
++
++def _unsettled(text: str) -> bool:
++    """True iff ``text``'s LAST non-blank line is :data:`UNSETTLED_MARKER`, alone.
++
++    Deliberately not a substring or mid-line test. These records embed each failed
++    attempt's captured stderr verbatim, so a looser rule would let a leaf's own output
++    impersonate the harness's account of its own run — and the harness would then
++    re-run a leaf that genuinely ran and failed. The writer side of that pair is
++    :func:`neutralize_leaf_text`.
++    """
++    for line in reversed(text.splitlines()):
++        if line.strip():
++            return line.strip() == UNSETTLED_MARKER
++    return False
++
++
++def unsettled_record(records: str) -> str:
++    """``records`` marked unsettled — what a leaf's error log holds BETWEEN attempts.
++    Writing the records without the marker (the retry loop's final write) settles them."""
++    return records + UNSETTLED_MARKER + "\n"
++
++
++def neutralize_leaf_text(text: str) -> str:
++    """A leaf's captured output with any line that would read as :data:`UNSETTLED_MARKER`
++    defused, so the leaf cannot impersonate the harness's account of its own run.
++
++    Only a line that IS the marker (bar surrounding whitespace) can be read as one, so
++    only such a line is rewritten — and it is rewritten, never dropped: the text stays in
++    the post-mortem, including anything riding the same channel (the #420 memory
++    telemetry), it simply can no longer be the log's marker line.
++    """
++    if UNSETTLED_MARKER not in text:
++        return text
++    out = "\n".join(f"{line} {_QUOTED_SUFFIX}" if line.strip() == UNSETTLED_MARKER else line
++                    for line in text.splitlines())
++    return out + "\n" if text.endswith("\n") else out
++
++
+ def is_resolved(d: Path) -> bool:
+     """Briefless-tracker terminal marker (issue #302): notes.json carries a top-level
+     dict ``resolved`` (e.g. ``{github_state, state_reason, closed_at, note}``) — the
+diff --git a/template/tests/test_attempt_ownership.py b/template/tests/test_attempt_ownership.py
+new file mode 100644
+index 0000000..d80f532
+--- /dev/null
++++ b/template/tests/test_attempt_ownership.py
+@@ -0,0 +1,260 @@
++"""Per-attempt record ownership (issue #540) — stdlib unittest, no deps.
++
++Run from the template root:
++    PYTHONPATH=src python -m unittest tests.test_attempt_ownership -v
++
++A retried reviewer/advisory leaf's ``*.error.log`` used to be written only once the
++retry loop ENDED, so two things were broken at once and neither could be fixed alone:
++
++1. while attempt 2 ran there was nothing on disk explaining attempt 1, and a run killed
++   mid-retry lost every attempt's account — the file never existed;
++2. the *presence* of that file meant "the leaf ran and FAILED" to four readers, so
++   flushing it earlier made that sentence false at every one of them — including two
++   executable recovery discriminators, which would then retire a leaf the death window
++   merely INTERRUPTED and carry the bundle to sign-off with no review of the diff.
++
++These tests drive the shipped wrapper with a stub "leaf" (a Python interpreter that
++dies at invocation, i.e. the transient/retry path) and assert the end state from
++BEHAVIOUR only — the mid-retry bytes are taken from the production write itself, and
++the settlement marker is read off those bytes, so nothing here re-implements or names
++the mechanism under test.
++"""
++
++from __future__ import annotations
++
++import shutil
++import sys
++import tempfile
++import unittest
++from pathlib import Path
++
++from pdca_harness import assemble, leaves, state
++from pdca_harness.config import Config, LeafConfig
++
++# A claude-family leaf so the stream path engages (the only path yielding the "did a
++# session start" signal); argv is a Python interpreter running this script. It writes to
++# stderr only and exits non-zero — no stdout, so no session started: the transient-infra
++# signal the wrapper retries. On its SECOND invocation it copies the bundle's error log
++# for this leaf aside, which is a leaf OBSERVING the bundle while attempt 1's account
++# should already be there. $SAY overrides the line it prints last on stderr.
++_STUB = """
++import os, shutil, sys
++
++counter, log, snap = os.environ["CNT"], os.environ["LOG"], os.environ["SNAP"]
++runs = len(open(counter).read()) if os.path.exists(counter) else 0
++open(counter, "a").write("x")
++if runs == 1 and os.path.exists(log):
++    shutil.copyfile(log, snap)
++sys.stderr.write(os.environ.get("SAY", "overloaded_error 529") + "\\n")
++sys.exit(1)
++"""
++
++# The same leaf, transient ONCE and then healthy: the retry recovers it, so the run
++# must leave no record behind at all (a leaf that succeeded is not a failed one).
++_RECOVERS_ON_RETRY = """
++import os, sys
++
++counter = os.environ["CNT"]
++runs = len(open(counter).read()) if os.path.exists(counter) else 0
++open(counter, "a").write("x")
++if runs == 0:
++    sys.stderr.write("overloaded_error 529\\n")
++    sys.exit(1)
++print('{"type": "result"}')
++"""
++
++ADVISORY_ID = "code-review"
++
++
++def _stub_config(root: Path) -> Config:
++    return Config(
++        root=root,
++        bundle_root=root / "results",
++        process_dir=root / "process",
++        templates_dir=root / "templates",
++        default_branch="main",
++        tracker_system="github",
++        tracker_url="",
++        issue_id_example="#1",
++        builder=LeafConfig(mode="stub", family="claude"),
++        reviewer=LeafConfig(mode="stub", family="codex"),
++    )
++
++
++class AttemptOwnershipBase(unittest.TestCase):
++    def setUp(self) -> None:
++        self.tmp = Path(tempfile.mkdtemp())
++        self.cnt = self.tmp / "count.txt"
++        self.snap = self.tmp / "mid-retry-snapshot"
++        self.error_log = self.tmp / state.REVIEW_ERROR_LOG
++
++    def tearDown(self) -> None:
++        shutil.rmtree(self.tmp, ignore_errors=True)
++
++    def _runs(self) -> int:
++        return len(self.cnt.read_text(encoding="utf-8")) if self.cnt.exists() else 0
++
++    def _run_failing_leaf(self, say: str = "") -> Exception | None:
++        """One full run of the SHIPPED wrapper against the retrying stub leaf."""
++        env = {"CNT": str(self.cnt), "LOG": str(self.error_log), "SNAP": str(self.snap)}
++        if say:
++            env["SAY"] = say
++        leaf = LeafConfig(mode="command", family="claude",
++                          argv=[sys.executable, "-c", _STUB], interactive=False)
++        return leaves._invoke_leaf_resilient(
++            leaf, self.tmp, "review please", error_log=self.error_log,
++            attempts=3, backoff=0.0, stream_json=True, env=env)
++
++    def _mid_retry_bytes(self) -> str:
++        """What the leaf's error log held DURING the retry loop — captured by the stub
++        itself, so the fixture is byte-for-byte the state a mid-retry kill leaves and
++        cannot drift from the production shape."""
++        self._run_failing_leaf()
++        self.assertTrue(
++            self.snap.exists(),
++            "attempt 2 observed the bundle and found NO record of attempt 1: a run "
++            "killed inside the retry loop leaves no post-mortem at all")
++        return self.snap.read_text(encoding="utf-8")
++
++    def _bundle(self) -> Path:
++        d = self.tmp / "bundle"
++        d.mkdir(exist_ok=True)
++        return d
++
++
++class EachAttemptsRecordIsOnDiskBeforeTheNext(AttemptOwnershipBase):
++    """Criterion 1 — a leaf observing the bundle during attempt 2 finds attempt 1's
++    account already there."""
++
++    def test_attempt_two_finds_attempt_ones_account(self) -> None:
++        err = self._run_failing_leaf()
++        self.assertIsInstance(err, leaves.LeafError)
++        self.assertEqual(self._runs(), 3)   # the shipped attempt budget, unchanged
++        self.assertTrue(
++            self.snap.exists(),
++            "attempt 2 observed the bundle and found NO record of attempt 1: a run "
++            "killed inside the retry loop leaves no post-mortem at all")
++        text = self.snap.read_text(encoding="utf-8")
++        self.assertIn("attempt 1", text)                # whose attempt it accounts for
++        self.assertIn("overloaded_error 529", text)     # attempt 1's captured stderr
++        self.assertNotIn("attempt 2", text)             # …and only the spent attempt
++
++    def test_a_leaf_that_recovers_on_retry_leaves_no_record_behind(self) -> None:
++        # The shipped contract's other edge (criterion 4): the flushed record describes
++        # a leaf that has since SUCCEEDED, so the successful run must clear it — a
++        # bundle carrying an error log beside a produced artifact would be a lie.
++        flaky = LeafConfig(mode="command", family="claude", interactive=False,
++                           argv=[sys.executable, "-c", _RECOVERS_ON_RETRY])
++        err = leaves._invoke_leaf_resilient(
++            flaky, self.tmp, "review please", error_log=self.error_log,
++            attempts=3, backoff=0.0, stream_json=True, env={"CNT": str(self.cnt)})
++        self.assertIsNone(err)
++        self.assertEqual(self._runs(), 2)          # failed once, then recovered
++        self.assertFalse(self.error_log.exists(),
++                         "a leaf that SUCCEEDED left an error log behind")
++
++    def test_an_unwritable_record_does_not_narrow_the_retry_contract(self) -> None:
++        # Criterion 5: the shipped stop rule is the ONLY stop rule. A record that
++        # cannot be written (here: a bundle dir that is not there — the same OSError
++        # family a read-only dir or ENOSPC raises, through the same call) must not end
++        # the run early; the records stay in hand for the loop's final write, which
++        # fails exactly as it does on the base. What must NOT change is the attempts.
++        self.error_log = self.tmp / "vanished" / state.REVIEW_ERROR_LOG
++        with self.assertRaises(OSError):
++            self._run_failing_leaf()
++        self.assertEqual(self._runs(), 3, "a failed record flush cost the leaf attempts")
++
++
++class AnUnsettledAccountDoesNotReadAsRanAndFailed(AttemptOwnershipBase):
++    """Criterion 2 — every reader treats a record whose leaf has attempts left exactly
++    as it treats an absent one, and the operator-facing wording names both shapes."""
++
++    def test_reviewer_with_an_unsettled_record_is_recovered(self) -> None:
++        d = self._bundle()
++        (d / state.REVIEW_ERROR_LOG).write_text(self._mid_retry_bytes(), encoding="utf-8")
++        self.assertTrue(
++            leaves.review_never_ran(d),
++            "a reviewer interrupted mid-retry was retired as 'ran and FAILED' — the "
++            "bundle would reach sign-off with no review of the diff at all")
++        text = assemble._missing_review_text(d)
++        self.assertNotIn("RAN AND FAILED", text)   # …and §6 does not assert it either
++        self.assertIn(state.REVIEW_ERROR_LOG, text)  # while still naming the record
++
++    def test_advisory_with_an_unsettled_record_is_not_skipped(self) -> None:
++        d = self._bundle()
++        cfg = _stub_config(self.tmp)
++        cfg.advisory_leaves = [{"id": ADVISORY_ID, "role": "x", "mode": "stub"}]
++        leaves.advisory_error_log(d, ADVISORY_ID).write_text(
++            self._mid_retry_bytes(), encoding="utf-8")
++        leaves.run_advisory_leaves(d, cfg, only_missing=True)
++        self.assertTrue(
++            leaves.advisory_artifact(d, ADVISORY_ID).exists(),
++            "the CHECKED-resume skipped an advisory leaf that was only INTERRUPTED")
++
++    def test_a_settled_record_still_means_ran_and_failed(self) -> None:
++        # The other half of the same sentence, and the shipped behaviour (#138/#369):
++        # once the attempts ARE spent, the log retires the leaf exactly as before.
++        self._run_failing_leaf()
++        settled = self.error_log.read_text(encoding="utf-8")
++        d = self._bundle()
++        cfg = _stub_config(self.tmp)
++        cfg.advisory_leaves = [{"id": ADVISORY_ID, "role": "x", "mode": "stub"}]
++        (d / state.REVIEW_ERROR_LOG).write_text(settled, encoding="utf-8")
++        leaves.advisory_error_log(d, ADVISORY_ID).write_text(settled, encoding="utf-8")
++        self.assertFalse(leaves.review_never_ran(d))
++        self.assertIn("RAN AND FAILED", assemble._missing_review_text(d))
++        leaves.run_advisory_leaves(d, cfg, only_missing=True)
++        self.assertFalse(leaves.advisory_artifact(d, ADVISORY_ID).exists(),
++                         "a leaf that ran and spent its attempts was re-run")
++
++
++class ALeafsOwnTextCannotImpersonateTheDistinction(AttemptOwnershipBase):
++    """Criterion 3 — whatever distinguishes an unsettled account from a spent one is
++    neutralised in the captured stderr the record embeds, and is recognised only as the
++    log's LAST NON-BLANK LINE, alone."""
++
++    def _last_line(self, text: str) -> str:
++        """The distinguishing line of a mid-retry record: its last non-blank line.
++        Derived, never named — the test knows only where it sits."""
++        lines = [ln for ln in text.splitlines() if ln.strip()]
++        self.assertTrue(lines, "the mid-retry record was empty")
++        return lines[-1].strip()
++
++    def test_a_leaf_emitting_that_line_last_does_not_read_as_unsettled(self) -> None:
++        line = self._last_line(self._mid_retry_bytes())
++        # A second run whose stub prints exactly that line, alone, last on stderr —
++        # the impersonation: the leaf's own text landing in the harness's account of
++        # the leaf's own run. Its attempts ARE spent when the run returns.
++        self._run_failing_leaf(say=line)
++        settled = self.error_log.read_text(encoding="utf-8")
++        d = self._bundle()
++        (d / state.REVIEW_ERROR_LOG).write_text(settled, encoding="utf-8")
++        self.assertFalse(
++            leaves.review_never_ran(d),
++            "a leaf's own output impersonated the harness's unfinished-attempts "
++            "distinction: a reviewer that ran and failed would be re-run as if it "
++            "had been interrupted")
++        self.assertIn("RAN AND FAILED", assemble._missing_review_text(d))
++        # Neutralised, not dropped: the leaf's account survives in the post-mortem
++        # (the #420 memory telemetry rides this same channel).
++        self.assertIn(line, settled)
++
++    def test_the_line_is_recognised_only_whole_and_last(self) -> None:
++        mid_retry = self._mid_retry_bytes()
++        line = self._last_line(mid_retry)
++        d = self._bundle()
++        log = d / state.REVIEW_ERROR_LOG
++        # Mid-line, and as a substring of a longer line: not the distinction.
++        for impostor in (f"boom {line} boom\n", f"{line} — quoted by a leaf\n",
++                         f"{mid_retry}\ntrailing chatter from a later write\n"):
++            log.write_text(impostor, encoding="utf-8")
++            self.assertFalse(leaves.review_never_ran(d),
++                             f"read as unsettled from a non-final/partial line: {impostor!r}")
++        # …while the real thing is recognised through trailing blank lines.
++        log.write_text(mid_retry + "\n\n  \n", encoding="utf-8")
++        self.assertTrue(leaves.review_never_ran(d),
++                        "trailing blank lines hid the unfinished-attempts record")
++
++
++if __name__ == "__main__":
++    unittest.main()

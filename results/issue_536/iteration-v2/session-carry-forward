@@ -1,0 +1,57 @@
+Rejected on unclosed carry-forward, not on approach or slicing. The slice is the right
+size and the design is sound — the atomic per-attempt flush, the defang + whole-last-line
+match, fail-closed withdrawal, and the three converted readers of "an error log means the
+leaf ran and FAILED" are all correct and independently reproduced (14 failures + 1 error
+red, 19/19 green, 1777-test suite green). Same slice, same design; close the items below.
+
+1. Close round 1's carry-forward item 3 in the shape that actually occurs. `_empty_run_class`
+   is keyed on `error_log.exists()`, but the log only survives a success when `withdrew` is
+   True — and `withdrew` is set only when a dead attempt left a FILE. For the canonical
+   transient death (attempt 1 exits non-zero with `overloaded_error 529` on stderr, writes
+   nothing; attempt 2 exits 0 writing nothing) the `else` branch at leaves.py:739-741 unlinks
+   the log, so `_empty_run_class` sees nothing and stamps `_FAIL_SUBSTANTIVE` — the operator
+   is told "substantive — needs a human. The leaf ran but did not yield a usable verdict; do
+   not assume an infra blip" one step after the harness deleted the 529 it was holding. That
+   is #278's inversion and the parent invariant ("the evidence of a failure is kept; no
+   evidence is never filed as a verdict") failing in the COMMON case.
+   Adjudication you need, which the brief left ambiguous: keep the log whenever `records` is
+   non-empty and the artifact is absent, not only after a file withdrawal. Criterion (vi)'s
+   "a success still leaves no error log behind" governs a clean success that PRODUCED its
+   artifact — not a success that produced nothing over a dead predecessor. Criterion (iii)
+   still holds: a leaf that exits 0 having written nothing with NO dead predecessor degrades
+   to today's placeholder, error-log-free, class unchanged.
+
+2. Make the successful-retry cleanup not best-effort (the reviewer's C3/T3 FAIL,
+   leaves.py:737-741). A swallowed `OSError` on `error_log.unlink()` leaves the log in
+   flight; the harvest then succeeds and `_settle_leaf_record` STRIPS the trailer, converting
+   the leftover into a settled "ran and failed" record beside a live check-review.md — one
+   leaf archived as both success and failure, against criterion (vi). Confirmed narrow: no
+   reader is driven to a wrong action (review_never_ran and the advisory short-circuit both
+   see the artifact first), so this is archive pollution plus a contract breach, not a
+   corrupted verdict. Fix at the source rather than papering over it downstream.
+
+3. Close the two test-blindness holes the adversary demonstrated by mutation; both are
+   one assertion and both would let a real regression ship green.
+   - Mutating `leaf_run_incomplete`'s whole-line match into a substring sniff leaves all
+     1777 tests green, because both impersonation cases route their payload through
+     `_defang_in_flight` before the match runs — the braces leaves.py:859-864 argues for are
+     untested. Hand-write a log whose BODY contains the marker on a non-final line and whose
+     last non-blank line is ordinary text; assert `leaf_run_incomplete(log)` is False.
+   - Deleting BOTH advisory `_settle_leaf_record` calls (leaves.py:3135, :3439) leaves the
+     suite green: `BothAdvisoryHarvestsAreAttemptAwareToo` asserts only the harvest half.
+     Parametrise it to assert `leaf_run_incomplete(error_log)` is False after each site.
+
+4. `driver.py:178-179` still prints "Check — reviewer never ran (beat was interrupted after
+   the gate write)" on every `review_never_ran(d)`, which this patch has just made false for
+   a reviewer that ran, died transiently and was killed during the backoff. The paired text
+   in assemble.py:435-437 was reworded for exactly this reason; this fourth reader was
+   missed. Wording only.
+
+Do NOT widen the slice:
+- Leave the staleness clear at leaves.py:716 alone — criterion (vi) freezes it and the prior
+  sign-off adjudicated it as a deliberate Act deferral.
+- The non-atomic `shutil.copy2` of the VERDICT at the three harvests (leaves.py:2772, :3131,
+  :3434) and the stranded `*.error.log.tmp.<pid>` (leaves.py:807-808) are noted as Act
+  candidates, not this round's work. Do not harden them here.
+- Do not touch the retry set, `LeafError.transient`, `progress.py` (sibling #538 owns it) or
+  the builder path. Keep `test_leaf_resilience.py` untouched.
