@@ -70,8 +70,8 @@ live case of the deadlock upstream #534 fixes). Five follow-ups filed upstream.
 
 ## Process deltas
 
-Agreed with the human; shipped together as draft PR (link below) — the human marks
-ready / merges.
+Agreed with the human; shipped together as draft PR
+https://github.com/eduralph/pdca-pdca/pull/64 — the human marks ready / merges.
 
 - **Spec routine:** `docs/INTEGRATION.md` §5 gains a closed/rejected-work check
   command **by affected path** (after the merged-history command, `:128-135`):
