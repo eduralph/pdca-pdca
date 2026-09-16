@@ -1,0 +1,32 @@
+fix(leaves): plan review covers the briefs a split writes in session
+
+With a plan reviewer configured, `pdca` reviews each brief a Plan session
+writes before anything is built from it. When a single-issue Plan session
+split its issue with `pdca split <id> --accept`, that review looked at the
+issue the session was started on, not at what the session wrote. The new
+child briefs were never reviewed, and they went on to be built as they
+were. The parent got one of two wrong outcomes. If it still had its old
+brief, the review graded that superseded brief on an issue already closed
+as split, and could open a revision session to edit a brief nobody will
+build. If the parent had no brief, the review silently did nothing. The
+children never got a second chance: they come out of the split already
+planned, so the flow skips Plan for them.
+
+This happened twice on a real project, and reviewing the children by hand
+afterwards found material errors in their briefs both times.
+
+Both Plan paths now pick what to review the same way. Before the session,
+they take a content hash of every brief in the results directory. Afterwards,
+they review every brief the session added or changed, wherever it was
+written. The multi-issue path already worked like this; the single-issue path
+now shares the same two helpers. The review pass itself now also skips any
+issue marked closed (`close-disposition`), so a split parent is never
+reviewed on either path, even when its brief changed in the same session.
+Placeholder briefs are still skipped, and with no plan reviewer configured
+Plan behaves as before.
+
+Out of scope: children of a split accepted outside a Plan session, from a
+sign-off session or a shell, never enter Plan, so they still get no plan
+review.
+
+Fixes #480
