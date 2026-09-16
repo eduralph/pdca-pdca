@@ -1,0 +1,23 @@
+Record sign-off text verbatim, even when it contains backslashes
+
+A sign-off rationale or a --by name that contained a backslash could not be
+recorded. Quoting a regex such as `^\W*` -- a normal thing to write when
+rejecting a change -- crashed `pdca signoff` with a traceback, and in a batch
+`pdca flow` the bundle was skipped on every pass, so it stayed stuck waiting
+for sign-off with nothing recorded. Text that happened to spell a group
+reference such as `\g<1>` was worse: it was recorded without error, but with
+the field's own label in place of the human's words, and that wrong text was
+then carried into the next build.
+
+The cause was that `signoff.record` passed the human's text to `re.subn` as
+the replacement string, which Python reads as a template with its own escape
+syntax. The replacement is now a function that returns the label plus the
+text unchanged, so no character in it is interpreted. Recording can again
+only fail with the ValueError its callers already handle.
+
+A new test, tests/test_signoff_verbatim.py, covers a rationale with `\W`, a
+rationale with `\g<1>`, a `CORP\dev` style --by for all four outcomes, and
+the full path through flow._apply_decision. It fails before this change and
+passes after it.
+
+Fixes #529

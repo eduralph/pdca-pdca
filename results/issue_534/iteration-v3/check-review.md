@@ -1,0 +1,35 @@
+Review issue #534: prevent interactive turn-end deadlocks and report unmet handoff contracts when the driver reaps the session, including blank-abandon and broken-bundle cases.
+
+Source citations beginning `template/` or `docs/` are grounded on the restored, patched `$PDCA_TARGET`; evidence and brief citations are relative to this review directory. This review is advisory.
+
+| Item | Verdict | Basis |
+|------|---------|-------|
+| C1 Spec | PASS | The agreed boundary and observable outcomes are explicit: turns reach the human; session-end checks only report; self-check and typed abandonment remain available (`brief.md:28`; `template/tests/test_handoff_reap.py:164`). |
+| C2 Reproduction (red pre-fix) | PASS | Independent stash/run reproduced the actual blocked turn: the live old hook returned 2, including as a subprocess; the 20 regression tests produced 24 assertion failures, with missing reap reports (`reviewer-red.log:3`; `template/tests/test_handoff_reap.py:198`). |
+| C3 Change | PASS | The patch satisfies the agreed boundary and both carry-forward corrections; blank abandonment cannot suppress problems and a broken bundle cannot hide its peers (`template/src/pdca_harness/handoff.py:445`; `template/src/pdca_harness/handoff.py:468`; `template/tests/test_handoff_reap.py:302`; `template/tests/test_handoff_reap.py:364`). |
+| C4 Verification (red→green) | PASS | Restoring the patch changed the regression outcome to green: all 55 handoff tests pass, covering real hook subprocesses, unchanged bundle contents, error reporting, and preserved leaf exceptions (`reviewer-green.log:7`; `template/tests/test_handoff_reap.py:330`; `gate-logs/C4-verify.log:10`). |
+| C5 Causal adequacy | PASS | Removing the turn-end hook and making its legacy invocation unconditionally silent removes the feedback-loop cause; the reporting exception boundaries isolate failures and are not capability probes masking that cause (`template/.claude/hooks/handoff_guard.py:76`; `template/src/pdca_harness/handoff.py:338`; `template/tests/test_handoff_reap.py:145`). |
+| T1 Structure | PASS | The existing contract module and session boundary remain the owners of the check; the three functions excluded for concurrent work are unchanged, including comments (`template/src/pdca_harness/handoff.py:343`; `reviewer-checks.log:1`). |
+| T2 Shape | PASS | Independently rerun docs lint and 22-page render/link audit pass, as does whitespace checking; frozen docs and host-CI-parity logs agree (`docs/01-render-and-integrate.md:176`; `gate-logs/T2-docs.log:10`; `gate-logs/host-ci-docs.log:10`). |
+| T3 Runtime | PASS | Independent driver run passes 1,808 tests with two skips; frozen evidence shows all 24 root render/update tests passed; the local root rerun is unavailable because this interpreter cannot import Copier (`reviewer-suite.log:1119`; `gate-logs/T3-suite.log:37`; `reviewer-root.log:6`). |
+| T4 Contribution | N/A | Contribution artifacts are intentionally drafted after Check; the deferred row owes its substantive audit to the mandatory publish rerun (`gate-logs/T4-contribution.log:10`). |
+| T5 Judgment | NEEDS-HUMAN | Confirm prior-art coverage by affected file path across merged and closed/rejected work — the brief records path-based history but closed-work searches by issue/text, and this synthetic one-commit target has no remote or history with which to settle supersession (`brief.md:115`; `reviewer-checks.log:5`). |
+| Validation — fitness-to-purpose | NEEDS-HUMAN | Decide whether reporting malformed or missing artifacts at process exit gives operators sufficient visibility while preserving human control of each turn — protocol and report behavior pass automated tests, but operational adequacy remains the human sign-off decision (`docs/01-render-and-integrate.md:176`; `template/src/pdca_harness/handoff.py:354`). |
+
+## Independent verification
+
+- Stashed tracked changes in the disposable target, leaving the new regression test available; ran `python3 -m unittest discover -s "$PDCA_TARGET/template/tests" -p test_handoff_reap.py` with the target's `template/src` on `PYTHONPATH`. The old hook's contract check was live: both in-process and subprocess invocations returned 2, rather than taking a missing-config fallback. Result: 20 tests, 24 assertion failures (`reviewer-red.log`).
+- Popped that stash and ran the same discovery with `-p 'test_handoff*.py'`: 55 tests passed (`reviewer-green.log`). The patch reverse-apply check succeeds on the restored target (`reviewer-checks.log:4`). No production source was edited by the reviewer.
+- Ran the full offline driver suite from `target/template`: 1,808 tests passed, two skipped (`reviewer-suite.log`). Ran the production-import scanner against this bundle: its added test imports `pdca_harness`. Inspected the tests' calls into the actual hook and `handoff.session`, beyond the scanner's import heuristic.
+- Ran the target's docs lint and renderer with `--check`, writing output inside this sandbox: lint clean, 22 pages rendered, internal links clean. `git diff --check` passed.
+- All test temporary directories were directed inside this review directory with `TMPDIR`; evidence logs are retained here for the harness.
+
+## Evidence limits and human decisions
+
+**Root-suite host caveat:** `python3 -m tests.run_root_suite` returned 77 locally: Copier exists as a CLI but is not importable by `/usr/bin/python3` (`reviewer-root.log:6`). This does not establish a patch failure or an undischarged dependency in the frozen round: `gate-logs/T3-suite.log:37` explicitly shows the render and update-compat cases executing successfully, followed by 24 tests and `OK` at lines 54–56. No alias or shim was substituted for Copier. The unavailable instance-root wrappers were adjudicated from their supplied logs and, where available, their underlying target commands were rerun.
+
+**Prior art:** the local investigation returned only synthetic base commit `c4597c7` and no remotes. The supplied brief names historical commits for three affected paths, but its closed/merged search is by `#534` and `stop_hook_active`, not the affected paths. Before clearing T5, establish whether prior merged or closed/rejected changes touching the files listed in `patch.diff` already address or reject this approach. No superseding change is established by the supplied evidence.
+
+**Fitness:** the maintainer has already chosen report-only behavior; this review does not reopen that scope decision. Sign-off must judge whether the observed messages are sufficient for the intended workflow, especially malformed-but-present decisions and briefs that downstream processing does not reject. The relevant independently passing cases are `template/tests/test_handoff_reap.py:237`, `:245`, and `:364`.
+
+No grounded patch defect found. The target was usable and the patch was restored; there is no stale-target caveat. The available integration document is the template with a TODO for project-specific human-only items (`template/docs/INTEGRATION.md.jinja:80`), so it supplies no additional enumerated decision.

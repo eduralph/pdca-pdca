@@ -1,0 +1,255 @@
+diff --git a/template/src/pdca_harness/leaves.py b/template/src/pdca_harness/leaves.py
+index 2a7ac2a..a2a7eef 100644
+--- a/template/src/pdca_harness/leaves.py
++++ b/template/src/pdca_harness/leaves.py
+@@ -912,6 +912,15 @@ def do_plan(d: Path, cfg: Config, csv: str | None = None) -> None:
+         print(f"leaves: {d.name} — tracker item is resolved (notes.json `resolved`); "
+               "skipping Plan (terminal, #302)", file=sys.stderr)
+         return
++    # Snapshot the WHOLE bundle root, not just `d`, before the session (#480). A
++    # single-bundle session can `pdca split <id> --accept` mid-session: that writes
++    # authored briefs into new child bundles this call was never handed, and can mark
++    # `d` itself terminal (a split parent). Reviewing only `d` afterwards either
++    # reviews a superseded parent brief on a closed bundle or, once the parent has no
++    # brief, reviews nothing at all — the children never get a look. Matches
++    # `do_plan_batch`'s pre-session snapshot (`:1073-1075`) so both paths select the
++    # same way (`_fresh_plan_briefs`).
++    briefed_before = _brief_snapshot(cfg)
+     if cfg.planner.mode == "command":
+         # The session's exit contract (#331): register the bundle + role so /handoff
+         # and the Stop hook can verify the brief (structure + dependency probe).
+@@ -924,7 +933,10 @@ def do_plan(d: Path, cfg: Config, csv: str | None = None) -> None:
+                     extra_argv=_plan_grant([d], cfg, cfg.profile(cfg.planner)))
+     else:
+         _stub_plan(d, cfg)
+-    run_plan_advisory(d, cfg)  # opt-in antagonistic review of the brief (#301); no-op unless configured
++    # #301, extended to cover what the session actually produced (#480): review every
++    # bundle it authored or rewrote, not just `d` — `run_plan_advisory_batch` itself
++    # skips a terminal (`close-disposition`) bundle and a placeholder brief.
++    run_plan_advisory_batch(cfg, _fresh_plan_briefs(cfg, briefed_before))
+ 
+ 
+ def _split_provenance_note(d: Path) -> str:
+@@ -1070,9 +1082,7 @@ def do_plan_batch(cfg: Config, csv: str | None = None, ids: list[str] | None = N
+     # brief; unchanged resumptions still skip). An unfilled template copy is NOT
+     # briefed (round 2 — the same placeholder semantics as state.state(), #113): the
+     # session replaces it with a real brief that must get its plan review.
+-    briefed_before = {d.name: _brief_sha(d) for d in cfg.bundle_root.glob("issue_*")
+-                      if (d / "brief.md").exists()
+-                      and not brief.is_placeholder(d / "brief.md")}
++    briefed_before = _brief_snapshot(cfg)
+     for iid in ids or []:
+         sources.seed(cfg, cfg.bundle(iid))  # seed notes.json + sources/ per bundle (#65/#102)
+     # RESOLVED trackers are terminal and must not enter the Plan session (#302 review):
+@@ -1126,11 +1136,7 @@ def do_plan_batch(cfg: Config, csv: str | None = None, ids: list[str] | None = N
+     # #301: one advisory pass over the freshly briefed OR rewritten bundles, then ONE
+     # revision session if any review found something. No-op unless
+     # [[leaves.plan_advisory]] is configured.
+-    fresh = sorted(d for d in cfg.bundle_root.glob("issue_*")
+-                   if (d / "brief.md").exists()
+-                   and (d.name not in briefed_before
+-                        or _brief_sha(d) != briefed_before[d.name]))
+-    run_plan_advisory_batch(cfg, fresh)
++    run_plan_advisory_batch(cfg, _fresh_plan_briefs(cfg, briefed_before))
+ 
+ 
+ def _reject_resolved_briefs(cfg: Config, resolved_before: set[str]) -> None:
+@@ -3351,6 +3357,38 @@ def _plan_revision_prompt(cfg: Config, bundles: list[Path]) -> str:
+     )
+ 
+ 
++def _brief_snapshot(cfg: Config) -> dict[str, str]:
++    """Content-hash snapshot of every non-placeholder brief in the bundle root, keyed
++    by bundle name — the pre-session "before" picture `_fresh_plan_briefs` diffs
++    against (#301 review round 5's content-hash rule, shared by `do_plan` and
++    `do_plan_batch` so a single-bundle session's PLAN reach is snapshotted the same
++    way a batch session's is, #480). An unfilled template copy is NOT briefed (round
++    2 — the same placeholder semantics as `state.state()`, #113): the session
++    replaces it with a real brief that must get its plan review."""
++    return {d.name: _brief_sha(d) for d in cfg.bundle_root.glob("issue_*")
++            if (d / "brief.md").exists() and not brief.is_placeholder(d / "brief.md")}
++
++
++def _fresh_plan_briefs(cfg: Config, briefed_before: dict[str, str]) -> list[Path]:
++    """Every bundle in the root a Plan session authored or REWROTE a brief for, against
++    the pre-session `_brief_snapshot` (#301 review round 5's content-hash rule).
++
++    Shared by `do_plan` and `do_plan_batch` (#480) so a single-bundle session's
++    plan-advisory reach matches the batch session's: a `pdca split <id> --accept`
++    run INSIDE either session's planner call writes authored briefs into new child
++    bundles neither call was individually handed, and this re-scan over the whole
++    root (not just the bundle the caller started with) is what picks them up.
++    Terminal bundles (a split parent that reached `close-disposition`) and
++    placeholder briefs are excluded downstream, by `run_plan_advisory_batch`
++    itself — the one choke point both Plan paths funnel through — so a bundle
++    marked terminal by a split accepted mid-session is filtered there whether it
++    reached this list or not."""
++    return sorted(d for d in cfg.bundle_root.glob("issue_*")
++                  if (d / "brief.md").exists()
++                  and (d.name not in briefed_before
++                       or _brief_sha(d) != briefed_before[d.name]))
++
++
+ def run_plan_advisory_batch(cfg: Config, bundles: list[Path]) -> None:
+     """The Plan-beat advisory pass over freshly briefed bundles (issue #301).
+ 
+@@ -3358,11 +3396,15 @@ def run_plan_advisory_batch(cfg: Config, bundles: list[Path]) -> None:
+     has findings, ONE planner revision invocation covers them all (bounded by
+     construction — never a loop), and each reviewed bundle gets its benefit record.
+     No-op when nothing is configured or nothing is reviewable (a placeholder brief is
+-    a template, not a plan — reviewing it would grade boilerplate)."""
++    a template, not a plan — reviewing it would grade boilerplate). A bundle carrying
++    `close-disposition` (terminal — split parent decomposed rather than built,
++    `split.py:862`) is excluded on BOTH Plan paths (#480): the parent's superseded
++    brief must never trigger the revision session over a bundle nothing will build."""
+     if not cfg.plan_advisory_leaves:
+         return
+     reviewed = [d for d in bundles
+-                if (d / "brief.md").exists() and not brief.is_placeholder(d / "brief.md")]
++                if (d / "brief.md").exists() and not brief.is_placeholder(d / "brief.md")
++                and not (d / state.CLOSE_MARKER).exists()]
+     ran: dict[Path, list[str]] = {}
+     for d in reviewed:
+         # A rewritten brief (or a changed pool/`when` selection) must not inherit the
+diff --git a/template/tests/test_plan_advisory_split_children.py b/template/tests/test_plan_advisory_split_children.py
+new file mode 100644
+index 0000000..aac38d6
+--- /dev/null
++++ b/template/tests/test_plan_advisory_split_children.py
+@@ -0,0 +1,136 @@
++"""Plan-advisory review after a Plan session that split (issue #480; stdlib unittest,
++offline). The #301 advisory pass, invoked from ``do_plan``/``do_plan_batch`` right after
++the planner session, must cover exactly the briefs THAT SESSION authored or rewrote —
++including CHILD bundles a ``pdca split <id> --accept`` run INSIDE a single-bundle session
++creates, which the bundle the driver handed the session (``d``) never names — and must
++never review a bundle already terminal (``close-disposition``), on either Plan path.
++"""
++
++from __future__ import annotations
++
++import shutil
++import tempfile
++import unittest
++from pathlib import Path
++from unittest import mock
++
++from pdca_harness import leaves, state
++from pdca_harness.config import Config, LeafConfig
++
++_REVIEWER = {
++    "id": "plan-reviewer",
++    "mode": "stub",
++    "role": "refute the brief: wrong root cause, untestable criterion, hidden scope",
++}
++
++
++def _cfg(root: Path, *, plan_advisory=None) -> Config:
++    return Config(
++        root=root, bundle_root=root / "results", process_dir=root / "process",
++        templates_dir=root / "templates", default_branch="main", tracker_system="github",
++        tracker_url="", issue_id_example="#1",
++        builder=LeafConfig(mode="stub"), reviewer=LeafConfig(mode="stub"),
++        planner=LeafConfig(mode="stub", interactive=True),
++        plan_advisory_leaves=list(plan_advisory or []))
++
++
++def _brief(cfg: Config, iid: str, *, body: str | None = None,
++           placeholder: bool = False) -> Path:
++    d = cfg.bundle(iid)
++    d.mkdir(parents=True, exist_ok=True)
++    if body is None:
++        body = "" if placeholder else f"- **Slug:** {iid.lower()}\n- **Defect:** x.\n"
++    (d / "brief.md").write_text(body or "# template\n", encoding="utf-8")
++    return d
++
++
++def _split_side_effect(cfg: Config, parent: Path, child_ids: list[str]):
++    """Stands in for `pdca split <id> --accept` run INSIDE the stub-planner session
++    (the brief's `Repro instruction`): authors briefs for children `do_plan` was
++    never handed, and marks the parent terminal — the parent's OWN brief is left
++    exactly as the caller set it up (untouched in shape 1, absent in shape 2)."""
++    def fake(_d: Path, cfg_: Config) -> None:
++        for cid in child_ids:
++            _brief(cfg_, cid, body=f"- **Slug:** {cid.lower()}\n- **Defect:** child.\n")
++        (parent / state.CLOSE_MARKER).write_text("split\n", encoding="utf-8")
++    return fake
++
++
++class SingleBundleSplitChildren(unittest.TestCase):
++    def setUp(self) -> None:
++        self.tmp = Path(tempfile.mkdtemp())
++
++    def tearDown(self) -> None:
++        shutil.rmtree(self.tmp, ignore_errors=True)
++
++    def test_shape1_parent_keeps_brief_children_reviewed_parent_is_not(self) -> None:
++        # brief.md `Repro instruction`, shape 1: split after a rejected attempt keeps
++        # the parent's authored brief (`split.accept`, `include_brief=False`).
++        cfg = _cfg(self.tmp, plan_advisory=[_REVIEWER])
++        parent = _brief(cfg, "P1")
++        with mock.patch.object(leaves, "_stub_plan",
++                               side_effect=_split_side_effect(cfg, parent, ["C1", "C2"])):
++            leaves.do_plan(parent, cfg)
++        for cid in ("C1", "C2"):
++            d = cfg.bundle(cid)
++            self.assertTrue(leaves.plan_advisory_artifact(d, "plan-reviewer").exists(), cid)
++            self.assertTrue((d / "plan-advisory-benefit.json").exists(), cid)
++        self.assertEqual(list(parent.glob("plan-advisory-*")), [])
++        self.assertFalse((parent / "plan-advisory-benefit.json").exists())
++
++    def test_shape2_parent_has_no_brief_children_still_reviewed(self) -> None:
++        # brief.md `Repro instruction`, shape 2: split after `iterate-plan` cleared the
++        # parent's brief — pre-fix, the `leaves.py:3364-3365` filter drops the parent
++        # and the pass silently does nothing for anyone.
++        cfg = _cfg(self.tmp, plan_advisory=[_REVIEWER])
++        parent = _brief(cfg, "P2")
++        (parent / "brief.md").unlink()
++        with mock.patch.object(leaves, "_stub_plan",
++                               side_effect=_split_side_effect(cfg, parent, ["C3", "C4"])):
++            leaves.do_plan(parent, cfg)
++        for cid in ("C3", "C4"):
++            d = cfg.bundle(cid)
++            self.assertTrue(leaves.plan_advisory_artifact(d, "plan-reviewer").exists(), cid)
++            self.assertTrue((d / "plan-advisory-benefit.json").exists(), cid)
++        self.assertEqual(list(parent.glob("plan-advisory-*")), [])
++
++    def test_terminal_bundle_is_never_reviewed_even_if_its_brief_changed(self) -> None:
++        # Success criterion (b): close-disposition must gate REGARDLESS of freshness —
++        # a rewritten brief on an already-terminal bundle must not trigger the
++        # revision session over a bundle nothing will build. Exercised directly
++        # against `run_plan_advisory_batch`, the one choke point both Plan paths
++        # funnel through, so the guard is proven on both without duplicating the
++        # planner-session plumbing.
++        cfg = _cfg(self.tmp, plan_advisory=[_REVIEWER])
++        d = _brief(cfg, "TERM")
++        (d / state.CLOSE_MARKER).write_text("split\n", encoding="utf-8")
++        leaves.run_plan_advisory_batch(cfg, [d])
++        self.assertEqual(list(d.glob("plan-advisory-*")), [])
++        self.assertFalse((d / "plan-advisory-benefit.json").exists())
++
++    def test_single_bundle_path_selects_like_the_batch_path(self) -> None:
++        # Success criterion (c), mirroring `test_rewritten_brief_gets_a_fresh_plan_review`
++        # (test_plan_advisory.py:357-376) for the SINGLE-bundle path: a brief elsewhere
++        # in the root that the session never touched is skipped, the session's own
++        # rewrite of `d` is reviewed, and a placeholder brief is still never reviewed.
++        cfg = _cfg(self.tmp, plan_advisory=[_REVIEWER])
++        untouched = _brief(cfg, "U1")
++        d = _brief(cfg, "RW1")
++
++        def rewrite(dd: Path, _cfg: Config) -> None:
++            (dd / "brief.md").write_text(
++                "- **Slug:** rw1-v2\n- **Defect:** reframed.\n", encoding="utf-8")
++
++        with mock.patch.object(leaves, "_stub_plan", side_effect=rewrite):
++            leaves.do_plan(d, cfg)
++        self.assertTrue(leaves.plan_advisory_artifact(d, "plan-reviewer").exists())
++        self.assertEqual(list(untouched.glob("plan-advisory-*")), [])
++
++        ph = _brief(cfg, "PH1", placeholder=True)
++        with mock.patch.object(leaves, "_stub_plan"):        # session leaves the template as-is
++            leaves.do_plan(ph, cfg)
++        self.assertEqual(list(ph.glob("plan-advisory-*")), [])
++
++
++if __name__ == "__main__":
++    unittest.main()

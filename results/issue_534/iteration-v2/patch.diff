@@ -1,0 +1,928 @@
+diff --git a/docs/01-render-and-integrate.md b/docs/01-render-and-integrate.md
+index 24a5fe9..142fa71 100644
+--- a/docs/01-render-and-integrate.md
++++ b/docs/01-render-and-integrate.md
+@@ -174,12 +174,15 @@ reviewer) run unattended.
+ 
+ Every interactive session also has a **checked exit** (issue #331): before you
+ end it, run `/handoff <issue-id>` — it verifies the session's expected artifact
+-exists and is well-formed, and reports PASS or FAIL with the items to fix. The
+-same contract is enforced mechanically at session end by a Stop hook, so a
+-session can't silently close with its artifact missing or malformed; a
+-deliberate walk-away is recorded with
+-`python3 .claude/hooks/handoff_guard.py --abandon "<why>"` rather than by
+-ignoring the guard. Each agent's role prompt lives in a canonical,
++exists and is well-formed, and reports PASS or FAIL with the items to fix. When
++the session ends, the driver checks the same contract and prints anything still
++missing or malformed to your terminal, so a session can't close silently with a
++bad artifact. That check only reports: it never keeps the session open and never
++changes the bundle. Nothing checks the contract at the end of each turn, so the
++leaf can always hand a question back to you (issue #534). A deliberate walk-away
++is recorded with `python3 .claude/hooks/handoff_guard.py --abandon "<why>"`, and
++the driver then reports your reason instead of the list. Each agent's role
++prompt lives in a canonical,
+ vendor-neutral body at `agents/<name>.md`; Claude leaves additionally get
+ `.claude/agents/<name>.md` (a frontmatter wrapper that includes that body, so
+ `--agent` resolves), materialized only when the leaf's family is `claude`.
+diff --git a/template/.claude/commands/handoff.md.jinja b/template/.claude/commands/handoff.md.jinja
+index a28dce3..f3947ee 100644
+--- a/template/.claude/commands/handoff.md.jinja
++++ b/template/.claude/commands/handoff.md.jinja
+@@ -14,6 +14,7 @@ the report below.
+ 
+ Relay the PASS/FAIL verdict above to the human verbatim. On FAIL, fix the listed items
+ (write or repair the named contract artifact — never a stand-in), then run `/handoff $1`
+-again before ending the session. The Stop hook enforces this same contract when the
+-session ends; a deliberate abandonment is recorded with
++again before ending the session. This command is the session's self-check: nothing
++checks the contract at a turn end, and when the session ends the driver reports anything
++still unmet to the human. A deliberate abandonment is recorded with
+ `python3 .claude/hooks/handoff_guard.py --abandon "<why>"`.
+diff --git a/template/.claude/hooks/handoff_guard.py b/template/.claude/hooks/handoff_guard.py
+index 41d40f4..f6f6fb6 100755
+--- a/template/.claude/hooks/handoff_guard.py
++++ b/template/.claude/hooks/handoff_guard.py
+@@ -1,33 +1,32 @@
+ #!/usr/bin/env python3
+-"""Stop hook for the interactive PDCA leaves — the checked exit contract (issue #331).
++"""The session side of the interactive PDCA leaves' exit contract (issues #331, #534).
+ 
+ The interactive leaves (Plan, sign-off, publish, Act) each have a checkable exit
+-contract, and until now nothing checked it at the boundary: the driver discards the
+-session's exit code, so "the human pressed Ctrl-D" and "the leaf discharged its
+-contract" are the same event. This hook makes the ``/handoff`` check non-optional —
+-a slash command cannot terminate its own session or be relied on to be typed — by
+-blocking a session that tries to end with a missing or malformed contract artifact,
+-with feedback naming exactly what is missing, and a deliberate-abandon escape hatch.
++contract. The driver judges it when it reaps the leaf's process and reports anything
++unmet to the human (``pdca_harness.handoff.session``). This script is what the session
++itself runs (vendor-neutral CLI):
+ 
+-Protocols (mirroring ``builder_guard.py``, the mechanical-discipline peer):
+-
+-* **Stop hook** (Claude Code): the event arrives as JSON on stdin; exit 0 allows the
+-  stop, exit 2 blocks it (stderr is fed back to the model). Inert — exit 0 — outside a
+-  driver-spawned leaf session (no ``PDCA_HANDOFF_ROLE`` in the environment), so an
+-  ad-hoc human session in the instance is never blocked.
+-* **``--check <id>``** (vendor-neutral CLI, used by the rendered ``/handoff`` command):
+-  verify the current leaf's contract for ONE required id; PASS ⇒ 0, FAIL ⇒ 1. There is
+-  no scan mode. The verdict is exit status + report — nothing is written to the bundle.
+-* **``--abandon "<why>"``**: the escape hatch — record a TYPED reason in the driver's
+-  session channel; the next stop is allowed and the driver reports the reason.
++* **``--check <id>``** (used by the rendered ``/handoff`` command): verify the current
++  leaf's contract for ONE required id; PASS ⇒ 0, FAIL ⇒ 1. There is no scan mode. The
++  verdict is exit status + report — nothing is written to the bundle.
++* **``--abandon "<why>"``**: record a TYPED reason in the driver's session channel; the
++  driver reports it when the session ends, in place of the list of unmet items.
++* **No arguments** is how the retired #331 **Stop** hook registration ran this script,
++  and it is inert: exit 0, no output, stdin unread. Stop fires every time the main agent
++  finishes a turn, not when the session ends, and a Stop hook's exit 2 sends its stderr
++  back to the model instead of handing the turn to the human. So a leaf that asked the
++  human a question never reached them: the model was told to write the missing
++  artifact (for sign-off, the human's own decision) and was blocked again on every
++  turn (#534). The template no longer registers the hook. An instance whose
++  ``settings.json`` still does (a ``copier update`` merge that kept it) must not
++  deadlock, so this path does nothing.
+ 
+ All contract logic lives in ``pdca_harness.handoff`` (plain Python, unit-tested
+-offline); this file only bootstraps the import and speaks the hook protocol.
++offline); this file only bootstraps the import and speaks the CLI.
+ """
+ 
+ from __future__ import annotations
+ 
+-import json
+ import os
+ import sys
+ from pathlib import Path
+@@ -45,34 +44,6 @@ def _bootstrap():
+     return handoff, Config.load(root)
+ 
+ 
+-def _stop_verdict() -> int:
+-    role = (os.environ.get("PDCA_HANDOFF_ROLE") or "").strip()
+-    if not role:
+-        return 0  # not a driver-spawned leaf session — nothing to enforce
+-    try:
+-        json.load(sys.stdin)  # the Stop event envelope; presence is all we need
+-    except Exception:  # noqa: BLE001 — an unparseable event must not block a human
+-        pass
+-    try:
+-        handoff, cfg = _bootstrap()
+-        problems = handoff.stop_problems(cfg, role, handoff.load_state())
+-    except Exception as exc:  # noqa: BLE001 — a broken check must not trap the session
+-        print(f"handoff_guard: contract check unavailable ({exc}) — allowing the stop",
+-              file=sys.stderr)
+-        return 0
+-    if not problems:
+-        return 0
+-    print(
+-        f"This {role} leaf session may not end yet — its exit contract is not "
+-        "discharged:\n" + "\n".join(f"  - {p}" for p in problems) + "\n"
+-        "Write the missing/malformed artifact(s), verify with `/handoff <id>` "
+-        "(the required id: the bundle's issue id, or the act-log entry date), then end "
+-        "the session again. To deliberately abandon instead, run:\n"
+-        '  python3 .claude/hooks/handoff_guard.py --abandon "<why>"',
+-        file=sys.stderr)
+-    return 2
+-
+-
+ def main() -> int:
+     argv = sys.argv[1:]
+     if argv and argv[0] == "--check":
+@@ -95,10 +66,16 @@ def main() -> int:
+                   "reports it when the session ends", file=sys.stderr)
+             return 2
+         handoff.record_abandon(Path(raw), reason)
+-        print("handoff_guard: abandonment recorded — the session may now end; the "
+-              "driver will report the reason")
++        print("handoff_guard: abandonment recorded — the driver reports the reason "
++              "when the session ends")
+         return 0
+-    return _stop_verdict()
++    if argv:
++        print(f"handoff_guard: unknown mode {argv[0]!r} — use --check <id> or "
++              '--abandon "<why>"', file=sys.stderr)
++        return 2
++    # No arguments: how the retired Stop registration ran this script (#534). Never
++    # block a turn end and never write text the model would read: exit 0, silently.
++    return 0
+ 
+ 
+ if __name__ == "__main__":
+diff --git a/template/.claude/settings.json b/template/.claude/settings.json
+index 8e6fd99..66057af 100644
+--- a/template/.claude/settings.json
++++ b/template/.claude/settings.json
+@@ -56,17 +56,5 @@
+       "Bash(gh pr merge:*)",
+       "Bash(gh release:*)"
+     ]
+-  },
+-  "hooks": {
+-    "Stop": [
+-      {
+-        "hooks": [
+-          {
+-            "type": "command",
+-            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/handoff_guard.py\""
+-          }
+-        ]
+-      }
+-    ]
+   }
+ }
+diff --git a/template/src/pdca_harness/handoff.py b/template/src/pdca_harness/handoff.py
+index d1fd0ee..6749a43 100644
+--- a/template/src/pdca_harness/handoff.py
++++ b/template/src/pdca_harness/handoff.py
+@@ -10,9 +10,14 @@ cause. This module gives each interactive leaf a *checked* boundary:
+   contract for ONE named id and report PASS/FAIL. Ids are REQUIRED — there is no scan
+   mode (prototype finding, getwyrd/wyrd-pdca#166: a scan judges old bundles against a
+   contract that postdates them; a named id only ever judges what this session worked).
+-* :func:`stop_problems` — the ``Stop``-hook verdict (``.claude/hooks/handoff_guard.py``)
+-  that makes the check non-optional: a session may not end with a missing or malformed
+-  contract artifact unless it deliberately abandons (:func:`record_abandon`).
++* :func:`stop_problems` — the session-end verdict: what the contract still lacks. The
++  driver judges it when it REAPS the leaf's process (:func:`session`) and reports the
++  result to the human on stderr. It never blocks, never reopens the session, never
++  changes bundle state; a deliberate abandon (:func:`record_abandon`) is reported in
++  its place. It is not a turn-end check (issue #534): #331 ran it as a Claude Code
++  ``Stop`` hook, but Stop fires every time the agent finishes a TURN, and a Stop hook's
++  exit 2 sends its text back to the model instead of handing the turn to the human, so
++  a leaf that asked the human a question could never reach them.
+ * :func:`session` — the driver-side registration: env for the spawned leaf naming its
+   role and a session-state scratch file (the act-log baseline where authorship must be
+   distinguished, the abandon channel, the record of passed ``/handoff`` runs). The
+@@ -96,9 +101,9 @@ def check_planner(d: Path, cfg: Config, *, allow_absent: bool = False) -> list[s
+     pre-dispatch guard runs, so the two verdicts cannot drift apart).
+ 
+     ``allow_absent`` is the id-seeded batch wrinkle: the batch prompt documents "leave
+-    it UNPLANNED (write no brief.md) and say why" as a legitimate outcome, so at the
+-    Stop boundary a wholly-absent brief passes there — a brief that EXISTS malformed
+-    never does.
++    it UNPLANNED (write no brief.md) and say why" as a legitimate outcome, so the
++    session-end check (:func:`stop_problems`, reported when the driver reaps the
++    session) passes a wholly-absent brief — a brief that EXISTS malformed never does.
+     """
+     from . import brief as _brief  # local: keep this module import-light for the hook
+     from . import doctor as _doctor
+@@ -256,11 +261,23 @@ def record_pass(path: Path, ident: str) -> None:
+ 
+ def record_abandon(path: Path, reason: str) -> None:
+     """The deliberate-abandon escape hatch: a TYPED reason, recorded in the driver's
+-    session channel (never the bundle). The Stop hook then allows the session to end,
+-    and the driver reports the reason when it reaps the session."""
++    session channel (never the bundle). When the driver reaps the session it reports
++    the reason in place of the list of unmet contract items."""
+     _update_state(path, abandoned=reason.strip() or "(no reason given)")
+ 
+ 
++def _abandon_reason(state: dict) -> str:
++    """The abandon reason recorded in ``state``, stripped; ``""`` means not abandoned.
++
++    This is the ONE "was the session abandoned" test: :func:`stop_problems` and
++    :func:`report_at_reap` both use it. The session can write its scratch file itself,
++    so a blank ``abandoned`` can get there without :func:`record_abandon`. If the two
++    judged it differently, a blank value would clear the problem list while no reason
++    was printed, and the reap would report nothing at all.
++    """
++    return str(state.get("abandoned") or "").strip()
++
++
+ @contextlib.contextmanager
+ def session(cfg: Config, role: str, bundles: list[Path] | None = None, *,
+             require_artifact: bool = True):
+@@ -271,6 +288,9 @@ def session(cfg: Config, role: str, bundles: list[Path] | None = None, *,
+     Captures the session-start act-log baseline for the act role. Yields ``{}`` — no
+     contract — when the render does not mark the leaf interactive (criterion f), and on
+     ANY setup failure (a checked exit contract must never break the leaf it checks).
++
++    On exit, which is the driver reaping the leaf's process, the contract is judged and
++    the verdict reported to the human (:func:`report_at_reap`, issue #534).
+     """
+     leaf = getattr(cfg, role, None)
+     if not isinstance(leaf, LeafConfig) or not leaf.interactive:
+@@ -283,36 +303,69 @@ def session(cfg: Config, role: str, bundles: list[Path] | None = None, *,
+             log = cfg.process_dir / "act-log.md"
+             text = log.read_text(encoding="utf-8") if log.exists() else ""
+             baseline = {"act_log_len": len(text), "act_log_sha": _sha(text)}
++        registered = {
++            "role": role,
++            "bundles": [str(b) for b in (bundles or [])],
++            "require_artifact": bool(require_artifact),
++            "baseline": baseline,
++        }
+         fh = tempfile.NamedTemporaryFile(
+             mode="w", encoding="utf-8", dir=cfg.root,
+             prefix=STATE_PREFIX, suffix=".json", delete=False)
+         with fh:
+-            json.dump({
+-                "role": role,
+-                "bundles": [str(b) for b in (bundles or [])],
+-                "require_artifact": bool(require_artifact),
+-                "baseline": baseline,
+-                "passed": [],
+-            }, fh, indent=2)
++            json.dump({**registered, "passed": []}, fh, indent=2)
+         path = Path(fh.name)
+         env = {ENV_ROLE: role, ENV_STATE: str(path)}
+     except OSError as exc:
+         print(f"handoff: could not register the {role} session state ({exc}) — the "
+-              "exit contract is unenforced for this session", file=sys.stderr)
++              "exit contract is unchecked for this session", file=sys.stderr)
+         yield {}
+         return
+     try:
+         yield env
+     finally:
+-        reason = str(_read_json(path).get("abandoned") or "").strip()
+-        if reason:
+-            print(f"handoff: the {role} session was deliberately abandoned — {reason}",
+-                  file=sys.stderr)
+-        path.unlink(missing_ok=True)
++        try:
++            # The session writes `passed` / `abandoned` into the scratch file; what the
++            # driver registered is taken from here, so the report names the bundles the
++            # driver actually handed the leaf even if the file was rewritten or lost.
++            report_at_reap(cfg, role, {**_read_json(path), **registered})
++        finally:
++            path.unlink(missing_ok=True)
++
++
++def report_at_reap(cfg: Config, role: str, state: dict) -> None:
++    """Report, never enforce, a session's exit contract when the driver reaps it (#534).
++
++    The verdict goes to the human on stderr: a recorded abandon reason, else each item
++    :func:`stop_problems` finds (bundle-prefixed), else nothing. This is REPORT ONLY: it
++    writes no bundle file, moves or deletes no artifact, does not reopen the session,
++    and never raises. A check that fails is one line on stderr, because a checked exit
++    contract must never break the leaf it checks.
++
++    The absent-artifact cases are also handled by the driver after the session (no
++    brief, no decision, no publish artifacts). What only this report catches is an
++    artifact that is present but malformed: a brief whose Success criterion is empty, an
++    iterate/discontinue decision with no rationale.
++    """
++    try:
++        reason = _abandon_reason(state)
++        problems = [] if reason else stop_problems(cfg, role, state)
++    except Exception as exc:  # noqa: BLE001 — the report must never break the leaf
++        detail = " ".join(f"{type(exc).__name__}: {exc}".split())
++        print(f"handoff: could not check the {role} session's exit contract ({detail})"
++              " — nothing reported", file=sys.stderr)
++        return
++    if reason:
++        print(f"handoff: the {role} session was deliberately abandoned — {reason}",
++              file=sys.stderr)
++    elif problems:
++        print(f"handoff: the {role} session ended with its exit contract not discharged "
++              "(a report only; the driver carries on as usual):\n"
++              + "\n".join(f"  - {p}" for p in problems), file=sys.stderr)
+ 
+ 
+ # ----------------------------------------------------------------------------
+-# The two verdicts: /handoff (ergonomics) and the Stop hook (enforcement).
++# The two verdicts: /handoff (the session's self-check) and the reap report.
+ # ----------------------------------------------------------------------------
+ def resolve_bundle(cfg: Config, ident: str) -> Path:
+     """``issue_331`` / ``331`` → the bundle dir, matching ``cfg.bundle`` keying."""
+@@ -363,15 +416,19 @@ def run_check(cfg: Config, ident: str, *, role: str | None = None,
+ 
+ 
+ def stop_problems(cfg: Config, role: str, state: dict) -> list[str]:
+-    """The Stop-hook verdict: why this session may NOT end yet (empty ⇒ it may).
++    """The session-end verdict: what this session's exit contract still lacks (empty ⇒
++    discharged). The driver reports it when it reaps the session
++    (:func:`report_at_reap`); nothing blocks on it. The name is historical: the #331
++    Stop hook that consumed it is retired (#534).
+ 
+     Re-verifies the ARTIFACTS for every bundle the driver registered at spawn — the
+     contract is the artifacts, so a session that discharged them without ever typing
+-    ``/handoff`` still ends cleanly. Where the driver could not register the work set
++    ``/handoff`` is discharged too. Where the driver could not register the work set
+     (the CSV-batch planner, Act), the session must have named its work through a
+-    passing ``/handoff``. A recorded abandonment always allows the stop.
++    passing ``/handoff``. A recorded abandonment clears the verdict (the typed reason
++    is reported instead); a blank one is no abandonment (:func:`_abandon_reason`).
+     """
+-    if state.get("abandoned"):
++    if _abandon_reason(state):
+         return []
+     if role not in contracts(cfg):
+         return []
+diff --git a/template/src/pdca_harness/leaves.py b/template/src/pdca_harness/leaves.py
+index 2a7ac2a..7a8c494 100644
+--- a/template/src/pdca_harness/leaves.py
++++ b/template/src/pdca_harness/leaves.py
+@@ -1032,7 +1032,8 @@ def _plan_prompt(cfg: Config, csv: str | None, d: Path) -> str:
+         "fewer, larger children: each costs a full cycle. Before ending the session, "
+         f"verify the Plan exit contract with `/handoff {d.name}` — brief structure plus "
+         "every backticked External-dependencies token registered in [[doctor.checks]] "
+-        "with its detect cmd passing; the Stop hook enforces it."
++        "with its detect cmd passing. `/handoff` is your self-check; when the session "
++        "ends, the driver reports anything still unmet to the human."
+     )
+ 
+ 
+@@ -1290,8 +1291,8 @@ def _plan_batch_prompt(cfg: Config, csv: str | None, ids: list[str] | None = Non
+             "defect), leave it UNPLANNED (write no brief.md) and say why. One id = one "
+             "`issue_<id>/brief.md`. Plan only — do not implement. After each brief is "
+             "written, verify it with `/handoff issue_<id>` (ids required, one bundle per "
+-            "invocation); the Stop hook re-checks every briefed bundle before the "
+-            "session may end."
++            "invocation). That is your self-check; when the session ends, the driver "
++            "re-checks every listed bundle and reports anything unmet to the human."
+         )
+     tracker_csv = csv or cfg.tracker_export_csv
+     src = f"the tracker export at '{tracker_csv}'" if tracker_csv \
+@@ -1307,7 +1308,8 @@ def _plan_batch_prompt(cfg: Config, csv: str | None, ids: list[str] | None = Non
+         "tracker id. One issue = one `issue_<id>/brief.md`. Plan only — do not implement. "
+         "After EACH brief is written, verify it with `/handoff issue_<id>` (ids required "
+         "— the driver cannot know mid-session choices, so the passing /handoff runs are "
+-        "how the session names its work; the Stop hook requires them)."
++        "how the session names its work; if none passed, the driver tells the human "
++        "when the session ends)."
+     )
+ 
+ 
+@@ -3411,8 +3413,9 @@ def run_plan_advisory(d: Path, cfg: Config) -> None:
+ # ----------------------------------------------------------------------------
+ def run_signoff(d: Path, cfg: Config) -> None:
+     if cfg.signoff.mode == "command":
+-        # Exit contract (#331): the Stop hook verifies the bundle's decision token
+-        # (+ rationale for iterate-*/discontinue) before the session may end.
++        # Exit contract (#331): when the session ends, handoff.session reports a missing
++        # or malformed decision token (or an iterate-*/discontinue with no rationale) to
++        # the human. Report only, never a block (#534).
+         with handoff.session(cfg, "signoff", [d]) as henv:
+             # This bundle's own target checkout, and only it (#494): §6 items routinely
+             # ask the human to check the patch against the source it was built on.
+@@ -3434,8 +3437,9 @@ def _signoff_prompt(d: Path) -> str:
+         f"discontinued / where the work goes instead). Do not edit §9 yourself; the "
+         "driver records it under a deterministic guard. When the decision is written, "
+         f"verify this leaf's exit contract with `/handoff {d.name}` — the rationale "
+-        "lines are the carry-forward the driver folds into the next attempt's brief, "
+-        "and the Stop hook blocks the session ending on a missing/malformed decision."
++        "lines are the carry-forward the driver folds into the next attempt's brief. "
++        "`/handoff` is your self-check; when the session ends, the driver reports a "
++        "missing or malformed decision to the human."
+     )
+ 
+ 
+@@ -3461,8 +3465,8 @@ def run_signoff_batch(cfg: Config, bundles: list[Path]) -> None:
+     if not bundles:
+         return
+     if cfg.signoff.mode == "command":
+-        # Exit contract (#331): every bundle of the batch is registered, so the Stop
+-        # hook verifies each decision; ending early is a deliberate abandon.
++        # Exit contract (#331): every bundle of the batch is registered, so the report
++        # at session end names each bundle still without a valid decision (#534).
+         with handoff.session(cfg, "signoff", list(bundles)) as henv:
+             # One session, several bundles: each bundle's own resolved checkout is
+             # admitted, exactly once (#494) — a batch may span repos.
+@@ -3489,9 +3493,10 @@ def _signoff_batch_prompt(bundles: list[Path]) -> str:
+         "its own `issue_<id>` bundle — never leave an item ambient to the batch or write "
+         "it into the wrong bundle. Do not edit §9 yourself; the driver records it under a "
+         "deterministic guard. After EACH bundle's decision is written, verify it with "
+-        "`/handoff issue_<id>` (one bundle per invocation — ids are required); the Stop "
+-        "hook checks every listed bundle before the session may end, and a deliberate "
+-        "early stop is recorded via the --abandon escape hatch it names."
++        "`/handoff issue_<id>` (one bundle per invocation — ids are required). That is "
++        "your self-check; when the session ends, the driver reports every listed bundle "
++        "still without a valid decision to the human. To stop early on purpose, record "
++        "why with `python3 .claude/hooks/handoff_guard.py --abandon \"<why>\"`."
+     )
+ 
+ 
+@@ -3625,8 +3630,9 @@ def run_publish(d: Path, cfg: Config) -> None:
+         # a no-op for claude, whose native hook already enforces this).
+         profile = families.resolve(cfg.publisher.family, cfg.families)
+         env = None if profile.native_guard else guard.shim_env(cfg, None)
+-        # Exit contract (#331), merged over the gh-shim env: the Stop hook verifies
+-        # both contribution artifacts (existence + the instance's deterministic lint).
++        # Exit contract (#331), merged over the gh-shim env: when the session ends,
++        # handoff.session reports a missing or lint-failing contribution artifact
++        # (existence + the instance's deterministic lint) to the human (#534).
+         with handoff.session(cfg, "publisher", [d]) as henv:
+             merged = {**(env or {}), **henv}
+             # The publisher is told to read the target checkout, and the deterministic
+@@ -3690,8 +3696,9 @@ def _publish_prompt(d: Path, cfg: Config) -> str:
+         "Write ONLY those two files. Do NOT push, branch, or open a PR — the driver's "
+         "`pdca publish` does the branch/apply/commit/push/draft-PR after you finish. "
+         f"When both are written, verify with `/handoff {d.name}` — it checks both "
+-        "artifacts against the instance's deterministic contribution lint; the Stop "
+-        "hook enforces the same contract when the session ends."
++        "artifacts against the instance's deterministic contribution lint. That is your "
++        "self-check; when the session ends, the driver reports anything still unmet to "
++        "the human."
+     )
+ 
+ 
+diff --git a/template/tests/test_handoff.py b/template/tests/test_handoff.py
+index 3e09ed5..986f473 100644
+--- a/template/tests/test_handoff.py
++++ b/template/tests/test_handoff.py
+@@ -1,5 +1,5 @@
+-"""The interactive leaves' checked exit contract — /handoff + Stop hook + session
+-carry-forward capture (issue #331; stdlib unittest, offline, no Claude/TTY).
++"""The interactive leaves' checked exit contract — /handoff + the session-end verdict +
++session carry-forward capture (issue #331; stdlib unittest, offline, no Claude/TTY).
+ 
+ Covers, against the #331 success criterion:
+   (a) the rendered `/handoff` command exists and the per-leaf contract checks hold —
+@@ -7,8 +7,11 @@ Covers, against the #331 success criterion:
+       signoff (VALID_DECISIONS token + rationale for iterate-*/discontinue),
+       publisher (both artifacts + the instance's deterministic T4 lint, reused),
+       act (the session NAMES the entry it wrote, against the driver's baseline);
+-  (b) the Stop hook ships, is registered, blocks a malformed/missing contract
+-      artifact and honours the deliberate-abandon escape hatch;
++  (b) the hook script ships as the session's CLI (`--check` / `--abandon`) and is NOT
++      registered as a Stop hook (#534: a turn end must hand control to the human; the
++      contract is reported when the driver reaps the session, tests/test_handoff_reap);
++      `stop_problems` flags a malformed/missing contract artifact and honours the
++      deliberate-abandon escape hatch;
+   (c) ids are REQUIRED — no scan mode, and no argument-hint advertises one;
+   (d) the gate's verdict is exit status + report — nothing is written into the bundle;
+   (e) the session carry-forward channel: flow captures the FULL sign-off rationale
+@@ -130,15 +133,17 @@ class RenderedArtifacts(unittest.TestCase):
+         self.assertIn("$1", text)  # the id is actually passed through
+         self.assertIn("handoff_guard.py", text)  # single-sourced with the hook
+ 
+-    def test_stop_hook_ships_and_is_registered(self) -> None:
+-        # (b): the hook file exists and settings.json registers it on Stop, so the
+-        # check is non-optional — a slash command cannot terminate its own session.
++    def test_hook_ships_and_is_not_registered_on_stop(self) -> None:
++        # (b): the hook file ships (it is the /handoff and --abandon CLI), and
++        # settings.json does NOT register it on Stop: Stop fires at every turn end and
++        # its exit 2 feeds the model, so a leaf could never hand a question to the
++        # human (#534). The contract is judged when the driver reaps the session.
+         self.assertTrue(HOOK.is_file(), f"missing {HOOK}")
+         settings = json.loads(SETTINGS.read_text(encoding="utf-8"))
+-        stops = settings.get("hooks", {}).get("Stop", [])
++        stops = (settings.get("hooks") or {}).get("Stop") or []
+         cmds = [h.get("command", "") for entry in stops for h in entry.get("hooks", [])]
+-        self.assertTrue(any("handoff_guard.py" in c for c in cmds),
+-                        "settings.json must register handoff_guard.py as a Stop hook")
++        self.assertFalse(any("handoff_guard.py" in c for c in cmds),
++                         "settings.json must not register handoff_guard.py as a Stop hook")
+ 
+     def test_hook_module_imports_offline(self) -> None:
+         spec = importlib.util.spec_from_file_location("handoff_guard", HOOK)
+diff --git a/template/tests/test_handoff_reap.py b/template/tests/test_handoff_reap.py
+new file mode 100644
+index 0000000..efbcfcb
+--- /dev/null
++++ b/template/tests/test_handoff_reap.py
+@@ -0,0 +1,411 @@
++"""The interactive leaves' exit contract is judged when the driver reaps the session,
++never at a turn end (issue #534; stdlib unittest, offline, no Claude/TTY).
++
++#331 registered `handoff_guard.py` as a Claude Code **Stop** hook. Stop fires every time
++the main agent finishes a turn, not when the session ends, and exit 2 sends the hook's
++stderr back to the MODEL instead of handing the turn to the human. An interactive leaf
++that asked the human a question therefore never reached the human: the model was told
++to write the missing artifact (for sign-off, the human's own decision) and was blocked
++again on every turn.
++
++Covers, against the #534 success criterion:
++  (a) no turn end is intercepted: the template registers no Stop hook, and the hook run
++      the way the old registration ran it (no arguments, a Stop envelope on stdin, a
++      registered session whose contract is UNDISCHARGED) exits 0 and prints nothing, so
++      an instance whose settings.json still carries the old registration (a `copier
++      update` merge that kept it) cannot deadlock either;
++  (b) the contract is reported when the driver reaps the leaf (`handoff.session`): what
++      `stop_problems()` finds goes to stderr naming the role and each bundle, a
++      discharged contract prints nothing, and a recorded `--abandon` reason is reported
++      in place of the problem list (a blank one is no reason and hides nothing);
++  (c) report only: nothing under the project root changes, and a check that fails
++      degrades to a one-line note, never an exception out of the context manager;
++  (d) `/handoff <id>` (`--check`) and `--abandon` keep working.
++
++RED on a tree without the fix: settings.json registers the Stop hook and the hook's
++no-argument mode returns 2 for an undischarged contract (a); `session()` reports only an
++abandon reason when it exits (b, c).
++"""
++
++from __future__ import annotations
++
++import contextlib
++import importlib.util
++import io
++import json
++import os
++import shutil
++import subprocess
++import sys
++import tempfile
++import unittest
++from contextlib import redirect_stderr, redirect_stdout
++from pathlib import Path
++from unittest import mock
++
++from pdca_harness import handoff, leaves
++from pdca_harness.config import Config, LeafConfig
++
++TEMPLATE_ROOT = Path(__file__).resolve().parents[1]
++TEMPLATES = TEMPLATE_ROOT / "templates"
++SRC = TEMPLATE_ROOT / "src"
++HOOK = TEMPLATE_ROOT / ".claude" / "hooks" / "handoff_guard.py"
++SETTINGS = TEMPLATE_ROOT / ".claude" / "settings.json"
++
++# The hook events that fire at a TURN end: Stop (the main agent finished responding) and
++# its subagent twin. A hook on either can turn a turn end into feedback to the model.
++TURN_END_EVENTS = ("Stop", "SubagentStop")
++
++
++def _stop_envelope(active: bool = False) -> str:
++    """What Claude Code writes on a Stop hook's stdin when a turn ends."""
++    return json.dumps({"session_id": "t", "transcript_path": "/dev/null", "cwd": ".",
++                       "hook_event_name": "Stop", "stop_hook_active": active})
++
++
++_AUTHORED_BRIEF = (
++    "# Brief — issue 7 / real\n\n"
++    "- **Slug:** real-slug\n"
++    "- **Defect:** something observable is wrong.\n"
++    "- **Success criterion:** the observable condition that means it is fixed.\n"
++    "- **Repo + branch target:** example-org/example-repo @ main\n"
++    "- **External dependencies:** none\n"
++)
++
++
++def _cfg(root: Path) -> Config:
++    # The contract Config, built the way tests/test_handoff.py::_cfg builds it: the four
++    # contract roles are interactive command leaves.
++    return Config(
++        root=root,
++        bundle_root=root / "results",
++        process_dir=root / "process",
++        templates_dir=TEMPLATES,
++        default_branch="main",
++        tracker_system="github",
++        tracker_url="",
++        issue_id_example="#1",
++        builder=LeafConfig(mode="command", family="claude"),
++        reviewer=LeafConfig(mode="command", family="codex"),
++        planner=LeafConfig(mode="command", family="claude", interactive=True,
++                           agent="planner"),
++        signoff=LeafConfig(mode="command", family="claude", interactive=True,
++                           agent="signoff"),
++        publisher=LeafConfig(mode="command", family="claude", interactive=True,
++                             agent="publisher"),
++        act=LeafConfig(mode="command", family="claude", interactive=True, agent="act"),
++    )
++
++
++def _load_hook():
++    """The hook module, loaded in-process (tests/test_handoff.py loads it the same way)."""
++    spec = importlib.util.spec_from_file_location("handoff_guard_under_test", HOOK)
++    mod = importlib.util.module_from_spec(spec)
++    spec.loader.exec_module(mod)
++    return mod
++
++
++def _tree(root: Path) -> dict[str, bytes]:
++    """Every file under ``root`` with its bytes: the before/after of "report only"."""
++    return {str(p.relative_to(root)): p.read_bytes()
++            for p in sorted(root.rglob("*")) if p.is_file()}
++
++
++class Base(unittest.TestCase):
++    def setUp(self) -> None:
++        self.tmp = Path(tempfile.mkdtemp())
++        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
++        self.cfg = _cfg(self.tmp)
++
++    def bundle(self, iid: str = "7") -> Path:
++        d = self.cfg.bundle(iid)
++        d.mkdir(parents=True, exist_ok=True)
++        return d
++
++    def reap(self, role: str, bundles: list[Path] | None = None, during=None,
++             **kw) -> str:
++        """Run one driver-registered session of ``role`` and return what its reap wrote
++        to stderr. ``during(env)`` runs inside the session, standing in for the leaf."""
++        err = io.StringIO()
++        with redirect_stderr(err):
++            with handoff.session(self.cfg, role, bundles, **kw) as env:
++                self.assertTrue(env, f"no contract registered for {role} — the fixture "
++                                "must make it an interactive leaf")
++                if during is not None:
++                    during(env)
++        return err.getvalue()
++
++
++# ----------------------------------------------------------------------------
++# (a) No turn end is intercepted.
++# ----------------------------------------------------------------------------
++class NoTurnEndIsIntercepted(Base):
++    def test_the_template_registers_no_turn_end_hook(self) -> None:
++        settings = json.loads(SETTINGS.read_text(encoding="utf-8"))
++        hooks = settings.get("hooks") or {}
++        for event in TURN_END_EVENTS:
++            cmds = [h.get("command", "") for entry in hooks.get(event) or []
++                    for h in entry.get("hooks", [])]
++            self.assertEqual(cmds, [], f"settings.json registers a {event} hook: {cmds} — "
++                             "a turn end must hand control to the human")
++
++    @contextlib.contextmanager
++    def undischarged_session(self):
++        """A registered sign-off session whose bundle has NO signoff-decision; yields
++        ``(bundle, env)``. Its reap report is swallowed — (b) tests that separately."""
++        d = self.bundle()
++        with redirect_stderr(io.StringIO()), \
++                handoff.session(self.cfg, "signoff", [d]) as env:
++            self.assertTrue(env)
++            yield d, env
++
++    def test_the_hook_run_as_the_old_registration_ran_it_lets_the_turn_end(self) -> None:
++        hook = _load_hook()
++        # The contract check the hook runs must be LIVE, or the pre-fix hook takes its
++        # "contract check unavailable — allowing the stop" branch and this test would be
++        # a false green: point the hook's config lookup at this test's Config...
++        live = mock.patch.object(hook, "_bootstrap", lambda: (handoff, self.cfg))
++        with self.undischarged_session() as (d, env), live, \
++                mock.patch.dict(os.environ, env):
++            # ...and prove it, in the exact environment the Stop invocation sees: the
++            # hook's own `--check` finds the contract undischarged.
++            out = io.StringIO()
++            with mock.patch.object(sys, "argv", ["handoff_guard.py", "--check", d.name]), \
++                    redirect_stdout(out), redirect_stderr(io.StringIO()):
++                self.assertEqual(hook.main(), 1)
++            self.assertIn("FAIL", out.getvalue())
++            self.assertIn(leaves.SIGNOFF_DECISION, out.getvalue())
++
++            # Now the way Claude Code ran the #331 registration: no arguments, the Stop
++            # event on stdin — including the re-entry Claude Code flags with
++            # stop_hook_active after a block.
++            for active in (False, True):
++                with self.subTest(stop_hook_active=active):
++                    out, err = io.StringIO(), io.StringIO()
++                    with mock.patch.object(sys, "argv", ["handoff_guard.py"]), \
++                            mock.patch.object(sys, "stdin",
++                                              io.StringIO(_stop_envelope(active))), \
++                            redirect_stdout(out), redirect_stderr(err):
++                        rc = hook.main()
++                    self.assertEqual(rc, 0, "a turn end was blocked; stderr: "
++                                     f"{err.getvalue()!r}")
++                    self.assertEqual(err.getvalue(), "",
++                                     "exit-0 stderr is still text for the model to read")
++                    self.assertEqual(out.getvalue(), "")
++
++    def test_the_old_registration_command_exits_0_silently(self) -> None:
++        # The same, as a real process, exactly as the registration spelled it:
++        # `python3 "$CLAUDE_PROJECT_DIR/.claude/hooks/handoff_guard.py"`. The process
++        # loads its OWN config from $CLAUDE_PROJECT_DIR/pdca.toml, which marks sign-off
++        # interactive, so its contract check is live.
++        (self.tmp / "pdca.toml").write_text(
++            '[leaves.signoff]\nmode = "command"\nfamily = "claude"\n'
++            'interactive = true\nagent = "signoff"\n', encoding="utf-8")
++        with self.undischarged_session() as (d, env):
++            penv = {k: v for k, v in os.environ.items()
++                    if not k.startswith(("PDCA_", "CLAUDE_")) and k != "PYTHONPATH"}
++            penv.update(env, CLAUDE_PROJECT_DIR=str(self.tmp), PYTHONPATH=str(SRC))
++
++            def run(*args: str, stdin: str = "") -> subprocess.CompletedProcess:
++                return subprocess.run([sys.executable, str(HOOK), *args], input=stdin,
++                                      capture_output=True, text=True, env=penv,
++                                      cwd=self.tmp, timeout=60)
++
++            check = run("--check", d.name)  # liveness: the process sees the unmet contract
++            self.assertEqual(check.returncode, 1, check.stdout + check.stderr)
++            self.assertIn("FAIL", check.stdout)
++            self.assertIn(leaves.SIGNOFF_DECISION, check.stdout)
++
++            stop = run(stdin=_stop_envelope())
++            self.assertEqual(stop.returncode, 0, f"a turn end was blocked: {stop.stderr!r}")
++            self.assertEqual(stop.stderr, "")
++            self.assertEqual(stop.stdout, "")
++
++
++# ----------------------------------------------------------------------------
++# (b) The contract is reported at reap.
++# ----------------------------------------------------------------------------
++class ReportedAtReap(Base):
++    def test_signoff_without_a_decision(self) -> None:
++        d = self.bundle()
++        err = self.reap("signoff", [d])
++        self.assertIn("signoff", err)
++        self.assertIn(f"{d.name}: {leaves.SIGNOFF_DECISION} is missing", err)
++
++    def test_iterate_without_a_rationale(self) -> None:
++        # Nothing downstream catches this one: sign-off records an empty Iteration
++        # delta and the next Do is never told why its attempt was rejected.
++        d = self.bundle()
++        (d / leaves.SIGNOFF_DECISION).write_text("iterate-do\n", encoding="utf-8")
++        err = self.reap("signoff", [d])
++        self.assertIn(f"{d.name}: decision 'iterate-do' has no rationale", err)
++
++    def test_planner_brief_with_an_empty_success_criterion(self) -> None:
++        d = self.bundle()
++        (d / "brief.md").write_text(_AUTHORED_BRIEF.replace(
++            "- **Success criterion:** the observable condition that means it is fixed.\n",
++            "- **Success criterion:**\n"), encoding="utf-8")
++        err = self.reap("planner", [d])
++        self.assertIn("planner", err)
++        self.assertIn(f"{d.name}: brief.md field 'success criterion' is empty", err)
++
++    def test_publisher_without_its_artifacts(self) -> None:
++        d = self.bundle()
++        err = self.reap("publisher", [d])
++        self.assertIn("publisher", err)
++        self.assertIn(f"{d.name}: commit-msg.txt is missing", err)
++        self.assertIn(f"{d.name}: pr-description.md is missing", err)
++
++    def test_act_that_named_no_entry(self) -> None:
++        err = self.reap("act")
++        self.assertIn("act session", err)
++        self.assertIn("act-log", err)
++
++    def test_each_undischarged_bundle_of_a_batch_is_named(self) -> None:
++        done, open_ = self.bundle("7"), self.bundle("8")
++        (done / leaves.SIGNOFF_DECISION).write_text("accept\n", encoding="utf-8")
++        err = self.reap("signoff", [done, open_])
++        self.assertIn(f"{open_.name}: {leaves.SIGNOFF_DECISION} is missing", err)
++        self.assertNotIn(f"{done.name}:", err)
++
++    def test_the_report_names_the_bundles_the_driver_registered(self) -> None:
++        # The session can write its own scratch file; a leaf that empties the bundle
++        # list there must not turn the report into a vaguer one.
++        d = self.bundle()
++
++        def rewrite(env: dict) -> None:
++            Path(env[handoff.ENV_STATE]).write_text('{"bundles": []}', encoding="utf-8")
++
++        err = self.reap("signoff", [d], during=rewrite)
++        self.assertIn(f"{d.name}: {leaves.SIGNOFF_DECISION} is missing", err)
++
++    def test_a_discharged_contract_prints_nothing(self) -> None:
++        d = self.bundle()
++        (d / leaves.SIGNOFF_DECISION).write_text(
++            "iterate-do\nthe probe hid the cause; remove it\n", encoding="utf-8")
++        self.assertEqual(self.reap("signoff", [d]), "")
++        (d / "brief.md").write_text(_AUTHORED_BRIEF, encoding="utf-8")
++        self.assertEqual(self.reap("planner", [d]), "")
++
++    def test_an_abandon_reason_is_reported_instead_of_the_problems(self) -> None:
++        d = self.bundle()
++
++        def abandon(env: dict) -> None:
++            handoff.record_abandon(Path(env[handoff.ENV_STATE]), "the human walked away")
++
++        err = self.reap("signoff", [d], during=abandon)
++        self.assertIn("deliberately abandoned — the human walked away", err)
++        self.assertNotIn(leaves.SIGNOFF_DECISION, err)
++
++    def test_a_blank_abandon_value_does_not_hide_the_report(self) -> None:
++        # The session can write its own scratch file, so a blank `abandoned` can land
++        # there without --abandon (which refuses a blank reason). A blank value is no
++        # reason, so the problem list must still be printed. The reap and
++        # stop_problems() have to agree on that: if the reap found no reason while
++        # stop_problems() counted the blank as one, the list would be cleared and the
++        # reap would print nothing at all.
++        d = self.bundle()
++        for blank in ("", " ", "\n", " \t\n"):
++            with self.subTest(abandoned=blank):
++                def write_blank(env: dict, blank: str = blank) -> None:
++                    p = Path(env[handoff.ENV_STATE])
++                    state = json.loads(p.read_text(encoding="utf-8"))
++                    p.write_text(json.dumps({**state, "abandoned": blank}),
++                                 encoding="utf-8")
++
++                err = self.reap("signoff", [d], during=write_blank)
++                self.assertIn(f"{d.name}: {leaves.SIGNOFF_DECISION} is missing", err)
++                self.assertNotIn("deliberately abandoned", err)
++                self.assertTrue(handoff.stop_problems(
++                    self.cfg, "signoff", {"bundles": [str(d)], "abandoned": blank}),
++                    "stop_problems() counted a blank abandon value as an abandonment")
++
++
++# ----------------------------------------------------------------------------
++# (c) Report only.
++# ----------------------------------------------------------------------------
++class ReportOnly(Base):
++    def test_the_reap_changes_nothing(self) -> None:
++        d = self.bundle()
++        (d / "brief.md").write_text(_AUTHORED_BRIEF.replace(
++            "- **Success criterion:** the observable condition that means it is fixed.\n",
++            "- **Success criterion:**\n"), encoding="utf-8")
++        (d / leaves.SIGNOFF_DECISION).write_text("iterate-do\n", encoding="utf-8")
++        (d / "SUMMARY.md").write_text("# SUMMARY\n", encoding="utf-8")
++        for role in ("planner", "signoff", "publisher", "act"):
++            with self.subTest(role=role):
++                before = _tree(self.tmp)
++                err = self.reap(role, None if role == "act" else [d])
++                self.assertTrue(err.strip(), "fixture must leave the contract undischarged")
++                self.assertEqual(_tree(self.tmp), before,
++                                 "the reap wrote, moved or deleted a file")
++
++    def test_a_check_that_fails_is_a_one_line_note(self) -> None:
++        # A real failure inside the check, not a stand-in: the brief names a dependency,
++        # so the planner check reads [[doctor.checks]] from pdca.toml, and a `doctor`
++        # key that is not a table breaks that read.
++        d = self.bundle()
++        (d / "brief.md").write_text(_AUTHORED_BRIEF.replace(
++            "- **External dependencies:** none",
++            "- **External dependencies:** `frobnicator` (build)"), encoding="utf-8")
++        (self.tmp / "pdca.toml").write_text("doctor = 1\n", encoding="utf-8")
++        with self.assertRaises(Exception):  # the fixture really breaks the check
++            handoff.check_planner(d, self.cfg)
++        state_files: list[Path] = []
++        err = self.reap("planner", [d],
++                        during=lambda env: state_files.append(Path(env[handoff.ENV_STATE])))
++        lines = err.strip().splitlines()
++        self.assertEqual(len(lines), 1, f"expected a one-line note, got: {err!r}")
++        self.assertIn("planner", lines[0])
++        self.assertFalse(state_files[0].exists(), "the scratch file must still be removed")
++
++    def test_the_leaf_s_own_exception_passes_through_untouched(self) -> None:
++        d = self.bundle()
++        boom = RuntimeError("the leaf died")
++        with self.assertRaises(RuntimeError) as caught:
++            with redirect_stderr(io.StringIO()):
++                with handoff.session(self.cfg, "signoff", [d]):
++                    raise boom
++        self.assertIs(caught.exception, boom)
++
++
++# ----------------------------------------------------------------------------
++# (d) /handoff (--check) and --abandon keep working.
++# ----------------------------------------------------------------------------
++class SelfCheckAndAbandonUnchanged(Base):
++    def _main(self, hook, env: dict, *args: str) -> tuple[int, str]:
++        out = io.StringIO()
++        with mock.patch.object(hook, "_bootstrap", lambda: (handoff, self.cfg)), \
++                mock.patch.dict(os.environ, env), \
++                mock.patch.object(sys, "argv", ["handoff_guard.py", *args]), \
++                redirect_stdout(out), redirect_stderr(out):
++            rc = hook.main()
++        return rc, out.getvalue()
++
++    def test_check_verifies_one_named_id(self) -> None:
++        hook, d = _load_hook(), self.bundle()
++        with redirect_stderr(io.StringIO()):
++            with handoff.session(self.cfg, "signoff", [d]) as env:
++                rc, out = self._main(hook, env, "--check", d.name)
++                self.assertEqual((rc, "FAIL" in out), (1, True), out)
++                (d / leaves.SIGNOFF_DECISION).write_text("accept\n", encoding="utf-8")
++                rc, out = self._main(hook, env, "--check", d.name)
++                self.assertEqual((rc, "PASS" in out), (0, True), out)
++                rc, _out = self._main(hook, env, "--check")  # ids are required
++                self.assertEqual(rc, 2)
++
++    def test_abandon_records_a_typed_reason_the_reap_reports(self) -> None:
++        hook, d = _load_hook(), self.bundle()
++        results: list[tuple[int, str]] = []
++
++        def abandon(env: dict) -> None:
++            results.append(self._main(hook, env, "--abandon", ""))  # reason required
++            results.append(self._main(hook, env, "--abandon", "no decision today"))
++
++        err = self.reap("signoff", [d], during=abandon)
++        self.assertEqual([rc for rc, _ in results], [2, 0], results)
++        self.assertIn("no decision today", err)
++
++
++if __name__ == "__main__":
++    unittest.main()

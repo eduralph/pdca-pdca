@@ -1,0 +1,39 @@
+fix(handoff): let leaf turns reach the human; report contract at exit
+
+An interactive leaf (Plan, sign-off, publish, Act) could not hand a turn
+back to the human while its exit contract was still open. The handoff
+guard was registered as a Claude Code Stop hook, and Stop fires at the end
+of every turn, not when the session ends. Its exit 2 sends the guard's text
+to the model instead of the human, so a leaf that asked a question got the
+guard's complaint back, answered it, and was blocked again. Nothing bounded
+the repeat: one sign-off session was blocked twelve turns in a row, and the
+pressure on the model was to write the artifact the guard wanted, which for
+sign-off is the human's own decision.
+
+Turn ends are no longer intercepted. The rendered settings register no Stop
+hook, and the guard with no arguments now exits 0 without output, so an
+instance whose settings kept the old registration through a copier update
+cannot get stuck either. The contract is judged once, when the driver reaps
+the leaf's process, and the result is printed to the human on stderr. That
+report only informs: it writes nothing, blocks nothing and never raises.
+
+The report follows a few rules so it cannot hide anything:
+- a recorded abandon reason is printed first, then every open problem;
+- a blank abandon reason counts as no reason;
+- a bundle whose check fails is listed as "could not check" and the other
+  bundles are still checked;
+- an unreadable [[doctor.checks]] table in pdca.toml is reported once per
+  planner reap, while the other brief checks still run;
+- non-printable characters are escaped, so text a session wrote cannot use
+  terminal escapes to hide the lines after it.
+
+The /handoff self-check and --abandon behave as before (only the --abandon
+reply text changed). The prompts, the /handoff command body and
+docs/01-render-and-integrate.md no longer promise hook enforcement. Tests
+that drive a session over an open contract now capture the report, so the
+driver suite prints nothing.
+
+The hook and handoff module came in with
+900d63810caa75dc6c36dcdc38cf761c1c51573b.
+
+Fixes #534
