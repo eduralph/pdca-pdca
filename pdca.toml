@@ -343,7 +343,9 @@ leaf_memory_max = "16G"
 # A sub-table, so it must sit after every bare [driver] key — see the note above size_guard
 # for what happens when that ordering slips.
 [driver.size_signal]
-patch_kb = 80
+# 80 → 125 at the 2026-09-15 Act review: a patch a little over the line is not a
+# split signal on its own; the calibrated churners (472, 473) still fire on rounds.
+patch_kb = 125
 patch_files = 25
 rounds = 3
 

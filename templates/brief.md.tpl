@@ -85,7 +85,7 @@
   globally-wrong call — an empty local redb where the peer resolves TiKV, a positional id
   where the peer uses the registered domain — is avoided. Cite it precisely; anything not
   cited stays out of Do's input.
-- **Prior-art check (triage cycles):** <searched by file path — merged history / open PRs / closed PRs — result>
+- **Prior-art check (triage cycles):** <searched by affected file path — merged history / open PRs / closed-unmerged PRs (the `docs/INTEGRATION.md` §5 commands; cite their output, not an issue-number search) — result>
 - **Disposition hint:** <one triage flag — drives the driver's Do path. FIX (full
   Do+Check band): `likely-fix`, `POSSIBLY-FIXED → verify first` (needs verification, so
   NOT close). CLOSE / no-fix (FAST-PATHED — builder + reviewer leaves skipped, routed

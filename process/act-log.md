@@ -29,6 +29,104 @@
 - The next Do phases should not recreate <specific issue>. Watch the next K cycles.
 -->
 
+# Act review — 2026-09-15 — cycles considered: issue_467, issue_480, issue_527, issue_529, issue_534
+
+Ninth Act review — five bundles frozen since the 2026-08-15 review (the index
+carried all 56; the 51 previously reviewed were considered only for effectiveness
+follow-up). All five merged-wider. One new recurring class (T5 closed-PR prior art,
+4 of 5) and one false "ineffective delta" flag. Two deltas applied with the human
+(the entry was first written with them proposed-only: this instance's pre-#534 Stop
+hook blocked the turn end and demanded the entry before the human had answered — a
+live case of the deadlock upstream #534 fixes). Five follow-ups filed upstream.
+
+## What the cycles' records exposed
+
+- **T5 prior art: closed/rejected work is searched by issue number, not by path —
+  4 of 5 bundles** (467, 480, 527, 529 §6; worded four different ways, so the
+  driver did not register it as recurring — the #501 signal-identity problem again).
+  Every brief's "Prior-art check" line runs merged history by path, then says "No
+  closed/merged PR references #N". The reviewer cannot redo it locally: since the
+  #419 fix its target is a one-commit snapshot with no remotes. Cause located in this
+  instance, not upstream: `templates/brief.md.tpl:88` and
+  `.claude/agents/planner.md:37` both require closed PRs *by path*, but the routine
+  they defer to, `docs/INTEGRATION.md:121-127` (§5), gives a by-path command for
+  merged history only. issue_534's reviewer settled it itself via the GitHub API
+  (T5 PASS), so it is mechanically settleable. Distinct from the 2026-08-01 class
+  (network), which stays cleared.
+- **"⚠ Ineffective delta" on the size backstop is a false alarm.** It "recurred" in
+  issue_534 — 5 build attempts, 3 iterate-to-Do, 1 iterate-to-Plan after the rounds
+  rule tripped — where the new `patch_kb = 80` (PR #60) fired on the final 89 KB
+  patch. A true positive. Two record problems made it look ineffective:
+  (a) the ledger row `process/act-ledger.json:99-104` still describes the 2026-08-09
+  values and says the re-tighten "awaits the human", though #50/#51 closed and PRs
+  #60/#61 merged; (b) `size-signal.json` for 534 reads `rounds: 0, replans: 1` —
+  rounds reset at a re-plan by design (`src/pdca_harness/size_signal.py:121-155`),
+  and `scripts/size-calibrate` shares that count, so the next calibration would
+  score the corpus's most-churned bundle as an 80 KB false positive.
+- **Structural, no delta:** Validation fitness-to-purpose in 5 of 5 (human-only by
+  design). T2/T3/T4 oracle classes stay at 0 — still cleared.
+- **Plan-advisory leaf:** disabled by PR #61 pending upstream #526 (open); nothing
+  to judge this wave.
+
+## Process deltas
+
+Agreed with the human; shipped together as draft PR (link below) — the human marks
+ready / merges.
+
+- **Spec routine:** `docs/INTEGRATION.md` §5 gains a closed/rejected-work check
+  command **by affected path** (after the merged-history command, `:128-135`):
+  `gh pr list -R eduralph/pdca-harness --state closed --limit 1000 --json number,title,mergedAt,files -q '.[] | select(.mergedAt == null) | select(any(.files[]; .path | IN("<path>", …))) | "\(.number) \(.title)"'`
+  (tested 2026-09-16, ~13 s). Upstream has exactly one closed-unmerged PR ever
+  (#4, `README.md` only), so a brief discharges this in one line; the reviewer
+  cannot rerun it (one-commit target), so the brief's cited output is what it checks.
+- **Spec template:** `templates/brief.md.tpl:88` Prior-art field now says
+  "closed-unmerged PRs (the `docs/INTEGRATION.md` §5 commands; cite their output,
+  not an issue-number search)".
+- **Gates/config:** `pdca.toml [driver.size_signal] patch_kb = 80 → 125`
+  (`pdca.toml:345-350`), the human's call: a patch a little over the line is not a
+  split signal on its own, and 80 fired on issue_534 for exactly that. `rounds` and
+  `patch_files` unchanged. The smarter rule the human asked for — a tolerance band
+  (≈10% over should not fire on size alone) — is harness machinery, routed upstream
+  below rather than hand-rolled here.
+- **Ledger:** the size-backstop row (`process/act-ledger.json`) rewritten to record
+  the 80 (PR #60) and 125 (this review) settings, the 534 firing as a true positive,
+  and that calibration must count pre-re-plan rounds before its numbers are used.
+
+## Follow-ups routed (not process deltas — work handed to an owner)
+
+- Harness/driver issue (upstream, `size_signal.py` + `scripts/size-calibrate`):
+  size backstop needs a tolerance band; calibration scores a re-planned bundle as
+  `rounds: 0` and would call 534 a false positive → filed
+  **https://github.com/eduralph/pdca-harness/issues/556**.
+- Harness/driver issue (upstream, from issue_480 §10): `do_plan` builds
+  `_brief_snapshot` even with no plan-advisory leaf configured (`leaves.py:917`) →
+  filed **https://github.com/eduralph/pdca-harness/issues/557**.
+- Harness/driver issues (upstream, from issue_534's adversarial review, against
+  PR #555): missing `pdca.toml` treated as a readable doctor table (`handoff.py:342`)
+  → **https://github.com/eduralph/pdca-harness/issues/558**; a raising dependency
+  clause drops the bundle's field problems (`handoff.py:128-141`) →
+  **https://github.com/eduralph/pdca-harness/issues/559**; no test guards against a
+  `Stop` hook returning via agent frontmatter →
+  **https://github.com/eduralph/pdca-harness/issues/560**.
+- Known, no new filing: this session hit the Stop-hook turn-end block that upstream
+  #534 fixes; the instance copy changes at its next `copier update`. `/handoff` still
+  needs the end-of-file marker (upstream #528, open).
+- Open Act item (carried, unchanged): triage rubric should state five buckets
+  explicitly (issue_316 §10) — no triage brief ran.
+
+## How effectiveness will be judged
+
+- §5 command: the next wave's briefs should cite its output, and the T5
+  "closed/rejected by path" §6 item should drop from 4 of 5 to 0. Recurrence with
+  the command in place means the planner prompt needs the pointer, not just the
+  template.
+- Size backstop at 125: judge firings against total build attempts
+  (`loop-telemetry.json` `iterations_to_pass`), not `rounds` alone. A bundle that
+  churns ≥3 attempts *without* firing any rule is the miss to watch for; once
+  upstream #556 lands, re-run `scripts/size-calibrate` with the corrected outcome.
+
+---
+
 # Act review — 2026-08-15 — cycles considered: issue_462, issue_466, issue_474, issue_475, issue_476, issue_494, issue_495, issue_497, issue_507
 
 Eighth Act review — nine bundles frozen since the 2026-08-10 review (the index
@@ -1091,3 +1189,5 @@ First Act review of the instance — nine frozen bundles, all merged-wider.
 ---
 
 <!-- act-session marker — 2026-08-15: this session's entry is the "# Act review — 2026-08-15" section at the TOP of this file, per the header's "Newest entries on top". This trailer exists only because the exit-contract check looks for the entry id in text appended AFTER the session baseline (src/pdca_harness/handoff.py:190-194), which a prepended entry can never satisfy — filed upstream as https://github.com/eduralph/pdca-harness/issues/528. Remove it when that lands. -->
+
+<!-- act-session marker — 2026-09-15: this session's entry is the "# Act review — 2026-09-15" section at the TOP of this file (newest on top). Trailer needed only because the exit check reads text appended after the session baseline — upstream https://github.com/eduralph/pdca-harness/issues/528, still open. -->
