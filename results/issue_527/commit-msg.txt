@@ -1,0 +1,24 @@
+Keep a wrapped NEEDS-HUMAN bullet whole in SUMMARY section 6
+
+When a reviewer or advisory artifact wrote a "- NEEDS-HUMAN" bullet that
+wrapped onto indented lines, SUMMARY.md section 6 showed only its first
+line. The person clearing section 6 at sign-off saw a question that stopped
+mid-sentence, such as "src/x.py:12 (`f`):", and had to open the artifact to
+learn what was being asked.
+
+The bullet parser now takes the first line plus every following line
+indented deeper than the bullet, and joins them with single spaces into one
+item. The item ends at a blank line, a line no deeper than the bullet, a new
+list item at any indent, a heading, a table row, or a code fence. So two
+bullets in a row stay two items, and an indented NEEDS-HUMAN sub-bullet is
+still its own item.
+
+The joined text never contains a newline. Each item renders as one
+"- [ ] ..." checkbox line, and sign-off counts open items line by line, so a
+second physical line would lose its checkbox and escape the open-item check.
+
+Single-line bullets, table rows, and "[impl]" classification behave as
+before. A new offline test, template/tests/test_needs_human_multiline.py,
+fails before the change and passes after it.
+
+Fixes #527

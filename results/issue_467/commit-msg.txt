@@ -1,0 +1,24 @@
+split: child issues inherit the parent's milestone and labels
+
+`pdca split <id> --accept` filed each child issue with only a title, a
+body and a parent link. The parent's milestone and labels were dropped, so
+the children landed outside the release they belong to: merged children
+did not count as milestone progress, and open ones did not count as
+remaining scope. On one real milestone, 8 children of 3 parents were all
+filed with no milestone and had to be fixed by hand.
+
+The split now reads the parent's milestone title and label names once,
+before filing, and passes them to every child's `gh issue create`. gh
+parses each `--label` value as CSV, so a label name with a comma or a
+double quote is quoted for that parser; plain names such as `bug` or
+`help wanted` go out unchanged. The milestone title is passed as-is.
+
+The lookup is best-effort. If it fails (non-zero exit, an error, or output
+that is not a JSON object), every child is still filed without the
+metadata and one warning says so. Ctrl-C during the lookup still stops the
+split before anything is filed. Assignees are not copied: who works on a
+child is a new decision. The `--ids` path and non-GitHub trackers file
+nothing, so they do no lookup. The PR-triage caller of the same filing
+helper is unchanged.
+
+Fixes #467
