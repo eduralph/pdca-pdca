@@ -125,6 +125,13 @@ Contract-tested by `engine/tests/test_run_verify.py`.
   scan the open milestone + open PRs (`gh pr list -R eduralph/pdca-harness`).
 - **Merged-history check command:**
   `git -C ../pdca-harness fetch origin && git -C ../pdca-harness log --oneline origin/main -n 30 -- <affected paths>`
+- **Closed/rejected-work check command** (by affected path, not by issue number — a
+  closed PR that touched the path is signal even when it never mentions the issue;
+  ~15 s, lists every closed-but-unmerged PR touching any named path):
+  `gh pr list -R eduralph/pdca-harness --state closed --limit 1000 --json number,title,mergedAt,files -q '.[] | select(.mergedAt == null) | select(any(.files[]; .path | IN("<path>", "<path>"))) | "\(.number) \(.title)"'`
+  Record its output (or "none") in the brief's Prior-art line. The reviewer's target
+  is a one-commit snapshot with no remotes, so it cannot rerun either command — the
+  brief's cited output is what it checks.
 
 ## 6. Brief and design-proposal templates
 - **Brief template:** `templates/brief.md.tpl`
