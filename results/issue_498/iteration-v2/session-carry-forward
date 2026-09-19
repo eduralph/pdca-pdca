@@ -1,0 +1,8 @@
+The claim/lock half is sound (refused before any write, released on return/raise/SIGKILL, a run never refuses itself) — keep it. The split-hint half has failed two rounds because criterion (v) asks for something no check at accept time can know: whether this run will actually reach the split parent's children (its sign-off may go unanswered, it may sit behind an unready dependency, or its adoption read may already be past). Re-plan criterion (v) so it is decidable:
+1. Make the in-flow hint conditional and honest, e.g. "the running `pdca flow` will adopt the children (…) if issue_N closes as split in this run", instead of an unconditional "will drive them — do not start another flow".
+2. Add an end-of-run line naming split children the run was expected to adopt but did not, with the command to drive them.
+3. Consider splitting the hint into its own issue so the drive-claim lock can ship on its own (pdca-pdca split <id> there, if the planner judges it two outcomes).
+Carry into the next brief too:
+4. Tests for the release/"passed" paths the adversary showed are unpinned (flow.py:1900-1901, :1291, :1314, :1562, :1705 — each deletable with all 63 tests green).
+5. The run prints "resume with `pdca flow 7`" and then refuses it while it still holds 7: either keep the claim and say "once this run ends", or release it — pick one and make the line and drive_claim.py:15-19 agree.
+6. Run.take() should retry on the transient _held_now probe collision the way _hold_new already does (drive_claim.py:197-206 vs :266-274), so no false "held by another run" refusal.

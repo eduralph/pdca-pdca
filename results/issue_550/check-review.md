@@ -1,0 +1,26 @@
+Review issue #550: admit the plan-advisory revision planner to exactly the primary checkouts of bundles with findings, without widening its workspace.
+
+| Item | Verdict | Basis |
+|------|---------|-------|
+| C1 Spec | PASS | The admission boundary is falsifiable, including an absent checkout despite other known targets; the negative fixture proves those other targets exist (`target/template/tests/test_leaf_workspace_admission.py:246`). |
+| C2 Reproduction (red pre-fix) | PASS | Independently stashing only the production fix leaves 17 tests runnable and produces exactly the missing-admission failure (`target/template/tests/test_leaf_workspace_admission.py:241`; `review-red.log:4`). |
+| C3 Change | PASS | The revision session receives only its finding bundles’ grant, preserving its cwd, prompt and exception boundary; no unrelated production behavior changes (`target/template/src/pdca_harness/leaves.py:3703`). |
+| C4 Verification (red→green) | PASS | Restoring the production fix turns the same 17 tests green; 32 advisory tests and a separate mixed-bundle probe also pass, covering failure containment, deduplication and exclusion (`target/template/tests/test_plan_advisory.py:199`; `review-green.log:3`; `review-batch.log:1`). |
+| C5 Causal adequacy | PASS | The missing spawn admission is directly repaired; no new capability probe or runtime guard masks a load-time cause, and the test executes the real revision path (`target/template/src/pdca_harness/leaves.py:3710`; `target/template/tests/test_leaf_workspace_admission.py:239`). |
+| T1 Structure | PASS | Reusing the existing strict bundle resolver preserves one admission policy and avoids the broader pre-brief Plan fallback (`target/template/src/pdca_harness/leaves.py:923`). |
+| T2 Shape | PASS | Independent whitespace, docs lint and site/link checks pass; frozen host-CI evidence corroborates the same docs commands (`review-docs-lint.log:1`; `review-docs-render.log:3`; `gate-logs/host-ci-docs.log:10`). |
+| T3 Runtime | PASS | Independent driver run passes 1,924 tests with two skips; frozen root-suite evidence shows 24 tests passing, including render/update compatibility, which local missing Copier prevents rerunning (`gate-logs/T3-suite.log:10`; `gate-logs/T3-suite.log:54`; `review-suite.log`). |
+| T4 Contribution | N/A | Contribution artifacts are intentionally undrafted at Check; the substantive audit must rerun at publish (`gate-logs/T4-contribution.log:10`). |
+| T5 Judgment | NEEDS-HUMAN | Confirm the affected-path merged and closed/rejected prior-art check before contribution — the brief reports it, but this supplied repository has only one synthetic base commit and no remotes or PR-history evidence (`review-prior-art.log:1`; affected call: `target/template/src/pdca_harness/leaves.py:3710`). |
+| Validation — fitness-to-purpose | NEEDS-HUMAN | Decide whether demonstrated argv admission sufficiently resolves the operator’s repeated-approval problem — real vendor CLI permission behavior was not exercised; the recorder establishes only the harness boundary (`target/template/tests/test_leaf_workspace_admission.py:89`). |
+
+Independent evidence and limits:
+
+- The target is the supplied disposable copy of base `70ea12b`, with the patch applied. Production-only `git stash` preserved the added regression tests for the red leg; `git stash pop` restored the fix for green. The final target diff matches `patch.diff` exactly. No stale-target caveat applies.
+- `review-red.log` shows one assertion failure because `extra_argv` is `None`; `review-green.log` shows all 17 passing. `review-advisory.log` shows 32 passing, including the planner-failure containment case. The extra probe used real checkout fixtures and production admission code, with a controlled no-findings result for one bundle; it observed one spawn, two distinct admitted checkouts, no duplicate and no admission for the clean bundle.
+- `review-suite.log` records the successful full driver rerun. Copier is not importable locally, so root-suite adjudication rests on the frozen log’s actual 24-test successful run, not an inferred local success. All six supplied gate logs were inspected. The instance-scoped wrappers are not required to exist in this target copy.
+- The C5 scanner explicitly did no substantive scan because no new test file was added (`gate-logs/C5-prod-path.log:10`). C5 above instead rests on the production call and the independently reproduced regression, not that scanner’s nominal pass.
+- The declared Python/git dependencies were exercised. The fixtures can expose the forbidden missing-admission behavior, as the red leg demonstrates; they do not establish real CLI permission UX. No additional project-specific human-only items are enumerated in the supplied integration template (`target/template/docs/INTEGRATION.md.jinja:80`).
+- Prior-art investigation by both affected paths returned only `bd8754f pre-fix base 70ea12b...`; `git remote -v` returned no entries (`review-prior-art.log`). The brief’s claimed #494/PR #524 precedent and absence of closed-unmerged work therefore remain unconfirmed from the supplied evidence.
+
+No grounded patch defect found. This review is advisory; the two NEEDS-HUMAN decisions remain for sign-off.
