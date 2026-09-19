@@ -1,0 +1,456 @@
+diff --git a/template/pdca.toml.jinja b/template/pdca.toml.jinja
+index 822403d..898d1ea 100644
+--- a/template/pdca.toml.jinja
++++ b/template/pdca.toml.jinja
+@@ -742,12 +742,21 @@ argv = []
+ # is no builder telemetry), so plan validation is cross-vendor automatically; no
+ # different-family leaf ⇒ same-vendor fallback + a decorrelation note. Advisory — never
+ # gates; off (commented) by default.
++#
++# `Write` rides alongside Read/Bash/Grep/Glob (issue #526): on a host that denies
++# unprivileged user namespaces the seeded fail-closed sandbox
++# (_seed_plan_sandbox_settings) cannot start, so every Bash call the reviewer
++# attempts fails while the CLI itself still exits 0 — and Bash was its only
++# write-capable tool, so it had no way left to deliver plan-advisory-<id>.md at all.
++# Write's own boundary (verified live, claude-code 2.1.276) is the leaf's cwd plus
++# any `--add-dir`-granted path, never wider than what Bash could already reach —
++# so this widens the DELIVERY route, not the confinement.
+ # [[leaves.plan_advisory]]
+ # id = "plan-reviewer"
+ # role = "refute the brief: wrong root cause, untestable success criterion, hidden scope"
+ # mode = "{{ leaves_mode }}"
+ # family = "claude"
+-# argv = ["claude", "-p", "--agent", "plan-reviewer", "--permission-mode", "acceptEdits", "--allowedTools", "Read,Bash,Grep,Glob"]
++# argv = ["claude", "-p", "--agent", "plan-reviewer", "--permission-mode", "acceptEdits", "--allowedTools", "Read,Bash,Grep,Glob,Write"]
+ # when = { field = "difficulty", substring = "high" }
+ #
+ # [leaves.plan_advisory_selection]
+diff --git a/template/src/pdca_harness/assemble.py b/template/src/pdca_harness/assemble.py
+index 10f567c..b49b559 100644
+--- a/template/src/pdca_harness/assemble.py
++++ b/template/src/pdca_harness/assemble.py
+@@ -99,12 +99,25 @@ _CANONICAL_LABELS = frozenset(label.strip().casefold()
+ LEAF_STATUS_INFRA = "infra-empty"      # ran, died with no output — a transient blip
+ LEAF_STATUS_STARTUP = "startup-empty"  # never launched — binary absent / not executable
+ LEAF_STATUS_HUMAN = "human-empty"      # ran, but yielded no usable verdict
++# The leaf's OWN process exited 0 — it launched, ran, and technically "completed" —
++# but its own final answer names the vendor sandbox it was seeded with (issue #526,
++# `_seed_plan_sandbox_settings`) as having refused to start, so nothing it attempted
++# with its only write-capable tool actually ran. A clean exit is why this needs its
++# own status distinct from `LEAF_STATUS_STARTUP` (whose command never launched at
++# all) and `LEAF_STATUS_HUMAN` (a real run with a real, if unhelpful, verdict): the
++# label must not say "safe to re-run" (INFRA's) or "fix the leaf's config"
++# (STARTUP's) — a plain re-run on the SAME host fails the same way until the host's
++# sandbox denial itself is addressed.
++LEAF_STATUS_SANDBOX = "sandbox-empty"
+ _LEAF_STATUS_RE = re.compile(r"<!--\s*pdca:leaf-status\s+(\S+)\s*-->")
+ _LEAF_STATUS_LABEL = {
+     LEAF_STATUS_INFRA: "leaf did not run (transient infra — safe to re-run)",
+     LEAF_STATUS_STARTUP: ("leaf did not run (its command could not be launched — fix the "
+                           "leaf's config, then re-run)"),
+     LEAF_STATUS_HUMAN: "leaf produced no usable verdict (needs a human)",
++    LEAF_STATUS_SANDBOX: ("leaf ran but its seeded vendor sandbox could not start on this "
++                          "host (fix the host, e.g. unprivileged user namespaces — a plain "
++                          "re-run will fail the same way)"),
+ }
+ 
+ 
+diff --git a/template/src/pdca_harness/leaves.py b/template/src/pdca_harness/leaves.py
+index 732a4f4..7a7319c 100644
+--- a/template/src/pdca_harness/leaves.py
++++ b/template/src/pdca_harness/leaves.py
+@@ -575,6 +575,8 @@ def _invoke(
+     extra_argv: list[str] | None = None,
+     cfg: Config | None = None,
+     memory_log: Path | None = None,
++    keep_final_text: bool = False,
++    capture_into: list[str] | None = None,
+ ) -> None:
+     """Run the leaf's configured command in ``workdir``, feeding it ``prompt``.
+ 
+@@ -603,6 +605,17 @@ def _invoke(
+     suffix, and a failing leaf's :class:`LeafError` carries a memory post-mortem in
+     its ``output``. Unbounded or interactive spawns ignore it — without a scope
+     there is nothing attributable to sample.
++
++    ``keep_final_text`` rides ``stream_json`` into
++    :func:`progress.run_with_heartbeat`'s ``keep_final_text`` (issue #526): the
++    leaf's own last plain-text answer, retained even on a **clean exit**. Off by
++    default — every existing caller is unaffected. ``capture_into``, when given,
++    gets the run's raw ``output`` (the same string a failing run's
++    :class:`LeafError` carries) appended to it **whether or not the run succeeded**
++    — the only way a caller can see anything a SUCCESSFUL run said, since this
++    function otherwise discards it on success. Both exist for one purpose:
++    classifying a leaf that exited 0 without doing what it was asked (#526),
++    without changing what any existing caller sees.
+     """
+     profile = families.resolve(leaf.family, cfg.families if cfg else None)
+     role_argv, prompt_prefix = _role_injection(cfg, leaf, profile)
+@@ -657,7 +670,12 @@ def _invoke(
+     rc, output, produced = progress.run_with_heartbeat(
+         argv, cwd=workdir, input_text=prompt, label=label, status=status,
+         stream_json=use_stream, tee_stderr=True, stream_format=profile.stream_format,
+-        env=run_env, telemetry=telemetry.tick if telemetry else None)
++        env=run_env, telemetry=telemetry.tick if telemetry else None,
++        keep_final_text=keep_final_text)
++    if capture_into is not None:
++        # Before the `rc != 0` branch, so a SUCCESSFUL run's output (the only case
++        # this function otherwise throws away) reaches the caller too (#526).
++        capture_into.append(output)
+     if rc != 0:
+         if telemetry is not None:
+             # The death explained next to the death reported: the post-mortem rides
+@@ -2766,6 +2784,13 @@ def _run_review_sandboxed(d: Path, cfg: Config) -> None:
+ _FAIL_TRANSIENT = "transient"      # ran, exited non-zero with no output; retries exhausted
+ _FAIL_STARTUP = "startup"          # never ran at all — the command could not be launched
+ _FAIL_SUBSTANTIVE = "substantive"  # ran and produced output, but no usable verdict
++# Exited 0 — a CLEAN exit, not caught by `_failure_class` at all — but its own final
++# answer (captured via `keep_final_text`, #526) names the seeded vendor sandbox as
++# having refused to start, so nothing it attempted with its only write-capable tool
++# actually ran. Never returned by `_failure_class` (there is no exception here to
++# classify); a caller that detects this from the leaf's own text passes it directly
++# to :func:`_unavailable_classification`.
++_FAIL_SANDBOX = "sandbox"
+ 
+ 
+ def _failure_class(exc: Exception | None) -> str:
+@@ -2824,6 +2849,7 @@ def _unavailable_classification(failure: str, error_log: Path | None) -> str:
+     status = {
+         _FAIL_TRANSIENT: assemble.LEAF_STATUS_INFRA,
+         _FAIL_STARTUP: assemble.LEAF_STATUS_STARTUP,
++        _FAIL_SANDBOX: assemble.LEAF_STATUS_SANDBOX,
+     }.get(failure, assemble.LEAF_STATUS_HUMAN)
+     marker = f"<!-- pdca:leaf-status {status} -->\n\n"
+     if failure == _FAIL_TRANSIENT:
+@@ -2838,6 +2864,15 @@ def _unavailable_classification(failure: str, error_log: Path | None) -> str:
+                 "reviewed the diff — this is NOT an empty verdict. A plain re-run will fail "
+                 "the same way: fix the leaf's `argv` / PATH first (`pdca doctor` checks each "
+                 "command leaf's CLI), then re-run.")
++    elif failure == _FAIL_SANDBOX:
++        kind = ("**sandbox infra — the leaf's seeded vendor sandbox could not start.** The "
++                "leaf exited 0 but wrote nothing; its own final answer names the sandbox "
++                "this run seeds (`sandbox.enabled` + `failIfUnavailable`, "
++                "`_seed_plan_sandbox_settings`) as refusing to start on this host, so every "
++                "Bash call it attempted failed and it had no other way left to deliver its "
++                "review — this is NOT a reviewed-and-found-nothing result. A plain re-run "
++                "on this host will fail the same way: the HOST denies the sandbox (e.g. "
++                "unprivileged user namespaces are restricted), not the leaf's config.")
+     else:
+         kind = ("**substantive — needs a human.** The leaf ran but did not yield a usable "
+                 "verdict; do not assume an infra blip.")
+@@ -3155,7 +3190,14 @@ def _plan_advisory_prompt(spec: dict, leaf_id: str) -> str:
+         "bullet prefixed '- NEEDS-HUMAN — ' with the evidence (a brief line, a thread "
+         "quote, a path:line). You are ADVISORY — you never gate, and you never edit "
+         "brief.md yourself. \"Could not fault the brief after a real attempt\" is an "
+-        "acceptable strong answer — say so explicitly."
++        "acceptable strong answer — say so explicitly. "
++        # #526: this leaf runs under a fail-closed sandbox that can deny Bash entirely
++        # on some hosts (every command errors, including something as plain as `echo`)
++        # while you keep running — do not give up on the review because of that. If
++        # Bash is not working, use the Write tool instead to create
++        f"plan-advisory-{leaf_id}.md directly (it is in your current directory), and "
++        "say so at the top of the file in one line: that Bash was unavailable in this "
++        "run, so the environment — not this review — is what's incomplete."
+     )
+ 
+ 
+@@ -3225,6 +3267,27 @@ def _plan_findings(d: Path) -> int:
+     return count
+ 
+ 
++def _plan_advisory_completed(d: Path) -> bool:
++    """Did every plan-advisory leaf that ran for this bundle actually deliver a
++    review (#526)? False iff at least one of its ``plan-advisory-*.md`` artifacts
++    (excluding the decorrelation note, a selection lapse rather than a leaf outcome)
++    is a NOT-COMPLETED placeholder — carries the machine-readable leaf-status marker
++    (#278), the same test :func:`_plan_findings` uses to exclude it from the count.
++
++    ``findings: 0`` alone cannot tell "ran and genuinely found nothing" from "never
++    ran" — both write the identical number, since a placeholder's NEEDS-HUMAN line is
++    excluded from the count too. This field is the one the benefit record was missing
++    to tell them apart (issue #526's Act-legibility criterion): a `false` here means
++    the ``findings``/``revised`` pair for this run is uninterpretable as review
++    telemetry, whatever it says."""
++    for p in sorted(d.glob("plan-advisory-*.md")):
++        if p.name == "plan-advisory-decorrelation.md":
++            continue
++        if assemble.leaf_status(p.read_text(encoding="utf-8")):
++            return False
++    return True
++
++
+ def _run_plan_advisory_leaves(d: Path, cfg: Config) -> list[str]:
+     """Run the applicable plan-advisory leaves for one briefed bundle; return the leaf
+     ids that ran. Artifacts only — the revision + benefit record are the caller's."""
+@@ -3341,6 +3404,30 @@ def _pinned_plan_target(d: Path, cfg: Config):
+         shutil.rmtree(tmp, ignore_errors=True)
+ 
+ 
++# Vocabulary a leaf's own final answer uses when the SEEDED vendor sandbox itself
++# refused to start (#526) — observed live, on a host denying unprivileged user
++# namespaces, across both the CLI's plain-text and `--output-format stream-json`
++# reporting: "sandbox permission restriction", "sandbox initialization error",
++# "apply-seccomp: write /proc/self/setgroups (nested userns is capability-restricted
++# …)". Broad and case-insensitive on purpose — the exact vendor wording is not a
++# contract this file can pin, and a live host (build-notes.md) is what actually
++# proves the match, not a fixed string here.
++_SANDBOX_UNAVAILABLE_HINTS = (
++    "sandbox", "bwrap", "userns", "user namespace", "seccomp", "uid_map",
++    "setgroups", "unprivileged",
++)
++
++
++def _mentions_unavailable_sandbox(text: str) -> bool:
++    """Does a leaf's own final answer read like the SEEDED vendor sandbox
++    (:func:`_seed_plan_sandbox_settings`) refused to start, rather than an ordinary
++    "nothing to report"? (#526) On a host that denies unprivileged user namespaces the
++    CLI still exits 0 — its own account of the failure is the only signal left to tell
++    "environment" apart from "reviewed and found nothing"."""
++    low = (text or "").lower()
++    return any(hint in low for hint in _SANDBOX_UNAVAILABLE_HINTS)
++
++
+ def _run_plan_advisory_sandboxed(d: Path, cfg: Config, leaf: LeafConfig, spec: dict,
+                                  leaf_id: str) -> None:
+     """One plan-advisory leaf in a temp dir holding ONLY the plan inputs (the reviewer
+@@ -3378,18 +3465,34 @@ def _run_plan_advisory_sandboxed(d: Path, cfg: Config, leaf: LeafConfig, spec: d
+             extra += list(profile.settings_scope_argv)
+         out = sandbox / f"plan-advisory-{leaf_id}.md"
+         error_log = d / f"plan-advisory-{leaf_id}.error.log"
++        # #526: on a host that denies the seeded vendor sandbox (`seeded` above), Bash
++        # fails on every call but the CLI itself still exits 0 — no LeafError, `err`
++        # stays None, and the ONLY trace of why is whatever the leaf said in its final
++        # answer. `keep_final_text` + `captured` retain that even on this clean-exit
++        # path (`_invoke`/`run_with_heartbeat` otherwise discard a successful run's
++        # output entirely); `_mentions_unavailable_sandbox` below reads it.
++        captured: list[str] = []
+         err = _invoke_leaf_resilient(
+             leaf, sandbox, _plan_advisory_prompt(spec, leaf_id),
+             error_log=error_log,
+             label=f"Plan advisory {leaf_id} {d.name}",
+             status=lambda: progress.bundle_activity(sandbox, (out.name,)),
+-            stream_json=True, env=env, extra_argv=extra, cfg=cfg)
++            stream_json=True, env=env, extra_argv=extra, cfg=cfg,
++            keep_final_text=True, capture_into=captured)
+         if err is not None:  # advisory must never crash Plan
+             _plan_advisory_unavailable(d, leaf_id, f"leaf failed: {err}",
+                                        failure=_failure_class(err), error_log=error_log)
+             return
+         if out.exists():
+             shutil.copy2(out, plan_advisory_artifact(d, leaf_id))
++            return
++        tail = captured[-1] if captured else ""
++        if _mentions_unavailable_sandbox(tail):
++            _plan_advisory_unavailable(
++                d, leaf_id,
++                "produced no artifact; its own final answer names the seeded vendor "
++                f"sandbox as the cause, not a reviewed-and-found-nothing run: {tail}",
++                failure=_FAIL_SANDBOX)
+         else:
+             _plan_advisory_unavailable(d, leaf_id, "produced no artifact")
+ 
+@@ -3516,6 +3619,12 @@ def run_plan_advisory_batch(cfg: Config, bundles: list[Path]) -> None:
+             "after_sha": after,
+             "revised": after != before[d],
+             "findings": _plan_findings(d),
++            # #526: `findings: 0` alone reads identically whether the leaf ran and
++            # genuinely found nothing, or never ran at all (a NOT-COMPLETED
++            # placeholder's NEEDS-HUMAN line is excluded from the count too). This
++            # is the differentiator an Act reader needs before treating a wave of
++            # zeros as a verdict on plan review rather than on the environment.
++            "completed": _plan_advisory_completed(d),
+             "leaves": ids,
+         }, indent=2) + "\n", encoding="utf-8")
+ 
+diff --git a/template/src/pdca_harness/progress.py b/template/src/pdca_harness/progress.py
+index c18cb7a..ff52a64 100644
+--- a/template/src/pdca_harness/progress.py
++++ b/template/src/pdca_harness/progress.py
+@@ -48,6 +48,7 @@ def run_with_heartbeat(
+     label: str = "",
+     status: Callable[[], str] | None = None,
+     telemetry: Callable[[int], str] | None = None,
++    keep_final_text: bool = False,
+ ) -> tuple[int, str, bool]:
+     """Run ``cmd``, printing ``… still working (NmSSs elapsed)`` every ``interval`` s.
+ 
+@@ -146,6 +147,19 @@ def run_with_heartbeat(
+     tick is the one moment the harness is already awake while the child works. The same
+     best-effort contract as ``status``: any exception it raises is swallowed — an
+     observer can never break the run it observes.
++
++    ``keep_final_text`` (issue #526), when set alongside ``stream_json``, retains the
++    LAST plain-text ``assistant`` message the leaf emitted and appends it to ``output``
++    — even on a **clean exit** (``rc == 0``). Every retention #506 already does
++    (:func:`_terminal_error`) is keyed on the CLI's OWN error mark, so it says nothing
++    when the child exits 0 having simply not done what it was asked — the exact shape
++    of a plan-advisory leaf whose seeded vendor sandbox (`leaves._seed_plan_sandbox_settings`)
++    could not start: every Bash call it attempts fails, yet the CLI itself still exits 0.
++    Its ordinary final answer is the only place left that says why. Unlike the #506
++    report, this is not marked by the CLI as anything special — it is whatever the leaf
++    last said — so it is opt-in and additive: off by default, every existing caller's
++    ``output`` is byte-identical. Skipped under ``capture`` (already keeps everything)
++    and for a format other than ``claude-stream-json`` (no observed shape to read).
+     """
+     tee_err = (stream_json or tee_stderr) and not capture
+     capture_out = capture or stream_json
+@@ -180,6 +194,10 @@ def run_with_heartbeat(
+     # death, so neither the session's wrap-up nor a sub-agent's report can overwrite the
+     # main session's own account of the cause (:func:`_note_terminal`).
+     terminal = {"text": "", "shape": ""}
++    # The leaf's last plain ``assistant`` text, retained only when ``keep_final_text``
++    # asks for it (#526) — newest overwrites oldest, so by the time the stream ends
++    # this is the leaf's OWN final answer, whatever its exit code.
++    final_text = {"text": ""}
+     latest_tool = {"label": ""}  # most recent tool-use, updated by the drain thread
+     readers: list[threading.Thread] = []
+     if capture_out:
+@@ -200,6 +218,10 @@ def run_with_heartbeat(
+                     text, shape = _terminal_error(ev, stream_format)
+                     if shape:  # the CLI's own marked report — keep it, whatever its cause
+                         _note_terminal(terminal, text, shape)
++                    if keep_final_text:
++                        ft = _final_assistant_text(ev, stream_format)
++                        if ft:
++                            final_text["text"] = ft
+                     lbl = _stream_tool_label(ev, stream_format)
+                     if lbl:
+                         latest_tool["label"] = lbl
+@@ -309,6 +331,12 @@ def run_with_heartbeat(
+         # evidence line and a stream family emits as JSONL — the report is in it already.
+         sep = "" if not output or output.endswith("\n") else "\n"
+         output = f"{output}{sep}{_TERMINAL_REPORT_HEADER}\n{terminal['text']}\n"
++    if keep_final_text and final_text["text"] and not capture:
++        # #526: appended the same way the #506 report is, but unconditionally — this
++        # is not a marked death, just whatever the leaf last said, kept so a clean
++        # exit that skipped its own task still leaves a trace of why.
++        sep = "" if not output or output.endswith("\n") else "\n"
++        output = f"{output}{sep}{_FINAL_TEXT_HEADER}\n{final_text['text']}\n"
+     rc = TIMEOUT_RC if timed_out else proc.returncode
+     # `produced` is returned exactly as before: this change RETAINS evidence and
+     # classifies nothing, so every retry decision downstream is unchanged (#506).
+@@ -525,6 +553,27 @@ _TERMINAL_ERROR_MAX = 500
+ #: leaf's whole account of its death — the reader is told there is more, and where the
+ #: rest is (the session transcript this retention exists to stop being the only copy).
+ _TRUNCATED_NOTE = f" … [report truncated at {_TERMINAL_ERROR_MAX} chars]"
++#: Banner for the ``keep_final_text`` retention (#526) — distinct from
++#: :data:`_TERMINAL_REPORT_HEADER` so a reader can tell the CLI's own MARKED death
++#: report (#506) from ordinary text the leaf happened to say last.
++_FINAL_TEXT_HEADER = "----- leaf's final answer -----"
++
++
++def _final_assistant_text(line: str | dict, fmt: str = "claude-stream-json") -> str:
++    """The plain text of a claude ``assistant`` event's message, whatever it says (#526).
++
++    Unlike :func:`_terminal_error`, nothing here is marked by the CLI as special — this
++    is retention of the ORDINARY final answer, for the one case #506's error-only
++    retention cannot see: a leaf that exits 0 (no error, no crash) having silently not
++    done the thing it was asked. Bounded the same way (:func:`_report_line`) — a diagnostic
++    line, not a transcript. Only the claude format has an observed shape; every other
++    family answers "" and stays exactly as it was before this existed."""
++    if fmt != "claude-stream-json":
++        return ""
++    ev = _stream_event(line)
++    if ev.get("type") != "assistant":
++        return ""
++    return _report_line(_claude_message_texts(ev.get("message")))
+ 
+ 
+ def _terminal_error(line: str | dict, fmt: str = "claude-stream-json") -> tuple[str, str]:
+diff --git a/template/tests/test_plan_advisory.py b/template/tests/test_plan_advisory.py
+index e93ec26..f86dca8 100644
+--- a/template/tests/test_plan_advisory.py
++++ b/template/tests/test_plan_advisory.py
+@@ -11,6 +11,7 @@ from __future__ import annotations
+ 
+ import json
+ import shutil
++import sys
+ import tempfile
+ import unittest
+ from pathlib import Path
+@@ -48,6 +49,30 @@ def _brief(cfg: Config, iid: str, *, difficulty: str | None = None,
+     return d
+ 
+ 
++def _fake_sandboxed_claude(tmp: Path) -> Path:
++    """A stand-in ``claude`` binary behaving exactly as the REAL vendor CLI was
++    observed to behave (#526 build-notes: live, on a host denying unprivileged
++    user namespaces) when its seeded sandbox cannot start: it launches, exits 0,
++    writes NO artifact, and its only account of what happened is an ordinary
++    ``assistant`` text event on stdout naming the sandbox. This is a real
++    subprocess spawned through the leaf's own ``argv`` — the outside boundary
++    ``_invoke``/``run_with_heartbeat`` already read before this fix — not a mock
++    of any function the fix adds."""
++    script = tmp / "fake-claude.py"
++    script.write_text(
++        "#!/usr/bin/env python3\n"
++        "import sys\n"
++        "sys.stdin.read()\n"
++        "print('{\"type\": \"assistant\", \"message\": {\"content\": "
++        "[{\"type\": \"text\", \"text\": \"The command failed due to a sandbox "
++        "permission restriction; the seeded sandbox could not start "
++        "(bwrap userns error).\"}]}}')\n"
++        "sys.exit(0)\n",
++        encoding="utf-8")
++    script.chmod(0o755)
++    return script
++
++
+ class PlanAdvisory(unittest.TestCase):
+     def setUp(self) -> None:
+         self.tmp = Path(tempfile.mkdtemp())
+@@ -137,6 +162,53 @@ class PlanAdvisory(unittest.TestCase):
+         for flag in ("--setting-sources", "project"):     # confinement flag rides
+             self.assertIn(flag, seen["extra"])
+ 
++    def test_sandbox_cannot_start_is_classified_infra_not_human(self) -> None:
++        # #526: on a host that denies unprivileged user namespaces, the seeded
++        # fail-closed sandbox (_seed_plan_sandbox_settings) cannot start, so every
++        # Bash call the reviewer attempts fails while the CLI itself still exits 0
++        # — no LeafError, no artifact. Before the fix this filed at
++        # _FAIL_SUBSTANTIVE with the needs-a-human marker, indistinguishable from a
++        # genuine "reviewed and found nothing" run. `_fake_sandboxed_claude` is a
++        # REAL subprocess spawned through the leaf's own argv, exactly as the real
++        # `claude` binary was observed to behave live (build-notes.md) — not a
++        # mock of `_invoke`/`_invoke_leaf_resilient` or of any symbol the fix adds.
++        fake = _fake_sandboxed_claude(self.tmp)
++        reviewer = {"id": "plan-reviewer", "mode": "command", "family": "claude",
++                    "argv": [sys.executable, str(fake)]}
++        cfg = _cfg(self.tmp, plan_advisory=[reviewer])
++        d = _brief(cfg, "SBX")
++        leaves.run_plan_advisory(d, cfg)
++        art = leaves.plan_advisory_artifact(d, "plan-reviewer")
++        self.assertTrue(art.exists())
++        text = art.read_text(encoding="utf-8")
++        status = assemble.leaf_status(text)
++        self.assertEqual(status, assemble.LEAF_STATUS_SANDBOX)   # (a) infra, not human
++        self.assertNotEqual(status, assemble.LEAF_STATUS_HUMAN)
++        self.assertIn("sandbox", text.lower())                   # (a) names the cause
++        benefit = json.loads((d / "plan-advisory-benefit.json").read_text(encoding="utf-8"))
++        self.assertFalse(benefit["completed"])                   # (b) distinct from
++        self.assertEqual(benefit["findings"], 0)                 #     "ran, 0 findings"
++
++    def test_a_working_sandbox_that_writes_nothing_stays_classified_as_today(self) -> None:
++        # #526 scope (e): the fix narrows the substantive class, it does not
++        # relabel every empty result as infra. A leaf whose final answer says
++        # nothing about a sandbox — it simply produced no artifact — still files
++        # at the needs-a-human class, exactly as before this fix.
++        reviewer = {"id": "plan-reviewer", "mode": "command", "family": "claude",
++                    "argv": ["claude"]}
++        cfg = _cfg(self.tmp, plan_advisory=[reviewer])
++        d = _brief(cfg, "NOSBX")
++
++        def fake(leaf, cwd, prompt, **kw):
++            return None                                          # exits 0, writes nothing
++
++        with mock.patch.object(leaves, "_invoke_leaf_resilient", side_effect=fake):
++            leaves.run_plan_advisory(d, cfg)
++        text = leaves.plan_advisory_artifact(d, "plan-reviewer").read_text(encoding="utf-8")
++        self.assertEqual(assemble.leaf_status(text), assemble.LEAF_STATUS_HUMAN)
++        benefit = json.loads((d / "plan-advisory-benefit.json").read_text(encoding="utf-8"))
++        self.assertFalse(benefit["completed"])
++
+     def test_when_gates_on_a_brief_field(self) -> None:
+         gated = {**_REVIEWER, "when": {"field": "difficulty", "substring": "high"}}
+         cfg = _cfg(self.tmp, plan_advisory=[gated])
