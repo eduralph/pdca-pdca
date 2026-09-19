@@ -1,0 +1,11 @@
+{
+  "mode": "new-pr",
+  "branch": "fix/550-plan-revision-pass-admits-the-bundles-checkouts",
+  "pr_url": "https://github.com/eduralph/pdca-harness/pull/568",
+  "base": "main",
+  "repo": "eduralph/pdca-harness",
+  "by": "Eduard Ralph",
+  "date": "2026-09-19",
+  "id_pending": false,
+  "host_ci_base": "70ea12b0e60f6cea4c604a0c2777240760ba11f3"
+}
