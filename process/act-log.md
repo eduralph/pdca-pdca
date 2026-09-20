@@ -74,7 +74,7 @@ the human can answer).
 
 ## Process deltas
 
-Agreed with the human; shipped as draft PR __PR__ — the human marks ready / merges.
+Agreed with the human; shipped as draft PR https://github.com/eduralph/pdca-pdca/pull/68 — the human marks ready / merges.
 
 - **Spec routine:** `docs/INTEGRATION.md` §5 (`:132-141`) — the sentence "the
   reviewer … cannot rerun either command — the brief's cited output is what it
