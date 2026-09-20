@@ -1,0 +1,12 @@
+{
+  "mode": "stacked-pr",
+  "branch": "fix/565-one-live-driver-per-bundle",
+  "pr_url": "https://github.com/eduralph/pdca-harness/pull/569",
+  "base": "pdca-integration/main",
+  "repo": "eduralph/pdca-harness",
+  "by": "Eduard Ralph",
+  "date": "2026-09-19",
+  "id_pending": false,
+  "host_ci_base": "b191da4477c4d49064ca8650c280b62e2b08061d",
+  "stacks_on": []
+}
