@@ -129,9 +129,16 @@ Contract-tested by `engine/tests/test_run_verify.py`.
   closed PR that touched the path is signal even when it never mentions the issue;
   ~15 s, lists every closed-but-unmerged PR touching any named path):
   `gh pr list -R eduralph/pdca-harness --state closed --limit 1000 --json number,title,mergedAt,files -q '.[] | select(.mergedAt == null) | select(any(.files[]; .path | IN("<path>", "<path>"))) | "\(.number) \(.title)"'`
-  Record its output (or "none") in the brief's Prior-art line. The reviewer's target
-  is a one-commit snapshot with no remotes, so it cannot rerun either command — the
-  brief's cited output is what it checks.
+  Record its output (or "none") in the brief's Prior-art line.
+- **Reviewer re-check (T5):** the reviewer's target is a one-commit snapshot with no
+  remotes, so the `git log` command above cannot run there — but every
+  `gh … -R eduralph/pdca-harness` command needs network only, and the reviewer leaf
+  has it. The reviewer reruns the closed/rejected-work command for the patch's paths,
+  and checks merged history per path with
+  `gh api "repos/eduralph/pdca-harness/commits?path=<path>&per_page=10" -q '.[] | "\(.sha[0:7]) \(.commit.message | split("\n")[0])"'`.
+  Output that agrees with the brief's Prior-art line settles T5 prior art mechanically
+  (PASS, cite the saved output). Raise it NEEDS-HUMAN only when the two disagree or
+  `gh` itself fails — and say which.
 
 ## 6. Brief and design-proposal templates
 - **Brief template:** `templates/brief.md.tpl`

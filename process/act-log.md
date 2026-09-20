@@ -29,6 +29,97 @@
 - The next Do phases should not recreate <specific issue>. Watch the next K cycles.
 -->
 
+# Act review — 2026-09-19 — cycles considered: issue_481, issue_498, issue_508, issue_526, issue_528, issue_549, issue_550, issue_565, issue_566
+
+Tenth Act review — nine bundles frozen since the 2026-09-15 review (the index
+carried all 65; the 56 previously reviewed were considered only for effectiveness
+follow-up). Eight merged-wider with a patch, one closed as a split (issue_498). One
+recurring class, and it is the one the last review aimed at: the fix worked on the
+brief side and missed on the reviewer side. One delta applied and one issue filed,
+both agreed with the human (the entry was first written with them proposed-only:
+this instance still carries the pre-#534 Stop hook, which demands the entry before
+the human can answer).
+
+## What the cycles' records exposed
+
+- **T5 prior art by path — still 8 of 8 patch bundles** (481, 508, 526, 528, 549,
+  550, 565, 566 §6; two ledger keys, rows 21–22). The 2026-09-15 delta (PR #64,
+  merged 2026-09-18) did its half: all eight briefs now cite a closed-unmerged PR
+  search **by path** (e.g. `results/issue_549/brief.md:121-122`,
+  `results/issue_550/brief.md:101-103`). The §6 item did not drop because the
+  reviewer words it differently now: "the brief records the search, but this target
+  has one synthetic commit and no remotes, so I cannot settle it". Cause, located in
+  this instance: the sentence that review added at `docs/INTEGRATION.md:132-134`
+  says the reviewer "cannot rerun either command". That is wrong for the closed-PR
+  command — `gh pr list -R eduralph/pdca-harness …` needs network only, not a local
+  remote; the reviewer leaf has network (`pdca.toml:1044-1045`), and issue_534's
+  reviewer ran exactly that and gave T5 PASS (`review-evidence/prior-art.json`). The
+  reviewer prompt (`agents/reviewer.md:139-140`) says "where it can't be
+  mechanically settled, raise it NEEDS-HUMAN", and with local git useless it takes
+  that exit every time. The 2026-09-15 criterion guessed "planner prompt needs the
+  pointer"; the records say the planner is fine and the reviewer is the gap.
+- **Cut-off advisory fragments in §6** (526, 550, 566 this wave; 462, 472 earlier) —
+  e.g. issue_566 "`drive_claim.held()`'s success path doesn't suppress `OSError`
+  on". Known: upstream #527 (multi-line NEEDS-HUMAN joining) closed 2026-09-16 but
+  is in no release; this instance renders v0.57.0. Expected until the next update.
+- **Structural, no delta:** Validation fitness-to-purpose 8 of 8; C4 "unverifiable"
+  on a test-only patch (508); split-close confirmation (498). T2/T3/T4 oracle
+  classes, the copier skip and the plan-advisory "no artifact" class: 0 of 9 — still
+  cleared (plan-advisory stays off until #526, closed upstream, reaches a release).
+- **One-off:** issue_508 C5 "test adds no import of `pdca_harness`" — correct for a
+  test that scans a rendered command file; no pattern.
+- **Size backstop at 125:** did not fire this wave. issue_565 came in at 84 KB with
+  0 rounds and issue_481 took 2 rounds at 35 KB; neither is the "≥3 attempts with
+  no rule firing" miss the last review said to watch for.
+
+## Process deltas
+
+Agreed with the human; shipped as draft PR __PR__ — the human marks ready / merges.
+
+- **Spec routine:** `docs/INTEGRATION.md` §5 (`:132-141`) — the sentence "the
+  reviewer … cannot rerun either command — the brief's cited output is what it
+  checks" is replaced by a "Reviewer re-check (T5)" bullet: the merged-history `git`
+  command cannot run in the reviewer's one-commit target, but every
+  `gh … -R eduralph/pdca-harness` command can (network only); the reviewer reruns
+  the closed-PR command for the patch's paths, checks merged history with
+  `gh api "repos/eduralph/pdca-harness/commits?path=<path>&per_page=10"` (tested
+  2026-09-20), and marks T5 prior art PASS when the output matches the brief —
+  NEEDS-HUMAN only when the two disagree or `gh` fails.
+- No template, ruleset, gate or config change. The reviewer prompt's fallback
+  sentence (`agents/reviewer.md:139-140`) is template-owned; change it only if the
+  §5 rewording alone does not move the number (see below).
+- **Ledger** (`process/act-ledger.json` rows 21–22): note added pointing at this
+  entry. Rows 15–17 (validation) are the structural class of row 1.
+
+## Follow-ups routed (not process deltas — work handed to an owner)
+
+- Harness/driver issue (upstream, Milestone 0.61.0), from issue_565 §10, the
+  human's own note "Make an issue for 0.61": every driver entry point that starts
+  work on a bundle must take a drive claim — `pdca run` / `signoff` / `publish` and
+  the CSV batch's Plan session take none; also the `_runnable` prerequisite skip
+  (`flow.py:641-643`) holds its claim for the whole run while
+  `docs/07-crosscutting.md` and the comment at `flow.py:626-627` say it is let go.
+  Filed **https://github.com/eduralph/pdca-harness/issues/573**.
+- Carried, open upstream, no new filing: #556 (size tolerance band + calibration),
+  #557 (`_brief_snapshot` when advisory is off), #501 (signal identity — it split
+  this wave's T5 class into two keys again).
+- Landed upstream since the last review, waiting for a release + `copier update`:
+  #526, #527, #528, #534. When #528 arrives, new entries go at the end of this file
+  and the end-of-file markers can go.
+- Open Act item (carried, unchanged): triage rubric should state five buckets
+  explicitly (issue_316 §10) — no triage brief ran.
+
+## How effectiveness will be judged
+
+- T5 prior art: once the §5 rewording merges, the class should drop from 8 of 8 to
+  near 0 in the next wave, with reviewers citing their own `gh` output. If it still
+  recurs, the next step is an upstream change to the reviewer prompt's fallback
+  sentence, not more instance wording.
+- Fragment class: should clear on the first wave after the release carrying #527.
+  Recurrence after that is the signal.
+
+---
+
 # Act review — 2026-09-15 — cycles considered: issue_467, issue_480, issue_527, issue_529, issue_534
 
 Ninth Act review — five bundles frozen since the 2026-08-15 review (the index
@@ -1191,3 +1282,5 @@ First Act review of the instance — nine frozen bundles, all merged-wider.
 <!-- act-session marker — 2026-08-15: this session's entry is the "# Act review — 2026-08-15" section at the TOP of this file, per the header's "Newest entries on top". This trailer exists only because the exit-contract check looks for the entry id in text appended AFTER the session baseline (src/pdca_harness/handoff.py:190-194), which a prepended entry can never satisfy — filed upstream as https://github.com/eduralph/pdca-harness/issues/528. Remove it when that lands. -->
 
 <!-- act-session marker — 2026-09-15: this session's entry is the "# Act review — 2026-09-15" section at the TOP of this file (newest on top). Trailer needed only because the exit check reads text appended after the session baseline — upstream https://github.com/eduralph/pdca-harness/issues/528, still open. -->
+
+<!-- act-session marker — 2026-09-19: this session's entry is the "# Act review — 2026-09-19" section at the TOP of this file (newest on top). Trailer needed only because the exit check reads text appended after the session baseline — upstream https://github.com/eduralph/pdca-harness/issues/528, closed upstream but not yet in a release this instance has consumed. -->
