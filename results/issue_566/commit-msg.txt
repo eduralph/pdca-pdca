@@ -1,0 +1,37 @@
+fix(split): make `split --accept`'s last line honest about a live run
+
+`pdca split <id> --accept` always ended with "run `pdca flow <child-ids>`
+to drive the children". Since a live `pdca flow` run adopts the children
+of a parent it is driving, and a CSV batch sweeps every in-flight bundle
+after its Plan session, that line told you to start a second driver over
+bundles a running flow was about to drive itself. And when a running flow
+did not reach a split's children — the parent's sign-off went unanswered,
+or the split was accepted from another shell after the run had moved on —
+nothing named them when the run ended. They sat PLANNED with no line
+pointing at them.
+
+The closing line now depends on what is true when it prints. While a live
+run holds the parent, or a live CSV batch has not finished deciding what
+it drives, it says that run drives the children if it reaches them, that
+it lists any it did not drive when it ends, and gives the `pdca flow
+<child-ids>` command for use after that run has ended. It never says
+"will drive": nothing at accept time can know that. With no live run in
+reach — a standalone accept, an accept after the run has ended, or a
+parent the run has already let go — the line is byte-identical to before.
+
+Every run now also checks, right before it ends, each split parent among
+the bundles it drove or was handed, and names on stderr every child still
+in flight that it did not drive, one line per parent, with the `pdca flow
+<ids>` command that resumes them. A child that is already finished is not
+named, so the command never points at work that is done. A child that is
+itself split is not named either, but the check goes on through it to its
+own children. The exit code does not change.
+
+Asking "does a live run hold this bundle?" takes and at once releases the
+same lock a run's claim uses, because the OS offers no way to look without
+taking. A run that tries to claim a bundle in that instant now retries a
+few times instead of reporting it held by another run when nobody holds
+it. The planner prompt, the planner seed text and docs/07-crosscutting.md
+describe the new line and the end-of-run report.
+
+Fixes #566

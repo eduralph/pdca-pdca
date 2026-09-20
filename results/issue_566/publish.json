@@ -1,0 +1,12 @@
+{
+  "mode": "stacked-pr",
+  "branch": "fix/566-split-hint-honest-about-a-live-run",
+  "pr_url": "https://github.com/eduralph/pdca-harness/pull/572",
+  "base": "pdca-integration/main",
+  "repo": "eduralph/pdca-harness",
+  "by": "Eduard Ralph",
+  "date": "2026-09-19",
+  "id_pending": false,
+  "host_ci_base": "fe8208f098556c8c3955aedec0c9f56cae2441dd",
+  "stacks_on": []
+}
