@@ -1,5 +1,5 @@
 {
-  "count": 56,
+  "count": 65,
   "reviewed": [
     "issue_311",
     "issue_316",
@@ -50,13 +50,22 @@
     "issue_475",
     "issue_476",
     "issue_480",
+    "issue_481",
     "issue_494",
     "issue_495",
     "issue_497",
+    "issue_498",
     "issue_507",
+    "issue_508",
+    "issue_526",
     "issue_527",
+    "issue_528",
     "issue_529",
-    "issue_534"
+    "issue_534",
+    "issue_549",
+    "issue_550",
+    "issue_565",
+    "issue_566"
   ],
   "fingerprints": {
     "issue_311": "18d7bf1a64397f124f84204b36451e1ffca0ca4191f19c124095ed352f1f26be",
@@ -108,13 +117,22 @@
     "issue_475": "6af9c276e9751e0292f274fd066a9f8aa74931ba5cd20cc7c7dc64bf12884b68",
     "issue_476": "e1e5fe62383d591ca83b513e0696c6543e7521bca9ec61ec47e9c90b8764dc81",
     "issue_480": "7dea0017b74096fb96607f87a24a8580047a5e53b227c3246be22db02ecd3583",
+    "issue_481": "d1f177b53ef04dbbe90830fd55ac858a3d5d3ff05fd9afc328cb49fa479e1684",
     "issue_494": "0b6912a4349b37b60ada06efba4be15c9e408c2ba4b6a5c04b7573c3c9f8f8c2",
     "issue_495": "cc995ad9daaa8f9073206df80cb4b23cd4a80119313970548699233cd1bfac71",
     "issue_497": "1bb5910d4da99006c30afd38df95b2ca43d13b32e87bd6633c36fe8c584921be",
+    "issue_498": "59958208afdb15176663e68c892bef1ebc2bf6b32e7d415b5be9e46735d12164",
     "issue_507": "fc55452d9df0e0db685f329a36d5492875201bb178d9366e4315fdc11df4e54b",
+    "issue_508": "b6bd8ddcf70881db18793a8f1169103c27816e4bdc697a65bc4dbec42d75ec06",
+    "issue_526": "fe95b4df4c510ffe1b607e9ad878b691eac766f80dbb7a5d6ed9c89e3b4c9049",
     "issue_527": "98d240cc1711d4e65f227251e9be30db0d96a4f56e12c5715b45d26fe96246a1",
+    "issue_528": "c1d94c732af08d915f32dcd7357696ac4e70aed7f13b359cc38d7a6c9c8ac547",
     "issue_529": "2418610cd30942d36ab66b60f41bd8ba339987e402e8aa78c7d24cb51cd44785",
-    "issue_534": "4a50ffb31db619d6da1257f0b465d969c0165fd5ca2927cf9fad54ab5ac52c54"
+    "issue_534": "4a50ffb31db619d6da1257f0b465d969c0165fd5ca2927cf9fad54ab5ac52c54",
+    "issue_549": "62202f8bf1fcaddfa727fe500ed7ea2c64a24f9aa465e9e7951a3acc9b351539",
+    "issue_550": "30daeca312b10d44618ada62f2e4052803d1fabf56a4f528fdfb396fe0a6956d",
+    "issue_565": "38861562d745d4ca58f315b495e745d31435893b992b161d44ec83512d36ef6c",
+    "issue_566": "c4a9587cf6817f2594078781d3d6538e8e155b279553fedec89145457287bc68"
   },
-  "last_review_date": "2026-09-15"
+  "last_review_date": "2026-09-19"
 }
