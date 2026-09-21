@@ -1,0 +1,28 @@
+Make /handoff actually run its exit-contract check
+
+Typing `/handoff <id>` in an interactive leaf never ran the check. The
+command ran the guard through a `!` pre-execution block that contained two
+shell expansions ($CLAUDE_PROJECT_DIR and $1). Claude Code's shell-permission
+checker will not match any allow-rule against a command that contains an
+expansion, so the block failed with "Contains simple_expansion" before the
+guard started. `allowed-tools: Bash(python3:*)` cannot help, because the
+checker refuses to evaluate that shape at all.
+
+This got worse after e9e59828dc6bc5e5914461a9c11a49f9c0914c10 retired the
+Stop hook. `/handoff` is now the only in-session check, and it could not
+run. The block came in with 900d63810caa75dc6c36dcdc38cf761c1c51573b.
+
+The command now tells the session to run the check itself through its
+Bash tool, from the project root, with a relative path:
+`python3 .claude/hooks/handoff_guard.py --check <id>`. This matches the
+`--abandon` line already in the same file. It does not need
+CLAUDE_PROJECT_DIR, which a session's Bash tool does not receive; the guard
+finds its instance root from its own location when that variable is unset.
+The one-required-id contract and the "nothing enforces this" wording stay
+as they were.
+
+A new test, tests/test_slash_commands.py, checks every file under
+.claude/commands/ and fails if any `!` block contains a shell expansion.
+It covers any command added later, not only /handoff.
+
+Fixes #508

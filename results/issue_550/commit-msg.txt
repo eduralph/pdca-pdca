@@ -1,0 +1,28 @@
+fix(leaves): stop prompting for the checkout in the revision pass
+
+Commit 304ff717759bad587c304a94e1b74c1efe7168de gave every interactive leaf the
+target checkout its session is about, so the operator stopped being asked to
+approve the same out-of-workspace read every session. One spawn was missed: the
+plan-advisory revision pass, which re-enters the planner after the advisory
+reviews raise findings.
+
+That session is the one that needs the checkout most. Its whole job is to weigh
+findings written against the target source, with file-and-line citations, and to
+re-check the brief's root cause against it. Instead it opened with that checkout
+outside its workspace, so the operator got a per-file approval prompt for every
+read, and approving by hand did not stick: a hand-granted rule lands in the
+untracked local settings file that the driver drops by design.
+
+The revision spawn now carries the same admission as sign-off, Act and publish:
+exactly the checkouts the bundles it is revising resolve to, and nothing else. A
+session that already knows which bundles it is about never widens to the
+instance's other configured targets, so when none of those checkouts exist on
+this host the spawn admits nothing rather than reaching for unrelated ones.
+Nothing else about the spawn changes: same working directory, byte-identical
+prompt, and a planner whose family has no grounding flag is still spawned with
+no extra arguments.
+
+Only instances that configure plan-advisory leaves reach this path, and only
+when a review actually raised a finding.
+
+Fixes #550

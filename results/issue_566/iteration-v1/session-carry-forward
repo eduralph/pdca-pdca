@@ -1,0 +1,38 @@
+Rejected on finding 2 — the end-of-run stranded-child report names finished
+children as unfinished work.
+
+`flow._warn_stranded_split_children`'s lineage walk (patch.diff:319-328)
+implements only half of brief (iii). It skips a child that is in the run's final
+drive set, and walks through a child that is itself split-marked, but it never
+checks the child's own state. So a COMPLETE / DISCONTINUED / RESOLVED child gets
+appended to `stranded` and printed as "left in-flight" with a `pdca flow <ids>`
+command pointing at work that is already done. Reviewer probe: parent 500 with
+COMPLETE children 601/602 under a real `flow 500 8` run prints
+`601, 602 left in-flight` (check-review.md finding 2; reviewer-probes.log:1).
+The only `state.state` calls in the new flow code are in the unrelated batch
+sweep — there is no terminal check anywhere in the walk.
+
+What to change:
+
+- Skip a lineage child whose state is terminal, per brief (iii) "not terminal
+  and not in the run's final drive set". Both conditions, not just the second.
+- Keep walking THROUGH a terminal split child. That traversal is deliberate and
+  correct — a split parent is terminal by design, and its grandchildren must
+  still be reached. Do not fix this by gating the whole walk on non-terminal.
+- Pin the missing branch with a test. Brief (iii) says "No such children → no
+  line" and (vi) requires a test for every branch that changes whether the
+  report fires; none of the 8 submitted tests covers a split parent whose
+  children are all finished.
+
+Scope of this iterate: finding 2 only. Change nothing else.
+
+The human reviewed the other two reviewer findings at sign-off and accepted the
+current behaviour on both — do not "also fix" them:
+
+- Finding 1 (flow_batch holds the CSV sweep marker for the whole drive, because
+  `return _drive_and_act(...)` is evaluated inside the `try` before the
+  `finally` releases it): accepted as-is, no fix wanted.
+- Finding 3 (`Run.take`'s bounded 5-retry past a `held()` peek vs brief (iv)'s
+  absolute "never cause a false refusal"): no work wanted now.
+
+The conditional-line half of the change was not rejected.

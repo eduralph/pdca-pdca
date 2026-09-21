@@ -1,0 +1,36 @@
+fix(handoff): act log is append-only, and the Act exit check says so
+
+An Act session that followed the act log's own header could not finish.
+The header shipped to every instance said "Newest entries on top", so a
+session put its new entry at the top. The exit check only looked for the
+named entry in text added after the session-start end of the file, so
+/handoff failed with "appears only in act-log text that predates this
+session" for an entry the session had just written. Naming an older entry
+instead then passed, because the old text had moved past that point. The
+check also passed a session that edited earlier entries and then appended,
+which the header's own "Append-only" forbids.
+
+There is now one rule: new entries go at the end. The header says so, in
+line with act.append_entry and the Act role prompt, which both already
+append. At session start the driver now keeps the full text of the log,
+not just its length and hash, and the exit check uses it:
+- the log unchanged, or the named entry missing, fails as before;
+- a new entry put at the top or between existing entries fails, whichever
+  date is named, and the message says entries must be appended at the end;
+- any change to text that was there at session start fails with a message
+  naming the append-only rule, even if a correct entry is also appended;
+- only session-start text left as it was, plus the named entry in what
+  was added after it, passes.
+
+A baseline without the full text (built by hand, or by a caller older than
+this change) still gets the old length/hash checks, so existing callers and
+tests behave as before. Sessions started by the driver always carry the
+full text.
+
+Existing act logs are not reordered. An instance whose log is newest-first
+puts its next entries at the end.
+
+The session-start baseline came in with
+900d63810caa75dc6c36dcdc38cf761c1c51573b.
+
+Fixes #528

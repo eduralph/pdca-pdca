@@ -1,0 +1,37 @@
+fix(flow): keep two `pdca flow` runs off the same bundle
+
+A bundle's state is nothing but the files in `results/issue_<id>/`, and nothing
+said who was allowed to write them. Two `pdca flow` runs over overlapping ids
+would drive the same bundle at the same time and interleave its brief, patch,
+review and sign-off artifacts with no ordering and no warning — an id you name
+that a colleague is already driving, a leftover a CSV batch's in-flight sweep
+picks up mid-drive, a child a split hands back. Both runs reported success, and
+the bundle was left in whatever state the last writer happened to leave.
+
+A run now claims each bundle before it drives it and holds the claim until the
+run ends. Name a bundle another live run holds and your run stops before it
+writes anything, naming that bundle and the run that has it, so nothing is
+half-driven. Reach one only implicitly — the sweep, an adopted child — and it is
+named and left to the run that holds it while the rest of your run goes on. A
+bundle a run decides not to drive after all is let go at that decision, so the
+`pdca flow N` it prints for you is never refused by the run that printed it; and
+a run that walks away from a bundle but keeps going now says to resume it once
+that run has ended, which is when the command will work.
+
+The claim is an exclusive, non-blocking file lock the OS drops when the run's
+process ends, however it ends — a return, an exception, `SIGKILL` — so a crashed
+run leaves no stale claim to clean up by hand. A claim that cannot be recorded
+at all (an unwritable process directory, a filesystem without file locks) is
+refused the same way rather than waved through: a bundle driven without a claim
+has nothing keeping a second run off it. The claim files live under
+`process/.drive-claims/`, outside every bundle and gitignored, so no bundle and
+no results commit ever carries one.
+
+What this does not cover, stated in docs/07-crosscutting.md: `pdca run`,
+`signoff` and `publish` take no claim, and a CSV batch's Plan session runs
+before the batch claims anything, so the planner in it — or a `pdca split
+--accept` it launches — can still rewrite or split a bundle another live run
+holds. A single run with no second driver behaves and prints exactly as before,
+apart from the qualified resume line above.
+
+Fixes #565

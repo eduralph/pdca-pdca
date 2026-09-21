@@ -1,0 +1,44 @@
+fix(leaves): plan review survives a sandbox that cannot start
+
+The plan-review leaf is the only leaf the harness runs inside the vendor
+sandbox with "refuse rather than run unconfined" turned on (added in
+915a1abf80ae67f4ade9c719371d64bdcb744363). On a host that denies
+unprivileged user namespaces, which is Ubuntu's default, that sandbox
+cannot start and every shell command the leaf tries fails, even
+`echo hello`. The leaf's only way to write its review was a shell command,
+so it exited 0 with nothing written. The harness then filed the empty
+result as "substantive — needs a human, do not assume an infra blip",
+which is the opposite of what happened. The benefit record wrote the same
+"0 findings, brief not revised" as a review that ran and found nothing, so
+a run of these would count against plan review at the next process
+review.
+
+Three changes make the outcome match what happened:
+
+- The review still arrives. The reviewer agent gains the Write tool, and
+  the prompt tells it, in text the model reads, to finish with Read, Grep
+  and Glob and write its file with Write when every shell command fails
+  before it starts. When that happens the harness appends a note quoting
+  the sandbox error, so the review always says the shell was unavailable.
+- When nothing arrives, the placeholder is filed under a new infra status,
+  `sandbox-empty`. Its text names the sandbox as the cause, says a plain
+  re-run will fail the same way, and says what the host needs. The harness
+  decides this from the vendor's own tool errors in the leaf's output
+  stream (lines starting `apply-seccomp:` or `bwrap:`), only when the leaf
+  made shell calls and none ran. It never reads the model's own words. The
+  CLI's "sandbox required but unavailable" refusal (exit 1) gets the same
+  status. A leaf whose shell worked and that wrote nothing is classified
+  as before.
+- `plan-advisory-benefit.json` gains `completed` and `not_completed` (leaf
+  id to status), and the SUMMARY §10 line reads "Plan advisory NOT
+  completed (sandbox-empty): …" in that case. Older records render as
+  before.
+
+The sandbox policy itself is unchanged: sandbox on, no unsandboxed
+commands, fail if unavailable, no extra grants. Because the leaf can now
+write files, the seeded settings also deny edits to the bundle and the
+pinned target checkout. Write is deliberately not added to the example
+`--allowedTools` in pdca.toml: tested live, that let Write overwrite a
+file outside every granted directory.
+
+Fixes #526

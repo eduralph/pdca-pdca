@@ -1,0 +1,344 @@
+diff --git a/template/src/pdca_harness/split.py b/template/src/pdca_harness/split.py
+index 8e96c9d..356c439 100644
+--- a/template/src/pdca_harness/split.py
++++ b/template/src/pdca_harness/split.py
+@@ -33,6 +33,7 @@ import tempfile
+ from dataclasses import dataclass
+ from pathlib import Path
+ 
++from . import brief as brief_mod
+ from . import state
+ 
+ PROPOSAL = "split-proposal.md"
+@@ -728,6 +729,64 @@ def materialise(children: list[Child], ids: list[str], cfg, staging: Path, *,
+     return staged
+ 
+ 
++_ITERATION_RE = re.compile(r"^iteration-v(\d+)$")
++
++
++def _archived_brief_source(parent: Path) -> Path | None:
++    """The most recently archived ORIGINAL brief still on disk, or ``None``.
++
++    Read from the highest-numbered ``iteration-v<N>/brief.md`` that exists and is
++    authored (never a placeholder). Used only when ``parent/brief.md`` itself is
++    missing at accept time — the realistic split-parent shape (issue #481): an
++    ``iterate-plan`` archived the brief to ``iteration-v<N>/`` *before* this slice was
++    split, so the parent's only remaining record of its own Slug / Repo + branch target
++    is inside that archive.
++    """
++    numbered = []
++    for d in parent.glob("iteration-v*"):
++        m = _ITERATION_RE.match(d.name)
++        if m:
++            numbered.append((int(m.group(1)), d))
++    for _, d in sorted(numbered, reverse=True):
++        bp = d / "brief.md"
++        if bp.exists() and not brief_mod.is_placeholder(bp):
++            return bp
++    return None
++
++
++def _parent_split_brief(source: Path, created: list[Path]) -> str:
++    """The parent's post-accept Plan artifact, built from the archived original.
++
++    Restores the invariant the CLOSE_MARKER contract depends on (state.py:40-44: the
++    close marker is the Do-era stand-in for patch.diff, so the state machine reads a
++    bundle carrying it as "past Do" — which presumes a Plan artifact exists). Only
++    the Defect / Success criterion are rewritten to describe the split outcome and name
++    every child this accept created (the accept transaction's own record, mirrored
++    from the ``build-notes.md`` breadcrumb below); Slug and Repo + branch target travel
++    unchanged from ``source`` so `handoff.check_planner`'s three mandatory fields are
++    filled with the same values a human already authored, not re-derived.
++    """
++    bundle_rel = source.relative_to(source.parent.parent)
++    slug = brief_mod.whole_field(source, "slug")
++    repo_target = brief_mod.whole_field(source, "repo + branch target")
++    children = ", ".join(d.name for d in created)
++    return (
++        f"# Brief — {source.parent.parent.name} / {slug} (split parent)\n\n"
++        "> The Plan artifact (docs 02 §PLAN). Written by `split.accept`, not a human: "
++        f"the original brief was archived to `{bundle_rel}` by an earlier iterate-to-Plan "
++        "before this slice was split (issue #481), so without this file the bundle would "
++        "carry a Do-era artifact (the close marker) with no Plan artifact behind it.\n\n"
++        f"- **Slug:** {slug}\n"
++        "- **Defect:** this slice was judged too large to build as one cycle and was "
++        f"decomposed rather than fixed directly here; see `{PROPOSAL}` for the accepted "
++        f"split and `{bundle_rel}` for the original defect this parent used to describe.\n"
++        "- **Success criterion:** the split is complete when every child bundle below "
++        f"reaches COMPLETE — {children}. This parent bundle has no fix of its own left to "
++        "verify; `build-notes.md` names the same children.\n"
++        f"- **Repo + branch target:** {repo_target}\n"
++    )
++
++
+ def _rollback(created: list[Path]) -> None:
+     """Undo the child bundles that landed. A part-applied accept is worse than either
+     outcome: the human can neither re-run (the ids exist) nor proceed (the batch is
+@@ -771,6 +830,23 @@ def accept(parent: Path, ids: list[str], cfg) -> list[Path]:
+             "second acceptance would create a duplicate set of children and leave the "
+             "first orphaned from the parent's breadcrumb. Reopen it first if that is what "
+             "you want")
++    # No top-level brief.md is the realistic split-parent shape (issue #481): an
++    # iterate-plan archived it to `iteration-v<N>/` *before* this slice was split. Locate
++    # that archive NOW, in the pre-write validation phase, so a parent this accept cannot
++    # give a Plan artifact back is refused while refusing is still free — never left
++    # terminal (the close marker) with no Plan artifact behind it, which is the exact
++    # briefless-terminal shape this fix removes (state.py CLOSE_MARKER contract, :40-44).
++    parent_had_brief = (parent / "brief.md").exists()
++    brief_source: Path | None = None
++    if not parent_had_brief:
++        brief_source = _archived_brief_source(parent)
++        if brief_source is None:
++            raise SplitError(
++                f"{parent.name} has no brief.md and no archived iteration-v*/brief.md to "
++                "rebuild one from — refusing to split. A split needs a Plan artifact "
++                "(leaves.do_split's own rule); this accept cannot write a parent brief "
++                "with nothing authored to base it on")
++
+     children = parse(proposal.read_text(encoding="utf-8"))
+     validate(children, ids, cfg)
+ 
+@@ -825,6 +901,7 @@ def accept(parent: Path, ids: list[str], cfg) -> list[Path]:
+     # anyone concluded it was too large) is excluded from the hint path by the
+     # first-attempt guard. The build-notes breadcrumb records WHY no patch exists so a
+     # frozen split parent never reads as an incomplete Do.
++    wrote_parent_brief = False
+     try:
+         # ARCHIVE the abandoned attempt first. A split is decided at sign-off, so the parent
+         # normally still carries the rejected attempt's patch.diff, gates, review and
+@@ -844,6 +921,16 @@ def accept(parent: Path, ids: list[str], cfg) -> list[Path]:
+         # cannot have touched it, because `LINEAGE` is deliberately not in
+         # `DOWNSTREAM_OF_BRIEF` — it is provenance, not this attempt's output.
+         _write_lineage(lineage_path, _merge_parent_lineage(parent, list(ids)))
++        # The parent's Plan artifact, only when accept found none: `parent_had_brief`
++        # was read before ANY write above, so this is exactly the realistic-case shape
++        # (brief.md missing, an archived original found) and never touches a parent that
++        # still has its own brief.md (criterion (f) — a briefed parent's brief.md must be
++        # byte-identical before and after). Written before the breadcrumb / marker below
++        # so a failure on either still rolls it back with everything else.
++        if not parent_had_brief:
++            (parent / "brief.md").write_text(
++                _parent_split_brief(brief_source, created), encoding="utf-8")
++            wrote_parent_brief = True
+         # The breadcrumb FIRST, the state-changing marker LAST. `CLOSE_MARKER` is what
+         # makes the parent terminal, and `_rollback` only removes child directories — so
+         # writing it first meant a failure on `build-notes.md` (a full disk, a path
+@@ -874,6 +961,14 @@ def accept(parent: Path, ids: list[str], cfg) -> list[Path]:
+             (parent / state.CLOSE_MARKER).unlink(missing_ok=True)
+         except OSError:
+             pass
++        # And the parent brief this run wrote, if any: a failed accept must not leave a
++        # NEW parent brief behind either (out of scope note) — the parent goes back to
++        # exactly the briefless shape this accept found it in.
++        if wrote_parent_brief:
++            try:
++                (parent / "brief.md").unlink(missing_ok=True)
++            except OSError:
++                pass
+         raise
+     return created
+ 
+diff --git a/template/src/pdca_harness/state.py b/template/src/pdca_harness/state.py
+index b19eea4..2818d02 100644
+--- a/template/src/pdca_harness/state.py
++++ b/template/src/pdca_harness/state.py
+@@ -301,24 +301,37 @@ def has_cycle_evidence(d: Path) -> bool:
+ def state(d: Path) -> str:
+     """Return the bundle's state from the files present (docs 03 §state)."""
+     bp = d / "brief.md"
+-    if not bp.exists():
+-        # No brief ever authored — pending Plan, unless the tracker itself settled the
+-        # question (a notes-only bundle with a `resolved` record is terminal, #302).
+-        return RESOLVED if is_resolved(d) else UNPLANNED
+     # Do is done when there's a patch — OR, on the close-disposition fast path, the
+-    # close marker that stands in for it (a close bundle never builds a patch.diff).
+-    if not (d / "patch.diff").exists() and not (d / CLOSE_MARKER).exists():
+-        # Pre-Do only: a brief that's still an unfilled template (Slug missing / a `<…>`
+-        # placeholder) means the planner never authored it, so treat it as UNPLANNED and
+-        # let the Plan beat re-plan it instead of being skipped (issue #113). Scoped to
+-        # the pre-Do boundary so a real, progressed bundle is never reclassified.
+-        # A placeholder is "never authored" — the same standing as no brief at all — so
+-        # the tracker's terminal `resolved` marker still wins there (#302 review): a
+-        # resolved notes-only bundle that picked up a stray template copy must not
+-        # reappear as pending. An AUTHORED brief keeps its normal PLANNED path.
+-        if brief.is_placeholder(bp):
++    # close marker that stands in for it (a close bundle never builds a patch.diff). The
++    # SAME equivalence applies here, before the brief is even consulted (issue #481): a
++    # bundle carrying either is "past Do" by the CLOSE_MARKER contract (:40-44 above), and
++    # #334's has-cycle-evidence reasoning is exactly "briefless is not the same as never
++    # planned" — so a briefless bundle carrying one is a broken invariant (Do ran with no
++    # Plan artifact on disk), never the ordinary "nobody has planned this yet" shape.
++    # UNPLANNED / RESOLVED both mean "before Plan"; deriving either here would place a
++    # past-Do bundle before Plan, which is precisely the state this fix removes.
++    has_do_artifact = (d / "patch.diff").exists() or (d / CLOSE_MARKER).exists()
++    if not bp.exists():
++        if not has_do_artifact:
++            # No brief ever authored — pending Plan, unless the tracker itself settled the
++            # question (a notes-only bundle with a `resolved` record is terminal, #302).
+             return RESOLVED if is_resolved(d) else UNPLANNED
+-        return PLANNED
++        # Falls through to the past-Do ladder below despite the missing brief — see the
++        # comment above `has_do_artifact`.
++    else:
++        if not has_do_artifact:
++            # Pre-Do only: a brief that's still an unfilled template (Slug missing / a
++            # `<…>` placeholder) means the planner never authored it, so treat it as
++            # UNPLANNED and let the Plan beat re-plan it instead of being skipped (issue
++            # #113). Scoped to the pre-Do boundary so a real, progressed bundle is never
++            # reclassified. A placeholder is "never authored" — the same standing as no
++            # brief at all — so the tracker's terminal `resolved` marker still wins there
++            # (#302 review): a resolved notes-only bundle that picked up a stray template
++            # copy must not reappear as pending. An AUTHORED brief keeps its normal
++            # PLANNED path.
++            if brief.is_placeholder(bp):
++                return RESOLVED if is_resolved(d) else UNPLANNED
++            return PLANNED
+     if not (d / "check-gates.json").exists():
+         return BUILT
+     if not (d / "SUMMARY.md").exists():
+diff --git a/template/tests/test_split.py b/template/tests/test_split.py
+index 05113bb..ad7bacd 100644
+--- a/template/tests/test_split.py
++++ b/template/tests/test_split.py
+@@ -20,7 +20,7 @@ from pathlib import Path
+ from types import SimpleNamespace
+ from unittest import mock
+ 
+-from pdca_harness import cli, driver, leaves, split, state, waves
++from pdca_harness import brief, cli, driver, handoff, leaves, split, state, waves
+ from pdca_harness.config import Config, LeafConfig
+ 
+ TEMPLATES = Path(__file__).resolve().parents[1] / "templates"
+@@ -1776,5 +1776,131 @@ class IrreversibleStateIsNeverLost(unittest.TestCase):
+                 split.file_children(self.parent, self.children, self.cfg)
+ 
+ 
++class SplitParentKeepsAPlanArtifact(unittest.TestCase):
++    """issue #481: a split parent that `iterate-plan` archived BEFORE it was split must
++    not end up terminal (the close marker) and UNPLANNED at the same time.
++
++    The realistic case (split.py:824-826's own name for it): the parent failed an
++    attempt, sign-off chose iterate-to-Plan (archiving `brief.md` to
++    `iteration-v<N>/brief.md`, `driver.py:140`), and the Plan session that reopens it
++    decides to split rather than re-author a brief — so `split.accept` runs with
++    `brief.md` already gone.
++    """
++
++    def setUp(self) -> None:
++        self.tmp = Path(tempfile.mkdtemp())
++        self.cfg = Config(
++            root=self.tmp, bundle_root=self.tmp / "results",
++            process_dir=self.tmp / "process", templates_dir=TEMPLATES,
++            default_branch="main", tracker_system="github", tracker_url="",
++            issue_id_example="#1",
++            builder=LeafConfig(mode="stub"), reviewer=LeafConfig(mode="stub"),
++        )
++        self.parent = self.cfg.bundle("500")
++        self.parent.mkdir(parents=True)
++
++    def tearDown(self) -> None:
++        shutil.rmtree(self.tmp, ignore_errors=True)
++
++    #: A COMPLETE authored brief — not `Accepting.setUp`'s bare `- **Slug:** parent`,
++    #: which `check_planner` would rightly reject as a source for the rebuilt Plan
++    #: artifact (brief's own Test file note).
++    _COMPLETE_BRIEF = (
++        "- **Slug:** widget-overflow\n"
++        "- **Defect:** the widget overflows its container on narrow screens\n"
++        "- **Success criterion:** the widget never exceeds its container's width at any "
++        "viewport down to 320px\n"
++        "- **Repo + branch target:** acme/widgets @ main\n"
++    )
++
++    def _make_realistic_parent(self) -> None:
++        """Brief authored, then archived by the driver's OWN iterate-plan path — never
++        hand-placed — so this follows `_archive_iteration` if it changes (Test file
++        note)."""
++        (self.parent / "brief.md").write_text(self._COMPLETE_BRIEF, encoding="utf-8")
++        driver._archive_iteration(self.parent, 1, include_brief=True)
++        self.assertFalse((self.parent / "brief.md").exists(),
++                         "setup did not reproduce the realistic shape")
++        self.assertTrue((self.parent / "iteration-v1" / "brief.md").exists(),
++                        "setup did not reproduce the realistic shape")
++
++    def _accept(self) -> list[Path]:
++        (self.parent / split.PROPOSAL).write_text(_proposal(_ONE, _TWO_INDEP),
++                                                   encoding="utf-8")
++        return split.accept(self.parent, ["601", "602"], self.cfg)
++
++    # -- (a) ------------------------------------------------------------------------
++
++    def test_a_realistic_parent_is_not_unplanned_or_resolved_after_accept(self) -> None:
++        self._make_realistic_parent()
++        self._accept()
++        st = state.state(self.parent)
++        self.assertNotEqual(st, state.UNPLANNED)
++        self.assertNotEqual(st, state.RESOLVED)
++
++    # -- (b) ------------------------------------------------------------------------
++
++    def test_a_realistic_parent_gets_a_complete_plan_artifact(self) -> None:
++        self._make_realistic_parent()
++        self._accept()
++        bp = self.parent / "brief.md"
++        self.assertTrue(bp.exists())
++        self.assertFalse(brief.is_placeholder(bp))
++        self.assertEqual(handoff.check_planner(self.parent, self.cfg), [])
++
++    # -- (c) ------------------------------------------------------------------------
++
++    def test_the_new_parent_brief_names_every_child(self) -> None:
++        self._make_realistic_parent()
++        created = self._accept()
++        text = (self.parent / "brief.md").read_text(encoding="utf-8")
++        for d in created:
++            self.assertIn(d.name, text,
++                          f"the rebuilt parent brief does not name child {d.name}")
++
++    # -- (d) ------------------------------------------------------------------------
++
++    def test_build_notes_still_names_the_children(self) -> None:
++        self._make_realistic_parent()
++        created = self._accept()
++        text = (self.parent / "build-notes.md").read_text(encoding="utf-8")
++        for d in created:
++            self.assertIn(d.name, text)
++
++    # -- (e) ------------------------------------------------------------------------
++
++    def test_close_marker_with_no_brief_never_derives_unplanned_however_it_arose(
++            self) -> None:
++        """Built directly (Test file note), not through `split.accept`: this is a
++        separate, general invariant on `state.state` — any close-marker bundle with no
++        brief, however it got that way."""
++        bundle = self.cfg.bundle("999")
++        bundle.mkdir(parents=True)
++        (bundle / state.CLOSE_MARKER).write_text("split\n", encoding="utf-8")
++        self.assertNotEqual(state.state(bundle), state.UNPLANNED)
++
++    def test_a_bare_close_marker_bundle_is_still_not_unplanned_without_notes_json(
++            self) -> None:
++        """The plainest shape from the brief's Falsifiability section: 'a bare bundle
++        holding only close-disposition also derives UNPLANNED' on main."""
++        bundle = self.cfg.bundle("998")
++        bundle.mkdir(parents=True)
++        (bundle / state.CLOSE_MARKER).write_text("split\n", encoding="utf-8")
++        self.assertEqual(list(bundle.iterdir()), [bundle / state.CLOSE_MARKER])
++        self.assertNotEqual(state.state(bundle), state.UNPLANNED)
++
++    # -- (f) ------------------------------------------------------------------------
++
++    def test_a_parent_with_its_own_brief_is_untouched(self) -> None:
++        """No iterate-plan archive here — the parent still has brief.md at accept time,
++        the shape every OTHER test in `Accepting` exercises. Byte-identical before and
++        after, and the rest of the suite (this module) stays green."""
++        (self.parent / "brief.md").write_text(self._COMPLETE_BRIEF, encoding="utf-8")
++        before = (self.parent / "brief.md").read_bytes()
++        self._accept()
++        after = (self.parent / "brief.md").read_bytes()
++        self.assertEqual(before, after)
++
++
+ if __name__ == "__main__":
+     unittest.main()

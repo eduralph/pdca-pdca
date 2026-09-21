@@ -1,0 +1,34 @@
+Report malformed briefs a batch Plan wrote at session end
+
+A Plan session that picks its own issues — the CSV and default batch runs —
+could end without a word about the briefs it had just written. The
+end-of-session check re-reads the artifacts of the bundles the driver
+registers at spawn, and this path has none to register, because the issues are
+chosen mid-session. It fell back to asking only whether a `/handoff` had
+passed, so one passing `/handoff` for one issue was enough to close the
+session in silence — even when the next brief written had an empty Success
+criterion, Slug or Repo + branch target. Nothing downstream catches those
+empty fields: an unfilled template copy is what the state read treats as
+UNPLANNED, and the plan policy looks at size and dependencies only. The brief
+then reaches Do with no stated end result, and Check builds its summary from
+the empty field.
+
+Such a session now has every brief it created or changed since it started
+re-read and reported, whether or not a `/handoff` passed. The work set is
+derived inside the check itself: each brief is fingerprinted at spawn and
+compared at the end, so a brief that predates the session and is
+byte-unchanged is left alone, even if malformed — it is not this session's
+work. A brief that cannot be read becomes its own reported item and never
+hides the others. The report still only prints: it never holds the session
+open and never changes a bundle. The documentation that promised the old
+behaviour is corrected with it.
+
+Sessions whose bundle set the driver does register — a single Plan, an
+id-seeded batch, sign-off, publish — and the Act role keep their current
+behaviour exactly, including when an unrelated brief elsewhere cannot be read.
+
+This completes the exit contract added in
+e9e59828dc6bc5e5914461a9c11a49f9c0914c10, which reports at reap but re-reads
+only registered bundles.
+
+Fixes #549

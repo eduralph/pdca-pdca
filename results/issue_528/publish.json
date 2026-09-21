@@ -1,0 +1,11 @@
+{
+  "mode": "new-pr",
+  "branch": "fix/528-act-log-append-only-and-the-check-enforces-it",
+  "pr_url": "https://github.com/eduralph/pdca-harness/pull/564",
+  "base": "main",
+  "repo": "eduralph/pdca-harness",
+  "by": "Eduard Ralph",
+  "date": "2026-09-18",
+  "id_pending": false,
+  "host_ci_base": "4050da290242ac1c797c93d2bce997a00263ad47"
+}

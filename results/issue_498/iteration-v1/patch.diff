@@ -1,0 +1,1247 @@
+diff --git a/docs/07-crosscutting.md b/docs/07-crosscutting.md
+index 29eb933..08bc1a6 100644
+--- a/docs/07-crosscutting.md
++++ b/docs/07-crosscutting.md
+@@ -338,9 +338,14 @@ it did. That holds whenever the hold happens: a child adopted into a later wave
+ that becomes unschedulable before its wave arrives is dropped back out of the
+ run, and its adoption announcement retracted by name, so "held" always reads the
+ same way. A parent marked `split` with no readable record is reported and skipped;
+-both holds degrade to the old remedy, the `pdca flow <child-ids>` command
+-`--accept` still prints, which remains the right answer for whatever a run
+-could not adopt.
++both holds degrade to the old remedy, the `pdca flow <child-ids>` command, which
++remains the right answer for whatever a run could not adopt. `--accept` prints
++that command only when no running flow will drive the children — an accept
++typed outside any run, or one for a parent the running flow is not driving.
++Inside the run that will drive them (an id run whose drive set holds the parent,
++or a CSV batch's Plan session, whose sweep picks the children up) it says that
++run will drive them instead, because a second `pdca flow` over them would be a
++second driver (see [one live driver per bundle](#lanes)).
+ 
+ One more thing changes at the reporting end, because adoption puts bundles you
+ never typed into the run's results map and the exit code is derived from all of
+@@ -461,6 +466,18 @@ checkout) or two lanes collide. Override per-run without touching `pdca.toml`:
+ processes can also share one workspace this way — each auto-claims a free lane
+ via a lockfile, or is pinned explicitly with `PDCA_LANE=k`.
+ 
++Those processes never share a *bundle*: **one live driver per bundle**. A
++`pdca flow` run claims every bundle it drives — the ids you name, each bundle
++its CSV sweep picks up, each child it adopts from a split — for exactly as long
++as the run lives, with a lock the OS drops when the run ends, however it ends
++(a return, an exception, `SIGKILL`). A second run whose *named* ids include a
++bundle a live run holds is refused before it touches anything, naming that
++bundle; a bundle it would only have reached *implicitly* (the sweep, an adopted
++child) is named and left to the run that holds it, and the rest of the run goes
++on. The claim files live under `process/.drive-claims/`, outside every bundle,
++and are gitignored. Single-step verbs (`pdca run`, `signoff`, `publish`) take no
++claim.
++
+ Each cycle's Do+Check runs in a dedicated git worktree off the target's base
+ (`[driver].worktree`, default `true`) so the primary checkout is never mutated
+ in place — exposed as `$PDCA_WORKTREE`, and gate commands should target that,
+diff --git a/template/.gitignore.jinja b/template/.gitignore.jinja
+index d456cf8..74f464c 100644
+--- a/template/.gitignore.jinja
++++ b/template/.gitignore.jinja
+@@ -37,6 +37,11 @@ results/issue_selftest/
+ .act-reviewed.tmp.*
+ .act-session.lock
+ 
++# One live driver per bundle (issue #498) — the per-bundle claim files a running `flow`
++# holds a lock on ({{ process_dir }}/.drive-claims/). Runtime-only, never a bundle artifact;
++# keep the pattern in step with `drive_claim.CLAIMS_DIR`.
++.drive-claims/
++
+ # Per-cycle Do/Check worktrees (issue #94) — created next to the target checkout;
+ # ignored in case a checkout lives inside the project tree.
+ *.pdca-wt/
+diff --git a/template/agents/planner.md.jinja b/template/agents/planner.md.jinja
+index a4a7ad6..63cc043 100644
+--- a/template/agents/planner.md.jinja
++++ b/template/agents/planner.md.jinja
+@@ -152,7 +152,8 @@ When the answer is "yes, this is several slices":
+                              # …read it with the human, edit it if it is wrong…
+ {{ cli_name }} split <id> --accept     # files one tracker issue per child as a SUB-ISSUE of this
+                              # one, materialises a bundle per child, marks this parent
+-                             # split, and prints the `{{ cli_name }} flow …` command for them
++                             # split, and says who drives them: the run you are in, or
++                             # the `{{ cli_name }} flow …` command to run when no run will
+ ```
+ 
+ You do **not** leave the session to file issues by hand. `--accept` does it (pass `--ids`
+@@ -179,8 +180,12 @@ What happens next no longer depends on how this run was started:
+   accepted the split ended before its children were driven, `{{ cli_name }} flow <parent-id>`
+   picks them up — the parent is still skipped as finished, its children (and theirs, through
+   a generation that already closed) are adopted into that run.
+-- **`--accept` still prints the `{{ cli_name }} flow <child-ids>` command.** That is the remedy
+-  for whatever a run could not adopt, and for a child that was held.
++- **`--accept` prints the `{{ cli_name }} flow <child-ids>` command only when no running flow
++  will drive the children** — an accept outside any run, or for a parent the run you are in
++  is not driving. Inside the run that will drive them it says so instead, and you must not
++  start another flow for them: one live run holds each bundle it drives, and a second
++  `{{ cli_name }} flow` over a bundle a live run holds is refused. The command stays the
++  remedy for whatever a run could not adopt, and for a child that was held.
+ 
+ Either way the `Depends on:` / `Conflicts with:` fields between children are what makes the
+ scheduling work, which is why they are the part to get right.
+diff --git a/template/src/pdca_harness/cli.py b/template/src/pdca_harness/cli.py
+index 383bbc3..fa5d04f 100644
+--- a/template/src/pdca_harness/cli.py
++++ b/template/src/pdca_harness/cli.py
+@@ -19,9 +19,9 @@ import time
+ from collections.abc import Callable
+ from pathlib import Path
+ 
+-from . import (act, brief, cleanup, doctor, drift, driver, flow, gates, leaves, manual_test,
+-               merged, publish, queue, record, registry, revalidate, revert, signoff, sizing,
+-               split, state, sweep, triage, waves, worktree)
++from . import (act, brief, cleanup, doctor, drift, drive_claim, driver, flow, gates, leaves,
++               manual_test, merged, publish, queue, record, registry, revalidate, revert,
++               signoff, sizing, split, state, sweep, triage, waves, worktree)
+ from .config import Config
+ 
+ 
+@@ -565,7 +565,19 @@ def _flow(cfg: Config, args: argparse.Namespace) -> int:
+     therefore runs a one-bundle wave (Plan→Do→Check→sign-off→publish→Act), not a second,
+     parallel implementation of the same cycle. Unbriefed ids are auto-planned (one shared
+     interactive Plan session) — no --plan flag. Act runs by default (--no-act to skip).
++
++    One live driver per bundle (#498): the whole run is ONE claim scope
++    (:func:`drive_claim.run`), entered here — in the process that drives, after the
++    keep-awake re-exec in :func:`main` — and released when the run ends, however it ends.
+     """
++    with drive_claim.run(cfg) as claims:
++        return _flow_claimed(cfg, args, claims)
++
++
++def _flow_claimed(cfg: Config, args: argparse.Namespace, claims: drive_claim.Run) -> int:
++    """:func:`_flow`'s body, inside its run's claim scope (#498). The NAMED ids are claimed
++    first; every bundle the run reaches implicitly — the CSV batch's in-flight sweep, a split's
++    children — is claimed where it is reached (:mod:`flow`)."""
+     if getattr(args, "lanes", None) is not None:
+         cfg.lanes = max(1, args.lanes)
+     if getattr(args, "max_passes", None) is not None:
+@@ -574,6 +586,22 @@ def _flow(cfg: Config, args: argparse.Namespace) -> int:
+         cfg.auto_iterate = True                    # issue #264 (flag only opts IN)
+     ids = list(args.issue_ids)
+ 
++    # Claim every NAMED id before anything below can touch the disk — the --from-briefs
++    # seeding, `flow_ids`' RESOLVED revalidation and its Plan pre-pass all write bundles
++    # (#498). One the operator named that another live run holds refuses THIS run, whole:
++    # the operator asked for that bundle by name, so quietly driving the rest would answer
++    # a question they did not ask. Sorted, so two runs over overlapping ids contend on the
++    # same bundle first rather than each taking half. The claims taken before a refusal
++    # are released by the scope `_flow` holds.
++    for iid in sorted(ids):
++        d = cfg.bundle(iid)
++        why = claims.take(d)
++        if why:
++            print(f"flow: {d.name} is {why} — refusing to start a second driver over it; "
++                  "no bundle was touched. Let that run finish (or stop it), or leave "
++                  f"{iid} out of this one.", file=sys.stderr)
++            return 1
++
+     # --from-briefs: seed any missing bundle from DIR/<id>.md before driving.
+     if args.from_briefs:
+         for iid in ids:
+@@ -596,7 +624,8 @@ def _flow(cfg: Config, args: argparse.Namespace) -> int:
+             return 2
+         try:
+             return _report_batch(flow.flow_batch(
+-                cfg, csv=args.from_csv, do_publish=do_publish, do_act=do_act, by=args.by))
++                cfg, csv=args.from_csv, do_publish=do_publish, do_act=do_act, by=args.by,
++                claims=claims))
+         except flow.PreflightError as exc:
+             print(f"flow: {exc}", file=sys.stderr)
+             return 1
+@@ -612,7 +641,8 @@ def _flow(cfg: Config, args: argparse.Namespace) -> int:
+     # from, live in exactly one place.
+     try:
+         results = flow.flow_ids(cfg, ids, plan_missing=True, csv=args.from_csv,
+-                                do_publish=do_publish, do_act=do_act, by=args.by)
++                                do_publish=do_publish, do_act=do_act, by=args.by,
++                                claims=claims)
+     except flow.PreflightError as exc:
+         print(f"flow: {exc}", file=sys.stderr)
+         return 1
+@@ -840,8 +870,16 @@ def _split(cfg: Config, args) -> int:
+     # streams part-way and, before #459, turned a completed acceptance into a traceback.
+     for child in created:
+         split.advisory(str(child), file=sys.stdout)
+-    split.advisory(f"{d.name} marked split; run `{_prog()} flow {' '.join(ids)}` to drive "
+-                   "the children")
++    if drive_claim.drives_children(cfg, d):
++        # Inside the live run that will drive them (#498): the id run whose drive set holds
++        # this parent adopts them, and a CSV batch's sweep picks them up after its Plan
++        # session. Telling the operator to start `flow` over them there would be telling
++        # them to start a second driver — which the claim rule then refuses.
++        split.advisory(f"{d.name} marked split; the running `{_prog()} flow` will drive the "
++                       f"children ({' '.join(ids)}) — do not start another flow for them")
++    else:
++        split.advisory(f"{d.name} marked split; run `{_prog()} flow {' '.join(ids)}` to "
++                       "drive the children")
+     return 0
+ 
+ 
+diff --git a/template/src/pdca_harness/drive_claim.py b/template/src/pdca_harness/drive_claim.py
+new file mode 100644
+index 0000000..5a14908
+--- /dev/null
++++ b/template/src/pdca_harness/drive_claim.py
+@@ -0,0 +1,254 @@
++"""One live driver per bundle (issue #498).
++
++A bundle's state is nothing but the files in ``results/issue_<id>/`` — "nothing is hidden
++in a database" — so two ``pdca flow`` runs over the same bundle have nothing to serialize
++on: they write the same artifacts with no ordering between them. Act's session lock
++(:func:`act.act_session`) states the rule for Act's one shared resource; this module states
++it for bundles, on every CLI drive path (named ids, the CSV batch's in-flight sweep, split
++adoption):
++
++* **A run claims every bundle it drives, for exactly as long as it runs.** A claim is an
++  exclusive, NON-blocking advisory lock (the cross-platform :func:`act._lock_exclusive`
++  Act's session uses) on a per-bundle file, held on an open handle for the run's lifetime.
++  The OS drops it when that handle closes — when the run returns, when it raises, and when
++  its process dies (SIGKILL, a host crash) — so a claim can never outlive its run, and there
++  is no stale-lock cleanup to get wrong. The files themselves are never deleted: unlinking a
++  lock file while another process may already have it open is how two holders of "the same"
++  lock happen.
++* **The RUN owns its claims, not its process.** Two runs in one process — a test driving two
++  flows on two threads — hold separate handles, and the lock refuses the second exactly as it
++  refuses a second process: the mechanism cannot tell them apart and does not try. What a
++  run already holds it never takes again, so a run can never refuse itself, and a bundle it
++  adopts becomes its own under the same rule.
++* **The files live outside every bundle** — ``<process_dir>/.drive-claims/`` — so
++  :func:`state.state` never sees one and no results commit can carry one. They are keyed by
++  the bundle's RESOLVED path, so a ``--rehearse`` bundle root never collides with the real
++  one, and a symlinked alias of a bundle is the same claim as the bundle it aliases.
++* **A claim that cannot be recorded is reported, never a crash** (Act's rule too): the
++  bundle is driven as it always was, unclaimed, and stderr says that nothing is keeping a
++  second run off it.
++
++A run also tells everything it spawns who it is (:data:`RUN_ENV`). That is how ``pdca split
++--accept``, run from inside the run's own Plan session, can tell whether the run it is inside
++will drive the children it has just created (:func:`drives_children`) — and so whether
++printing ``run `pdca flow <child-ids>``` would be an instruction to start a driver this rule
++then refuses.
++"""
++
++from __future__ import annotations
++
++import contextlib
++import errno
++import hashlib
++import os
++import secrets
++import sys
++from collections.abc import Iterator
++from pathlib import Path
++
++from .act import _lock_exclusive, _unlock
++from .config import Config
++
++#: Where the claim files live, under ``cfg.process_dir`` (gitignored in the render).
++CLAIMS_DIR = ".drive-claims"
++
++#: The token of the live ``flow`` run this process is inside — set by :func:`run` for the
++#: run's lifetime and inherited by every leaf and command it spawns.
++RUN_ENV = "PDCA_FLOW_RUN"
++
++#: Set to the run's token only while a CSV batch run is in its Plan session: whatever that
++#: session materialises, the in-flight sweep that follows it will drive (:func:`sweeping`).
++SWEEP_ENV = "PDCA_FLOW_SWEEPS"
++
++#: A non-blocking lock attempt that failed because ANOTHER handle holds it — as opposed to a
++#: filesystem that cannot lock at all. flock reports EWOULDBLOCK; Windows' LK_NBLCK reports
++#: EACCES or EDEADLOCK (== EDEADLK).
++_CONTENDED = {errno.EAGAIN, errno.EWOULDBLOCK, errno.EACCES, errno.EDEADLK}
++
++
++def _key(d: Path) -> str:
++    """The claim-file stem for bundle ``d``: its resolved name plus a digest of its resolved
++    path. Resolved, so an alias and its target share one claim; the digest, so two bundle
++    roots (``results/`` and a ``--rehearse`` one) never share any."""
++    try:
++        real = d.resolve()
++    except (OSError, RuntimeError):  # a symlink loop — name it by its lexical path instead
++        real = d.absolute()
++    digest = hashlib.sha256(str(real).encode("utf-8")).hexdigest()[:12]
++    return f"{real.name}-{digest}"
++
++
++def _claim_file(cfg: Config, d: Path) -> Path:
++    return cfg.process_dir / CLAIMS_DIR / f"{_key(d)}.lock"
++
++
++def _contended(exc: OSError) -> bool:
++    return isinstance(exc, BlockingIOError) or exc.errno in _CONTENDED
++
++
++def _stamp(path: Path) -> tuple[str, str]:
++    """``(token, pid)`` of the run that last took this claim, or ``("", "")``. Only ever a
++    hint on top of the lock (the lock is the claim): best-effort, never raises."""
++    try:
++        lines = path.read_text(encoding="utf-8").splitlines()
++    except (OSError, ValueError):
++        return "", ""
++    return (lines[0].strip() if lines else ""), (lines[1].strip() if len(lines) > 1 else "")
++
++
++def _release(fh) -> None:
++    try:
++        with contextlib.suppress(OSError):
++            _unlock(fh)
++    finally:
++        with contextlib.suppress(OSError):
++            fh.close()
++
++
++class Run:
++    """The bundles one live ``flow`` run holds. Built by :func:`run`, which releases them."""
++
++    def __init__(self, cfg: Config, token: str) -> None:
++        self.cfg = cfg
++        self.token = token
++        self._held: dict[str, object] = {}   # claim key -> the open, locked handle
++
++    def take(self, d: Path) -> str:
++        """Claim bundle ``d`` for this run. ``""`` when this run now holds it — or already
++        did, which is what keeps a run from ever refusing itself. Otherwise the reason it
++        cannot: another live run holds it. Non-blocking, and it never raises."""
++        key = _key(d)
++        if key in self._held:
++            return ""
++        path = self.cfg.process_dir / CLAIMS_DIR / f"{key}.lock"
++        try:
++            path.parent.mkdir(parents=True, exist_ok=True)
++            # "a+", never "w": opening must not rewrite a file another run holds.
++            fh = path.open("a+", encoding="utf-8")
++        except OSError as exc:
++            _unclaimed(d, exc)
++            return ""
++        try:
++            _lock_exclusive(fh, wait=False)
++        except OSError as exc:
++            with contextlib.suppress(OSError):
++                fh.close()
++            if not _contended(exc):
++                _unclaimed(d, exc)
++                return ""
++            _token, pid = _stamp(path)
++            return ("held by another live `flow` run"
++                    + (f" (pid {pid})" if pid.isdigit() else ""))
++        with contextlib.suppress(OSError):
++            fh.seek(0)
++            fh.truncate()
++            fh.write(f"{self.token}\n{os.getpid()}\n")
++            fh.flush()
++        self._held[key] = fh
++        return ""
++
++    def release(self, d: Path) -> None:
++        """Give up the claim on ``d`` — for a bundle this run has stopped driving (a child
++        the reschedule held), so the resume command it is told to run is not refused by
++        the very run that let it go."""
++        fh = self._held.pop(_key(d), None)
++        if fh is not None:
++            _release(fh)
++
++    def close(self) -> None:
++        for fh in self._held.values():
++            _release(fh)
++        self._held.clear()
++
++
++def _unclaimed(d: Path, exc: OSError) -> None:
++    try:
++        print(f"flow: could not record this run's claim on {d.name} ({exc}) — driving it "
++              f"UNCLAIMED: nothing keeps a second `flow` run off it", file=sys.stderr)
++    except OSError:
++        pass
++
++
++@contextlib.contextmanager
++def run(cfg: Config) -> Iterator[Run]:
++    """The claim scope of one live ``flow`` run: every claim taken through the yielded
++    :class:`Run` is released when this exits — normally or by raising — and by the OS if the
++    process dies first. Exports :data:`RUN_ENV` for the same span, so a leaf or a command the
++    run spawns knows which run it is inside. Enter it in the process that DRIVES — after any
++    re-exec, never before one."""
++    token = f"{os.getpid()}-{secrets.token_hex(6)}"
++    prev = os.environ.get(RUN_ENV)
++    os.environ[RUN_ENV] = token
++    claims = Run(cfg, token)
++    try:
++        yield claims
++    finally:
++        claims.close()
++        if prev is None:
++            os.environ.pop(RUN_ENV, None)
++        else:
++            os.environ[RUN_ENV] = prev
++
++
++@contextlib.contextmanager
++def sweeping(claims: Run | None) -> Iterator[None]:
++    """Mark a CSV batch run's Plan session: everything it materialises — a split's children
++    included — is picked up by the in-flight sweep right after it. A no-op without a run."""
++    if claims is None:
++        yield
++        return
++    prev = os.environ.get(SWEEP_ENV)
++    os.environ[SWEEP_ENV] = claims.token
++    try:
++        yield
++    finally:
++        if prev is None:
++            os.environ.pop(SWEEP_ENV, None)
++        else:
++            os.environ[SWEEP_ENV] = prev
++
++
++def _held_now(path: Path) -> bool:
++    """Is this claim file locked by a live holder right now? A free lock is let go at once."""
++    try:
++        fh = path.open("a+", encoding="utf-8")
++    except OSError:
++        return False
++    try:
++        try:
++            _lock_exclusive(fh, wait=False)
++        except OSError as exc:
++            return _contended(exc)
++        with contextlib.suppress(OSError):
++            _unlock(fh)
++        return False
++    finally:
++        with contextlib.suppress(OSError):
++            fh.close()
++
++
++def drives_children(cfg: Config, parent: Path) -> bool:
++    """Will the live ``flow`` run this process is inside drive the children a split of
++    ``parent`` has just materialised?
++
++    True in exactly two cases, both INSIDE a run (:data:`RUN_ENV`):
++
++    * that run is a CSV batch in its Plan session (:func:`sweeping`) — the in-flight sweep
++      after the session picks the children up;
++    * that run holds ``parent``'s claim, live — the parent is in its drive set, so split
++      adoption hands the children to it.
++
++    Anything else — no run at all (an accept typed in a shell), or a run that is not driving
++    this parent — is False, and the caller prints the ``pdca flow <child-ids>`` instruction
++    as it always has. Advisory, so it is total: any failure reads as False.
++    """
++    try:
++        token = os.environ.get(RUN_ENV, "")
++        if not token:
++            return False
++        if os.environ.get(SWEEP_ENV) == token:
++            return True
++        path = _claim_file(cfg, parent)
++        return _stamp(path)[0] == token and _held_now(path)
++    except Exception:  # noqa: BLE001 — a hint must never change an exit code
++        return False
+diff --git a/template/src/pdca_harness/flow.py b/template/src/pdca_harness/flow.py
+index 3e70f67..dcdbb66 100644
+--- a/template/src/pdca_harness/flow.py
++++ b/template/src/pdca_harness/flow.py
+@@ -26,8 +26,8 @@ import sys
+ import threading
+ from pathlib import Path
+ 
+-from . import (act, assemble, autoiterate, brief, driver, gates, integrate, lane, leaves,
+-               merge, merged, preflight, publish, queue, signoff, size_signal, sources,
++from . import (act, assemble, autoiterate, brief, drive_claim, driver, gates, integrate, lane,
++               leaves, merge, merged, preflight, publish, queue, signoff, size_signal, sources,
+                split, state, sweep, waves)
+ from .config import Config
+ 
+@@ -911,7 +911,8 @@ def _is_split_parent(d: Path) -> bool:
+ 
+ 
+ def _adoptable(cfg: Config, parent: Path, *, known: set[str],
+-               refused: list[tuple[str, str, str]]) -> tuple[list[Path], list[Path]]:
++               refused: list[tuple[str, str, str]],
++               claims: drive_claim.Run | None = None) -> tuple[list[Path], list[Path]]:
+     """The children of ``parent`` this run can drive, and the ones to WALK THROUGH —
+     ``([], [])`` unless it split.
+ 
+@@ -963,6 +964,11 @@ def _adoptable(cfg: Config, parent: Path, *, known: set[str],
+     attributed to the parent that actually declared them — rather than by a second reader of
+     the same lineage record. It is a pair, not one list, because the two are different
+     claims: the first is work this run takes on, the second is a bundle to ASK about.
++
++    With ``claims`` (the CLI run's, #498) a child is adopted only once this run has CLAIMED
++    it, as the last step — so a child another live run already drives is excluded, named in
++    the same "NOT adopted: …" shape as every other skip here, and the rest of the adoption
++    goes on. A child this run already holds is simply taken again, which is a no-op.
+     """
+     if not _is_split_parent(parent):
+         return [], []
+@@ -1054,6 +1060,12 @@ def _adoptable(cfg: Config, parent: Path, *, known: set[str],
+                 print(f"flow: {d.name} — child of {parent.name} NOT adopted: already "
+                       f"terminal ({s})", file=sys.stderr)
+             continue
++        why = claims.take(d) if claims is not None else ""
++        if why:
++            print(f"flow: {d.name} — child of {parent.name} NOT adopted: {why}, so it is "
++                  f"that run's to drive (if it ends without finishing it, resume it with "
++                  f"`pdca flow {cid}`)", file=sys.stderr)
++            continue
+         out.append(d)
+     return sorted(out, key=lambda p: p.name), sorted(walk, key=lambda p: p.name)
+ 
+@@ -1118,7 +1130,8 @@ def _report_refused(refused: list[tuple[str, str, str]], batch_names: set[str])
+ 
+ def _adopt_split_children(cfg: Config, candidates: list[Path], *, k: int,
+                           wave_list: list[list[Path]], bundles: list[Path],
+-                          batch_names: set[str], named: frozenset[str]) -> None:
++                          batch_names: set[str], named: frozenset[str],
++                          claims: drive_claim.Run | None = None) -> None:
+     """Splice the children of any bundle in ``candidates`` that has split into the waves
+     AFTER ``k``, and announce each child's REAL wave. ``k`` is the wave just driven; ``-1``
+     is the pre-pass over the run's adoption SEEDS (#473) — ids the operator named whose
+@@ -1187,6 +1200,12 @@ def _adopt_split_children(cfg: Config, candidates: list[Path], *, k: int,
+     below can still hold that child. So a refusal is collected, not printed, and answered
+     by :func:`_report_refused` once the splice has settled which of the two it was.
+ 
++    ``claims`` (#498) is the run's, handed to :func:`_adoptable`, which claims each child it
++    adopts. A claim lasts as long as the run DRIVES the bundle, so a child this splice does
++    not schedule — held, retracted, or left over by a reschedule that failed — is let go
++    again here: it is left in flight with a command to resume it, and that command must not
++    be refused by the run that has just stopped driving it.
++
+     Two things this deliberately does NOT do, both visible in a run and neither a
+     consequence anyone should have to rediscover from the code:
+ 
+@@ -1223,7 +1242,7 @@ def _adopt_split_children(cfg: Config, candidates: list[Path], *, k: int,
+         # `_isolate` returns None iff the read RAISED: that candidate then contributes
+         # neither children nor a walk-through, and the run carries on (its own report).
+         got = _isolate(parent, "split adoption", lambda parent=parent: _adoptable(
+-            cfg, parent, known=batch_names | taken, refused=refused))
++            cfg, parent, known=batch_names | taken, refused=refused, claims=claims))
+         kids, onward = got or ([], [])
+         to_examine += onward      # a generation that already closed is walked THROUGH
+         if kids:
+@@ -1235,11 +1254,13 @@ def _adopt_split_children(cfg: Config, candidates: list[Path], *, k: int,
+     # set: a child refused against a claim that never became a schedule is reported as the
+     # run's non-owner, not as work in flight.
+     wave_of: dict[str, int] = {}
++    dropped: list[Path] = []     # claimed for this run, then not scheduled — let go below
+     if adopted:
+         children = [c for _parent, kids in adopted for c in kids]
+         remaining = [d for w in wave_list[k + 1:] for d in w]
+         tail = _reschedule(cfg, remaining + children)
+         if tail is None:
++            dropped = children
+             parents = ", ".join(p.name for p, _kids in adopted)
+             print(f"flow: the children of {parents} could not be scheduled; they are left "
+                   f"in-flight — drive them with `pdca flow "
+@@ -1260,14 +1281,19 @@ def _adopt_split_children(cfg: Config, candidates: list[Path], *, k: int,
+             # `_report_held`'s reason.
+             retracted = sorted(d.name for d in remaining
+                                if d.name not in named and d.name not in wave_of)
++            gone = set(retracted)
++            dropped = [c for c in children if c.name not in wave_of] + \
++                      [d for d in remaining if d.name in gone]
+             if retracted:
+-                gone = set(retracted)
+                 bundles[:] = [d for d in bundles if d.name not in gone]
+                 batch_names -= gone
+                 for name in retracted:
+                     print(f"flow: {name} — adopted earlier this run, now held: it is NOT "
+                           f"scheduled and NOT in this run's results (the earlier adoption "
+                           f"line no longer stands)", file=sys.stderr)
++    if claims is not None:
++        for d in dropped:
++            claims.release(d)
+     _report_refused(refused, batch_names)
+     for parent, kids in adopted:
+         by_wave: dict[int, list[str]] = {}
+@@ -1412,6 +1438,7 @@ def _drive_and_act(
+     today: str,
+     max_passes: int | None = None,
+     adopt_seeds: list[Path] | None = None,
++    claims: drive_claim.Run | None = None,
+ ) -> dict[str, str]:
+     """Drive a set of in-flight bundles through the full cycle to Act, in waves.
+ 
+@@ -1444,6 +1471,10 @@ def _drive_and_act(
+ 
+     ``--no-publish`` (``do_publish=False``) drives every wave to COMPLETE but sequences
+     nothing — no publish, no fold — so a later wave builds on the unchanged base.
++
++    ``claims`` is the CLI run's claim scope (#498). The caller has already claimed
++    ``bundles``; adoption claims each child as it takes it on, and skips one another live
++    run holds (:func:`_adoptable`). ``None`` — a library call — claims nothing.
+     """
+     bundles = list(bundles)          # the drive set — split adoption extends it (#469)
+     allowance = cfg.max_passes if max_passes is None else max_passes
+@@ -1481,7 +1512,8 @@ def _drive_and_act(
+     # split gets. With no seeds this is not even entered and the waves above stand.
+     if adopt_seeds:
+         _adopt_split_children(cfg, list(adopt_seeds), k=-1, wave_list=wave_list,
+-                              bundles=bundles, batch_names=batch_names, named=named)
++                              bundles=bundles, batch_names=batch_names, named=named,
++                              claims=claims)
+         if not bundles:
+             # A recovery run whose seeds offered nothing adoptable (the brood was already
+             # driven, or every child was refused and named above). There is no schedule, so
+@@ -1552,7 +1584,7 @@ def _drive_and_act(
+         # the `_pass_pool` read at the top of the NEXT iteration (#473); `spent` is untouched
+         # here and never anywhere else — a bound, not a reset.
+         _adopt_split_children(cfg, runnable, k=k, wave_list=wave_list, bundles=bundles,
+-                              batch_names=batch_names, named=named)
++                              batch_names=batch_names, named=named, claims=claims)
+         complete = [d for d in sorted(runnable, key=lambda p: p.name)
+                     if state.state(d) == state.COMPLETE]
+         _audit_wave_overlap(complete)
+@@ -1658,6 +1690,7 @@ def flow_batch(
+     by: str = "",
+     today: str | None = None,
+     max_passes: int | None = None,
++    claims: drive_claim.Run | None = None,
+ ) -> dict[str, str]:
+     """Plan many → drive every in-flight bundle to sign-off → publish → Act once. **Resumable.**
+ 
+@@ -1667,10 +1700,17 @@ def flow_batch(
+     "no new briefs". COMPLETE bundles (done), DISCONTINUED ones (abandoned) and UNPLANNED
+     ones (no brief — e.g. an issue the planner chose to skip) are left alone. Returns
+     ``{issue_id: state}``.
++
++    With ``claims`` (the CLI run's, #498) the sweep is the run's IMPLICIT reach, so it
++    excludes rather than refuses: an in-flight bundle another live run holds is named and
++    left to that run, and the rest of the batch is driven. The Plan session is marked
++    (:func:`drive_claim.sweeping`), so a ``split --accept`` inside it knows this sweep will
++    drive the children it creates.
+     """
+     today = today or datetime.date.today().isoformat()
+ 
+-    leaves.do_plan_batch(cfg, csv)
++    with drive_claim.sweeping(claims):
++        leaves.do_plan_batch(cfg, csv)
+     # Resume set: every bundle with a brief that isn't finished. UNPLANNED (skipped /
+     # un-briefed), COMPLETE (done), DISCONTINUED (deliberately abandoned) and RESOLVED
+     # (settled in the tracker, #302) are excluded, so a re-run is idempotent and a
+@@ -1685,6 +1725,12 @@ def flow_batch(
+         print("flow: nothing to do — no in-flight briefs (all COMPLETE or none authored; "
+               "brief new issues to add work).", file=sys.stderr)
+         return {}
++    if claims is not None:
++        bundles = _claim_swept(claims, bundles)
++        if not bundles:
++            print("flow: nothing to drive — every in-flight bundle is held by another live "
++                  "`flow` run.", file=sys.stderr)
++            return {}
+     # Resume tolerance (#191): the sweep pulls in EVERY in-flight bundle, so a stale /
+     # misconfigured `Depends on` in an unrelated leftover must not abort the whole run. Hold
+     # (skip this run, leave in-flight) any bundle with an unresolvable dependency or in a
+@@ -1696,7 +1742,23 @@ def flow_batch(
+               "dependency or a cycle.", file=sys.stderr)
+         return {}
+     return _drive_and_act(cfg, bundles, do_publish=do_publish, do_act=do_act, by=by,
+-                          today=today, max_passes=max_passes)
++                          today=today, max_passes=max_passes, claims=claims)
++
++
++def _claim_swept(claims: drive_claim.Run, bundles: list[Path]) -> list[Path]:
++    """The swept bundles this run could claim (#498); each one another live run holds is
++    named and left to it. Exclusion, not refusal: nobody named these, so the run carries on
++    with the rest — the same stance adoption takes toward a child held elsewhere."""
++    out: list[Path] = []
++    for d in bundles:
++        why = claims.take(d)
++        if why:
++            print(f"flow: {d.name} — NOT driven: {why}, so it is that run's to drive "
++                  f"(if it ends without finishing it, resume it with "
++                  f"`pdca flow {d.name.removeprefix('issue_')}`)", file=sys.stderr)
++            continue
++        out.append(d)
++    return out
+ 
+ 
+ # ----------------------------------------------------------------------------
+@@ -1713,6 +1775,7 @@ def flow_ids(
+     by: str = "",
+     today: str | None = None,
+     max_passes: int | None = None,
++    claims: drive_claim.Run | None = None,
+ ) -> dict[str, str]:
+     """Drive specific bundles by id through the FULL cycle to Act.
+ 
+@@ -1736,6 +1799,10 @@ def flow_ids(
+     completing sibling, because only one shape could see it. Unlike ``flow_batch``, whose
+     caller passes no id list and can therefore only be told what was driven, every id here
+     was ASKED FOR by name and so gets an answer.
++
++    ``claims`` is the CLI run's claim scope (#498), and the CLI has ALREADY claimed every id
++    in ``ids`` with it — before this function's first write, the revalidation below — or
++    refused the run (``cli._flow``). Here it only reaches adoption (:func:`_drive_and_act`).
+     """
+     today = today or datetime.date.today().isoformat()
+ 
+@@ -1802,7 +1869,7 @@ def flow_ids(
+     bundles.sort(key=lambda p: p.name)
+     return skipped | _drive_and_act(cfg, bundles, adopt_seeds=seeds, do_publish=do_publish,
+                                     do_act=do_act, by=by, today=today,
+-                                    max_passes=max_passes)
++                                    max_passes=max_passes, claims=claims)
+ 
+ 
+ def _bundle_dirs(cfg: Config) -> set[str]:
+diff --git a/template/src/pdca_harness/leaves.py b/template/src/pdca_harness/leaves.py
+index 4bc83e9..60859e2 100644
+--- a/template/src/pdca_harness/leaves.py
++++ b/template/src/pdca_harness/leaves.py
+@@ -1116,8 +1116,11 @@ def _plan_prompt(cfg: Config, csv: str | None, d: Path) -> str:
+         "list like `pdca flow 500 501`, or a single id). They spend the run's own pass "
+         "budget, not a fresh one, and a child whose declared dependency cannot be "
+         "resolved is held and named on stderr rather than silently dropped. `--accept` "
+-        "still prints the `pdca flow <child-ids>` command, which is the remedy for a "
+-        "split accepted OUTSIDE a running flow and for a child left in flight. Prefer "
++        "prints the `pdca flow <child-ids>` command only when no running flow will drive "
++        "the children (a split accepted OUTSIDE a running flow); inside the run that will "
++        "drive them it says so instead — do not start another flow for them, it would be "
++        "refused (one live run holds each bundle it drives). The command stays the remedy "
++        "for a child left in flight. Prefer "
+         "fewer, larger children: each costs a full cycle. Before ending the session, "
+         f"verify the Plan exit contract with `/handoff {d.name}` — brief structure plus "
+         "every backticked External-dependencies token registered in [[doctor.checks]] "
+diff --git a/template/tests/test_flow_single_driver.py b/template/tests/test_flow_single_driver.py
+new file mode 100644
+index 0000000..36368b7
+--- /dev/null
++++ b/template/tests/test_flow_single_driver.py
+@@ -0,0 +1,530 @@
++"""One live driver per bundle, and a split hint that does not contradict it (#498).
++
++Two linked defects. (a) `pdca split <id> --accept` ALWAYS ended with "run `pdca flow
++<child-ids>` to drive the children" — also when it was run from inside the very flow that
++was about to drive those children (an id run adopts a split in its drive set; a CSV batch
++sweeps every in-flight bundle after its Plan session). An operator following it started a
++second driver over the same bundles. (b) Nothing kept two drivers apart at all: bundle state
++is plain files, and no drive path took any ownership of a bundle, so any two `pdca flow` runs
++over overlapping ids wrote the same artifacts with no ordering.
++
++Every run here goes through the CLI entry points (`cli._flow`, `cli._split`), with all six
++leaves stubbed and gates empty — the fixture shape of `tests/test_flow_adopt_split.py:43-63`
++(copied, never imported). Where a run has to be paused mid-drive, a stand-in builder waits on
++a file before calling the PRODUCTION stub builder, and the competing driver is a REAL second
++process (`_spawn`): a claim could be per-process, and then an in-process thread would pass for
++the wrong reason. Child processes get `PYTHONPATH=<checkout>/template/src` and none of the
++gate's `PDCA_*` environment. Every wait is bounded, so a red leg fails instead of hanging.
++
++Modules are imported, never new symbols (`from pdca_harness import cli, …`): the C4 red leg
++reverts the production hunks and keeps this file, and a symbol this patch adds would fail to
++import there (`engine/scripts/run-verify.sh` records that as PDCA-UNVERIFIABLE, not red).
++
++    cd template && PYTHONPATH=src python3 -m unittest tests.test_flow_single_driver
++"""
++
++from __future__ import annotations
++
++import hashlib
++import io
++import os
++import shutil
++import signal
++import subprocess
++import sys
++import tempfile
++import threading
++import time
++import unittest
++from contextlib import redirect_stderr, redirect_stdout
++from pathlib import Path
++from types import SimpleNamespace
++from unittest import mock
++
++from pdca_harness import cli, leaves, split, state
++from pdca_harness.config import Config, LeafConfig
++
++#: The package under test, for the child processes (`template/src`).
++_SRC = Path(__file__).resolve().parents[1] / "src"
++#: Upper bound on every wait in this file — a red leg must fail, never hang the C4 gate.
++_WAIT = 60.0
++
++
++def _stub_config(root: Path) -> Config:
++    """All six leaves stubbed, gates empty — the shape of `test_flow_adopt_split.py:43-63`,
++    including the hermetic toy checkout inside the tmp root."""
++    return Config(
++        root=root,
++        bundle_root=root / "results",
++        process_dir=root / "process",
++        templates_dir=root / "templates",  # empty → planner stub uses its fallback brief
++        default_branch="main",
++        tracker_system="github",
++        tracker_url="",
++        issue_id_example="#1",
++        builder=LeafConfig(mode="stub", family="claude"),
++        reviewer=LeafConfig(mode="stub", family="codex"),
++        planner=LeafConfig(mode="stub", family="claude", interactive=True),
++        signoff=LeafConfig(mode="stub", family="claude", interactive=True),
++        publisher=LeafConfig(mode="stub", family="claude", interactive=True),
++        act=LeafConfig(mode="stub", family="claude", interactive=True),
++        act_cadence=1,
++        repo_checkouts={"example-org/example-repo": str(root / "example-repo")},
++    )
++
++
++def _brief(slug: str) -> str:
++    """An authored brief (a filled Slug, so `state` reads PLANNED, not a placeholder)."""
++    return (f"# Brief — {slug}\n\n"
++            f"- **Slug:** {slug}\n"
++            f"- **Defect:** stub defect for {slug}.\n"
++            "- **Success criterion:** the stub test passes.\n"
++            "- **Repo + branch target:** example-repo @ main\n"
++            "- **Test file:** test_stub.py\n")
++
++
++def _proposal(*slugs: str) -> str:
++    """A `split-proposal.md` the production parser accepts (`split.parse`) — independent
++    children, so every one of them can be scheduled on its own."""
++    out = "<!-- pdca:split-proposal v1 -->\n# Split proposal\n\n"
++    for i, slug in enumerate(slugs, 1):
++        out += (f"<!-- pdca:child child-{i} -->\n{_brief(slug)}\n"
++                f"<!-- pdca:end child-{i} -->\n\n")
++    return out
++
++
++def _args(ids: list[str], *, csv: str | None = None) -> SimpleNamespace:
++    """The `pdca flow …` argv as `cli._flow` receives it (`--no-publish --no-act`)."""
++    return SimpleNamespace(issue_ids=ids, from_csv=csv, from_briefs=None, no_publish=True,
++                           no_act=True, by="", lanes=None, max_passes=None)
++
++
++def _briefed(cfg: Config, iid: str) -> Path:
++    d = cfg.bundle(iid)
++    d.mkdir(parents=True, exist_ok=True)
++    (d / "brief.md").write_text(_brief(f"slice-{iid}"), encoding="utf-8")
++    return d
++
++
++def _ready_to_split(cfg: Config, iid: str, slugs: tuple[str, ...]) -> Path:
++    """A briefed parent with a proposal on disk — what `pdca split <id>` leaves for the
++    human to read before `--accept`."""
++    d = _briefed(cfg, iid)
++    (d / split.PROPOSAL).write_text(_proposal(*slugs), encoding="utf-8")
++    return d
++
++
++def _pausing_build(pause: Path):
++    """Install a builder that, on its first call, drops `pause/ready` and then waits
++    (bounded) for `pause/go` before running the PRODUCTION stub builder. Returns the
++    original, for the caller to restore. This is how a run is held mid-drive."""
++    real = leaves.do_build
++    first = [True]
++
++    def build(d: Path, cfg: Config) -> None:
++        if first[0]:
++            first[0] = False
++            (pause / "ready").write_text(d.name, encoding="utf-8")
++            deadline = time.monotonic() + _WAIT
++            while not (pause / "go").exists() and time.monotonic() < deadline:
++                time.sleep(0.02)
++        real(d, cfg)
++
++    leaves.do_build = build
++    return real
++
++
++def _child_main(argv: list[str]) -> int:
++    """Entry point of a child process (`_spawn`). `flow <root> <pause-dir|-> <ids…>` runs
++    `pdca flow <ids…>` through `cli._flow`, held mid-drive when a pause dir is given;
++    `split <root> <parent> <ids>` runs `pdca split <parent> --accept --ids <ids>` through
++    `cli._split`."""
++    mode, cfg = argv[0], _stub_config(Path(argv[1]))
++    if mode == "split":
++        return cli._split(cfg, SimpleNamespace(issue_id=argv[2], accept=True, ids=argv[3]))
++    if argv[2] != "-":
++        _pausing_build(Path(argv[2]))
++    return cli._flow(cfg, _args(argv[3:]))
++
++
++#: The child's bootstrap: load THIS file by path and call `_child_main` — one fixture,
++#: in one module, for both processes.
++_BOOT = ("import importlib.util, sys\n"
++         "spec = importlib.util.spec_from_file_location('single_driver_child', sys.argv[1])\n"
++         "mod = importlib.util.module_from_spec(spec)\n"
++         "spec.loader.exec_module(mod)\n"
++         "sys.exit(mod._child_main(sys.argv[2:]))\n")
++
++
++def _fingerprint(root: Path) -> dict[str, tuple]:
++    """Every path under `root`, with enough of each file to see ANY write to it."""
++    out: dict[str, tuple] = {}
++    for p in sorted(root.rglob("*")):
++        rel = str(p.relative_to(root))
++        if p.is_dir():
++            out[rel] = ("dir",)
++        else:
++            st = p.stat()
++            out[rel] = (st.st_size, st.st_mtime_ns,
++                        hashlib.sha256(p.read_bytes()).hexdigest())
++    return out
++
++
++def _wait_for(path: Path, proc: subprocess.Popen | None = None) -> bool:
++    deadline = time.monotonic() + _WAIT
++    while time.monotonic() < deadline:
++        if path.exists():
++            return True
++        if proc is not None and proc.poll() is not None:
++            return False
++        time.sleep(0.02)
++    return False
++
++
++class SingleDriver(unittest.TestCase):
++    def setUp(self) -> None:
++        # Hermetic environment: nothing the gate (or an enclosing flow) exported under
++        # PDCA_* may reach these runs, in this process or in any child.
++        env = mock.patch.dict(os.environ)
++        env.start()
++        self.addCleanup(env.stop)
++        for key in [k for k in os.environ if k.startswith("PDCA_")]:
++            del os.environ[key]
++        self.tmp = Path(tempfile.mkdtemp())
++        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
++        self.cfg = _stub_config(self.tmp / "instance")
++        self.cfg.bundle_root.mkdir(parents=True)
++        self._orig = (leaves.do_plan_batch, leaves.do_build)
++        self.addCleanup(self._restore)
++        self.err = io.StringIO()
++        self.out = io.StringIO()
++
++    def _restore(self) -> None:
++        leaves.do_plan_batch, leaves.do_build = self._orig
++
++    # -- running things ------------------------------------------------------------------
++
++    def _cli(self, ids: list[str], *, csv: str | None = None) -> int:
++        """`pdca flow <ids…>` (or `pdca flow --from-csv`) in THIS process."""
++        with redirect_stderr(self.err), redirect_stdout(self.out):
++            return cli._flow(self.cfg, _args(ids, csv=csv))
++
++    def _env(self, *, inside: bool) -> dict[str, str]:
++        """A child's environment. `inside=True` is a command spawned INSIDE the running flow
++        (it inherits what that flow exported); `inside=False` is a separate shell, which
++        inherits no `PDCA_*` at all."""
++        env = {k: v for k, v in os.environ.items()
++               if inside or not k.startswith("PDCA_")}
++        env["PYTHONPATH"] = str(_SRC)
++        return env
++
++    def _spawn(self, *argv: str, inside: bool = False, tag: str = "child") -> subprocess.Popen:
++        """A second process running `_child_main(argv)`. Output goes to files (a paused child
++        must never block on a full pipe); it is killed at teardown if still alive."""
++        out = (self.tmp / f"{tag}.out").open("w")
++        err = (self.tmp / f"{tag}.err").open("w")
++        proc = subprocess.Popen(
++            [sys.executable, "-c", _BOOT, str(Path(__file__).resolve()), *argv],
++            stdout=out, stderr=err, env=self._env(inside=inside), cwd=str(self.tmp))
++
++        def reap() -> None:
++            if proc.poll() is None:
++                proc.kill()
++            try:
++                proc.wait(timeout=_WAIT)
++            finally:
++                out.close()
++                err.close()
++
++        self.addCleanup(reap)
++        return proc
++
++    def _finish(self, proc: subprocess.Popen, tag: str) -> tuple[int, str]:
++        rc = proc.wait(timeout=_WAIT)
++        return rc, (self.tmp / f"{tag}.err").read_text(encoding="utf-8")
++
++    def _run_child(self, *argv: str, inside: bool = False, tag: str = "child") -> tuple[int, str]:
++        return self._finish(self._spawn(*argv, inside=inside, tag=tag), tag)
++
++    def _hold_in_child(self, *ids: str, tag: str = "holder") -> subprocess.Popen:
++        """Run A in ANOTHER process — `pdca flow <ids…>` — and return once it is paused
++        inside its first build, i.e. mid-drive, holding whatever it holds."""
++        pause = self.tmp / f"{tag}-pause"
++        pause.mkdir()
++        proc = self._spawn("flow", str(self.cfg.root), str(pause), *ids, tag=tag)
++        if not _wait_for(pause / "ready", proc):
++            self.fail(f"run A never reached its build: rc={proc.poll()}\n"
++                      + (self.tmp / f"{tag}.err").read_text(encoding="utf-8"))
++        return proc
++
++    def _state(self, iid: str) -> str:
++        return state.state(self.cfg.bundle(iid))
++
++    @staticmethod
++    def _held_lines(text: str, name: str) -> list[str]:
++        return [ln for ln in text.splitlines() if name in ln and "held by another" in ln]
++
++    # -- (i) a second driver over a bundle a live run holds is refused ---------------------
++
++    def test_a_second_flow_over_a_bundle_a_live_run_holds_is_refused(self) -> None:
++        """Run A (`pdca flow 7`) is paused mid-drive; run B — `pdca flow 7`, a separate
++        process — must exit non-zero, name issue_7 as held by another run, and change
++        nothing under results/. On the base B simply drives 7 to COMPLETE under A.
++
++        Then (iii), the normal-return half: once A has returned, a new run over 7 is not
++        refused."""
++        _briefed(self.cfg, "7")
++        pause = self.tmp / "pause"
++        pause.mkdir()
++        orig_build = _pausing_build(pause)
++        self.addCleanup(setattr, leaves, "do_build", orig_build)
++        result: dict[str, int] = {}
++        a = threading.Thread(target=lambda: result.update(rc=self._cli(["7"])),
++                             name="run-A", daemon=True)
++        a.start()
++
++        def release_a() -> None:
++            (pause / "go").write_text("", encoding="utf-8")
++            a.join(timeout=_WAIT)
++
++        self.addCleanup(release_a)
++        self.assertTrue(_wait_for(pause / "ready"), "run A never reached its build")
++
++        before = _fingerprint(self.cfg.bundle_root)
++        rc_b, err_b = self._run_child("flow", str(self.cfg.root), "-", "7", tag="B")
++
++        self.assertNotEqual(rc_b, 0, f"run B drove a bundle run A holds:\n{err_b}")
++        self.assertTrue(self._held_lines(err_b, "issue_7"),
++                        f"run B did not name issue_7 as held by another run:\n{err_b}")
++        self.assertEqual(_fingerprint(self.cfg.bundle_root), before,
++                         "run B changed results/ while run A held the bundle")
++
++        release_a()
++        self.assertFalse(a.is_alive(), "run A did not finish")
++        self.assertEqual(result.get("rc"), 0, self.err.getvalue())
++        self.assertEqual(self._state("7"), state.COMPLETE)
++
++        # (iii) A has returned: its claim went with it.
++        rc_c, err_c = self._run_child("flow", str(self.cfg.root), "-", "7", tag="C")
++        self.assertEqual(rc_c, 0, err_c)
++        self.assertEqual(self._held_lines(err_c, "issue_7"), [], err_c)
++
++    def test_a_named_id_list_is_refused_whole_before_its_plan_pre_pass(self) -> None:
++        """`pdca flow 3 7` while another process holds 7: refused before ANY bundle is
++        touched — 3's Plan pre-pass (it has no brief yet) never runs, and no bundle
++        directory is created for it."""
++        _briefed(self.cfg, "7")
++        a = self._hold_in_child("7")
++        planned: list[list[str]] = []
++        leaves.do_plan_batch = lambda cfg, csv=None, ids=None: planned.append(list(ids or []))
++        before = _fingerprint(self.cfg.bundle_root)
++
++        rc = self._cli(["3", "7"])
++
++        err = self.err.getvalue()
++        self.assertEqual(rc, 1, err)
++        self.assertTrue(self._held_lines(err, "issue_7"), err)
++        self.assertEqual(planned, [], "the Plan pre-pass ran for a refused run")
++        self.assertEqual(_fingerprint(self.cfg.bundle_root), before)
++        self.assertIsNone(a.poll(), "run A should still be alive and holding 7")
++
++    # -- (iii) the claim ends with the run -----------------------------------------------
++
++    def test_a_run_that_raises_leaves_nothing_behind(self) -> None:
++        """A run that ends by RAISING (a ^C inside the builder) releases its claim: the next
++        run over the same bundle, in another process, drives it."""
++        _briefed(self.cfg, "7")
++        real = leaves.do_build
++
++        def interrupted(d: Path, cfg: Config) -> None:
++            raise KeyboardInterrupt
++
++        leaves.do_build = interrupted
++        with self.assertRaises(KeyboardInterrupt):
++            self._cli(["7"])
++        leaves.do_build = real
++
++        rc, err = self._run_child("flow", str(self.cfg.root), "-", "7", tag="after-raise")
++        self.assertEqual(rc, 0, err)
++        self.assertEqual(self._held_lines(err, "issue_7"), [], err)
++        self.assertEqual(self._state("7"), state.COMPLETE)
++
++    @unittest.skipUnless(hasattr(signal, "SIGKILL"), "needs SIGKILL")
++    def test_a_killed_run_holds_nothing_and_blocks_nothing(self) -> None:
++        """While run A (another process) holds 7, a run here is refused and changes nothing;
++        once A is SIGKILLed mid-drive — no cleanup of its own at all — a run here drives 7."""
++        _briefed(self.cfg, "7")
++        a = self._hold_in_child("7")
++        before = _fingerprint(self.cfg.bundle_root)
++
++        rc = self._cli(["7"])
++
++        err = self.err.getvalue()
++        self.assertEqual(rc, 1, f"a second driver ran while another process held 7:\n{err}")
++        self.assertTrue(self._held_lines(err, "issue_7"), err)
++        self.assertEqual(_fingerprint(self.cfg.bundle_root), before)
++
++        a.send_signal(signal.SIGKILL)
++        a.wait(timeout=_WAIT)
++        self.err, self.out = io.StringIO(), io.StringIO()
++
++        rc = self._cli(["7"])
++
++        err = self.err.getvalue()
++        self.assertEqual(rc, 0, err)
++        self.assertEqual(self._held_lines(err, "issue_7"), [], err)
++        self.assertEqual(self._state("7"), state.COMPLETE)
++
++    # -- (ii) implicit reach is excluded, not refused --------------------------------------
++
++    def test_the_csv_sweep_skips_a_bundle_another_live_run_holds(self) -> None:
++        """A CSV batch sweeps every in-flight bundle after its Plan session. With 7 held by a
++        live run in another process, the sweep names 7, leaves it untouched, and drives the
++        rest (8) to COMPLETE."""
++        _briefed(self.cfg, "7")
++        _briefed(self.cfg, "8")
++        a = self._hold_in_child("7")
++        leaves.do_plan_batch = lambda cfg, csv=None, ids=None: None
++        seven = self.cfg.bundle_root / "issue_7"
++        before = _fingerprint(seven)
++
++        rc = self._cli([], csv="tracker.csv")
++
++        err = self.err.getvalue()
++        self.assertTrue(self._held_lines(err, "issue_7"), err)
++        self.assertEqual(_fingerprint(seven), before, "the sweep drove a bundle A holds")
++        self.assertEqual(self._state("8"), state.COMPLETE)
++        self.assertNotIn("\t7", self.out.getvalue())       # not in this run's results
++        self.assertEqual(rc, 0, err)
++        self.assertIsNone(a.poll())
++
++    def test_split_adoption_skips_a_child_another_live_run_holds(self) -> None:
++        """`pdca flow 500` splits 500 at its Plan pre-pass into 601 and 602; before the
++        run gets to adopt them, another process starts driving 601. Adoption names 601 as
++        NOT adopted, leaves it alone, and still adopts and drives 602."""
++        holder: list[subprocess.Popen] = []
++
++        def plan(cfg: Config, csv: str | None = None, ids: list[str] | None = None) -> None:
++            parent = _ready_to_split(cfg, "500", ("child-a", "child-b"))
++            split.accept(parent, ["601", "602"], cfg)
++            holder.append(self._hold_in_child("601"))
++
++        leaves.do_plan_batch = plan
++        six01 = self.cfg.bundle_root / "issue_601"
++
++        rc = self._cli(["500"])
++
++        err = self.err.getvalue()
++        self.assertEqual(len(holder), 1, err)
++        self.assertTrue([ln for ln in self._held_lines(err, "issue_601")
++                         if "NOT adopted" in ln], err)
++        self.assertEqual(self._state("601"), state.PLANNED, "601 was driven under its holder")
++        self.assertEqual(self._state("602"), state.COMPLETE, err)
++        self.assertEqual(self._state("500"), state.COMPLETE, err)
++        self.assertEqual(rc, 0, err)
++        self.assertTrue(six01.is_dir())
++        self.assertIsNone(holder[0].poll())
++
++    # -- (v) the hint is truthful ------------------------------------------------------------
++
++    def _instruction(self, parent: str, kids: str) -> str:
++        """The instruction line exactly as the base prints it (`cli.py:843-844`)."""
++        return (f"issue_{parent} marked split; run `{cli._prog()} flow {kids}` to drive the "
++                "children")
++
++    def test_an_accept_inside_the_run_driving_the_parent_does_not_say_run_flow(self) -> None:
++        """`pdca flow 500`, and 500's Plan session runs `pdca split 500 --accept --ids
++        601,602`. The run adopts and drives both children, so the accept must not tell the
++        operator to start `pdca flow 601 602` — it says the running flow will drive them."""
++        def plan(cfg: Config, csv: str | None = None, ids: list[str] | None = None) -> None:
++            _ready_to_split(cfg, "500", ("child-a", "child-b"))
++            cli._split(cfg, SimpleNamespace(issue_id="500", accept=True, ids="601,602"))
++
++        leaves.do_plan_batch = plan
++
++        rc = self._cli(["500"])
++
++        err = self.err.getvalue()
++        self.assertNotIn(self._instruction("500", "601 602"), err)
++        self.assertIn("issue_500 marked split; the running", err)
++        self.assertIn("will drive the children", err)
++        self.assertEqual(self._state("601"), state.COMPLETE, err)   # …and it does
++        self.assertEqual(self._state("602"), state.COMPLETE, err)
++        self.assertEqual(rc, 0, err)
++
++    def test_a_split_command_spawned_by_the_run_is_neither_blocked_nor_told_to_run_flow(
++            self) -> None:
++        """The same, with `pdca split --accept` as a REAL child process of the run (as it is
++        from an interactive Plan session): it inherits the run's environment, is not blocked
++        by the run's claim on the parent (it returns promptly, rc 0), and prints the
++        truthful line rather than the instruction."""
++        spawned: list[tuple[int, str]] = []
++
++        def plan(cfg: Config, csv: str | None = None, ids: list[str] | None = None) -> None:
++            _ready_to_split(cfg, "500", ("child-a", "child-b"))
++            spawned.append(self._run_child("split", str(cfg.root), "500", "601,602",
++                                           inside=True, tag="accept"))
++
++        leaves.do_plan_batch = plan
++
++        rc = self._cli(["500"])
++
++        err = self.err.getvalue()
++        self.assertEqual(len(spawned), 1, err)
++        rc_split, err_split = spawned[0]
++        self.assertEqual(rc_split, 0, err_split)
++        self.assertNotIn(self._instruction("500", "601 602"), err_split)
++        self.assertIn("will drive the children", err_split)
++        self.assertEqual(self._state("601"), state.COMPLETE, err)
++        self.assertEqual(self._state("602"), state.COMPLETE, err)
++        self.assertEqual(rc, 0, err)
++
++    def test_an_accept_inside_a_csv_batch_plan_session_does_not_say_run_flow(self) -> None:
++        """`pdca flow --from-csv …`: the batch's Plan session splits 500. The sweep after the
++        session drives every in-flight bundle, the children included — so no instruction."""
++        def plan(cfg: Config, csv: str | None = None, ids: list[str] | None = None) -> None:
++            _ready_to_split(cfg, "500", ("child-a", "child-b"))
++            cli._split(cfg, SimpleNamespace(issue_id="500", accept=True, ids="601,602"))
++
++        leaves.do_plan_batch = plan
++
++        rc = self._cli([], csv="tracker.csv")
++
++        err = self.err.getvalue()
++        self.assertNotIn(self._instruction("500", "601 602"), err)
++        self.assertIn("will drive the children", err)
++        self.assertEqual(self._state("601"), state.COMPLETE, err)
++        self.assertEqual(self._state("602"), state.COMPLETE, err)
++        self.assertEqual(rc, 0, err)
++
++    def test_a_standalone_accept_prints_the_instruction_byte_identical(self) -> None:
++        """No run at all — an accept typed in a shell: the instruction, exactly as today."""
++        _ready_to_split(self.cfg, "500", ("child-a", "child-b"))
++        with redirect_stderr(self.err), redirect_stdout(self.out):
++            rc = cli._split(self.cfg, SimpleNamespace(issue_id="500", accept=True,
++                                                      ids="601,602"))
++        self.assertEqual(rc, 0, self.err.getvalue())
++        self.assertIn(self._instruction("500", "601 602"), self.err.getvalue().splitlines())
++
++    def test_an_accept_inside_a_run_not_driving_that_parent_keeps_the_instruction(
++            self) -> None:
++        """`pdca flow 7`, whose Plan session also accepts a split of 900 — a bundle this run
++        is NOT driving. Nothing will drive 901/902, so the instruction stays, byte-identical."""
++        def plan(cfg: Config, csv: str | None = None, ids: list[str] | None = None) -> None:
++            _briefed(cfg, "7")
++            _ready_to_split(cfg, "900", ("child-a", "child-b"))
++            cli._split(cfg, SimpleNamespace(issue_id="900", accept=True, ids="901,902"))
++
++        leaves.do_plan_batch = plan
++
++        rc = self._cli(["7"])
++
++        err = self.err.getvalue()
++        self.assertIn(self._instruction("900", "901 902"), err.splitlines())
++        self.assertEqual(self._state("7"), state.COMPLETE, err)
++        self.assertEqual(self._state("901"), state.PLANNED)
++        self.assertEqual(rc, 0, err)
++
++
++if __name__ == "__main__":
++    unittest.main()

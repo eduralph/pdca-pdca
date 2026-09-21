@@ -1,0 +1,35 @@
+fix(split): a parent split after a re-plan no longer reopens Plan
+
+When a bundle's first attempt was sent back to Plan and the Plan session then
+split it into child bundles, the parent got stuck. Sending it back to Plan had
+archived its brief, and accepting the split wrote the close marker but no new
+brief. The state logic looked for a brief before it looked for the marker, so
+the finished parent read as never planned: every `pdca flow` on it opened an
+empty Plan session with nothing to decide, and the parent never reached
+sign-off, never got a SUMMARY.md and never froze. A parent split on its first
+attempt still had its brief and was not affected.
+
+Two changes, because either one alone leaves a gap. Accepting a split on a
+parent with no brief.md now writes one: slug and repo + branch target are
+copied from the brief of the latest re-plan archive, and the rest describes the
+split, names every child bundle and points at the archived original. It is the
+last write before the close marker and is removed again if the accept fails.
+And a bundle that carries a patch.diff or the close marker is now treated as
+past Do whether or not it has a brief, so no other route to that shape can land
+a finished bundle back before Plan.
+
+A split whose parent has no brief and no archived brief to rebuild from, or an
+archive missing its slug, success criterion or target, is now refused before
+any child tracker issue is filed. Before, it "succeeded" into the stuck state.
+
+Bundles already stuck from an older version now stop at summary assembly with a
+missing-brief.md error instead of reopening Plan. To repair one, copy its
+iteration-v<N>/brief.md back to brief.md and run it again.
+
+Finding the latest re-plan archive now happens in one place in state.py, shared
+by the split and by size_signal.iteration_rounds, so the two cannot disagree
+about which archive holds the brief. The unused archive-name pattern left in
+scripts/size-calibrate since f616bc9cedef34faeeac9dc334fa19d8008bab99 moved
+iteration_rounds into size_signal is removed.
+
+Fixes #481
