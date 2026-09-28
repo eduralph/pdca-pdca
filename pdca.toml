@@ -139,6 +139,18 @@ merge_method = "merge"
 #       protection is again the only backstop (and an empty rollup merges). Correct only
 #       where the host's required checks really are the whole verification.
 merge_requires = "all"
+# Bounded wait for that same non-final check-rollup gate (issue #462). A wave boundary
+# fires SECONDS after the PR is opened, so the FIRST rollup read is routinely `pending`
+# (queued/running) or `empty` (nothing reported yet) — that is absence of evidence, not a
+# verdict. `_merge_one` re-reads the rollup until it clears pending/empty or this many
+# wall-clock seconds elapse; only then does an unresolved rollup refuse (with a message
+# that says the checks never reported in time, distinct from a check that actually failed).
+# On every refusal after the ready-mark — timeout, a red/unreadable rollup, or a failing
+# `gh pr merge` — the PR is returned to draft (`gh pr ready --undo`) before the run STOPs,
+# so a stopped wave never leaves a PR advertising a readiness no human granted.
+#   300  (default) — a sensible bound for CI to register and report on a freshly-opened PR.
+#   0    — perform no wait at all: a single read, the original immediate-refusal behaviour.
+merge_wait_secs = 300
 # Optional integration re-gate (#wave-model). After each wave folds (stack mode), run the
 # repo-scoped gates over the folded integration tip before the next wave builds on it, so a
 # combination that is red though each fix was green ALONE stops the run. Off by default
@@ -919,24 +931,31 @@ argv = ["claude", "-p", "--agent", "code-review", "--permission-mode", "acceptEd
 # Not a wiring fault: `plan-advisory-plan-reviewer.memory.jsonl` shows the process alive
 # under its own scope for the full run in every bundle.
 #
-# TO RE-ENABLE: either grant the host userns (`sudo sysctl -w
-# kernel.apparmor_restrict_unprivileged_userns=0`, persisted in /etc/sysctl.d/, or an
-# AppArmor profile granting `bwrap` userns create) — a host-hardening decision, not this
-# repo's — or wait for eduralph/pdca-harness#526, which fixes the misclassification
-# upstream. Then uncomment the block below.
+# The re-enable condition was: grant the host userns (a host-hardening decision, not this
+# repo's) OR wait for eduralph/pdca-harness#526. RE-ENABLED 2026-09-28 on the copier
+# update to v0.58.0, which carries #526: the leaf now delivers its review through the
+# agent's own Write even when the sandbox cannot start, and an empty result is no longer
+# filed as a substantive finding. The host still denies userns; nothing here changed.
 #
 # Read `plan-advisory-benefit.json`'s "0 findings" history as UNINTERPRETABLE, not as a
 # verdict on plan review: it means the leaf never ran. The signal that it works is a wave
 # whose artifacts DIFFER from each other, with a non-zero findings count somewhere.
 #
-# [[leaves.plan_advisory]]
-# id = "plan-reviewer"
-# role = "refute the brief: wrong root cause, untestable success criterion, hidden scope"
-# mode = "command"
-# family = "claude"
-# model = "sonnet"
-# effort = "high"
-# argv = ["claude", "-p", "--agent", "plan-reviewer", "--permission-mode", "acceptEdits", "--allowedTools", "Read,Bash,Grep,Glob"]
+#
+# `--allowedTools` below deliberately leaves out `Write`, though the plan-reviewer agent has
+# it (issue #526): Write is how it still delivers its review on a host where the sandbox
+# cannot start and every Bash call fails. `acceptEdits` already lets it write in its own
+# working directory, and the harness denies file edits on the pinned target and on the
+# bundle. Listing `Write` here would pre-approve it for EVERY path — observed: it then
+# overwrote a file outside all of the leaf's granted directories.
+[[leaves.plan_advisory]]
+id = "plan-reviewer"
+role = "refute the brief: wrong root cause, untestable success criterion, hidden scope"
+mode = "command"
+family = "claude"
+model = "sonnet"
+effort = "high"
+argv = ["claude", "-p", "--agent", "plan-reviewer", "--permission-mode", "acceptEdits", "--allowedTools", "Read,Bash,Grep,Glob"]
 
 # Left UNSET on purpose. vendor-complement anchors on the PLANNER's family (claude) and
 # runs the single leaf whose family differs; with one claude leaf declared it would fall
@@ -1194,6 +1213,15 @@ required = true
 # C4 — the per-fix CORRECTNESS gate (bundle-scoped, GATING). Applies the bundle's
 # patch.diff and runs ONLY its test, asserting red-without-fix / green-with-fix.
 # This is what makes a cycle mean something — it validates THIS change.
+#
+# THE BASE LADDER (issue #474) — `$PDCA_BASE` / `$PDCA_VERIFY_BASE` / `$PDCA_BRIEF_BASE`,
+# the base a per-fix verifier resets to before applying `patch.diff` — is exported to this
+# row ONLY, never to any other configured row (repo-scoped or bundle-scoped). A row is the
+# verifier iff `verifies_base = true` is set explicitly, OR (undeclared) iff its `tier` is
+# `"C4"` — which the row below already is, so this default costs a rendered instance
+# NOTHING: your existing C4 row keeps receiving the base with no edit here. Give a
+# differently-tiered row `verifies_base = true` only if IT is the one that resets to and
+# tests against the base (rare — most projects have exactly one such row, this one).
 # [[gates.checks]]
 # id = "C4-verify"
 # tier = "C4"

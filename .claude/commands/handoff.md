@@ -8,19 +8,19 @@ Verify the current interactive leaf's exit contract for the REQUIRED id `$1` —
 bundle's issue id (`issue_<id>` or the bare id), or, in an Act session, the date of the
 act-log entry this session wrote. There is no scan mode: every invocation names exactly
 one id. The check writes nothing into the bundle — its verdict is the exit status plus
-its report.
+the report below.
 
-Run the check NOW with the Bash tool, from the project root, with the id this command
-was invoked with in place of `<id>`:
+Using your Bash tool, run this now from the project root — no `!` pre-execution block:
+the permission checker cannot match one that carries a shell expansion, so this call is
+yours to make directly, the same as the `--abandon` call below:
+`python3 .claude/hooks/handoff_guard.py --check $1`
 
-    python3 .claude/hooks/handoff_guard.py --check "<id>"
-
-(You make this call yourself: a `!` pre-execution block cannot — the permission checker
-refuses any command carrying a `$` expansion, so a block that passes the id can never
-run. Issue #508.)
-
-Relay the PASS/FAIL verdict to the human verbatim. On FAIL, fix the listed items
+Relay the PASS/FAIL verdict above to the human verbatim. On FAIL, fix the listed items
 (write or repair the named contract artifact — never a stand-in), then run `/handoff $1`
-again before ending the session. The Stop hook enforces this same contract when the
-session ends; a deliberate abandonment is recorded with
+again before ending the session. This command is the session's self-check; nothing
+checks the contract when a turn ends. When the session ends, the driver re-checks the
+bundles it registered for this session and tells the human what is still unmet — in a
+session that picks its own issues, or an Act session, it checks that a `/handoff`
+passed instead of re-reading what the session wrote. A deliberate abandonment is
+recorded with
 `python3 .claude/hooks/handoff_guard.py --abandon "<why>"`.
