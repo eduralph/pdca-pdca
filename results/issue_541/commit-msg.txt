@@ -1,0 +1,49 @@
+Never file a dead attempt's review, or misread a closed one as empty
+
+A retried reviewer or advisory leaf runs every attempt in the same sandbox.
+When an early attempt wrote part of its report and then died, the attempt that
+later exited 0 was credited with that half-written file: all three harvest
+sites (Check reviewer, Check advisory, plan advisory) copied whatever sat at
+the artifact path on a bare existence test. A bundle could reach sign-off
+carrying a dead attempt's truncated text as its review, with nothing telling
+the human so.
+
+The same blind spot showed up when an artifact was classified. Whether a file
+was a real verdict or a harness placeholder was decided by searching its whole
+text for a `pdca:leaf-status` marker. A real report that merely quoted one --
+which any advisory review of this harness does -- was read as a placeholder:
+its findings were relabelled "leaf did not run" and forced to a human, its
+`[impl]` routing was stripped, the size signal counted the round ambiguous,
+and the plan-advisory findings were discarded. Evidence that existed was turned
+into "no evidence".
+
+Both faces are settled by asking who produced the file, not what it mentions:
+
+- One owner, `_LeafHarvest`, now stands behind all three harvest sites. As
+  each attempt dies, whatever it left at the artifact path is taken off the
+  path and quoted (bounded head and tail) into the bundle's `*.error.log` as
+  that attempt's own record -- preserved, never deleted, and never
+  re-attributed. What is filed afterwards is the live attempt's own work or a
+  placeholder. A leftover that cannot be withdrawn is settled by filesystem
+  identity at harvest time: a file the live attempt wrote over is filed; only
+  the same file, unchanged, is refused. The retry count is unchanged.
+
+- A leaf now closes its report with `<!-- pdca:leaf-complete -->` as the last
+  line. `assemble.leaf_status()` checks for that trailer first, at that fixed
+  position only; an artifact that ends with it is a real verdict whatever its
+  body quotes. All three readers go through that one function, so they change
+  together. The three harness-authored prompts ask for the trailer as their
+  last instruction, after any project rubric, and the three offline stubs emit
+  it; the harness's own placeholders never do.
+
+Absence of the trailer changes nothing. An artifact without it is classified
+exactly as before, so third-party leaves, a leaf that forgets, and every bundle
+already on disk behave as they did. No new status token is added: the case
+where the leaf exited 0 but nothing at the path could be attributed to it
+reuses `human-empty`, with the specifics in the placeholder's prose, and a test
+pins the size of the status table.
+
+Builds on the per-attempt record from #540, merged in
+4050da290242ac1c797c93d2bce997a00263ad47.
+
+Fixes #541
