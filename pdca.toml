@@ -524,10 +524,12 @@ agent = "builder"
 # Model and effort PINNED (issue #31 item 8). Unpinned, Do ran on whatever the CLI happened
 # to default to that day, which makes two things impossible: comparing loop-telemetry across
 # cycles, and having an escalation ladder mean anything (escalating to opus is a no-op if the
-# base already resolved to opus). sonnet at `high` is the base tier; the ladder and the
-# difficulty route below both climb from here.
-effort = "high"
-argv = ["claude", "-p", "--agent", "builder", "--permission-mode", "acceptEdits", "--allowedTools", "Read,Edit,Write,Bash,Grep,Glob", "--model", "sonnet"]
+# base already resolved to opus). opus 5.5 at `medium` is the base tier (moved from
+# sonnet/`high` on 2026-09-28; pinned by id — `claude-opus-5-5` — not the floating `opus`
+# alias, so the base cannot drift when the alias does); the ladder and the difficulty route
+# below both climb from here.
+effort = "medium"
+argv = ["claude", "-p", "--agent", "builder", "--permission-mode", "acceptEdits", "--allowedTools", "Read,Edit,Write,Bash,Grep,Glob", "--model", "claude-opus-5-5"]
 
 # Builder escalation ladder (issue #135) — optional. A bundle that fails Check and
 # iterates re-runs the builder; without escalation it re-fails with the same model until
@@ -570,14 +572,15 @@ argv = ["claude", "-p", "--agent", "builder", "--model", "opus", "--permission-m
 # `(when.get("substring") or "").lower()`, so a list raises. The brief vocabulary is
 # low/medium/high, so one word is enough.
 
-# sonnet — force the base tier even on a `high` bundle (overrides the difficulty route).
+# base — force the base tier (opus 5.5 at `medium`) even on a `high` bundle (overrides the
+# difficulty route). This was the `sonnet` pin until 2026-09-28; no brief ever named it.
 [[leaves.builder_variant]]
-model = "sonnet"
-effort = "high"
-argv = ["claude", "-p", "--agent", "builder", "--permission-mode", "acceptEdits", "--allowedTools", "Read,Edit,Write,Bash,Grep,Glob", "--model", "sonnet"]
+model = "base"
+effort = "medium"
+argv = ["claude", "-p", "--agent", "builder", "--permission-mode", "acceptEdits", "--allowedTools", "Read,Edit,Write,Bash,Grep,Glob", "--model", "claude-opus-5-5"]
 
-# fable — the Claude 5 family builder, pin-only. A third first-attempt tier between sonnet
-# and opus, and a model-family change rather than a size change, so it is also the way to
+# fable — the Claude 5 family builder, pin-only. A first-attempt tier beside the opus 5.5
+# base, and a model-family change rather than a size change, so it is also the way to
 # retry a bundle whose failures look like one lineage's blind spot.
 [[leaves.builder_variant]]
 model = "fable"
@@ -676,13 +679,13 @@ argv = ["claude", "-p", "--agent", "sizer", "--allowedTools", "Read", "Write", "
 # stub hardcoded `confidence: "low"` into every bundle, so `on_confidence` would have fired
 # on all 44 of them and escalated every time. With the real sizer answering, a low
 # confidence is a real one and this triggers on the bundles that genuinely are unclear —
-# which is the case the escalation was designed for and the only one worth paying sonnet
+# which is the case the escalation was designed for and the only one worth paying opus 5.5
 # for over the haiku first pass.
 [[leaves.sizer_escalation]]
 on_band = ["watch"]
 on_confidence = ["low"]
 effort = "medium"
-argv = ["claude", "-p", "--agent", "sizer", "--allowedTools", "Read", "Write", "--model", "sonnet"]
+argv = ["claude", "-p", "--agent", "sizer", "--allowedTools", "Read", "Write", "--model", "claude-opus-5-5"]
 
 [leaves.reviewer]
 mode = "command"
@@ -855,7 +858,7 @@ when = { field = "difficulty", substring = "high" }
 # Decorrelated by ROLE, like the adversary: the codex reviewer judges ADEQUACY (does the
 # evidence support the claim), the adversary REFUTES it, this reads the DIFF for defects
 # the fix introduced and for reuse it missed. Three different questions, so a third vendor
-# buys nothing here. sonnet/high rather than the adversary's opus/xhigh: reading a diff for
+# buys nothing here. opus 5.5/medium rather than the adversary's opus/xhigh: reading a diff for
 # bugs is not the job where a weaker model rubber-stamps — that risk is specific to being
 # asked to attack a verdict.
 [[leaves.advisory]]
@@ -863,8 +866,8 @@ id = "code-review"
 role = "correctness bugs introduced by the patch + reuse/simplification/efficiency cleanups"
 mode = "command"
 family = "claude"
-model = "sonnet"
-effort = "high"
+model = "claude-opus-5-5"
+effort = "medium"
 argv = ["claude", "-p", "--agent", "code-review", "--permission-mode", "acceptEdits", "--allowedTools", "Read,Bash,Grep,Glob"]
 #
 # Advisory-selection policy (issue #64 default vs. issue #200). Unset ⇒ every advisory leaf
@@ -903,7 +906,8 @@ argv = ["claude", "-p", "--agent", "code-review", "--permission-mode", "acceptEd
 # nominate itself for review, and the expensive failure (Do burns a build on a brief whose
 # root cause is wrong) is not the one anybody labelled high.
 #
-# sonnet/high, not the adversary's opus/xhigh: start at the cheaper tier and let the
+# opus 5.5/medium (the instance baseline since 2026-09-28), not the adversary's
+# opus/xhigh: start at the base tier and let the
 # evidence decide. This leaf ships its own effectiveness telemetry —
 # plan-advisory-benefit.json records the findings count and whether the brief was revised,
 # surfaced in SUMMARY §10 — so Act can judge over a few cycles whether it earns a stronger
@@ -953,8 +957,8 @@ id = "plan-reviewer"
 role = "refute the brief: wrong root cause, untestable success criterion, hidden scope"
 mode = "command"
 family = "claude"
-model = "sonnet"
-effort = "high"
+model = "claude-opus-5-5"
+effort = "medium"
 argv = ["claude", "-p", "--agent", "plan-reviewer", "--permission-mode", "acceptEdits", "--allowedTools", "Read,Bash,Grep,Glob"]
 
 # Left UNSET on purpose. vendor-complement anchors on the PLANNER's family (claude) and
