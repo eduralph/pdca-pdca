@@ -1,0 +1,31 @@
+Retry a leaf on the cause of its death, not on whether it spoke first
+
+A leaf was retried only if it died before printing any work. That got
+both directions wrong. A builder that worked for eighteen minutes and
+then lost its API connection was not retried, so a whole cycle round was
+lost to a network blip. A leaf that the memory cap killed before its
+first output was retried three times, into the same cap each time. And
+the Check summary told the operator such a leaf "did not run ... safe to
+re-run" even when it had run for eighteen minutes.
+
+A leaf is now retried when it died before doing any work, or when its
+own last report names a transient API failure: a lost connection, an
+overload or 5xx, or a passing rate-limit rejection. It is not retried
+when the vendor marked the cause permanent (bad request, auth, billing,
+a credits or entitlement stop), when the report kind is unknown to the
+harness, when the session recovered from the error and kept working, or
+when the report came from a sub-agent. A leaf killed by a signal is
+never retried for having said nothing, whether the exit code reads
+-signum or a wrapper's 128+signum; the harness's own timeout keeps its
+meaning. A spent subscription usage window (5-hour or weekly) is not
+retried either, since every attempt is refused until it resets.
+
+Every place that states what "transient" means now says the same thing,
+including the operator-facing Check summary label, and the tests that
+pinned the old "did not run" text are updated with it. The retained
+error report from b920752b45a5c198aac52f0e9d69fb9b8d696ea7 is unchanged.
+
+This builds on the open builder-retry change for #537 (PR #587) and
+corrects the transient message that change adds; merge that one first.
+
+Fixes #539
