@@ -173,7 +173,7 @@
     "first_seen": "2026-09-19",
     "status": "applied",
     "applied_date": "2026-09-19",
-    "location": "Act 2026-09-19: same class under two keys, 8 of 8 patch bundles. Briefs now cite the by-path closed-PR search (PR #64 worked on the brief side); the reviewer still raises it because docs/INTEGRATION.md:132-134 wrongly says it cannot rerun the commands - the gh -R commands need network only (issue_534's reviewer ran them, T5 PASS). APPLIED 2026-09-19: docs/INTEGRATION.md section 5 now has a 'Reviewer re-check (T5)' bullet telling the reviewer to rerun them; see process/act-log.md entry 2026-09-19."
+    "location": "Act 2026-09-19: same class under two keys, 8 of 8 patch bundles. Briefs now cite the by-path closed-PR search (PR #64 worked on the brief side); the reviewer still raises it because docs/INTEGRATION.md:132-134 wrongly says it cannot rerun the commands - the gh -R commands need network only (issue_534's reviewer ran them, T5 PASS). APPLIED 2026-09-19: docs/INTEGRATION.md section 5 now has a 'Reviewer re-check (T5)' bullet telling the reviewer to rerun them; see process/act-log.md entry 2026-09-19. Act 2026-09-28: APPLIED BUT MISLOCATED - the class recurred on issue_541 (reviewed 2026-09-28, a week after PR #68 merged) under a third ledger key. The reviewer sandbox never receives this instance's docs/INTEGRATION.md (REVIEWER_INPUTS, src/pdca_harness/leaves.py:70); issue_541's reviewer read target/template/docs/INTEGRATION.md.jinja instead. No instance-docs fix can reach the reviewer. Root cause upstream https://github.com/eduralph/pdca-harness/issues/575 (evidence added: https://github.com/eduralph/pdca-harness/issues/575#issuecomment-5878229756); unseeded pointer filed https://github.com/eduralph/pdca-harness/issues/586. Until #575 lands, the human clears this item at sign-off."
   },
   {
     "signal": "t5 judgment \u2014 confirm the affected-path merged and",
@@ -181,6 +181,22 @@
     "first_seen": "2026-09-19",
     "status": "applied",
     "applied_date": "2026-09-19",
-    "location": "Act 2026-09-19: same class under two keys, 8 of 8 patch bundles. Briefs now cite the by-path closed-PR search (PR #64 worked on the brief side); the reviewer still raises it because docs/INTEGRATION.md:132-134 wrongly says it cannot rerun the commands - the gh -R commands need network only (issue_534's reviewer ran them, T5 PASS). APPLIED 2026-09-19: docs/INTEGRATION.md section 5 now has a 'Reviewer re-check (T5)' bullet telling the reviewer to rerun them; see process/act-log.md entry 2026-09-19."
+    "location": "Act 2026-09-19: same class under two keys, 8 of 8 patch bundles. Briefs now cite the by-path closed-PR search (PR #64 worked on the brief side); the reviewer still raises it because docs/INTEGRATION.md:132-134 wrongly says it cannot rerun the commands - the gh -R commands need network only (issue_534's reviewer ran them, T5 PASS). APPLIED 2026-09-19: docs/INTEGRATION.md section 5 now has a 'Reviewer re-check (T5)' bullet telling the reviewer to rerun them; see process/act-log.md entry 2026-09-19. Act 2026-09-28: APPLIED BUT MISLOCATED - the class recurred on issue_541 (reviewed 2026-09-28, a week after PR #68 merged) under a third ledger key. The reviewer sandbox never receives this instance's docs/INTEGRATION.md (REVIEWER_INPUTS, src/pdca_harness/leaves.py:70); issue_541's reviewer read target/template/docs/INTEGRATION.md.jinja instead. No instance-docs fix can reach the reviewer. Root cause upstream https://github.com/eduralph/pdca-harness/issues/575 (evidence added: https://github.com/eduralph/pdca-harness/issues/575#issuecomment-5878229756); unseeded pointer filed https://github.com/eduralph/pdca-harness/issues/586. Until #575 lands, the human clears this item at sign-off."
+  },
+  {
+    "signal": "validation \u2014 fitness-to-purpose \u2014 decide whether a real",
+    "raw": "Validation \u2014 fitness-to-purpose \u2014 Decide whether a real instance\u2019s declared host-CI commands and sign-off recovery workflow are operationally fit \u2014 toy real-git tests prove mechanics, but the reproduced publish-time \u00a76 visibility gap affects how humans discover and clear a late failure (`template/tests/test_host_ci.py:417`, `template/src/pdca_harness/assemble.py:195`).",
+    "first_seen": "2026-09-28",
+    "status": "structural",
+    "applied_date": null,
+    "location": "By design, no delta possible: validation fitness-to-purpose is human-only (same class as row 1). Act 2026-09-28."
+  },
+  {
+    "signal": "t5 judgment \u2014 confirm the recorded affected-path prior-art",
+    "raw": "T5 Judgment \u2014 Confirm the recorded affected-path prior-art search covers the applicable merged and closed/rejected work \u2014 this one-commit snapshot has no remotes or upstream history to independently establish that the patch is not superseded (`brief.md:307`; `reviewer-history.log:1`).",
+    "first_seen": "2026-09-28",
+    "status": "open",
+    "applied_date": null,
+    "location": "Act 2026-09-28: same class as rows 21-22 under a third key (#501). Pending upstream https://github.com/eduralph/pdca-harness/issues/575 and https://github.com/eduralph/pdca-harness/issues/586; see process/act-log.md entry 2026-09-28."
   }
 ]
