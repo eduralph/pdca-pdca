@@ -1285,3 +1285,83 @@ First Act review of the instance — nine frozen bundles, all merged-wider.
 <!-- act-session marker — 2026-09-15: this session's entry is the "# Act review — 2026-09-15" section at the TOP of this file (newest on top). Trailer needed only because the exit check reads text appended after the session baseline — upstream https://github.com/eduralph/pdca-harness/issues/528, still open. -->
 
 <!-- act-session marker — 2026-09-19: this session's entry is the "# Act review — 2026-09-19" section at the TOP of this file (newest on top). Trailer needed only because the exit check reads text appended after the session baseline — upstream https://github.com/eduralph/pdca-harness/issues/528, closed upstream but not yet in a release this instance has consumed. -->
+
+---
+
+# Act review — 2026-09-28 — cycles considered: issue_541
+
+Eleventh Act review, and the first appended at the end of the log (v0.58.0 brought
+#528). One bundle frozen since the 2026-09-19 review; the index carried all 72, and the
+other 71 were considered only for effectiveness follow-up. issue_541 was merged-wider
+after 6 build attempts and one re-plan. Its one real finding: the 2026-09-19 delta was
+put in a file the reviewer never reads. No new instance delta; ledger corrected and two
+upstream routings, agreed with the human.
+
+## What the cycles' records exposed
+
+- **T5 prior art recurred, so the 2026-09-19 delta is mislocated** (issue_541 §6). The
+  final review ran 2026-09-28 22:24, a week after PR #68 merged, and still said "this
+  one-commit snapshot has no remotes or upstream history". Cause: the reviewer sandbox
+  holds `REVIEWER_INPUTS = ["patch.diff", "brief.md", "check-gates.json"]`
+  (`src/pdca_harness/leaves.py:70`), the gate logs and the target copy. This instance's
+  `docs/INTEGRATION.md`, where the "Reviewer re-check (T5)" bullet was added
+  (`docs/INTEGRATION.md:133-141`), is not among them. The reviewer's own report confirms
+  it: the only INTEGRATION file it found was the template's, "`target/template/docs/
+  INTEGRATION.md.jinja:80`" (issue_541 SUMMARY §5). `rubric_file` is unset
+  (`pdca.toml:21`), so `rubric-snapshot.md` is empty and no other route exists. The
+  planner side of the 2026-09-15 delta still works: the brief cites the by-path search
+  (`results/issue_541/brief.md:307`).
+- **Same gap, wider:** the reviewer prompt tells the leaf to use "the project's
+  enumerated human-only items (INTEGRATION.md §4)" (`agents/reviewer.md:115`, template
+  `agents/reviewer.md.jinja:115`), and that file is never seeded either. It is
+  harness machinery, so it goes upstream.
+- **The ledger missed the recurrence.** The class registered under a third key
+  ("t5 judgment — confirm the recorded affected-path prior-art", ledger row 24), so
+  rows 21–22 kept "applied" with no ineffective flag. Upstream #501 again.
+- **Already filed, more evidence:** §6 cites `reviewer-history.log:1`, a scratch file
+  discarded with the sandbox (#577 part 2). SUMMARY §8 lists `tracker-comment.md`
+  (ALWAYS), which is absent from the bundle (#577 part 1).
+- **Sizing:** `loop-telemetry.json` shows 6 attempts to pass at 95 KB, but
+  `size-signal.json` records rounds=2 because the re-plan reset the count. The backstop
+  (125 KB / 3 rounds) did not fire. The human ruled "one slice" at re-plan. This is
+  evidence for #556; no local delta.
+- **Quiet / structural:** multi-line fragment class 0 of 1 (first cycle after #527).
+  T2/T3/T4 oracle classes 0. Validation fitness-to-purpose is structural (ledger row 23,
+  now marked so). Plan advisory was re-enabled today (c3ecbe3), and no cycle has run with
+  it yet, so there is nothing to judge.
+
+## Process deltas
+
+- **No instance delta warranted.** Instance docs cannot reach the reviewer, so more
+  wording here would repeat the 2026-09-19 mistake. The fix belongs upstream (below).
+- **Ledger** (`process/act-ledger.json`): rows 21–22 keep "applied" with a note that the
+  delta is mislocated, with the upstream links. Row 24 (same class, third key) is open,
+  pending #575 / #586. Row 23 (validation) is marked structural, like row 1.
+- Considered and not taken, by the human's choice: routing the T5 instruction through
+  `rubric_file` (a "Review rubric & protocol" section in pdca-harness `AGENTS.md`).
+  Wait for #575 instead; the human clears the T5 item at sign-off until then.
+
+## Follow-ups routed (not process deltas — work handed to an owner)
+
+- Harness/driver issue (upstream): evidence added to #575 (reviewer target has no
+  history). The comment explains that an instance-side docs workaround cannot reach the
+  reviewer → https://github.com/eduralph/pdca-harness/issues/575#issuecomment-5878229756
+- Harness/driver issue (upstream): the reviewer prompt points at the instance's
+  INTEGRATION.md §4, but the file is never seeded into the reviewer sandbox → filed
+  https://github.com/eduralph/pdca-harness/issues/586
+- Carried, open upstream, no new filing: #501 (signal identity: split T5 a third
+  time), #556 (size calibration ignores pre-re-plan rounds; issue_541 is one more case),
+  #557, #573, #577 (reviewer scratch evidence; tracker-comment.md), #579 (Act frontier
+  advances even when the exit contract is unmet).
+- Open Act item (carried, unchanged): triage rubric should state five buckets
+  explicitly (issue_316 §10). No triage brief ran.
+
+## How effectiveness will be judged
+
+- T5 prior art: expected to keep recurring on every patch bundle until #575 lands and
+  reaches this instance through `copier update`. Recurrence before then is not a
+  signal. Recurrence after it is. If #575 slips a milestone, reconsider the
+  `rubric_file` route.
+- Plan advisory: the first wave after c3ecbe3 should show `plan-advisory-*.md`
+  artifacts with real findings, and no "leaf produced no usable verdict" §6 item. If
+  that class comes back, #526 did not fix it on this host.
