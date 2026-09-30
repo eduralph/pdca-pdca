@@ -1,0 +1,23 @@
+test(flow): pin that a split never aborts the run that caused it
+
+When a bundle splits during `pdca flow`, the run tries to adopt the new
+child bundles and fold them into its remaining waves. The code promises
+that nothing that goes wrong in that step can end the run or lose the
+results of bundles it already drove. The code keeps that promise today,
+but the tests only partly check it: making the path resolver re-raise
+instead of skipping a child passes the whole offline suite, and two other
+breakages of the same rule are caught only by a test about something else
+(added in fe8208f098556c8c3955aedec0c9f56cae2441dd).
+
+Add two tests to the split-adoption suite, both driven through the CLI:
+
+- the post-split reschedule raises while a later wave is still to run:
+  the run reports it, leaves the children in flight, still drives the
+  later wave, and exits 0;
+- one child's bundle path will not resolve: that child is skipped and
+  named, its sibling is adopted and completed, and the run exits 0.
+
+Each of the three breakages named in the issue now fails one of these
+tests. Test-only change; no production code is touched.
+
+Fixes #496
