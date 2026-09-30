@@ -1,0 +1,37 @@
+fix(leaves): retry a builder that dies before doing any work
+
+The reviewer and both advisory leaves already retry a transient death (the
+child exits non-zero before emitting any work, e.g. a dropped connection or
+an overloaded API), bounded and with backoff. The builder did not: one such
+death failed the whole Do, on the leaf where an attempt costs the most. In
+the reported case that burned about 18 minutes and a cycle round, and an
+identical re-run minutes later succeeded.
+
+The builder now runs on the same retry path, with the same attempt budget,
+backoff and transient rule. A builder that failed after doing real work is
+still not retried. A successful build is spawned exactly as before, and the
+first attempt's prompt is unchanged byte for byte.
+
+A retried builder is told in its prompt that the attempt before it died
+mid-flight, and that any patch.diff, build-notes.md, test file or worktree
+change it finds is unfinished residue to verify or replace, never evidence
+that the work is done. It is pointed at build.error.log when the record of
+the dead attempt is there to read.
+
+Every failed Do now prints what it left in the bundle and what a plain
+re-run will do next, asking the state machine rather than guessing from the
+files. When a patch.diff was left, it says the bundle now reads BUILT, so a
+re-run goes to Check on that unfinished patch, not Do. Nothing is deleted.
+A transient failure also says how many attempts were actually spent.
+
+The per-attempt record the retries write is no longer overwritten by
+do_build's own single-record capture, which now only covers a Do that died
+around the leaf (worktree setup, the lane lock). When build.error.log
+cannot be written, the builder's own failure still reaches the flow, as
+before.
+
+New tests in template/tests/test_builder_retry.py drive the real do_build
+with a stub leaf; test_build_error_log.py records the backoff instead of
+sleeping it, so the suite stays as fast as before.
+
+Fixes #537

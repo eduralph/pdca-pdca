@@ -1,0 +1,11 @@
+{
+  "mode": "new-pr",
+  "branch": "fix/537-the-builder-retries-like-every-other-leaf",
+  "pr_url": "https://github.com/eduralph/pdca-harness/pull/587",
+  "base": "main",
+  "repo": "eduralph/pdca-harness",
+  "by": "Eduard Ralph",
+  "date": "2026-09-28",
+  "id_pending": false,
+  "host_ci_base": "59a836d3ef8f79c45460e23004d34d96ce22c2aa"
+}

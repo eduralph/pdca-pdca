@@ -1,0 +1,17 @@
+# Advisory code review — issue 541 (correctness + reuse lens)
+
+**Verdict: no correctness bugs found in this diff.** No NEEDS-HUMAN items. Two small notes on reuse and efficiency follow. Neither is worth another round on its own.
+
+What I checked, against the patched tree at `$PDCA_TARGET`:
+
+- **Reader guard.** `template/src/pdca_harness/assemble.py:156` (`leaf_status`) takes the last non-blank line, compares it after strip, and returns `""` on a match. Otherwise it falls through to the unchanged `_LEAF_STATUS_RE.search`. Trailing blank lines, surrounding whitespace, a trailer quoted in a fence, and a trailer mentioned inline are all handled correctly. The one function is still the only classifier: its three callers are `assemble.py:247`, `leaves.py:3734` and `size_signal.py:233`.
+- **Status table.** `leaves.py:3275-3279` sends `_FAIL_UNOWNED` to the default `human-empty`. No fourth or fifth token was added. The docstring at `leaves.py:3262-3274` and the block comment at `assemble.py` (above `LEAF_STATUS_INFRA`) now describe the design that shipped. The old "neither …" leftover from the struck design is gone.
+- **Write sites.** Review (`leaves.py:3173-3175`), advisory (`leaves.py:3427`) and plan-advisory (`leaves.py:3646`) each append `_COMPLETION_INSTRUCTION` last, after the rubric. The runtime text at `leaves.py:2541` no longer claims that a report without the trailer goes unread. The three stubs emit the trailer. The three `_*_unavailable` placeholders do not.
+- **Harvest refactor.** Behaviour is preserved at all three sites. There is one small change on the "exited 0, wrote nothing" path: the placeholder now receives `error_log`. It only mentions the log when `_preserve` has actually rewritten it, which is the intended outcome. With no dead attempts, the log does not exist and the text matches today's. The plan-advisory `sandbox_account` closure (`leaves.py:3992-4009`) reproduces the old #526 branches exactly. The only difference is that `bash.sandbox_start_failure()` is now read only when something was filed or when `explain(None)` runs.
+- **`_note_bash_unavailable`.** When no trailer is present, the output is byte-identical to the old append. When a trailer is present, the note goes above it and the trailer stays last.
+- **Gates.** C4 (the red/green check that the new test fails without the fix and passes with it) is genuinely red: 13 failures and 5 errors, no load failure. T3 (the full test suite) passes, 1990 tests OK.
+
+Notes (advisory only, no action required):
+
+- `template/src/pdca_harness/leaves.py:4047` — `_note_bash_unavailable` works out "is the last non-blank line the trailer?" with its own `text.rstrip().rpartition("\n")`. That is a second copy of the check at `assemble.py:169-170`. The two agree for `\n` and `\r\n` line endings. They only differ on exotic separators that `str.splitlines` also splits on (`\x0c`, `\u2028`, …). A shared helper such as `assemble.is_closed(text) -> bool`, used by both places, would keep the rule in one spot. That matches the brief's "do not add a second classifier" intent. The copy here only decides where to insert the note, not how the artifact is classified, so this is a clean-up, not a defect.
+- `template/src/pdca_harness/assemble.py:169` — `leaf_status` builds a full `splitlines()` list of the artifact just to read its last non-blank line. `artifact_text.rstrip().rpartition("\n")[2].strip()` gives the same answer without the list. This is tiny at today's artifact sizes, and the shared helper from the note above would fix it in the same place.

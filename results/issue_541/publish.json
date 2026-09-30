@@ -1,0 +1,11 @@
+{
+  "mode": "new-pr",
+  "branch": "fix/541-no-dead-attempts-artifact-harvested-as-a-live-ones",
+  "pr_url": "https://github.com/eduralph/pdca-harness/pull/585",
+  "base": "main",
+  "repo": "eduralph/pdca-harness",
+  "by": "Eduard Ralph",
+  "date": "2026-09-28",
+  "id_pending": false,
+  "host_ci_base": "5daab6539e04b347dfeb5e00d224140506ee33d7"
+}

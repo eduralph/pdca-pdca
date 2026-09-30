@@ -1,0 +1,1562 @@
+diff --git a/template/src/pdca_harness/assemble.py b/template/src/pdca_harness/assemble.py
+index 7f3d846..820dfc2 100644
+--- a/template/src/pdca_harness/assemble.py
++++ b/template/src/pdca_harness/assemble.py
+@@ -92,21 +92,25 @@ _CANONICAL_LABELS = frozenset(label.strip().casefold()
+ # reads identically to "the adversary never ran" — and an infra failure then presents as a
+ # clean adversarial pass. The status lets §6 say WHY the artifact is empty, and lets a
+ # consumer act on it (re-run vs adjudicate) instead of parsing prose.
+-# Both INFRA shapes mean "nothing reviewed the diff", but they call for different ACTIONS, so
+-# the §6 row must not conflate them: a transient blip is safe to re-run as-is, while a leaf
+-# whose command could never be launched will fail identically until that command is fixed —
+-# telling the operator "safe to re-run" there would be a false instruction (PR #285 review).
++# Both INFRA shapes mean "no review came back" (a transient one may have worked for minutes
++# first), but they call for different ACTIONS, so the §6 row must not conflate them: a
++# transient blip is safe to re-run as-is, while a leaf whose command could never be launched
++# will fail identically until that command is fixed — telling the operator "safe to re-run"
++# there would be a false instruction (PR #285 review).
+ # A third infra shape (issue #526): the leaf's command launched, but the vendor sandbox the
+ # harness seeded it with could not start on this host, so no command the leaf tried ever ran.
+ # Its action differs from both others — neither a re-run nor a config fix helps until the HOST
+ # can start that sandbox — so it gets its own marker rather than borrowing one's instruction.
+-LEAF_STATUS_INFRA = "infra-empty"      # ran, died with no output — a transient blip
++# infra-empty: ran, and died of a transient blip — before emitting any work, or on its own
++# report of a transient API error (a leaf that worked for minutes, then lost the API).
++LEAF_STATUS_INFRA = "infra-empty"
+ LEAF_STATUS_STARTUP = "startup-empty"  # never launched — binary absent / not executable
+ LEAF_STATUS_SANDBOX = "sandbox-empty"  # launched, but its seeded sandbox could not start
+ LEAF_STATUS_HUMAN = "human-empty"      # ran, but yielded no usable verdict
+ _LEAF_STATUS_RE = re.compile(r"<!--\s*pdca:leaf-status\s+(\S+)\s*-->")
+ _LEAF_STATUS_LABEL = {
+-    LEAF_STATUS_INFRA: "leaf did not run (transient infra — safe to re-run)",
++    LEAF_STATUS_INFRA: ("leaf died of transient infra (before emitting any work, or on its "
++                        "own report of a transient API error — safe to re-run)"),
+     LEAF_STATUS_STARTUP: ("leaf did not run (its command could not be launched — fix the "
+                           "leaf's config, then re-run)"),
+     LEAF_STATUS_SANDBOX: ("leaf could not work (the vendor sandbox it was seeded with could "
+diff --git a/template/src/pdca_harness/leaves.py b/template/src/pdca_harness/leaves.py
+index 094eaab..88d0187 100644
+--- a/template/src/pdca_harness/leaves.py
++++ b/template/src/pdca_harness/leaves.py
+@@ -90,13 +90,16 @@ VALID_DECISIONS = frozenset({"accept", "iterate-do", "iterate-plan", "discontinu
+ # Subprocess invocation — the one place a leaf command is run.
+ # ----------------------------------------------------------------------------
+ class LeafError(subprocess.CalledProcessError):
+-    """A headless leaf exited non-zero. Carries the captured stderr tail
+-    (``output``) so a failed reviewer/advisory leaf leaves recoverable error text
+-    in the bundle (#138), and ``produced`` — whether the child emitted a substantive
+-    stream event (real work) before exiting, vs only the CLI's ``system``/``init``
+-    or ``api_retry`` events. ``produced is False`` is the transient-infra signal: the
+-    child died at/near invocation (usage/rate limit, 5xx, auth, network) before doing
+-    any work, so a retry is likely to succeed."""
++    """A headless leaf exited non-zero. Carries ``output`` — the captured stderr tail, plus
++    the leaf's own stream report of its death when there was one — so a failed leaf leaves
++    recoverable error text in the bundle (#138, #506), and ``produced`` — whether the
++    child did work that stands as its own (:func:`progress.run_with_heartbeat`).
++    ``produced is False`` covers the two shapes of a transient-infra death: the child died
++    at/near invocation, before emitting any work, where no report says why (a usage/rate
++    limit, a 5xx, a network blip); or its main session's last word was the CLI's own report
++    of a cause the vendor marks transient (a lost connection, an overload or 5xx, a
++    rate-limit rejection), however much work came first. Either way a retry is likely to
++    succeed — unless a signal ended it (:attr:`transient`)."""
+ 
+     def __init__(self, returncode: int, cmd, output: str = "", produced: bool = False):
+         super().__init__(returncode, cmd, output=output)
+@@ -104,9 +107,13 @@ class LeafError(subprocess.CalledProcessError):
+ 
+     @property
+     def transient(self) -> bool:
+-        """A no-output non-zero exit — almost certainly transient infra, not a
+-        reviewer that looked at the diff and couldn't decide."""
+-        return not self.produced
++        """Worth another attempt: the leaf died of transient infra — before emitting any
++        work, or on its own report of a transient API error — and **not** of a signal
++        (#539). A signal death (the memory cap, the OOM killer, an operator's kill;
++        ``-signum`` or a wrapper's ``128 + signum``) repeats on every attempt, so having
++        said nothing first does not make it transient (#510). The harness's own timeout
++        (:data:`progress.TIMEOUT_RC`) is not a signal spelling and keeps its meaning."""
++        return not self.produced and not progress.is_signal_death(self.returncode)
+ 
+ 
+ 
+@@ -671,10 +678,11 @@ def _invoke(
+             # The death explained next to the death reported: the post-mortem rides
+             # `output` into the same `*.error.log` the stderr tail lands in.
+             output = (output or "") + telemetry.post_mortem(rc)
+-        # Only the stream path gives a real "did a session start" signal. Without it
+-        # (a stream-less family) we cannot tell invocation-death from a substantive
+-        # failure, so report produced=True → not transient, not retried — preserving
+-        # the prior immediate-placeholder behavior for non-stream leaves.
++        # Only the stream path says how the leaf died — whether a session started, and
++        # whether it ended on the vendor's own transient report (#539). Without it (a
++        # stream-less family) we can tell neither from a substantive failure, so report
++        # produced=True → not transient, not retried — preserving the prior
++        # immediate-placeholder behavior for non-stream leaves.
+         raise LeafError(rc, argv, output=output, produced=produced or not use_stream)
+ 
+ 
+@@ -700,11 +708,15 @@ def _invoke_leaf_resilient(
+ ) -> Exception | None:
+     """Run a headless reviewer/advisory leaf with bounded retry + error capture (#138).
+ 
+-    A non-zero exit that produced **no output** is the transient-infra signal — the
+-    child died at/near invocation (usage/rate limit, 5xx, auth, network), not a
+-    reviewer that read the diff and couldn't decide — so retry it with exponential
+-    backoff. A failure that *did* produce output, or a non-LeafError (e.g. command
+-    not found), is substantive: do not retry. Each failed attempt's captured stderr
++    A transient-infra death (:attr:`LeafError.transient`) is retried with exponential
++    backoff: a non-zero exit before the leaf emitted any work, where no report says why (a
++    usage/rate limit, a 5xx or a network blip at invocation), or one whose main session
++    ended on the CLI's own report of a cause the vendor marks transient (a lost connection,
++    an overload or 5xx, a rate-limit rejection) however much work came first — not a
++    reviewer that read the diff and couldn't decide. Every other failure is substantive and
++    not retried: a leaf that worked and then failed on its own account, one a **signal**
++    killed (#510), or a non-LeafError (e.g. command not found). A retry is a fresh re-invoke
++    of the whole leaf, not a resume of its session. Each failed attempt's captured stderr
+     tail is written to ``error_log`` AS IT HAPPENS (#540), so the bundle carries
+     recoverable error text, not just an exit code, from the moment there is any — and a
+     run killed inside the retry loop leaves a post-mortem instead of nothing at all. The
+@@ -753,8 +765,9 @@ def _invoke_leaf_resilient(
+             _flush_attempt_records(error_log, records)
+             delay = backoff * (2 ** (attempt - 1))
+             print(f"leaves: {workdir.name} — leaf exited {getattr(exc, 'returncode', '?')} "
+-                  f"with no output (transient); retry {attempt}/{attempts - 1} in "
+-                  f"{delay:.0f}s", file=sys.stderr)
++                  "on transient infra (before emitting any work, or on its own report of a "
++                  f"transient API error); retry {attempt}/{attempts - 1} in {delay:.0f}s",
++                  file=sys.stderr)
+             time.sleep(delay)
+     # The attempts are spent: the same records, now SETTLED — which is what makes the log
+     # read as "the leaf ran and FAILED" (state.leaf_ran_and_failed). Raises exactly as the
+@@ -2186,7 +2199,8 @@ def _do_build_command(d: Path, cfg: Config, builder: LeafConfig, n: int) -> None
+         return
+     if getattr(err, "transient", False):
+         print(f"leaves: {d.name} — transient: the builder leaf exited "
+-              f"{getattr(err, 'returncode', '?')} without emitting any work, the class of "
++              f"{getattr(err, 'returncode', '?')} on transient infra (before emitting any "
++              "work, or on its own report of a transient API error), the class of "
+               "failure the harness retries to absorb; not absorbed after "
+               f"{spent} attempt(s).", file=sys.stderr)
+     raise err
+@@ -2915,8 +2929,9 @@ def _run_review_sandboxed(d: Path, cfg: Config) -> None:
+         # the leaf its ambient sandbox, #290); the codex network grant does not (#291).
+         extra_argv += _sandbox_argv(cfg, profile, seeded=seeded)
+         error_log = d / state.REVIEW_ERROR_LOG
+-        # A transient (no-output) reviewer failure is retried with backoff before it
+-        # degrades to a §6 placeholder; the failed attempts' stderr lands in error_log.
++        # A transient reviewer death (before emitting any work, or on its own report of a
++        # transient API error) is retried with backoff before it degrades to a §6
++        # placeholder; the failed attempts' stderr and stream report land in error_log.
+         err = _invoke_leaf_resilient(
+             cfg.reviewer, sandbox, _REVIEW_PROMPT + rubric_mod.for_reviewer(d, cfg),
+             error_log=error_log,
+@@ -2937,11 +2952,15 @@ def _run_review_sandboxed(d: Path, cfg: Config) -> None:
+ 
+ 
+ # How a reviewer / advisory leaf failed (#138, #278). The split that matters downstream is
+-# INFRA (nothing reviewed the diff) vs SUBSTANTIVE (it reviewed, and yielded nothing usable) —
+-# but the two infra shapes need different *actions* from the operator, so keep them distinct.
+-_FAIL_TRANSIENT = "transient"      # ran, exited non-zero with no output; retries exhausted
++# INFRA (infrastructure stopped it before a review came back) vs SUBSTANTIVE (the leaf itself
++# yielded nothing usable) — but the infra shapes need different *actions* from the operator,
++# so keep them distinct.
++# transient: died of transient infra — before emitting any work, or on its own report of
++#   a transient API error — and retries did not recover it.
++# substantive: ran and failed any other way (a signal death included), no usable verdict.
++_FAIL_TRANSIENT = "transient"
+ _FAIL_STARTUP = "startup"          # never ran at all — the command could not be launched
+-_FAIL_SUBSTANTIVE = "substantive"  # ran and produced output, but no usable verdict
++_FAIL_SUBSTANTIVE = "substantive"
+ # Launched, but the vendor sandbox the harness seeded it with could not start on this host
+ # (#526), so nothing it tried ran. Never inferred from an exception alone, as the others
+ # are: only the vendor's own evidence of the sandbox failing sets it
+@@ -2953,8 +2972,10 @@ _FAIL_SANDBOX = "sandbox"
+ def _failure_class(exc: Exception | None) -> str:
+     """Classify a failed leaf invocation.
+ 
+-    A :class:`LeafError` means the child actually ran: ``transient`` (no output — a rate
+-    limit / 5xx / network blip) or substantive. But a **startup** failure never produces a
++    A :class:`LeafError` means the child actually ran: ``transient`` (it died of a rate
++    limit / 5xx / network blip before emitting any work, or on its own report of one after
++    working — :attr:`LeafError.transient`) or substantive (every other way it can fail, a
++    signal death included). But a **startup** failure never produces a
+     LeafError at all — the spawn raises ``FileNotFoundError`` before one exists, when the
+     configured binary is absent or not executable (the canonical ``[Errno 2] … 'codex'``).
+     Reading ``.transient`` off such an exception yields ``False``, so it was reported as "the
+@@ -2999,8 +3020,8 @@ def _unavailable_classification(failure: str, error_log: Path | None) -> str:
+     adversarial pass and the operator has to hand-annotate "infra, not substance". `assemble`
+     reads the marker and labels the §6 row accordingly.
+ 
+-    Every infra shape (transient, startup, sandbox) carries an infra marker — nothing
+-    reviewed the diff either way — but their prose differs, because the operator's next action
++    Every infra shape (transient, startup, sandbox) carries an infra marker — no review came
++    back either way — but their prose differs, because the operator's next action
+     does: a transient blip is safe to re-run as-is; a leaf that never started will fail the
+     same way until its command is fixed; a leaf whose seeded sandbox could not start (#526)
+     will fail the same way until the HOST can start it."""
+@@ -3011,11 +3032,12 @@ def _unavailable_classification(failure: str, error_log: Path | None) -> str:
+     }.get(failure, assemble.LEAF_STATUS_HUMAN)
+     marker = f"<!-- pdca:leaf-status {status} -->\n\n"
+     if failure == _FAIL_TRANSIENT:
+-        kind = ("**transient infra — safe to re-run.** The leaf exited non-zero with no "
+-                "output and retries did not recover, so it almost certainly hit a usage/"
+-                "rate limit or a transient API/network error rather than reviewing the "
+-                "diff; a sibling advisory leaf of a different family may already have "
+-                "covered it.")
++        kind = ("**transient infra — safe to re-run.** The leaf exited non-zero either "
++                "before emitting any work or on its own report of a transient API error "
++                "(a lost connection, an overload or 5xx, a rate-limit rejection), and "
++                "retries did not recover it — so it hit a usage/rate limit or a transient "
++                "API/network error rather than finishing its review of the diff; a sibling "
++                "advisory leaf of a different family may already have covered it.")
+     elif failure == _FAIL_STARTUP:
+         kind = ("**startup infra — the leaf never ran.** Its configured command could not be "
+                 "launched at all (the binary is absent, or not executable), so nothing "
+diff --git a/template/src/pdca_harness/progress.py b/template/src/pdca_harness/progress.py
+index 822dd33..c173406 100644
+--- a/template/src/pdca_harness/progress.py
++++ b/template/src/pdca_harness/progress.py
+@@ -31,6 +31,33 @@ from pathlib import Path
+ # pass/fail verdict the child itself could have expressed.
+ TIMEOUT_RC = -1001
+ 
++#: The highest signal number a POSIX host delivers (``SIGRTMAX``: 64 on Linux, lower on
++#: the BSDs — the wider bound is the safe one, since a hit only ever buys "not transient").
++_MAX_SIGNUM = 64
++#: How a WRAPPER argv reports that ITS child died of a signal: the shell's ``128 + signum``
++#: (137 = SIGKILL, 143 = SIGTERM), as ``sh -c`` and ``docker run`` spell it.
++_SHELL_SIGNAL_BASE = 128
++
++
++def is_signal_death(rc: int) -> bool:
++    """Did a **signal** end this child? Answered for both spellings of the same death,
++    because which one the harness sees depends on nothing but the argv's shape:
++    :mod:`subprocess` reports a direct child's signal death as ``-signum``, while a wrapper
++    argv has already exited normally with the shell's ``128 + signum``. The memory cap
++    (#420) kills with SIGKILL, and a rule that knew only one spelling would retry the same
++    OOM whenever the leaf ran behind a wrapper.
++
++    Why a retry decision asks it (#539): a signal death is not an API failure the vendor
++    reported, and it repeats — the same cap, OOM killer or operator kills the same leaf on
++    every attempt — so it is never "transient" merely because the leaf had said nothing yet
++    (what to do with it instead is issue #510's question). :data:`TIMEOUT_RC` lies outside
++    both ranges by construction, so the harness's own wall-clock kill answers ``False``
++    here and keeps its own meaning.
++    """
++    if rc < 0:
++        return 1 <= -rc <= _MAX_SIGNUM
++    return _SHELL_SIGNAL_BASE < rc <= _SHELL_SIGNAL_BASE + _MAX_SIGNUM
++
+ 
+ def run_with_heartbeat(
+     cmd,
+@@ -58,14 +85,34 @@ def run_with_heartbeat(
+     failed leaf's real error — usage/rate limit, 5xx, auth — survives in the bundle
+     instead of scrolling past on a console nobody is watching), **plus the leaf's own
+     terminal error report** when the stream carried one (below); ``""`` otherwise.
+-    ``produced`` is whether the child emitted a **substantive** stream event — an
+-    ``assistant`` / ``user`` / ``result`` event, i.e. a session that did real work.
+-    Claude emits a ``system``/``init`` event (and ``system``/``api_retry`` on a
+-    retryable API error) *before* doing anything, so those do NOT count: a non-zero
+-    exit with ``produced is False`` is the transient-infra signal (the child died
+-    at/near invocation — usage/rate limit, 5xx, auth — before any real output).
++    ``produced`` is whether the child did work that **stands as its own**: it emitted a
++    substantive stream event — an ``assistant`` / ``user`` / ``result`` event, i.e. a
++    session that did real work — and did not then exit non-zero with its stream ENDED on
++    the vendor's own report of a transient infrastructure failure (below). Claude emits a
++    ``system``/``init`` event (and ``system``/``api_retry`` on a retryable API error)
++    *before* doing anything, so those do NOT count. A non-zero exit with ``produced is
++    False`` is therefore the transient-infra signal in **both** of its shapes: the child
++    died at/near invocation, before emitting any work, where no report says why (a
++    usage/rate limit, a 5xx, a network blip); or its main session's last word was the
++    CLI's marked report of a cause the vendor marks transient. How the child was killed is
++    the caller's second question, answered from the returncode (:func:`is_signal_death`).
+     ``input_text``, if given, is written to stdin.
+ 
++    **What a transient death is, decided once** (issue #539). "Did it emit any work?" was
++    only a proxy for "did it die at invocation?", and it failed exactly where an attempt
++    is dearest: an 18-minute leaf whose API connection dropped mid-response did plenty of
++    work and still died of infrastructure it did not cause. The stream already says how the
++    leaf died — the CLI marks the report it synthesises for an API error and stamps its
++    own error kind, and often a typed cause, on it — so that record is classified
++    (:func:`_reports_transient_cause`): when it came from the MAIN session, the vendor
++    marked its cause transient, no main-session work followed it (that would mean the CLI
++    recovered, :func:`_is_main_session_work`), and the child then exited non-zero,
++    ``produced`` is ``False`` however much work came first. The vendor's word decides, the
++    most specific first: a typed cause outranks the kind, no prose promotes a cause the
++    vendor marked or typed as permanent, an unrecognised kind or cause and an unstamped
++    report stay as they were, and a run the harness killed on its own ``timeout`` is not
++    re-labelled by what its stream said last.
++
+     **The leaf's own account of its death is kept** (issue #506). The CLI *marks* the
+     message it synthesises for an API error, and that report arrives as a stream event
+     on stdout — which this function already reads, parsed for a tool label and then
+@@ -75,8 +122,8 @@ def run_with_heartbeat(
+     to the same string. An 18-minute leaf whose API connection dropped mid-response used
+     to file ``(no output captured)``, with the cause legible only in the CLI's session
+     transcript under ``~/.claude/projects/`` — a post-mortem artifact that explains
+-    nothing. Retention only: **nothing here is classified**. ``produced``, and therefore
+-    every retry decision made from it, is byte-identical to before for every input.
++    nothing. Retention itself classifies nothing; the verdict above is read off the record
++    it keeps, and clearing that verdict when the session recovers leaves the text kept.
+ 
+     Three properties this retention is held to:
+ 
+@@ -190,6 +237,13 @@ def run_with_heartbeat(
+     # death, so neither the session's wrap-up nor a sub-agent's report can overwrite the
+     # main session's own account of the cause (:func:`_note_terminal`).
+     terminal = {"text": "", "shape": ""}
++    # How the leaf died, by its own account (#539): does the record ``terminal`` keeps name
++    # a cause the vendor marks transient? Main-session work after it means the CLI
++    # recovered, which clears this verdict only — the kept text stays for the error log.
++    # Cleared, it stays cleared until a record at least as near as the kept one names a
++    # death again: a fresh main-session report does; a later ``result`` wrap-up cannot,
++    # being farther (:func:`_note_terminal` does not keep it, so it sets nothing).
++    died_of = {"transient": False}
+     latest_tool = {"label": ""}  # most recent tool-use, updated by the drain thread
+     readers: list[threading.Thread] = []
+     if capture_out:
+@@ -199,7 +253,7 @@ def run_with_heartbeat(
+                 if capture:
+                     chunks.append(line)
+                 if stream_json:
+-                    # Decoded ONCE per line, then classified three ways. This is a hot
++                    # Decoded ONCE per line, then classified by each reader. This is a hot
+                     # loop — a long session streams thousands of lines — and each
+                     # classifier below used to re-parse the same bytes for itself. A
+                     # line that is no JSON object decodes to ``{}``, which every
+@@ -209,7 +263,13 @@ def run_with_heartbeat(
+                         produced["session"] = True  # a startup/init line does NOT count
+                     text, shape = _terminal_error(ev, stream_format)
+                     if shape:  # the CLI's own marked report — keep it, whatever its cause
+-                        _note_terminal(terminal, text, shape)
++                        if _note_terminal(terminal, text, shape):
++                            # The verdict follows the record kept, so a farther record
++                            # cannot overrule the cause the nearest one reported.
++                            died_of["transient"] = _reports_transient_cause(
++                                ev, stream_format)
++                    elif died_of["transient"] and _is_main_session_work(ev, stream_format):
++                        died_of["transient"] = False  # the CLI recovered: not the death
+                     lbl = _stream_tool_label(ev, stream_format)
+                     if lbl:
+                         latest_tool["label"] = lbl
+@@ -325,9 +385,13 @@ def run_with_heartbeat(
+         sep = "" if not output or output.endswith("\n") else "\n"
+         output = f"{output}{sep}{_TERMINAL_REPORT_HEADER}\n{terminal['text']}\n"
+     rc = TIMEOUT_RC if timed_out else proc.returncode
+-    # `produced` is returned exactly as before: this change RETAINS evidence and
+-    # classifies nothing, so every retry decision downstream is unchanged (#506).
+-    return rc, output, produced["session"]
++    # The verdict is applied only to the outcome it describes (#539): a run that ended
++    # non-zero after its main session reported a transient cause. Exit 0 keeps `produced`
++    # as it was, and so does the harness's own timeout — "the oracle did not answer" is
++    # not a death the stream diagnosed. A signal kill is the caller's question, answered
++    # from `rc` (`is_signal_death`), not this stream's.
++    ended_on_reported_infra = died_of["transient"] and rc not in (0, TIMEOUT_RC)
++    return rc, output, produced["session"] and not ended_on_reported_infra
+ 
+ 
+ def _terminate_group(proc: subprocess.Popen, grace: float = 2.0) -> None:
+@@ -464,8 +528,10 @@ def _stream_event(line: str | dict) -> dict:
+ 
+ def _is_session_event(line: str | dict, fmt: str = "claude-stream-json") -> bool:
+     """True iff a stream line is **substantive work** — not a startup/init event the CLI
+-    emits before doing anything. A non-zero exit having produced no such event is the
+-    transient-infra signal a retry should target (#138). Best-effort: non-JSON → False."""
++    emits before doing anything. A non-zero exit having produced no such event, and not
++    ended by a signal, is one of the two transient-infra shapes (#138; the other, #539, is
++    a stream that ends on the vendor's own transient report — :func:`run_with_heartbeat`).
++    Best-effort: non-JSON → False."""
+     ev = _stream_event(line)
+     if fmt == "codex-stream-json":
+         return ev.get("type") in _CODEX_SESSION_TYPES
+@@ -485,8 +551,9 @@ def _is_session_event(line: str | dict, fmt: str = "claude-stream-json") -> bool
+ # The discriminator is NOT the prose. The CLI *marks* the message it synthesises for an
+ # API error, so a leaf that merely writes about an API error — a builder fixing this very
+ # defect, quoting the incident line — is never mistaken for one dying of it, whatever its
+-# wording. Nothing here reads a cause, a kind or a status: this module keeps the text and
+-# says whose it is, and every retry decision stays exactly where it was.
++# wording. Nothing in THIS section reads a cause, a kind or a status: it keeps the text
++# and says whose it is. Whether that cause is worth another attempt is the next
++# section's question (#539), asked of the same marked record.
+ #
+ # WHICH field lives on WHICH event is read out of the shipped binary (claude-code
+ # 2.1.234), not assumed: a rule keyed on a field the CLI never emits is a branch that
+@@ -570,7 +637,8 @@ def _terminal_error(line: str | dict, fmt: str = "claude-stream-json") -> tuple[
+     The text is returned for **any** such record: retention is unconditional, because the
+     cause the vendor reported is not this function's to judge, and a permanent failure
+     must explain itself in the bundle just as loudly as a transient one. Nothing here
+-    feeds a retry decision — the classification half is issue #506's second child.
++    feeds a retry decision; :func:`_reports_transient_cause` judges the record this keeps
++    (#539).
+     """
+     if fmt != "claude-stream-json":
+         return "", ""
+@@ -592,7 +660,7 @@ def _terminal_error(line: str | dict, fmt: str = "claude-stream-json") -> tuple[
+     return "", ""
+ 
+ 
+-def _note_terminal(terminal: dict, text: str, shape: str) -> None:
++def _note_terminal(terminal: dict, text: str, shape: str) -> bool:
+     """Record one marked terminal record into the drain's ``terminal`` state: newest wins
+     **within a shape**, but a record farther from the leaf's own death never overwrites a
+     nearer one (:data:`_TERMINAL_PRECEDENCE`).
+@@ -612,10 +680,15 @@ def _note_terminal(terminal: dict, text: str, shape: str) -> None:
+     is the leaf's newer account of its own death and wins outright. Symmetrically, a
+     farther record arriving FIRST cannot pre-empt the report — so the nearest record wins
+     in either arrival order.
++
++    Returns whether the record was kept, so the drain's verdict (#539) follows the kept
++    record: a farther record that cannot bury the cause's text cannot overrule its
++    classification either.
+     """
+     if _TERMINAL_PRECEDENCE[shape] < _TERMINAL_PRECEDENCE.get(terminal["shape"], 0):
+-        return
++        return False
+     terminal.update(text=text, shape=shape)
++    return True
+ 
+ 
+ def _is_subagent_event(ev: dict) -> bool:
+@@ -675,6 +748,169 @@ def _report_line(texts: Iterable[str]) -> str:
+     return ""
+ 
+ 
++# ----------------------------------------------------------------------------
++# What a transient death IS (issue #539) — the classification of the record kept above.
++#
++# The vendor's own marks decide, the most specific first, and the harness's reading of
++# prose never outranks one. A typed cause is the CLI's most specific word, so it decides
++# whenever the report carries one; otherwise the error kind (`error`) does. A kind outside
++# the transient set — a 400, an auth or billing stop, a kind a later CLI adds — keeps the
++# substantive verdict whatever its text says. The one exception is the kind the CLI uses
++# for "I could not classify this", whose text alone is read: its leading HTTP status when
++# it has one, and otherwise only the wording of a connection that failed. Every field and
++# set below was re-read out of claude-code 2.1.284 (tests/fixtures/README.md: which claims
++# are observed, which derived, and the greps that re-verify them).
++# ----------------------------------------------------------------------------
++#: The error kinds this harness retries. ``server_error`` and ``overloaded`` are the
++#: vendor's own main-session rule (``apiErrorIsTransient===!0 || error==="overloaded" ||
++#: error==="server_error"``; the flag never reaches the stream), and ``server_error`` is
++#: what the CLI stamps on a 5xx and on a lost connection (``Connection to the API was lost
++#: (<code>)``, ``Connection lost mid-response``). ``rate_limit`` is this PROJECT's policy,
++#: not that rule: a mid-session rate-limit rejection is the twin of the invocation-time
++#: one #138 already retried. The three-kind set is borrowed from the CLI's handling of a
++#: SUB-AGENT an API error cut off (``new Set(["rate_limit","overloaded","server_error"])``:
++#: it keeps that Task's partial output instead of failing it).
++_CLAUDE_TRANSIENT_KINDS = frozenset({"server_error", "overloaded", "rate_limit"})
++#: Where the vendor TYPES a report's cause — stream spelling, then transcript spelling: the
++#: CLI's own typed kind, and the server's gate code for a gate this CLI has no typed kind
++#: for yet. Either one outranks the kind: the usage-credit stops ride ``rate_limit``, a TLS
++#: trust failure rides ``server_error``.
++_CLAUDE_CAUSE_FIELDS = ("api_error", "apiError", "api_error_code", "apiErrorCode")
++#: The one typed cause that names a category this harness retries: no response arrived
++#: before the first-byte deadline, on any attempt — a response that never came, the lost-
++#: connection family. Every other typed cause names a condition a fresh attempt meets
++#: again — a certificate store, a proxy, credentials, an entitlement, the request itself —
++#: and so, for want of a reading, does one this harness has not seen.
++_CLAUDE_TRANSIENT_CAUSES = frozenset({"no_response"})
++#: The kind the CLI's mapper falls back to when it could not classify the failure itself.
++_CLAUDE_UNKNOWN_KIND = "unknown"
++#: HTTP statuses worth another attempt besides 5xx — the API client's own retry rule
++#: (``status===408 || status===409 || status===429 || status>=500``).
++_TRANSIENT_STATUSES = frozenset({408, 409, 429})
++#: The HTTP status an ``unknown`` report LEADS with. The CLI writes an API rejection it did
++#: not classify as ``API Error: <status> <body>``, so the status is read at the head of the
++#: text only: a number further in — a message index (``messages.536…``), a field value, a
++#: count — belongs to the body, not to the answer.
++_UNKNOWN_STATUS_RE = re.compile(r"\s*API\s+Error:\s*(\d{3})\b")
++#: How a connection that FAILED reads — a failure that never got an HTTP answer, so its
++#: report has no status to lead with. Read ONLY in an ``unknown`` report that carries no
++#: typed cause and no leading status: the wording Node, undici, the Anthropic SDK and the
++#: CLI itself use for a lost, dropped, refused or timed-out connection, and the CLI's own
++#: connection-error codes (its ``JF`` and ``J0`` sets). No bare word a request body could
++#: carry by accident — not ``timeout``, not a number.
++_CONNECTION_FAILED_RE = re.compile(r"""
++      \bconnection\s+(?:to\s+the\s+api\s+)?(?:was\s+)?
++         (?:lost|dropped|reset|closed|refused|aborted|interrupted|error|timed\s+out)\b
++    | \brequest\s+timed\s+out\b
++    | \bsocket\s+hang\s+up\b
++    | \bother\s+side\s+closed\b
++    | \bpremature\s+close\b
++    | \bfetch\s+failed\b
++    | \AAPI\s+Error:\s*terminated\W*\Z
++    | \b(?:ECONNRESET|EPIPE|ConnectionClosed|UND_ERR_SOCKET|ETIMEDOUT|ECONNABORTED
++         |ERR_SOCKET_CLOSED|StreamSuspended|StreamTruncated|ECONNREFUSED|ConnectionRefused
++         |ENOTFOUND|ENETUNREACH|ENETDOWN|EHOSTUNREACH|EHOSTDOWN|EAI_AGAIN
++         |FailedToOpenSocket|ERR_PROXY_TUNNEL)\b
++""", re.I | re.X)
++
++
++def _reports_transient_cause(line: str | dict, fmt: str = "claude-stream-json") -> bool:
++    """Does this marked record say the leaf died of a cause the **vendor** marks transient?
++
++    The classification companion to :func:`_terminal_error` (which keeps the record) and
++    :func:`_is_session_event`, in their shape: dispatch on ``stream_format``, the drain's
++    shared decode, and ``False`` for every family and record it does not know — so codex
++    and every stream-less family keep exactly today's verdict. A field of an unexpected
++    type is a ``False`` too, never an exception: this runs in the drain thread.
++
++    * A main-session **report** the vendor left **unstamped** (no ``error`` kind) is not
++      transient — there is no vendor judgement to follow. A **typed cause**
++      (:data:`_CLAUDE_CAUSE_FIELDS`, either spelling) decides next, before the kind: only
++      :data:`_CLAUDE_TRANSIENT_CAUSES` is transient, so a ``rate_limit`` the CLI typed as a
++      usage-credit stop is not, nor a ``server_error`` it typed as a TLS trust failure.
++      Untyped, the kind decides (:data:`_CLAUDE_TRANSIENT_KINDS`). A kind stamped
++      :data:`_CLAUDE_UNKNOWN_KIND` is the vendor saying it could not tell, so its text is
++      read — the only door prose comes in through (:func:`_unclassified_text_is_transient`).
++      Any other kind (the permanent ones, one this harness has not read) is not transient,
++      whatever the text says.
++    * A **sub-agent's** report never is: the CLI handles a Task an API error cut off
++      itself, so the report says nothing about how the session ended.
++    * The ``result`` wrap-up is transient only in its ``success`` variant — the one the CLI
++      builds when the session ended on its own API-error message, and the only one that
++      carries that error's HTTP status — with a status a retry can clear (5xx, or one of
++      :data:`_TRANSIENT_STATUSES`) and no server gate code. An ``error_*`` wrap-up ends on
++      whatever threw, so its status, if any, is not the death's.
++    """
++    if fmt != "claude-stream-json":
++        return False
++    ev = _stream_event(line)
++    if ev.get("type") == "assistant" and (ev.get("is_api_error_message")
++                                          or ev.get("isApiErrorMessage")):
++        if _is_subagent_event(ev):
++            return False
++        kind = ev.get("error")
++        if not isinstance(kind, str):
++            return False  # unstamped: the vendor made no judgement to follow
++        causes = _typed_causes(ev)
++        if causes:  # the vendor typed the cause, and that outranks the kind
++            return all(isinstance(c, str) and c in _CLAUDE_TRANSIENT_CAUSES for c in causes)
++        if kind in _CLAUDE_TRANSIENT_KINDS:
++            return True
++        if kind != _CLAUDE_UNKNOWN_KIND:
++            return False
++        texts = (t for t in _claude_message_texts(ev.get("message")) if t.strip())
++        return _unclassified_text_is_transient(next(texts, ""))
++    if ev.get("type") == "result" and ev.get("is_error"):
++        return (ev.get("subtype") == "success" and not _typed_causes(ev)
++                and _is_transient_status(ev.get("api_error_status")))
++    return False
++
++
++def _typed_causes(ev: dict) -> list:
++    """Every typed cause the vendor put on a record, in either spelling; ``[]`` if none."""
++    return [ev[key] for key in _CLAUDE_CAUSE_FIELDS if ev.get(key) is not None]
++
++
++def _is_transient_status(status) -> bool:
++    """An HTTP status a retry can clear: 5xx, or one of :data:`_TRANSIENT_STATUSES`."""
++    return isinstance(status, int) and (status in _TRANSIENT_STATUSES or 500 <= status <= 599)
++
++
++def _unclassified_text_is_transient(text: str) -> bool:
++    """Read the text of a report the vendor could NOT classify — and only for the
++    categories the harness promises to retry.
++
++    A leading HTTP status decides alone (:data:`_UNKNOWN_STATUS_RE`): what follows it is
++    the API's body, so a 400 is never promoted by a word or a number inside it. Without
++    one, the report is of a failure that got no HTTP answer at all, and only the wording
++    of a connection that failed counts (:data:`_CONNECTION_FAILED_RE`)."""
++    lead = _UNKNOWN_STATUS_RE.match(text)
++    if lead:
++        return _is_transient_status(int(lead.group(1)))
++    return bool(_CONNECTION_FAILED_RE.search(text.strip()))
++
++
++#: The event types that are the session doing turn work. A ``result`` is its wrap-up, so
++#: it is not "the session carried on".
++_WORK_EVENT_TYPES = frozenset({"assistant", "user"})
++
++
++def _is_main_session_work(line: str | dict, fmt: str = "claude-stream-json") -> bool:
++    """Is this line the MAIN session carrying on — so a report before it was not the
++    leaf's death, and whatever fails later is the leaf's own (#539)?
++
++    ``user`` belongs here as much as ``assistant``: a session that recovers and runs a
++    tool answers with a main-session ``tool_result``, emitted as ``type: "user"`` with
++    ``parent_tool_use_id: null``. **Main-session** matters as much: a sub-agent's traffic
++    (:func:`_is_subagent_event`) is a Task still draining, and letting it count would clear
++    the very report that explains the death.
++    """
++    if fmt != "claude-stream-json":
++        return False
++    ev = _stream_event(line)
++    return ev.get("type") in _WORK_EVENT_TYPES and not _is_subagent_event(ev)
++
++
+ def _stream_tool_label(line: str | dict, fmt: str = "claude-stream-json") -> str:
+     """A human label for the tool-use in one stream line, or "" if none.
+     Best-effort: a non-JSON / non-tool line yields ""."""
+diff --git a/template/tests/fixtures/README.md b/template/tests/fixtures/README.md
+index f2e5794..6c5d4dc 100644
+--- a/template/tests/fixtures/README.md
++++ b/template/tests/fixtures/README.md
+@@ -8,8 +8,9 @@ the shipped binary's own emitter, with the expression quoted).
+ 
+ Scope of this note: the claims `progress._terminal_error` / `progress._is_subagent_event`
+ depend on — **the marker** on a terminal API-error report, **whose** report it is, and the
+-`result` wrap-up that competes with it for precedence. Nothing here classifies a cause; a
+-later change that reads error *kinds* or HTTP statuses appends its own provenance below.
++`result` wrap-up that competes with it for precedence. Nothing in this section classifies a
++cause; the error *kinds*, typed causes and HTTP statuses the retry decision reads are
++grounded in [Classifying the report](#classifying-the-report-issue-539) below.
+ 
+ ## Files
+ 
+@@ -84,6 +85,142 @@ recognise — an unmarked message, another family's stream, an unparseable line
+ than guess; re-running the greps above is how a maintainer checks whether the two shapes
+ it does know are still emitted.
+ 
++## Classifying the report (issue #539)
++
++The claims `progress._reports_transient_cause` and `progress._is_main_session_work` depend
++on: which error **kinds** the harness retries and which of them are the vendor's own rule,
++where the vendor **types** a cause and which typed cause is transient, how the text of a
++report the vendor could **not** classify is built, where an HTTP **status** reaches the
++stream, and how a **recovered** session shows itself. No new fixture file: the
++classification cases are built inline in `test_terminal_error_classification.py` (a C4 red
++leg reverts any `fixtures/*.jsonl` a patch adds), and the two pinned death records above
++are replayed there too.
++
++### Observed
++
++* The incident record (`claude_api_error_death.transcript.jsonl`, 2.1.228) carries
++  `"error":"server_error"` on a lost connection, and that leaf exited **1** after it — the
++  kind and the exit this classification retries.
++* The permanent record (`claude_api_error_permanent.transcript.jsonl`, 2.1.222) carries
++  `"error":"model_not_found"` and, in the transcript spelling only, `"apiErrorStatus":404`.
++  Its stream spelling (derived above) has no status field — see the next list.
++
++Neither record carries a typed cause, so everything below about typed causes is derived.
++
++### Derived (claude-code 2.1.284, the installed binary; the greps below re-verify)
++
++* **The kind enum** — `z(["authentication_failed","oauth_org_not_allowed",
++  "account_on_hold","verification_required","billing_error","rate_limit","overloaded",
++  "invalid_request","model_not_found","server_error","unknown","max_output_tokens",
++  "cloud_credential_error"])`. It rides the main-loop emitter's `error:n.error`.
++* **The vendor's own main-session transient rule** — `function Akr(e){return
++  e.apiErrorIsTransient===!0||e.error==="overloaded"||e.error==="server_error"}`. It covers
++  `overloaded` and `server_error` only; `rate_limit` is transient there only when the
++  `apiErrorIsTransient` flag is set (the generic 429 sets it on a condition:
++  `error:"rate_limit",apiErrorIsTransient:M`), and that flag never reaches the stream — the
++  wire converter `function _o(e,s){…r={aborted:…,is_api_error_message:…,api_error:…,
++  api_error_params:…,api_error_code:…,…}` does not carry it.
++* **`rate_limit` is this project's policy, not the vendor's main-session rule** — the
++  harness retries a mid-session rate-limit rejection as the twin of the invocation-time one
++  #138 already retried, a choice made at sign-off (#539). The three-kind set is borrowed
++  from the CLI's handling of a **sub-agent** an API error cut off: `var rl=new
++  Set(["rate_limit","overloaded","server_error"]);function il(e,s){if(!(e instanceof
++  Ao))return null;if(!e.errorKind||!rl.has(e.errorKind))return null;…` (`Ao` is
++  `AgentApiErrorTerminationError`) — for those kinds it keeps the Task's partial output
++  ("Everything below is PARTIAL output recovered from the agent before it was cut off")
++  instead of failing it. Hence `_CLAUDE_TRANSIENT_KINDS = {server_error, overloaded,
++  rate_limit}`: two kinds from the vendor's main-session rule, one by policy.
++* **A lost connection is stamped `server_error`** — ``if(w&&(JF.has(w.code)||J0.has(w.code)))
++  return Qo({content:`${Pa}: Connection to the API was lost (${w.code}). This is usually
++  temporary — try again.`,error:"server_error"})``, with `JF` = ECONNRESET, EPIPE,
++  ConnectionClosed, UND_ERR_SOCKET, ETIMEDOUT, ECONNABORTED, ERR_SOCKET_CLOSED,
++  StreamSuspended, StreamTruncated and `J0` = ECONNREFUSED, ConnectionRefused, ENOTFOUND,
++  ENETUNREACH, ENETDOWN, EHOSTUNREACH, EHOSTDOWN, EAI_AGAIN, FailedToOpenSocket,
++  ERR_PROXY_TUNNEL. A connection that dies mid-stream is stamped the same way by the
++  streaming loop (``${Pa}: Connection lost mid-response. The response above may be
++  incomplete.`` … `error:"server_error"`), as is a 5xx (`e.status>=500` →
++  `error:"server_error"`).
++* **Where the vendor types a cause** — the stream field `api_error` (`_o`: `api_error:
++  e.apiError`; `apiError` in the transcript spelling, the internal message's own name) is
++  the enum `z(["max_output_tokens","dlp_request_denied","claude_code_version_too_old",
++  "safety_monitor_blocked","effort_requires_thinking","advisor_incompatible",
++  "tool_history_mismatch","autocompact_thrashing","pdf_too_large","pdf_password_protected",
++  "no_response","tls_untrusted_ca","gateway_content_type","provider_credentials",
++  "gateway_signin_required","gateway_session_expired","api_key_auth_disabled",
++  "org_disabled_credential","invalid_credential_header","model_requires_usage_credits",
++  "long_context_credits_required","consent_unanswered","no_allowed_fallback",
++  "model_substitution_disabled","field_not_granted"])`, described as *"Typed kind of the API
++  error … for consumers that key on the cause instead of the message text (the text stays
++  the fallback and may change)."* It rides kinds the harness would otherwise retry:
++  `error:"rate_limit",apiError:"model_requires_usage_credits"` and
++  `error:"rate_limit",apiError:"long_context_credits_required"` (*"a request over the
++  200K-token context boundary needs usage credits"*) — usage-credit stops, not rate-limit
++  rejections; `error:"server_error",apiError:"no_response"` (*"no response arrived before
++  the first-byte deadline on any attempt"*); and `W="tls_untrusted_ca"` /
++  `W="gateway_content_type"` → `error:"server_error",apiError:W` (a TLS-inspecting proxy or a
++  private CA; a proxy that rewrote the response). The `unknown` kind carries
++  `gateway_signin_required` / `gateway_session_expired` / `provider_credentials`. The second
++  typed field is `api_error_code` (`apiErrorCode`): *"The server's error.details.error_code
++  … Carries server gate codes this build has no api_error value for, so a host can key on a
++  new gate without a Claude Code release."* — the wrapper that finishes every API-error
++  message sets it (`let S=oWo(g);if(S!==void 0)s.apiErrorCode=S`), and the `success`
++  wrap-up repeats it (`…Mt!==void 0&&{api_error_code:Mt}`). Hence
++  `_CLAUDE_CAUSE_FIELDS`, and the rule that a typed cause outranks the kind: only
++  `no_response` — a response that never came — names a category the harness retries, so
++  `_CLAUDE_TRANSIENT_CAUSES = {no_response}`. The schema asks consumers to *"treat an
++  unknown value as absent"*; the harness deliberately does not, and treats a typed cause it
++  has not read as not transient — that only ever withholds a retry, never grants one.
++* **`unknown` is the mapper's fallback, and how its text is built** — ``if(e instanceof
++  Pt)return Qo({content:`${Pa}: ${Pre(e)}`,error:"unknown"})`` for an API rejection no
++  earlier branch took, with `Pa="API Error"`. `Pt` is the SDK's `APIError`, whose message is
++  ``static makeMessage(n,e,t){…if(n&&r)return`${n} ${r}`;…}`` — the status first — and an
++  `APIError` with no status is never one: `static generate(n,e,t,r){if(!n||!r)return new
++  Fu({message:t,…})`, and `Fu` (`Connection error.`; `Request timed out.` for its timeout
++  subclass) is stamped `server_error` earlier. A 5xx and a 429 are stamped earlier too, so
++  the status an `unknown` report leads with is a 4xx: 408 and 409 are the ones the API
++  client's own retry rule names. The other untyped `unknown` reports are
++  ``if(e instanceof Error)return Qo({content:`${Pa}: ${e.message}`,error:"unknown"})`` and a
++  bare `return Qo({content:Pa,error:"unknown"})` — a failure that got no HTTP answer at all.
++  Hence the two-step read of an `unknown` report's text: a leading `API Error: <status>`
++  decides alone (`_UNKNOWN_STATUS_RE`), and without one only the wording of a connection
++  that failed counts (`_CONNECTION_FAILED_RE`: the SDK's and the CLI's own phrases above,
++  Node's and undici's `socket hang up`, `other side closed`, `terminated`, `fetch failed`,
++  `Premature close`, and the `JF`/`J0` codes). Never a bare number — a 400 body names
++  message indices such as `messages.536.content.0.text` — and never a bare `timeout`, which
++  is a Bash tool input field.
++* **Where an HTTP status reaches the stream** — only on the `result` wrap-up's `success`
++  variant: `variant:{subtype:"success",api_error_status:Ut,…}` with
++  `pt=n.isApiErrorMessage===!0,Ut=n.apiErrorStatus??null,Mt=n.apiErrorCode` taken from the
++  last main-loop assistant message, and `is_error:pt`. The `error_*` variants are
++  `{subtype:…,errors:ws}` with no status. The SDK schema declares an optional
++  `api_error_status` on the assistant message, but no emitter in 2.1.284 sets it (`_o` above
++  has no such key). The statuses worth another attempt are the API client's own retry rule:
++  `if(e.status===408)return!0;if(e.status===409)return!0;if(e.status===429)return!0;
++  if(e.status>=500)return!0;`.
++* **What "the session carried on" looks like** — the main-loop emitter `PYt` writes
++  `{type:"assistant",…,parent_tool_use_id:null,…,error:n.error,…_o(n),…}` and, for a tool
++  result, `{type:"user",message:n.message,session_id:Y(),parent_tool_use_id:null,…}`. A
++  sub-agent's `user` events carry the Task's `parent_tool_use_id` (the `agent_progress`
++  branch: `case"user":{yield{type:"user",message:g.message,parent_tool_use_id:
++  e.parentToolUseID,…}`). So main-session `assistant` **and** `user` events clear a report
++  (the CLI recovered); a sub-agent's never do.
++
++Not observed: a 2.1.284 stream of a real API-error death, or any record carrying a typed
++cause. The minified names (`Akr`, `rl`, `_o`, `PYt`, `JF`, `J0`, `Pt`, `Fu`, `Pa`) change
++between builds; grep the literals instead:
++
++```sh
++B="$(readlink -f "$(command -v claude)")"          # e.g. …/versions/2.1.284
++grep -ao 'new Set(\["rate_limit","overloaded","server_error"\])' "$B"
++grep -ao 'e.error==="overloaded"||e.error==="server_error"' "$B"
++grep -ao 'error:"\(rate_limit\|server_error\)",apiError[:A-Za-z_"]*' "$B" | sort -u
++grep -ao '[A-Za-z]="\(tls_untrusted_ca\|gateway_content_type\)"' "$B"
++grep -ao 'Carries server gate codes[^.]*' "$B"
++grep -ao 'error:"unknown"[^)]\{0,60\}' "$B" | sort -u
++grep -ao 'static makeMessage(.\{0,260\}' "$B"
++grep -ao 'if(e.status===408).\{0,120\}' "$B"
++```
++
+ ## A vendor sandbox that cannot start (issue #526)
+ 
+ The claims `leaves._BashSandboxProbe` and `leaves._sandbox_refusal` depend on: how a
+diff --git a/template/tests/test_builder_retry.py b/template/tests/test_builder_retry.py
+index 5e4caec..6804214 100644
+--- a/template/tests/test_builder_retry.py
++++ b/template/tests/test_builder_retry.py
+@@ -1,11 +1,12 @@
+ """The Do builder retries like every other leaf, and a failed Do says what it left (#537).
+ 
+ The reviewer and both advisory leaves run under `_invoke_leaf_resilient` (#138): a
+-transient death — the child exits non-zero before emitting any work — is retried, bounded,
+-with backoff. The builder called plain `_invoke`, so no builder failure was ever retried,
+-on the leaf where an attempt costs the most; and a Do whose attempts ran out printed an
+-argv and an exit status, while what the operator should do next depends on what is left in
+-the bundle — a bundle holding patch.diff reads BUILT, and a plain re-run runs Check on it.
++transient death — the child exits non-zero before emitting any work, or on its own report of
++a transient API error (#539) — is retried, bounded, with backoff. The builder called plain
++`_invoke`, so no builder failure was ever retried, on the leaf where an attempt costs the
++most; and a Do whose attempts ran out printed an argv and an exit status, while what the
++operator should do next depends on what is left in the bundle — a bundle holding patch.diff
++reads BUILT, and a plain re-run runs Check on it.
+ 
+ Every test here drives the real `leaves.do_build` with a stub "leaf" that is a Python
+ interpreter (the harness from test_leaf_resilience.py, copied, not imported). The stub
+diff --git a/template/tests/test_leaf_status.py b/template/tests/test_leaf_status.py
+index 3e8f391..b2ebff5 100644
+--- a/template/tests/test_leaf_status.py
++++ b/template/tests/test_leaf_status.py
+@@ -81,7 +81,7 @@ class LeafStatusMarker(unittest.TestCase):
+     def test_failure_class_maps_every_shape(self) -> None:
+         self.assertEqual(
+             leaves._failure_class(leaves.LeafError(1, ["x"], output="", produced=False)),
+-            leaves._FAIL_TRANSIENT)                       # ran, no output → retryable blip
++            leaves._FAIL_TRANSIENT)                       # ran, emitted no work → retryable blip
+         self.assertEqual(
+             leaves._failure_class(leaves.LeafError(1, ["x"], output="verdict?", produced=True)),
+             leaves._FAIL_SUBSTANTIVE)                     # ran, produced output → human
+@@ -132,8 +132,12 @@ class Section6Labelling(unittest.TestCase):
+         self._fail_advisory(d, failure=leaves._FAIL_TRANSIENT)
+         items = self._advisory_items(d)
+         self.assertEqual(len(items), 1)
+-        self.assertTrue(items[0].text.startswith("leaf did not run (transient infra — safe to re-run)"),
+-                        items[0].text)
++        # The class covers a leaf that worked for minutes and then lost the API (#539), so
++        # the row must not claim it "did not run" — it names both shapes instead.
++        self.assertTrue(items[0].text.startswith(
++            "leaf died of transient infra (before emitting any work, or on its own "
++            "report of a transient API error — safe to re-run)"), items[0].text)
++        self.assertNotIn("did not run", items[0].text)
+         # …and it reaches §6, so the empty adversarial pass can't be accepted as clean.
+         self.assertTrue(any("infra" in it for it in
+                             signoff.open_needs_human(d / "SUMMARY.md")))
+@@ -222,7 +226,7 @@ class Section6Labelling(unittest.TestCase):
+         with redirect_stdout(io.StringIO()):
+             assemble.assemble_summary(d, self.cfg)
+         items = [i for i in assemble.collect_needs_human(d, self.cfg)
+-                 if "leaf did not run" in i.text]
++                 if i.text.startswith("leaf died of transient infra")]
+         self.assertTrue(items, "a transient reviewer failure must be labelled infra in §6")
+         self.assertEqual(items[0].kind, assemble.HUMAN)
+ 
+diff --git a/template/tests/test_terminal_error_retention.py b/template/tests/test_terminal_error_retention.py
+index eaf7781..65a74f3 100644
+--- a/template/tests/test_terminal_error_retention.py
++++ b/template/tests/test_terminal_error_retention.py
+@@ -18,9 +18,9 @@ What this module holds the harness to:
+   spellings of that scope (`parent_tool_use_id`, `isSidechain`);
+ * where several candidate records arrive, the one nearest the leaf's own death wins, in
+   either arrival order;
+-* **nothing is classified**: `LeafError.transient` and the retry counts are what they
+-  were, and the guards below assert the invocation counts explicitly so a later change
+-  cannot silently move them;
++* **retention classifies nothing**: the retry verdict is issue #539's classification of
++  the record kept here (tests/test_terminal_error_classification.py), and the guards below
++  pin the invocation counts it gives these records, so no later change moves them silently;
+ * nothing else changes: `capture` still returns the child's raw stdout unmodified, the
+   codex stream format and a stream-less family degrade to today's behaviour, and a leaf
+   that exits 0 is spawned and reported exactly as today;
+@@ -365,8 +365,10 @@ class NearestRecordWins(_StubLeafCase):
+         self.assertNotIn("(no output captured)", log)
+ 
+ 
+-class NothingIsClassified(_StubLeafCase):
+-    """(v) the guard: `transient` and the retry counts are what they were."""
++class RetryCountsArePinned(_StubLeafCase):
++    """(v) the guard: `transient` and the retry counts, pinned. Issue #539 moved them for
++    one record only: a main-session report of a cause the vendor marks transient
++    (`_REPORT` is `server_error`) is now retried, however much work came first."""
+ 
+     def test_a_no_output_death_is_still_transient_and_retried_thrice(self) -> None:
+         err = self._run_leaf("", err="overloaded_error 529\n")
+@@ -374,25 +376,29 @@ class NothingIsClassified(_StubLeafCase):
+         self.assertEqual(self._runs(), 3)
+         self.assertIn("overloaded_error 529", self._log())
+ 
+-    def test_a_report_after_real_work_is_still_substantive_and_not_retried(self) -> None:
++    def test_a_transient_report_after_real_work_is_retried_thrice(self) -> None:
+         err = self._run_leaf(_stream(_WORK, _REPORT))
+-        self.assertFalse(getattr(err, "transient", True))
+-        self.assertEqual(self._runs(), 1)
++        self.assertTrue(getattr(err, "transient", None))
++        self.assertEqual(self._runs(), 3)
+ 
+-    def test_a_report_alone_is_still_substantive_and_not_retried(self) -> None:
+-        # The marked report IS an `assistant` event, so it has always counted as
+-        # "produced" — retaining its text must not move that by a hair.
++    def test_a_transient_report_alone_is_retried_thrice(self) -> None:
++        # The marked report IS an `assistant` event, so it counts as work — but it is the
++        # leaf's own account of its death, and the vendor marked that cause transient.
+         err = self._run_leaf(_stream(_REPORT))
+-        self.assertFalse(getattr(err, "transient", True))
+-        self.assertEqual(self._runs(), 1)
++        self.assertTrue(getattr(err, "transient", None))
++        self.assertEqual(self._runs(), 3)
+ 
+-    def test_produced_is_unmoved_by_a_retained_report(self) -> None:
++    def test_produced_follows_the_verdict_not_the_retained_text(self) -> None:
+         _, _, produced = self._heartbeat(_stream(_WORK, _REPORT))
+-        self.assertTrue(produced)
++        self.assertFalse(produced)
+         _, _, produced_report_only = self._heartbeat(_stream(_REPORT))
+-        self.assertTrue(produced_report_only)
++        self.assertFalse(produced_report_only)
+         _, _, produced_none = self._heartbeat("", err="overloaded_error 529\n")
+         self.assertFalse(produced_none)
++        # Retained just the same, but a cause no retry can clear: `produced` stays True.
++        _, output, produced_permanent = self._heartbeat(_stream(_WORK, _PERMANENT))
++        self.assertTrue(produced_permanent)
++        self.assertIn(_PERMANENT_TEXT, output)
+ 
+ 
+ class NothingElseChanges(_StubLeafCase):
+diff --git a/template/tests/test_terminal_error_classification.py b/template/tests/test_terminal_error_classification.py
+new file mode 100644
+index 0000000..319a63e
+--- /dev/null
++++ b/template/tests/test_terminal_error_classification.py
+@@ -0,0 +1,677 @@
++"""A leaf's death is classified by what actually happened (issue #539) — stdlib unittest.
++
++`LeafError.transient` used to be `not produced`: "did the child say anything?" standing in
++for "did it die at invocation?". That proxy is wrong both ways. It refused to retry an
++18-minute builder that did real work and *then* lost its API connection — the CLI's own
++marked report named the cause, and the harness filed a substantive failure. And it retried
++a leaf a signal killed before its first stream event — a memory-capped leaf OOM-killed at
++start-up bought three more OOMs.
++
++What this module holds the harness to, criterion by criterion:
++
++* (i) a leaf whose stream ended on its MAIN session's marked report of a cause the vendor
++  marked transient — a lost connection, an overload or 5xx, a rate-limit rejection — and
++  then exited non-zero is retried, however much work came first;
++* (ii) it is NOT retried when the vendor marked the cause permanent — by its kind, or by a
++  typed cause that outranks the kind (a usage-credit stop riding `rate_limit`), in either
++  spelling — stamped a kind or typed a cause this harness does not know, or stamped
++  nothing; when the text of a report the vendor could not classify names no category the
++  harness retries (a 400 body is not promoted by a number or a field name inside it); when
++  the leaf merely quoted an error; when real main-session work followed the report (the
++  CLI recovered); or when the report was a sub-agent's;
++* (iii) a leaf a SIGNAL killed is never transient on the strength of having said nothing —
++  as `-signum` from a direct child and as the shell's `128+signum` from a wrapper argv —
++  while the harness's own wall-clock kill (`progress.TIMEOUT_RC`) keeps today's meaning;
++* (iv) what the operator is told agrees with that: the retry line, the builder's failure
++  line, the placeholder prose and the §6 label never say "did not run" / "no output" /
++  "without emitting any work" of a leaf that ran;
++* (v) the report text is still retained, a recovered one included;
++* (vi) nothing else moves — exit 0, a stream-less family, the codex format, `capture`.
++
++Every case is a stub "leaf" that is a Python interpreter printing chosen stream events —
++no vendor CLI, no API key, no network — driven through the production path
++(`leaves._invoke_leaf_resilient` → `_invoke` → `progress.run_with_heartbeat`, or
++`leaves.do_build` for the builder). Only API that existed before this change is imported,
++so a red leg that reverts the fix fails on assertions, never on an import. The event
++shapes are the vendor's; see tests/fixtures/README.md for which are observed and which
++derived, and from which build.
++
++Run from the project root: PYTHONPATH=src python -m unittest discover -s tests
++"""
++
++from __future__ import annotations
++
++import contextlib
++import io
++import json
++import os
++import shutil
++import sys
++import tempfile
++import time
++import unittest
++from pathlib import Path
++from unittest import mock
++
++from pdca_harness import assemble, leaves, progress
++from pdca_harness.config import Config, LeafConfig
++
++FIXTURES = Path(__file__).resolve().parent / "fixtures"
++
++# The stub-leaf harness of tests/test_leaf_resilience.py, widened to die the ways a real
++# leaf dies: argv is a python interpreter running an inline script; `_invoke` appends
++# --output-format/--verbose (ignored) and feeds the prompt on stdin. The script counts its
++# invocations into $CNT, prints $STREAM to stdout and $ERR to stderr, may sleep $SLEEP
++# seconds, then either kills ITSELF with signal $SIG or exits $RC.
++_STUB = (
++    "import os,signal,sys,time\n"
++    "open(os.environ['CNT'],'a').write('x')\n"
++    "sys.stdout.write(os.environ['STREAM'])\n"
++    "sys.stdout.flush()\n"
++    "sys.stderr.write(os.environ['ERR'])\n"
++    "sys.stderr.flush()\n"
++    "time.sleep(float(os.environ.get('SLEEP') or 0))\n"
++    "if os.environ.get('SIG'):\n"
++    "    os.kill(os.getpid(), getattr(signal, os.environ['SIG']))\n"
++    "sys.exit(int(os.environ['RC']))\n"
++)
++
++
++def _leaf() -> LeafConfig:
++    return LeafConfig(mode="command", family="claude",
++                      argv=[sys.executable, "-c", _STUB], interactive=False)
++
++
++def _wrapped_leaf() -> LeafConfig:
++    """The same stub behind a real WRAPPER argv: the shell forks it (the trailing `exit`
++    stops the shell exec-ing it), so a signal that kills the stub reaches the harness as
++    the shell's own exit status, 128 + signum — the `docker run` / `sh -c` spelling."""
++    return LeafConfig(mode="command", family="claude",
++                      argv=["sh", "-c", '"$0" -c "$1"; exit $?', sys.executable, _STUB],
++                      interactive=False)
++
++
++# ---------------------------------------------------------------------------------
++# Stream events, in the shapes claude-code emits them (tests/fixtures/README.md).
++# ---------------------------------------------------------------------------------
++def _text(text: str) -> dict:
++    return {"content": [{"type": "text", "text": text}]}
++
++
++# Main-session work: the main loop's emitters hard-code `parent_tool_use_id: null`, and
++# a main-session tool result arrives as a `user` event.
++_WORK = {"type": "assistant", "parent_tool_use_id": None, "message": _text("Editing x.py")}
++_TOOL_USE = {"type": "assistant", "parent_tool_use_id": None,
++             "message": {"content": [{"type": "tool_use", "id": "toolu_01Main",
++                                      "name": "Bash", "input": {"command": "make test"}}]}}
++_TOOL_RESULT = {"type": "user", "parent_tool_use_id": None,
++                "message": {"role": "user", "content": [
++                    {"type": "tool_result", "tool_use_id": "toolu_01Main",
++                     "content": "Ran 12 tests. FAILED (failures=1)"}]}}
++# A sub-agent's traffic, forwarded with the Task's tool_use id.
++_SUB_WORK = {"type": "assistant", "parent_tool_use_id": "toolu_01Task",
++             "message": _text("sub-agent still draining")}
++_SUB_TOOL_RESULT = {"type": "user", "parent_tool_use_id": "toolu_01Task",
++                    "message": {"role": "user", "content": [
++                        {"type": "tool_result", "tool_use_id": "toolu_02Sub",
++                         "content": "ok"}]}}
++
++_LOST = "API Error: Connection lost mid-response. The response above may be incomplete."
++# Text the reader of an UNCLASSIFIED report would take as transient — it leads with a 5xx
++# and names a lost connection — used where a kind or a typed cause the vendor DID give
++# must decide instead, whatever the text says.
++_TEMPTING = ("API Error: 503 the service was overloaded, a rate limit hit, and the "
++             "connection was lost mid-response (ECONNRESET)")
++
++# What an `unknown` report reads like: `API Error: <status> <body>` for an API rejection
++# the CLI did not classify, `API Error: <message>` for a failure that got no HTTP answer.
++_BODY_536 = ('API Error: 400 {"type":"error","error":{"type":"invalid_request_error",'
++             '"message":"messages.536.content.0.text: cache_control cannot be set for empty '
++             'text blocks"}}')
++_BODY_TIMEOUT_FIELD = ('API Error: 400 {"type":"error","error":{"type":"invalid_request_'
++                       'error","message":"messages.40.content.1.tool_use.input.timeout: '
++                       'Input should be a valid integer"}}')
++_BODY_EVERY_PHRASE = ('API Error: 400 {"type":"error","error":{"type":"invalid_request_'
++                      'error","message":"tool_result quotes: Connection to the API was lost '
++                      '(ECONNRESET); socket hang up; Request timed out; fetch failed; 503"}}')
++
++
++def _report(kind="server_error", text: str = _LOST, **extra) -> dict:
++    """The CLI's own marked report of an API error, from the MAIN session (stream
++    spelling). ``kind=None`` leaves it unstamped."""
++    ev = {"type": "assistant", "parent_tool_use_id": None, "is_api_error_message": True,
++          "message": _text(text)}
++    if kind is not None:
++        ev["error"] = kind
++    ev.update(extra)
++    return ev
++
++
++def _transcript_report(kind: str = "server_error", text: str = _LOST, **extra) -> dict:
++    """The same report in the persisted transcript's spelling: `isApiErrorMessage`, the
++    scope as `isSidechain`, no `parent_tool_use_id` key, and camel-cased typed causes."""
++    return {"type": "assistant", "isSidechain": False, "isApiErrorMessage": True,
++            "error": kind, "message": _text(text), **extra}
++
++
++def _wrapup(subtype: str = "success", status: int | None = None,
++            text: str = _LOST, **extra) -> dict:
++    """The session's `result` record. Only the `success` variant carries the HTTP status
++    of the API error that ended it; an `error_*` variant carries an `errors` list."""
++    ev: dict = {"type": "result", "subtype": subtype, "is_error": True}
++    if subtype == "success":
++        ev["result"] = text
++    else:
++        ev["errors"] = [text]
++    if status is not None:
++        ev["api_error_status"] = status
++    ev.update(extra)
++    return ev
++
++
++def _stream(*events: dict) -> str:
++    return "".join(json.dumps(ev) + "\n" for ev in events)
++
++
++@contextlib.contextmanager
++def _stdout_fd_to(path: Path):
++    """Point this process's fd 1 at ``path`` — a stream-less leaf inherits stdout, and its
++    output must not land in the suite's own (a gate reads that as the run's verdict)."""
++    sys.stdout.flush()
++    saved = os.dup(1)
++    with open(path, "w", encoding="utf-8") as sink:
++        os.dup2(sink.fileno(), 1)
++    try:
++        yield
++    finally:
++        sys.stdout.flush()
++        os.dup2(saved, 1)
++        os.close(saved)
++
++
++class _StubLeafCase(unittest.TestCase):
++    def setUp(self) -> None:
++        self.tmp = Path(tempfile.mkdtemp())
++        self.cnt = self.tmp / "count.txt"
++        self.error_log = self.tmp / "check-review.error.log"
++        self.stderr = ""
++
++    def tearDown(self) -> None:
++        shutil.rmtree(self.tmp, ignore_errors=True)
++
++    def _env(self, stream: str, err: str, rc: int, sig: str, sleep: float) -> dict:
++        return {"CNT": str(self.cnt), "STREAM": stream, "ERR": err, "RC": str(rc),
++                "SIG": sig, "SLEEP": str(sleep)}
++
++    def _run(self, stream: str, *, err: str = "", rc: int = 1, sig: str = "",
++             leaf: LeafConfig | None = None, stream_json: bool = True):
++        """Through the production leaf path, with the shipped attempt budget spelled as
++        tests/test_leaf_resilience.py spells it. Keeps what the harness printed."""
++        self.cnt.unlink(missing_ok=True)
++        buf = io.StringIO()
++        with contextlib.redirect_stderr(buf):
++            err_ = leaves._invoke_leaf_resilient(
++                leaf or _leaf(), self.tmp, "review please", error_log=self.error_log,
++                attempts=3, backoff=0.0, stream_json=stream_json,
++                env=self._env(stream, err, rc, sig, 0))
++        self.stderr = buf.getvalue()
++        return err_
++
++    def _heartbeat(self, stream: str, *, rc: int = 1, sleep: float = 0,
++                   timeout: int | None = None, capture: bool = False,
++                   fmt: str = "claude-stream-json"):
++        env = {**os.environ, **self._env(stream, "", rc, "", sleep)}
++        with contextlib.redirect_stderr(io.StringIO()):
++            return progress.run_with_heartbeat(
++                [sys.executable, "-c", _STUB], env=env, capture=capture, stream_json=True,
++                tee_stderr=True, stream_format=fmt, timeout=timeout)
++
++    def _runs(self) -> int:
++        return len(self.cnt.read_text()) if self.cnt.exists() else 0
++
++    def _log(self) -> str:
++        self.assertTrue(self.error_log.exists(), "no error log was written")
++        return self.error_log.read_text(encoding="utf-8")
++
++    def _assert_retried(self, err) -> None:
++        self.assertIsInstance(err, leaves.LeafError)
++        self.assertTrue(err.transient, f"expected transient; rc={err.returncode}")
++        self.assertEqual(self._runs(), 3, "a transient death is retried to the budget")
++        self.assertEqual(leaves._failure_class(err), leaves._FAIL_TRANSIENT)
++
++    def _assert_not_retried(self, err) -> None:
++        self.assertIsInstance(err, leaves.LeafError)
++        self.assertFalse(err.transient, f"expected substantive; rc={err.returncode}")
++        self.assertEqual(self._runs(), 1, "a non-transient death is not re-run")
++        self.assertEqual(leaves._failure_class(err), leaves._FAIL_SUBSTANTIVE)
++
++    def _each_retried(self, *streams: str) -> None:
++        for stream in streams:
++            with self.subTest(stream=stream):
++                self._assert_retried(self._run(stream))
++
++    def _each_not_retried(self, *streams: str) -> None:
++        for stream in streams:
++            with self.subTest(stream=stream):
++                self._assert_not_retried(self._run(stream))
++
++
++class TransientCauseAfterWorkIsRetried(_StubLeafCase):
++    """(i) the vendor marked the cause transient ⇒ retried, however much work came first."""
++
++    def test_a_lost_connection_after_real_work_is_retried(self) -> None:
++        # The incident: work, then the CLI's own report of the dropped connection, exit 1.
++        self._assert_retried(self._run(_stream(_WORK, _TOOL_USE, _TOOL_RESULT, _report())))
++
++    def test_however_much_work_came_first(self) -> None:
++        long_session = [_WORK, _TOOL_USE, _TOOL_RESULT] * 60
++        self._assert_retried(self._run(_stream(*long_session, _report())))
++
++    def test_each_kind_the_harness_retries(self) -> None:
++        # `server_error` (a 5xx, a lost connection) and `overloaded` are the vendor's own
++        # main-session rule; `rate_limit` — a mid-session rate-limit rejection — is this
++        # project's policy (tests/fixtures/README.md).
++        self._each_retried(*(_stream(_WORK, _report(kind))
++                             for kind in ("server_error", "overloaded", "rate_limit")))
++
++    def test_a_typed_cause_that_names_a_response_that_never_came(self) -> None:
++        # The one typed cause in the retried category: no first byte before the deadline,
++        # on any attempt. A typed cause outranks the kind, so it must be read as transient
++        # in its own right.
++        self._assert_retried(self._run(_stream(_WORK, _report(
++            "server_error", "API Error: Request timed out. (waited 5m, then 5m on the retry)",
++            api_error="no_response"))))
++
++    def test_an_unclassified_report_that_leads_with_a_status_a_retry_can_clear(self) -> None:
++        # `unknown` is the vendor saying "I could not classify this". Its leading status
++        # is read: 408 and 409 are the only statuses the API client retries that reach it
++        # (a 5xx and a 429 are stamped earlier), and a 5xx still counts if one does.
++        self._each_retried(*(_stream(_WORK, _report("unknown", text)) for text in (
++            "API Error: 408 Request Timeout",
++            'API Error: 409 {"type":"error","error":{"type":"conflict_error"}}',
++            "API Error: 503 Service Unavailable",
++            "API Error: 529 Overloaded")))
++
++    def test_an_unclassified_report_of_a_connection_that_failed(self) -> None:
++        # No status to lead with: a failure that never got an HTTP answer, read only for
++        # the wording a failed connection has — the SDK's, the CLI's, Node's, undici's —
++        # and the CLI's own connection-error codes.
++        self._each_retried(*(_stream(_WORK, _report("unknown", text)) for text in (
++            "API Error: Connection error.",
++            "API Error: Connection closed before the response finished",
++            "API Error: Request timed out.",
++            "API Error: socket hang up",
++            "API Error: other side closed",
++            "API Error: Premature close",
++            "API Error: fetch failed",
++            "API Error: terminated",
++            "API Error: read ECONNRESET")))
++
++    def test_the_wrapup_that_follows_the_report_does_not_bury_its_cause(self) -> None:
++        # The `result` wrap-up names the effect; the report before it names the cause.
++        self._each_retried(
++            _stream(_WORK, _report(), _wrapup()),
++            _stream(_WORK, _report(), _wrapup("error_during_execution",
++                                              text="[ede_diagnostic] turn aborted")))
++
++    def test_a_wrapup_carrying_a_429(self) -> None:
++        # 429 is not in the 5xx range, so only the transient-status set can admit it.
++        self._assert_retried(self._run(_stream(_WORK, _wrapup(status=429))))
++
++    def test_a_wrapup_carrying_a_5xx(self) -> None:
++        self._assert_retried(self._run(_stream(_WORK, _wrapup(status=503))))
++
++    def test_a_sub_agent_that_keeps_draining_does_not_clear_the_report(self) -> None:
++        # Only MAIN-session work means the CLI recovered: a Task's trailing traffic is not
++        # the session carrying on.
++        self._assert_retried(self._run(_stream(_WORK, _report(), _SUB_WORK,
++                                               _SUB_TOOL_RESULT)))
++
++
++class NotEveryReportIsTransient(_StubLeafCase):
++    """(ii) permanent, typed, unknown-to-us, unstamped, unreadable, quoted, recovered or a
++    sub-agent's ⇒ not retried."""
++
++    def test_a_permanent_cause_is_not_promoted_by_its_prose(self) -> None:
++        self._each_not_retried(*(_stream(_WORK, _report(kind, _TEMPTING)) for kind in (
++            "invalid_request", "authentication_failed", "billing_error", "model_not_found")))
++
++    def test_a_kind_this_harness_does_not_recognise(self) -> None:
++        self._assert_not_retried(self._run(_stream(_WORK, _report("quota_v2", _TEMPTING))))
++
++    def test_a_report_the_vendor_left_unstamped(self) -> None:
++        # No `error` kind at all: the message never went through the vendor's mapper, so
++        # there is no vendor judgement to follow — and neither prose nor a stray typed
++        # cause is one.
++        self._each_not_retried(_stream(_WORK, _report(None, _LOST)),
++                               _stream(_WORK, _report(None, _LOST, api_error="no_response")))
++
++    def test_a_rate_limit_the_vendor_typed_as_a_usage_credit_stop(self) -> None:
++        # Stamped `rate_limit`, but typed as an entitlement stop: a request past the 200K
++        # context boundary without usage credits, or a model that needs them. A fresh
++        # attempt re-does the work and meets the same stop — the typed cause outranks the
++        # kind the harness would otherwise retry.
++        self._each_not_retried(*(_stream(_WORK, _report("rate_limit", text, api_error=cause))
++                                 for cause, text in (
++            ("long_context_credits_required",
++             "API Error: Usage credits required for 1M context · run /usage-credits"),
++            ("model_requires_usage_credits",
++             "You're out of included usage for this model · turn on usage credits"))))
++
++    def test_a_server_error_the_vendor_typed_as_a_stop_a_retry_meets_again(self) -> None:
++        # Stamped `server_error`, typed as a TLS trust failure (a TLS-inspecting proxy, a
++        # private CA) or a proxy that rewrote the response: configuration, not a blip.
++        self._each_not_retried(*(_stream(_WORK, _report("server_error", _TEMPTING,
++                                                        api_error=cause))
++                                 for cause in ("tls_untrusted_ca", "gateway_content_type")))
++
++    def test_a_typed_cause_this_harness_has_not_read(self) -> None:
++        # The schema adds typed causes over time. One this harness has not read is not
++        # taken as transient, whatever kind it rides — that only ever withholds a retry.
++        self._assert_not_retried(self._run(_stream(_WORK, _report(
++            "server_error", _TEMPTING, api_error="some_cause_added_next_year"))))
++
++    def test_a_server_gate_code_outranks_the_kind(self) -> None:
++        # `api_error_code` carries a server gate this CLI has no typed kind for yet — the
++        # channel a new usage-credit stop arrives on before a CLI release names it.
++        self._assert_not_retried(self._run(_stream(_WORK, _report(
++            "rate_limit", "API Error: Request rejected (429)",
++            api_error_code="credits_required"))))
++
++    def test_the_transcript_spelling_of_a_typed_cause(self) -> None:
++        # The same typed causes spelled as the persisted transcript spells them: the mark
++        # (`isApiErrorMessage`) is honoured in that spelling, so the cause must be too.
++        self._each_not_retried(
++            _stream(_WORK, _transcript_report(
++                "unknown", "API Error: gateway session timed out; connection lost",
++                apiError="gateway_session_expired")),
++            _stream(_WORK, _transcript_report(
++                "rate_limit", "API Error: Usage credits required for 1M context",
++                apiError="long_context_credits_required")),
++            _stream(_WORK, _transcript_report(
++                "rate_limit", "API Error: Request rejected (429)",
++                apiErrorCode="credits_required")))
++
++    def test_an_unclassified_report_the_vendor_typed_is_not_read_as_prose(self) -> None:
++        # claude-code stamps `unknown` plus a typed cause for a gateway sign-in or a
++        # provider credential failure: the vendor did type the cause, so its text is not
++        # read.
++        self._assert_not_retried(self._run(_stream(_WORK, _report(
++            "unknown", "API Error: gateway session timed out; connection lost",
++            api_error="gateway_session_expired"))))
++
++    def test_an_unclassified_report_is_decided_by_its_leading_status_alone(self) -> None:
++        # A 400 body the CLI could not classify: its message index (`messages.536…`) is
++        # no 5xx, its Bash-input field name (`…input.timeout`) is no timeout, and a body
++        # that quotes every connection phrase is still a 400.
++        self._each_not_retried(*(_stream(_WORK, _report("unknown", body))
++                                 for body in (_BODY_536, _BODY_TIMEOUT_FIELD,
++                                              _BODY_EVERY_PHRASE)))
++
++    def test_an_unclassified_report_without_a_status_names_no_failed_connection(self) -> None:
++        # No leading status, and none of a failed connection's wording: an incidental
++        # number and a field called `timeout` are not read as either.
++        self._each_not_retried(*(_stream(_WORK, _report("unknown", text)) for text in (
++            "API Error: Unexpected value at messages.536.content.0.input.timeout",
++            "API Error: Unexpected token < in JSON at position 0",
++            "API Error")))
++
++    def test_a_leaf_that_merely_quotes_an_error_is_untouched(self) -> None:
++        # An UNMARKED assistant message is the leaf talking, whatever it says.
++        quoted = {"type": "assistant", "parent_tool_use_id": None, "error": "server_error",
++                  "message": _text(_LOST)}
++        self._assert_not_retried(self._run(_stream(_WORK, quoted)))
++
++    def test_recovered_through_more_assistant_work(self) -> None:
++        self._assert_not_retried(self._run(_stream(_WORK, _report(), _WORK)))
++
++    def test_recovered_through_a_main_session_tool_cycle(self) -> None:
++        # A main-session tool result is a `user` event: the CLI recovered, ran a tool, and
++        # the leaf then failed on its own merits.
++        self._assert_not_retried(self._run(_stream(_WORK, _report(), _TOOL_RESULT)))
++
++    def test_a_sub_agents_report_never_classifies(self) -> None:
++        sub = _report("overloaded", parent_tool_use_id="toolu_01Task")
++        side = {**_report("overloaded"), "isSidechain": True}
++        del side["parent_tool_use_id"]  # the transcript spelling carries no such key
++        self._each_not_retried(_stream(_WORK, sub), _stream(_WORK, side))
++
++    def test_the_status_on_an_execution_error_wrapup_is_not_read(self) -> None:
++        # Only the `success` wrap-up is the CLI's "this session ended on my API-error
++        # message"; an `error_*` one ends on whatever threw, whatever status it carries.
++        wrap = {**_wrapup("error_during_execution", text="turn aborted"),
++                "api_error_status": 503}
++        self._assert_not_retried(self._run(_stream(_WORK, wrap)))
++
++    def test_a_wrapup_status_no_retry_can_clear(self) -> None:
++        self._each_not_retried(_stream(_WORK, _wrapup(status=400)),
++                               _stream(_WORK, _wrapup(status=None)))
++
++    def test_a_wrapup_carrying_a_server_gate_code(self) -> None:
++        # The wrap-up repeats the gate code of the error that ended the turn: a 429 the
++        # server gated is a stop, not a rejection a retry can clear.
++        self._assert_not_retried(self._run(_stream(_WORK, _wrapup(
++            status=429, api_error_code="credits_required"))))
++
++    def test_the_leafs_newer_account_of_its_death_wins(self) -> None:
++        self._assert_not_retried(self._run(_stream(_WORK, _report(),
++                                                   _report("invalid_request", _TEMPTING))))
++
++    def test_a_wrapup_status_cannot_overrule_the_reported_cause(self) -> None:
++        self._assert_not_retried(self._run(_stream(
++            _WORK, _report("invalid_request", _TEMPTING), _wrapup(status=503))))
++
++    def test_a_malformed_record_is_a_verdict_not_a_crash(self) -> None:
++        # The classifier runs in the stream's drain thread: a field of an unexpected type
++        # must read as "not transient", never raise — or no line after it is read at all.
++        for name, bad in (
++                ("listed kind", _report(["server_error"])),
++                ("mapping cause", _report("server_error", api_error={"no": "hash"})),
++                ("listed cause", _report("server_error", api_error=["no_response"])),
++                ("text status", {**_wrapup(), "api_error_status": "503"})):
++            with self.subTest(field=name):
++                self._assert_not_retried(self._run(_stream(_WORK, bad)))
++                # …and the drain read on: a well-formed report after it still decides.
++                self._assert_retried(self._run(_stream(_WORK, bad, _report())))
++
++
++class SignalDeathIsNotTransient(_StubLeafCase):
++    """(iii) the manner of the kill: a signal death is never re-run for having said
++    nothing, in either returncode spelling; the harness's own timeout keeps its meaning."""
++
++    def test_a_silent_leaf_killed_by_sigkill_is_not_re_run(self) -> None:
++        err = self._run("", err="", sig="SIGKILL")
++        self.assertEqual(err.returncode, -9)
++        self._assert_not_retried(err)
++
++    def test_a_silent_leaf_killed_by_sigterm_is_not_re_run(self) -> None:
++        err = self._run("", sig="SIGTERM")
++        self.assertEqual(err.returncode, -15)
++        self._assert_not_retried(err)
++
++    def test_the_wrapper_spelling_of_a_sigkill(self) -> None:
++        # A real wrapper argv: the shell outlives the killed stub and exits 128 + 9.
++        err = self._run("", sig="SIGKILL", leaf=_wrapped_leaf())
++        self.assertEqual(err.returncode, 137)
++        self._assert_not_retried(err)
++
++    def test_a_bare_exit_137_is_read_as_the_same_death(self) -> None:
++        err = self._run("", rc=137)
++        self._assert_not_retried(err)
++
++    def test_the_kill_outranks_a_transient_report(self) -> None:
++        # What ended the leaf was the signal, not the API it reported on.
++        self._assert_not_retried(self._run(_stream(_WORK, _report()), sig="SIGKILL"))
++
++    def test_an_ordinary_silent_death_is_still_retried(self) -> None:
++        # #138 unchanged: a non-zero exit before any work, no signal involved. 128 is the
++        # shell's base alone (no signal 0) and 255 is past every signal number.
++        for rc in (1, 2, 128, 255):
++            with self.subTest(rc=rc):
++                err = self._run("", err="overloaded_error 529\n", rc=rc)
++                self.assertEqual(err.returncode, rc)
++                self._assert_retried(err)
++
++    def test_the_harness_timeout_keeps_todays_meaning(self) -> None:
++        # TIMEOUT_RC is "the oracle did not answer": a silent timed-out leaf reads
++        # transient as before, and one that worked is not re-labelled by its stream.
++        self.assertTrue(leaves.LeafError(progress.TIMEOUT_RC, ["x"],
++                                         produced=False).transient)
++        self.assertFalse(leaves.LeafError(progress.TIMEOUT_RC, ["x"],
++                                          produced=True).transient)
++        rc, _, produced = self._heartbeat(_stream(_WORK, _report()), sleep=30, timeout=1)
++        self.assertEqual(rc, progress.TIMEOUT_RC)
++        self.assertTrue(produced)
++
++
++class _Clock:
++    """`time` as `leaves` sees it, minus the wait: each backoff is recorded, not slept
++    (the shape tests/test_builder_retry.py uses — copied, not imported)."""
++
++    def __init__(self) -> None:
++        self.slept: list[float] = []
++
++    def sleep(self, seconds: float) -> None:
++        self.slept.append(seconds)
++
++    def __getattr__(self, name: str):
++        return getattr(time, name)
++
++
++class WhatTheOperatorIsTold(_StubLeafCase):
++    """(iv) every message about the decision states the same true thing."""
++
++    def test_the_retry_line_does_not_say_no_output_of_a_leaf_that_worked(self) -> None:
++        self._run(_stream(_WORK, _report()))
++        self.assertIn("retry 1/2", self.stderr)
++        self.assertIn("report of a transient API error", self.stderr)
++        self.assertNotIn("no output", self.stderr)
++
++    def test_the_builders_failure_line_for_the_headline_leaf(self) -> None:
++        # The builder is on the same retry path (#537): an 18-minute builder that ends on
++        # its own transient report is retried, and the line it leaves when the retries are
++        # spent must not say it emitted no work.
++        cfg = Config(root=self.tmp, bundle_root=self.tmp / "results",
++                     process_dir=self.tmp / "process", templates_dir=self.tmp / "templates",
++                     default_branch="main", tracker_system="github", tracker_url="",
++                     issue_id_example="#1", builder=_leaf(),
++                     reviewer=LeafConfig(mode="stub", family="codex"), worktree=False)
++        d = cfg.bundle("539")
++        d.mkdir(parents=True)
++        (d / "brief.md").write_text("- **Slug:** headline\n- **Test file:** tests/test_x.py\n",
++                                    encoding="utf-8")
++        env = self._env(_stream(_WORK, _TOOL_USE, _TOOL_RESULT, _report()), "", 1, "", 0)
++        out = io.StringIO()
++        with mock.patch.dict(os.environ, env), mock.patch.object(leaves, "time", _Clock()), \
++                contextlib.redirect_stderr(out):
++            with self.assertRaises(leaves.LeafError):
++                leaves.do_build(d, cfg)
++        self.assertEqual(self._runs(), 3, "the builder's transient death is retried")
++        self.assertIn("— transient:", out.getvalue())
++        self.assertIn("report of a transient API error", out.getvalue())
++        self.assertNotIn("without emitting any work", out.getvalue())
++
++    def test_the_section6_row_for_the_headline_leaf(self) -> None:
++        # From the stream to the row the human reads at sign-off.
++        err = self._run(_stream(_WORK, _TOOL_USE, _TOOL_RESULT, _report()))
++        with contextlib.redirect_stderr(io.StringIO()):
++            leaves._review_unavailable(self.tmp, f"reviewer leaf failed: {err}",
++                                       failure=leaves._failure_class(err),
++                                       error_log=self.error_log)
++        text = (self.tmp / "check-review.md").read_text(encoding="utf-8")
++        self.assertEqual(assemble.leaf_status(text), assemble.LEAF_STATUS_INFRA)
++        items = assemble._items_from_artifact(text)
++        self.assertTrue(items)
++        for it in items:
++            self.assertNotIn("did not run", it.text)
++            self.assertIn("safe to re-run", it.text)
++
++    def test_the_label_and_the_placeholder_name_both_shapes(self) -> None:
++        label = assemble._LEAF_STATUS_LABEL[assemble.LEAF_STATUS_INFRA]
++        prose = leaves._unavailable_classification(leaves._FAIL_TRANSIENT, None)
++        for said in (label, prose):
++            with self.subTest(said=said[:40]):
++                self.assertNotIn("did not run", said)
++                self.assertNotIn("with no output", said)
++                self.assertIn("before emitting any work", said)          # shape one …
++                self.assertIn("report of a transient API error", said)   # … and shape two
++
++
++class RetentionIsUnchanged(_StubLeafCase):
++    """(v) child-1's retention holds under the new verdict."""
++
++    def test_every_attempt_keeps_its_report(self) -> None:
++        self._run(_stream(_WORK, _report()))
++        self.assertEqual(self._log().count(_LOST), 3)
++
++    def test_a_recovered_report_is_kept_though_it_is_not_the_verdict(self) -> None:
++        self._assert_not_retried(self._run(_stream(_WORK, _report(), _TOOL_RESULT)))
++        self.assertIn(_LOST, self._log())
++        self.assertNotIn("(no output captured)", self._log())
++
++    def test_a_typed_stop_is_kept_though_it_is_not_retried(self) -> None:
++        text = "API Error: Usage credits required for 1M context · run /usage-credits"
++        self._assert_not_retried(self._run(_stream(_WORK, _report(
++            "rate_limit", text, api_error="long_context_credits_required"))))
++        self.assertIn(text, self._log())
++
++
++class NothingElseChanges(_StubLeafCase):
++    """(vi) the verdict moves nothing but the retry decision on a failed run."""
++
++    def test_a_leaf_that_exits_zero_is_reported_as_today(self) -> None:
++        for stream in (_stream(_WORK, _report()), _stream(_report(), _WORK)):
++            with self.subTest(stream=stream[:30]):
++                self.assertIsNone(self._run(stream, rc=0))
++                self.assertEqual(self._runs(), 1)
++                self.assertFalse(self.error_log.exists())
++
++    def test_exit_zero_keeps_produced_as_it_was(self) -> None:
++        # The verdict describes a run that FAILED: a session that ended on a transient
++        # report and still exited 0 did work, and `produced` keeps saying so.
++        rc, _, produced = self._heartbeat(_stream(_WORK, _report()), rc=0)
++        self.assertEqual(rc, 0)
++        self.assertTrue(produced)
++
++    def test_a_stream_less_family_still_reports_substantive(self) -> None:
++        # No stream parse, so no verdict: the `produced=True` fallback is untouched.
++        with _stdout_fd_to(self.tmp / "inherited-stdout.txt"):
++            err = self._run(_stream(_WORK, _report()), stream_json=False)
++        self._assert_not_retried(err)
++
++    def test_the_codex_format_does_not_read_a_claude_report(self) -> None:
++        codex_work = {"type": "item.completed", "item": {"type": "agent_message"}}
++        _, _, produced = self._heartbeat(_stream(codex_work, _report()),
++                                         fmt="codex-stream-json")
++        self.assertTrue(produced)
++
++    def test_capture_still_returns_the_childs_raw_stdout(self) -> None:
++        stream = _stream(_WORK, _report())
++        _, output, _ = self._heartbeat(stream, capture=True)
++        self.assertEqual(output, stream)
++
++
++class PinnedVendorRecords(_StubLeafCase):
++    """The same rules against bytes a real CLI wrote (tests/fixtures/README.md)."""
++
++    def _fixture(self, name: str) -> str:
++        path = FIXTURES / name
++        if not path.is_file():
++            self.skipTest(f"pinned vendor fixture {name} is not present")
++        return path.read_text(encoding="utf-8")
++
++    def test_the_observed_incident_record_after_work_is_retried(self) -> None:
++        for name in ("claude_api_error_death.stream.jsonl",
++                     "claude_api_error_death.transcript.jsonl"):
++            with self.subTest(fixture=name):
++                self._assert_retried(self._run(_stream(_WORK) + self._fixture(name)))
++
++    def test_the_observed_permanent_record_after_work_is_not(self) -> None:
++        for name in ("claude_api_error_permanent.stream.jsonl",
++                     "claude_api_error_permanent.transcript.jsonl"):
++            with self.subTest(fixture=name):
++                self._assert_not_retried(self._run(_stream(_WORK) + self._fixture(name)))
++
++
++if __name__ == "__main__":
++    unittest.main()

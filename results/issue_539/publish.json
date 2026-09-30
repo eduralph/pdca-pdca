@@ -1,0 +1,12 @@
+{
+  "mode": "stacked-pr",
+  "branch": "fix/539-what-a-transient-leaf-death-is-decided-once",
+  "pr_url": "https://github.com/eduralph/pdca-harness/pull/588",
+  "base": "pdca-integration/main",
+  "repo": "eduralph/pdca-harness",
+  "by": "Eduard Ralph",
+  "date": "2026-09-28",
+  "id_pending": false,
+  "host_ci_base": "41c19e9fff34364200dc9bac4aef02c5154467ed",
+  "stacks_on": []
+}

@@ -1,0 +1,87 @@
+REPLAN — re-author this ONE brief. Do NOT split: the human ruled at sign-off that this stays a
+single slice (it is already depth 3 of the #536 split, siblings #540/#537, and does not need
+deepening again). Return to Plan because the remaining work needs SPECIFYING, not because the
+slice is too big.
+
+WHY PLAN AND NOT A REBUILD: the remaining defect is no longer "tighten a matching rule" but a
+redesign of the leaf-status mechanism, and three consecutive rounds have shown Do cannot author
+it from a carry-forward paragraph. Round 2 shipped "match the marker anywhere", holed by a
+quoted marker. Round 3 shipped an 8-line header window, holed by a fenced block opening at line
+5. Round 4 made `unowned-empty` a recognised token, which self-triggers on any artifact that
+quotes it — including any advisory reviewing this very issue. Each round closed the previous
+hole and opened a new one in the same mechanism, because each round was given the destination
+and left to guess the route. The replanned brief must specify the route.
+
+WHAT THE REPLANNED BRIEF KEEPS — criteria 1, 2, 3, 5, 6 are MET by the patch in this bundle and
+must be carried forward as "keep as built", not re-derived. All three lenses confirm it; the
+code-review lens found no correctness bug at all. Specifically: all three harvest sites share
+one owner and `_LeafHarvest.run` is the only caller of `_invoke_leaf_resilient`, so a fourth
+site cannot grow its own copy (criterion 6, stronger than the brief asked); the retry contract
+is untouched, `_runs() == 3` under a locked sandbox (criterion 5); the residue de-dup accounts
+for an un-removable residue exactly once across three deaths; the residue quote is head/tail
+bounded; the red->green is honest through the real entry points and was independently
+re-reproduced by both advisory lenses. Do not re-open the structure and do not re-slice.
+
+WHAT THE REPLANNED BRIEF RE-SPECIFIES — criterion 4 only (the leaf-status label / marker).
+
+  DESIGN CHOSEN BY THE HUMAN AT SIGN-OFF — this is the intent to specify, not an open question:
+  invert the marker to a POSITIVE COMPLETION signal, written as the LAST LINE of the artifact,
+  and written BY THE LEAF ITSELF. Its presence means the artifact closed successfully; its
+  ABSENCE means something did not close, and those cases get surfaced and worked through one by
+  one.
+
+  WHY THIS BEATS THE ALTERNATIVES (record the reasoning, do not re-litigate it):
+  - It removes the use/mention collision that has now defeated three implementations. Only the
+    final line is consulted, so a real report may quote the marker anywhere in its body — which
+    is exactly what any advisory reviewing this harness must do — with no effect.
+  - A leaf-written trailer detects TRUNCATION, which is the actual defect class here (a dying
+    attempt leaves a half-written report). A harness-written stamp applied on exit 0 would only
+    re-assert "the process exited cleanly", which the harness already knows, and would still
+    stamp a report whose generation stopped mid-way.
+
+  QUESTIONS THE REPLAN MUST ANSWER IN THE BRIEF — leaving any of these to Do repeats the loop:
+  1. Non-cooperating leaves. Leaves are arbitrary external commands, including third-party
+     ones; nothing can compel them to emit a trailer. Model-backed leaves can be INSTRUCTED via
+     their prompt; non-model command leaves cannot. Specify per-leaf-kind behaviour, or a
+     declared capability, so a leaf that cannot stamp is not permanently read as failing.
+  2. False "incomplete". A model leaf that finishes correctly but omits the trailer reads as a
+     failure. Specify the tolerance — corroborate against the exit code and the ownership
+     signal this bundle's `_LeafHarvest` already computes, rather than trusting the trailer
+     alone.
+  3. Legacy migration. NO existing artifact in ANY bundle carries the trailer, so on the day
+     this lands the entire back catalogue reads as "did not close successfully" — including
+     every artifact the corpus / size-signal scripts read. Specify the legacy rule ("no trailer
+     AND no recorded failure ⇒ legacy, stay quiet"), or state deliberately that history should
+     flag. The human's "catch them one by one" was said of GOING FORWARD; confirm the scope at
+     Plan.
+  4. The #278 contract. The existing guard (tests/test_leaf_status.py:194,
+     `test_an_impl_tagged_finding_in_a_placeholder_cannot_smuggle_in_impl`) exists to stop
+     findings being smuggled out of placeholders. An inverted marker must keep that property.
+  5. All THREE readers, not one. `leaf_status` is read at assemble.py:168, size_signal.py:240
+     and leaves.py:3057; this bundle's patch only goes near the first. The marker is WRITTEN at
+     exactly one site today (leaves.py:2664, `_unavailable_classification` — the harness's own
+     placeholder generator; no leaf writes it now), so the redesign adds a write site in the
+     leaf path and must convert every reader together. Say so in the brief's scope.
+
+DECISIONS ALREADY TAKEN AT SIGN-OFF — carry into the replanned brief, do not re-open:
+- The metadata-only-touch hole is ACCEPTED and lived with (the reviewer's C3/C5 FAIL; identity
+  at leaves.py:1074 includes st_mtime_ns/st_ctime_ns, so a live attempt that only chmods or
+  utimes an artifact moves the tuple, the ownership lookup misses, and a dead attempt's
+  artifact can still be harvested). The human accepted this knowingly, to see whether it occurs
+  in practice; it is filed as an issue and recorded in SUMMARY §10. Do NOT change
+  `_residue_identity`, do NOT remove `st_ctime_ns`, do NOT add a digest cross-check on a moved
+  identity. If it is ever observed in the wild it returns as its own issue.
+- The related Validation / fitness-to-purpose question (may real leaves perform metadata-only
+  permission repair) is answered by that same acceptance.
+- T5 dependency ordering on #540 is CONFIRMED as a publish-time concern, not a patch defect;
+  `stack-base` already reads `pdca-integration/main`, which carries #540.
+
+EVIDENCE NOTE FOR THE REPLAN: the round-4 adversary measured the current defect against base on
+an artifact holding a fenced quote of the `unowned-empty` marker plus one genuine `[impl]`
+finding — base gave `impl` with autoiterate eligible, patched gave `human`, not eligible, with
+the finding's #264 routing stripped. The replanned brief must name that shape as a required
+test leg, and require it to be genuinely RED on the base: the existing guard
+(tests/test_attempt_harvest.py:449, token `some-future-status`) is green pre-fix and therefore
+proves nothing. More generally the adversary observed that the whole identity mechanism carries
+no red->green proof (tests/test_attempt_harvest.py:304,324,340 are green pre-fix as well as
+post), which is structurally how the round-4 hole survived into a fourth round.

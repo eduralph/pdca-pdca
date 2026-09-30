@@ -1,0 +1,15 @@
+Reviewing the attempt-aware harvest fix that must prevent dead retry artifacts from being filed as live reviewer, advisory, or plan-advisory output while preserving recoverable evidence.
+
+| Item | Verdict | Basis |
+|------|---------|-------|
+| C1 Spec | PASS | The brief gives an executable three-site reproduction and separately specifies dead-residue refusal, evidence preservation, live-output behavior, unchanged retries, truthful status, and one shared owner; the corresponding production-path cases begin at `template/tests/test_attempt_harvest.py:188`. |
+| C2 Reproduction (red pre-fix) | PASS | With the tracked production changes stashed, the focused test module reproduced the defect at all three sites (9 failures and 3 errors); the three-site assertion is grounded at `template/tests/test_attempt_harvest.py:188`. |
+| C3 Change | FAIL | A real artifact that quotes an unknown status as a standalone line inside an early fenced block is classified as a placeholder, converting its `[impl]` finding to HUMAN/“no verdict”; the first-eight-lines heuristic does not exclude fenced quotes at `template/src/pdca_harness/assemble.py:130`. |
+| C4 Verification (red→green) | PASS | Independent replay produced the pre-fix red above and then 13/13 green after restoring the patch; the live-overwrite, refusal, preservation, label, and shared-owner legs are exercised from `template/tests/test_attempt_harvest.py:188`. |
+| C5 Causal adequacy | FAIL | The carried-forward requirement to retain real findings that merely quote an unknown marker remains incomplete for an early fenced quote, so valid implementation findings can still lose routing at `template/src/pdca_harness/assemble.py:130`. |
+| T1 Structure | PASS | One `_LeafHarvest` owns the mechanism at `template/src/pdca_harness/leaves.py:794`, and all three production sites delegate to it at `template/src/pdca_harness/leaves.py:2838`, `template/src/pdca_harness/leaves.py:3194`, and `template/src/pdca_harness/leaves.py:3497`. |
+| T2 Shape | PASS | Direct rerun reported `lint_docs: OK` and a clean 22-page render/link audit; `git diff --check` also reported no patch-format errors. |
+| T3 Runtime | PASS | Direct patched-target execution passed all 1,816 driver tests (2 skips); the local root replay lacked `copier`, while the frozen `T3-suite` log shows all 7 copier-backed root tests passed on the gate host. |
+| T4 Contribution | N/A | The row ran before `pr-description.md` exists and explicitly defers its substantive contribution-artifact audit to the mandatory publish re-gate. |
+| T5 Judgment | NEEDS-HUMAN | Maintainer must confirm prerequisite #540 publish order and absence of overlapping merged/closed/rejected work by affected path — this target exposes only one synthetic base commit and no remotes, so rejected-work prior art cannot be mechanically settled here. |
+| Validation — fitness-to-purpose | NEEDS-HUMAN | The human must decide whether the attempt-attribution behavior is fit for real reviewer retries — mechanical stub coverage is strong, but the early-fenced-quote loss above still risks suppressing a genuine implementation finding. |

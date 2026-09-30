@@ -1,0 +1,42 @@
+Rebuild for issue_541. The slice itself is right and the core landed: all three
+harvest sites genuinely share one owner (criterion 6 — the whole point of this
+child), and the red→green is honest (independently re-verified through the real
+entry points). Do NOT re-open the structure or re-slice; fix the three findings
+the adversary raised and keep everything else as built.
+
+1. The un-owned refusal can destroy a LIVE verdict (leaves.py:836-841).
+   `unlink()` needs write permission on the DIRECTORY; `open(path,"w")` needs it
+   only on the FILE — so in the very scenario the patch's own test builds
+   (dying attempt does `chmod(".", 0o500)`), the next attempt can still overwrite
+   the residue with its complete real review, and the harvest then refuses it.
+   The live verdict dies with the temp dir while the bundle says "NOT COMPLETED".
+   Settle ownership by content/inode comparison against the bytes already read in
+   `withdraw` (leaves.py:851-857): if the file at the path is no longer the dead
+   attempt's, it is the live attempt's work and must be harvested. That satisfies
+   criterion 3 without weakening criterion 5's refusal, so the two stop colliding.
+   Test gap to close with it: every `lock=True` leg passes the default `live=""`
+   (test_attempt_harvest.py:150,236,251,284) — no leg has a live attempt writing
+   under a locked sandbox. Add that leg.
+
+2. The withdrawn residue is quoted with NO bound into a tracked bundle file.
+   leaves.py:852 reads the whole artifact and :905-907 embeds it whole, once per
+   attempt. Measured: a 3.2 MB artifact dying transiently three times yields a
+   9.6 MB `check-review.error.log`, held in memory first, plus a `.partial`
+   sibling — committed into project history, since `results/` is tracked and only
+   `results/issue_selftest/` is ignored. Cap it head/tail with an elision line,
+   exactly like the channel it mirrors (`progress.py:176`, `deque(maxlen=200)`).
+
+3. The unknown-status fallback demotes REAL findings (assemble.py:191).
+   `leaf_status` matches the marker ANYWHERE in the artifact, so an artifact
+   carrying a full verdict table and real `NEEDS-HUMAN [impl]` items — one merely
+   QUOTING a marker with an unknown token — comes back labelled "leaf produced no
+   verdict" for every item, losing the #264 `[impl]` routing. Pre-fix an unknown
+   token gave "" and left the artifact alone. This is self-triggering in this repo
+   and the brief never asked for it (criterion 4 is about the leaf-status LABEL,
+   not about unrecognised markers). Either require the marker in the placeholder's
+   own header region, or keep "" for an artifact that carries a verdict table —
+   restoring the old behaviour while keeping the #541 label.
+
+Not in scope for the rebuild: the T5 dependency-ordering item is a publish-time
+concern, not a patch defect — the stack base (`pdca-integration/main`, on #540's
+`480fa6b`) is already correct.

@@ -1,0 +1,56 @@
+Rebuild for issue_541, round 3. The slice is right and the core landed again: all three
+harvest sites genuinely share one owner (criterion 6 — the point of this child), the retry
+budget is untouched (criterion 5), and the red→green is honest through the real entry points.
+Do NOT re-open the structure, do NOT re-slice, and keep everything else as built. Two of the
+three round-2 carry-forward remedies were only PARTIALLY closed, and the code review found a
+third defect inside the fix itself. Close these three, nothing more.
+
+1. assemble.py:112 — the header-region remedy is defeated by an early fenced quote.
+   `_LEAF_STATUS_HEADER_LINES = 8` (used at :122-131 and :211) classifies a REAL artifact as a
+   placeholder when it quotes an unknown status token as a standalone line inside a fenced
+   block that opens in the first 8 lines (fence at line 5, marker at line 6). Measured: two
+   genuine `NEEDS-HUMAN [impl]` findings come back `human` prefixed "leaf produced no verdict
+   (unrecognised leaf status …)" — the #264 `[impl]` routing is stripped, still a regression
+   against the base, and self-triggering in this repo. The guard at
+   tests/test_attempt_harvest.py:376 only misses the hole by construction (its fence sits at
+   line 10+) and passes with the production change reverted, so C4 covers none of it.
+   Prefer the OTHER remedy the round-2 carry-forward offered — keep "" for an artifact that
+   carries a verdict table / findings — which is not subject to a line-position accident and
+   holds in this case. Add a leg with the fence at line 5.
+
+2. leaves.py:891-909 — `_live_attempt_overwrote_it` is digest-only; the carry-forward asked
+   for content/INODE. Two measured cases still destroy a LIVE verdict (both regressions
+   against the base), driven through `_run_review_sandboxed`:
+   (a) a residue that could not be READ sets `_unreadable = True` permanently (:941-947,
+       consumed at :856), so an attempt that writes its complete review atomically via temp
+       file + `os.replace` and exits 0 is refused — "live verdict filed?" pre-fix True,
+       post-fix False, with an un-owned placeholder in its place;
+   (b) content equality cannot distinguish "nobody rewrote it" from "rewritten
+       byte-identically" (:909) — a deterministic command-mode leaf writing identical bytes on
+       attempt 2 has its verdict discarded.
+   Record `st_ino` / `st_mtime_ns` at withdraw time and treat any stat change as the live
+   attempt's file: that closes both, including the unreadable case, since the residue's
+   identity is knowable even when its bytes are not. Existing guard at
+   tests/test_attempt_harvest.py:263 cannot see (b) — its live text differs from the residue.
+
+3. leaves.py:861-884 — `withdraw()` re-quotes the SAME un-removable residue for every
+   subsequent dead attempt. Once one attempt's file cannot be unlinked (the patch's own
+   `lock=True` shape), it is still at `self.produced` when the next attempt dies, and
+   `withdraw()` has no "have I already accounted for this residue?" check: it reads it again,
+   fails to unlink it again, and emits another `_record(attempt, …)` claiming THAT attempt left
+   it — even though that invocation never wrote. `_drive(..., deaths=3, lock=True)` yields the
+   same residue quoted three times, attributed to attempts 1, 2 and 3 — reintroducing "no
+   notion of which attempt wrote it" one level down, inside the fix for it, plus tripling the
+   read+sha256 on a large residue. `self._residues` is already populated for exactly this:
+   return "" (or a "same as a prior attempt's" note, not a fresh "attempt N left…" block) when
+   the file is unchanged from what a previous withdraw already recorded and failed to remove.
+   The current test only asserts `assertIn(_DEAD_MARK, …)` plus the attempt count, so add a leg
+   that asserts the residue is accounted for ONCE.
+
+Not defects against the brief, do not spend the round on them: the ~600 KB worst-case residue
+quoting (the head/tail cap asked for was delivered; the bound is per-read, not total), the
+UTF-8 split at the `readline` boundary in `_read_residue` (cosmetic, display text only), and
+the pre-existing `assemble.leaf_status()` readers at leaves.py:3333 / size_signal.py:240
+(identical before and after this diff — Act candidate, not this child's). The T5 ordering item
+is a publish-time concern, not a patch defect: the stack base (`pdca-integration/main`, on
+#540) is already correct.
