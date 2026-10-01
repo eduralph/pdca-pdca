@@ -1,0 +1,19 @@
+Rebuild to fix one regression the reviewer found (reproduced at sign-off):
+assemble.py (_needs_human_rows, ~:833): the Verdict column is now found by its header
+(_verdict_column), but the Basis is still read as cells[vi + 1]. With a header ordered
+`| Item | Basis | Verdict |` the Basis is lost, so a promoted finding reads only
+`T5 Judgment` instead of `T5 Judgment — Handle empty input`, and the rebuild gets nothing
+to act on. Find the Basis column by its header too (fall back to the cell after the
+Verdict only when no Basis header exists), and make the reordered-column test assert the
+FULL finding text, not just the label and kind.
+Second change (human decision at sign-off): a verdict-table row whose Verdict cell says
+PASS / FAIL / N/A but whose other cells mention NEEDS-HUMAN must NOT be dropped from §6
+(assemble.py ~:822-823). It must never become IMPL (no auto-rebuild), but it should still
+reach the human as a HUMAN item, which keeps the old fail-safe for self-contradicting rows
+like `| T5 Judgment | PASS | still NEEDS-HUMAN on scope |`. Update
+test_a_basis_quoting_an_impl_verdict_under_pass_is_no_finding: assert no IMPL item, and
+assert the row appears as a HUMAN item. The STANDING guards are unchanged.
+Keep everything else as is: the iteration-1 fixes (tag read from the Verdict column only;
+STANDING rows counted before dedup), the V-row normalisation, the C5/T5 bounding, the
+plan-advisory/primary-review bounding, and the prompt/role changes were all found fine.
+The advisory-tag policy change stays accepted.

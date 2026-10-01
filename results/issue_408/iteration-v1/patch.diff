@@ -1,0 +1,579 @@
+diff --git a/template/agents/adversary.md.jinja b/template/agents/adversary.md.jinja
+index e515d5e..6fd583b 100644
+--- a/template/agents/adversary.md.jinja
++++ b/template/agents/adversary.md.jinja
+@@ -22,7 +22,7 @@ default applies to *substantive* doubt about the fix — not to your sandbox lac
+ tools to re-run the proof. If you cannot reproduce the red→green because a compiler /
+ `cargo` / a runtime / a container is absent (or a gate red looks like an environment fault
+ — a shimmed `cc`, a missing CLI), that inability is **not** evidence the fix is broken:
+-mark it `- NEEDS-HUMAN — ` (toolchain unavailable; verdict provisional), don't score it as
++mark it `- NEEDS-HUMAN [human] — ` (toolchain unavailable; verdict provisional), don't score it as
+ a refutation.
+ 
+ You are **advisory: you never gate accept.** Deterministic gates block; you annotate.
+@@ -51,17 +51,18 @@ can cost you the validation it was attached to.
+ 
+ A short list of refutation attempts, each a Markdown bullet citing `path:line` and the
+ **concrete failing case or unwarranted claim** (not a generic worry). For any finding a
+-human must adjudicate, prefix the bullet `- NEEDS-HUMAN — ` (the harness lifts those into
+-`SUMMARY.md` §6). Scope each to **this diff** — don't file pre-existing debt the patch
++human must adjudicate, prefix the bullet `- NEEDS-HUMAN [impl] — ` or
++`- NEEDS-HUMAN [human] — ` (the harness lifts those into `SUMMARY.md` §6; how to choose the
++tag is below). Scope each to **this diff** — don't file pre-existing debt the patch
+ didn't touch. If you genuinely cannot refute the fix after a real attempt, say so:
+ "attempted to refute X, Y, Z; could not" is a strong signal, not a non-answer.
+ 
+-**Mark the implementation defects (issue #264).** When the refutation lands on something the
+-**builder can fix by iterating** — a concrete failing case, a logic slip, a test that
+-wouldn't have gone red, a conformance nit — prefix that bullet `- NEEDS-HUMAN [impl] — `
+-instead. The driver then routes it straight back to Do without spending the human's
+-attention. Keep the plain `- NEEDS-HUMAN — ` form when the finding demands a human
+-**architectural / scope / fitness-to-purpose** decision — the fix targets a symptom rather
+-than the cause, the brief asked for the wrong thing, the toolchain was unavailable so the
+-verdict is provisional. **When in doubt, omit `[impl]`**: an unmarked finding always reaches
+-the human, a mismarked one buys a wasted rebuild.
++**Tag every NEEDS-HUMAN finding `[impl]` or `[human]` (issues #264, #408).** When the
++refutation lands on something the **builder can fix by iterating** — a concrete failing
++case, a logic slip, a test that wouldn't have gone red, a conformance nit — write that
++bullet `- NEEDS-HUMAN [impl] — `. The driver then routes it straight back to Do without
++spending the human's attention. Write `- NEEDS-HUMAN [human] — ` when the finding demands a
++human **architectural / scope / fitness-to-purpose** decision — the fix targets a symptom
++rather than the cause, the brief asked for the wrong thing, the toolchain was unavailable so
++the verdict is provisional. Decide which for every bullet: an untagged bullet is read as
++`[human]`, and a mismarked `[impl]` buys a wasted rebuild.
+diff --git a/template/agents/reviewer.md.jinja b/template/agents/reviewer.md.jinja
+index e142c2e..eb8ac27 100644
+--- a/template/agents/reviewer.md.jinja
++++ b/template/agents/reviewer.md.jinja
+@@ -98,6 +98,10 @@ Basis |`. This is the canonical order the gates assemble; mirror it exactly:
+ | T5 Judgment | … | … |
+ | Validation — fitness-to-purpose | NEEDS-HUMAN | … |
+ 
++Write each Item cell **exactly** as listed above — the bare label, with no element-id
++prefix (not `V — Validation — fitness-to-purpose`) and nothing added: the harness
++matches the cell exactly.
++
+ Verdict is `PASS / FAIL / NEEDS-HUMAN / N/A`; Basis is the one line you
+ re-derived (cite `path:line` where you can). **State the decision owed, not the
+ implementation:** the Basis names the *context and impact* the verdict turns on —
+@@ -107,6 +111,14 @@ matters>", not a description of the code. Use `N/A` with a reason when an elemen
+ does not apply — **do not drop the row.** The harness lifts every NEEDS-HUMAN row
+ into `SUMMARY.md` §6, so a row you omit is a verdict the human never sees.
+ 
++**Tag a builder-fixable C5 / T5 concern `NEEDS-HUMAN [impl]`.** On the `C5 Causal
++adequacy` and `T5 Judgment` rows **only**, when your NEEDS-HUMAN concern is an
++implementation defect the builder can fix by iterating — a logic bug, a missed case, a
++weak or incorrect test — write the Verdict `NEEDS-HUMAN [impl]`; the driver then routes
++it straight back to Do. Keep plain `NEEDS-HUMAN` there for a concern that needs a human
++decision (scope, contested root cause, fitness-to-purpose). Never tag any other row
++`[impl]`: on the input cells (C1, C3) and the Validation row the tag is ignored.
++
+ ## Emit NEEDS-HUMAN by design on
+ 
+ Validation fitness-to-purpose; contested symptom-vs-root-cause; semantic
+diff --git a/template/src/pdca_harness/assemble.py b/template/src/pdca_harness/assemble.py
+index 37a61e2..cdf4199 100644
+--- a/template/src/pdca_harness/assemble.py
++++ b/template/src/pdca_harness/assemble.py
+@@ -60,12 +60,35 @@ class NeedsHumanItem(NamedTuple):
+ _GATE_ELEMENTS = frozenset(e for e, _label, kind, _oracle in canonical_elements()
+                            if kind == "gate")
+ 
++# The judgment cells the REVIEWER may hand back to Do by tagging its verdict
++# `NEEDS-HUMAN [impl]` (#408): C5 causal adequacy and T5 judgment, whose substance is often a
++# plain build defect. Not V — the reviewer emits that row NEEDS-HUMAN on every cycle, so it can
++# never name something a rebuild fixes — and not the `input` cells C1/C3: a defect in the spec
++# or the change's scope survives any rebuild against the same brief. Derived from the taxonomy,
++# like `_GATE_ELEMENTS`, so it cannot drift from the matrix.
++_PROMOTABLE_ELEMENTS = frozenset(e for e, _label, kind, _oracle in canonical_elements()
++                                 if kind == "judgment" and e != "V")
++
+ # A §6 item's leading 5/5/1 element id, when the reviewer's table row carries one.
+ _ELEMENT_RE = re.compile(r"^(C[1-5]|T[1-5]|V)\b")
+ 
+ # An advisory leaf tags a builder-fixable finding `- NEEDS-HUMAN [impl] — …`. Unmarked
+ # findings stay HUMAN, so a legacy advisory file can never trigger an auto-iteration.
+ _IMPL_MARKER_RE = re.compile(r"^\[impl\]\s*[—:-]*\s*", re.IGNORECASE)
++# Either routing tag a leaf may lead a finding with (#408): `[impl]` (a rebuild can fix it) or
++# `[human]` (it cannot). Both are stripped from the §6 text; `[human]` always means HUMAN.
++_TAG_MARKER_RE = re.compile(r"^\[(impl|human)\]\s*[—:-]*\s*", re.IGNORECASE)
++# The reviewer's own tag, carried in a verdict table row's Verdict cell: `NEEDS-HUMAN [impl]`.
++_VERDICT_IMPL_RE = re.compile(r"needs-human\s*\[impl\]", re.IGNORECASE)
++
++# How `_classify_finding` treats a leading `[impl]` tag, by the artifact the finding came from.
++# FREE — a Check advisory bullet: honoured on any finding (advisory bullets carry no reliable
++# element id to bound it by). BOUNDED — the primary review: honoured only when the finding's
++# element is in `_PROMOTABLE_ELEMENTS`, otherwise ignored. IGNORED — a plan advisory: it
++# reviews the brief, which no rebuild changes, so the tag is stripped and the item is HUMAN.
++TAGS_FREE = "free"
++TAGS_BOUNDED = "bounded"
++TAGS_IGNORED = "ignored"
+ 
+ # Where a `- NEEDS-HUMAN` bullet's continuation ENDS (issue #527), mirroring the
+ # membership rule `brief._block_for` already uses for a wrapped field value
+@@ -95,6 +118,28 @@ _V_LABEL = next(label for e, label, _kind, _oracle in canonical_elements() if e
+ # never enough (PR #294 review, local pass): a "## Concerns" table can carry the exact same label.
+ _CANONICAL_LABELS = frozenset(label.strip().casefold()
+                               for _e, label, _kind, _oracle in canonical_elements())
++# Which element each canonical label belongs to — for `_normalized_item_label`'s prefix rule.
++_ELEMENT_OF_LABEL = {label.strip().casefold(): e
++                     for e, label, _kind, _oracle in canonical_elements()}
++_ITEM_PREFIX_RE = re.compile(r"^(C[1-5]|T[1-5]|V)\s*—\s*(.+)$")
++
++
++def _normalized_item_label(cell: str) -> str:
++    """A verdict table's Item cell in the form the 5/5/1 spells it (#408).
++
++    Reviewers write the cell three ways: the bare label, the label behind its element id
++    (`V — Validation — fitness-to-purpose`, which an older reviewer prompt listed), and with
++    ASCII `--` for the em dash. This folds `--` to `—`, collapses whitespace, and drops a
++    leading `<element-id> —` ONLY when the label after it is that element's own label. A
++    mismatched prefix is kept (`C5 — Validation — fitness-to-purpose` stays as written), so
++    such a cell never equals a canonical label. The caller still compares the result EXACTLY:
++    nothing here matches on a prefix of free text (the #294 rule).
++    """
++    s = " ".join(cell.replace("--", "—").split())
++    m = _ITEM_PREFIX_RE.match(s)
++    if m and _ELEMENT_OF_LABEL.get(m.group(2).casefold()) == m.group(1):
++        return m.group(2)
++    return s
+ 
+ # Leaf-status marker (issue #278). When a reviewer / advisory leaf could not produce a
+ # verdict, `leaves` writes a placeholder carrying one of these as a machine-readable comment.
+@@ -245,8 +290,9 @@ def _item(value: str) -> str:
+     return "\n".join([first] + [f"  {line}" if line else "" for line in rest])
+ 
+ 
+-def _classify_finding(text: str, *, standing: bool = False) -> NeedsHumanItem:
+-    """Classify one reviewer / advisory §6 item, stripping any `[impl]` marker.
++def _classify_finding(text: str, *, standing: bool = False, verdict_impl: bool = False,
++                      tags: str = TAGS_FREE) -> NeedsHumanItem:
++    """Classify one reviewer / advisory §6 item, stripping any `[impl]` / `[human]` marker.
+ 
+     Three kinds. IMPL — a rebuild can address it. STANDING — the reviewer's `Validation` row,
+     which its prompt emits NEEDS-HUMAN on every cycle whatever it finds, so its presence proves
+@@ -265,25 +311,47 @@ def _classify_finding(text: str, *, standing: bool = False) -> NeedsHumanItem:
+     a rebuild. Beside an IMPL item, a HUMAN finding is deferred to the handover §6 (#409);
+     STANDING is not even deferred, since every Check re-emits it — and neither is a
+     ``no_verdict`` row (:class:`NeedsHumanItem`), for the same reason.
++
++    The finding's own builder-fixability statement (#408) is honoured AFTER the STANDING check,
++    so a tag can never lift the constant V row. ``verdict_impl`` is the reviewer's
++    `NEEDS-HUMAN [impl]` Verdict cell on a verdict table row, decided by the caller; it
++    promotes the row only on a `_PROMOTABLE_ELEMENTS` cell (C5/T5). A leading `[impl]` in the
++    text is weighed by ``tags`` (see `TAGS_FREE`): free for a Check advisory bullet, bounded
++    to C5/T5 for the primary review, ignored for a plan advisory. A tag that is not honoured
++    is dropped and the item classifies as if untagged. A leading `[human]` is stripped and
++    the item is HUMAN.
+     """
+-    stripped = _IMPL_MARKER_RE.sub("", text, count=1)
+-    if stripped != text:
+-        return NeedsHumanItem(stripped.strip(), IMPL)
+     if standing:
+         return NeedsHumanItem(text, STANDING)   # emitted every cycle ⇒ carries no signal (#293)
++    tag = ""
++    m = _TAG_MARKER_RE.match(text)
++    if m:
++        tag = m.group(1).lower()
++        text = text[m.end():].strip()
++    if tag == "human" or tags == TAGS_IGNORED:
++        return NeedsHumanItem(text, HUMAN)
+     m = _ELEMENT_RE.match(text)
+-    if m and m.group(1) in _GATE_ELEMENTS:
++    element = m.group(1) if m else ""
++    if verdict_impl and element in _PROMOTABLE_ELEMENTS:
++        return NeedsHumanItem(text, IMPL)
++    if tag == "impl" and (tags == TAGS_FREE or element in _PROMOTABLE_ELEMENTS):
++        return NeedsHumanItem(text, IMPL)
++    if element in _GATE_ELEMENTS:
+         return NeedsHumanItem(text, IMPL)
+     return NeedsHumanItem(text, HUMAN)
+ 
+ 
+ def _items_from_artifact(text: str, *, allow_standing: bool = False,
++                         plan_advisory: bool = False,
+                          no_verdict: Callable[[str], bool] = lambda _t: False,
+                          ) -> list[NeedsHumanItem]:
+     """§6 items from one reviewer / advisory artifact, labelled by its leaf status (#278).
+ 
+     ``allow_standing`` is passed only for the PRIMARY review (#294 review) — see
+-    :func:`_classify_finding`. An advisory leaf's free-form bullets never earn STANDING.
++    :func:`_classify_finding`. An advisory leaf's free-form bullets never earn STANDING. It
++    also marks the artifact whose `[impl]` tags are bounded to C5/T5 and whose Verdict-cell
++    `NEEDS-HUMAN [impl]` is read (#408). ``plan_advisory`` marks a plan advisory, whose tags
++    are ignored: every item it yields is HUMAN.
+ 
+     A placeholder (the leaf could not produce a verdict) has its items prefixed with WHY the
+     artifact is empty — infra vs substance — so the human doesn't have to hand-annotate it,
+@@ -296,8 +364,10 @@ def _items_from_artifact(text: str, *, allow_standing: bool = False,
+     merely QUOTES a marker, recognised or not, and closed itself with the completion trailer
+     (:func:`leaf_status`)."""
+     label = _LEAF_STATUS_LABEL.get(leaf_status(text), "")
+-    items = [_classify_finding(t, standing=allow_standing and is_standing)
+-             for t, is_standing in _needs_human(text)]
++    tags = TAGS_IGNORED if plan_advisory else TAGS_BOUNDED if allow_standing else TAGS_FREE
++    items = [_classify_finding(t, standing=allow_standing and is_standing,
++                               verdict_impl=allow_standing and is_impl, tags=tags)
++             for t, is_standing, is_impl in _needs_human_rows(text)]
+     if not label:
+         return items
+     return [NeedsHumanItem(f"{label} — {it.text}", HUMAN, no_verdict=no_verdict(it.text))
+@@ -360,12 +430,13 @@ def collect_needs_human(d: Path, cfg: Config) -> list[NeedsHumanItem]:
+     # the human dispositions it at sign-off: a bundle-wide "was the brief revised?" bit
+     # cannot say WHICH findings the revision addressed, so it must never suppress them
+     # (one cosmetic edit would have hidden every remaining objection from C6). All
+-    # HUMAN-kind by construction (the plan prompt emits no [impl] markers), so they never
+-    # cause an auto-iterate round (#264); beside real implementation work they are deferred
+-    # to the handover §6 like any HUMAN item (#409).
++    # HUMAN-kind by construction — parsed with any `[impl]` tag stripped and ignored (#408), so
++    # a plan advisory can never cause an auto-iterate round (#264), whatever its prompt says;
++    # beside real implementation work they are deferred to the handover §6 like any HUMAN
++    # item (#409).
+     for ptext in [p.read_text(encoding="utf-8")
+                   for p in sorted(d.glob("plan-advisory-*.md"))]:
+-        items += _items_from_artifact(ptext)
++        items += _items_from_artifact(ptext, plan_advisory=True)
+     # The empirical size backstop (#324). HUMAN, never IMPL — the tag and the text
+     # together are the mechanism: `autoiterate.eligible()` rebuilds past every other HUMAN
+     # item (#409) but STOPS the rebuild loop on a HUMAN item `size_signal.is_size_item`
+@@ -679,17 +750,28 @@ def _needs_human(review_text: str) -> list[tuple[str, bool]]:
+       text's *prefix* let a real objection wear the template's clothes (PR #294 review).
+ 
+     Everything else keeps its signal.
++
++    The Item cell is compared after :func:`_normalized_item_label` (#408), so the three forms
++    reviewers actually write the V row in — bare, behind its `V —` id, with `--` — are all the
++    constant row; the comparison itself stays exact.
+     """
+-    items: list[tuple[str, bool]] = []
++    return [(t, standing) for t, standing, _impl in _needs_human_rows(review_text)]
++
++
++def _needs_human_rows(review_text: str) -> list[tuple[str, bool, bool]]:
++    """:func:`_needs_human`, plus whether each item is a verdict-table row whose Verdict cell
++    reads `NEEDS-HUMAN [impl]` — the reviewer stating a rebuild can fix it (#408). Only the
++    MANDATED verdict table's rows carry that statement; a bullet's tag stays in its text."""
++    items: list[tuple[str, bool, bool]] = []
+     seen: set[str] = set()
+     lines = review_text.splitlines()
+     verdict_table = _verdict_table_lines(lines)
+ 
+-    def add(text: str, *, standing: bool) -> None:
++    def add(text: str, *, standing: bool, impl: bool = False) -> None:
+         text = text.strip()
+         if text and text.lower() not in seen:
+             seen.add(text.lower())
+-            items.append((text, standing))
++            items.append((text, standing, impl))
+ 
+     i = 0
+     n = len(lines)
+@@ -720,18 +802,24 @@ def _needs_human(review_text: str) -> list[tuple[str, bool]]:
+             vi = next((k for k, c in enumerate(cells) if "needs-human" in c.lower()), None)
+             if vi is not None:
+                 label = cells[0] if cells else ""
++                # A canonical label is rendered in the matrix's own spelling, so every form
++                # of one row reads the same in §6; anything else is kept as written.
++                norm = _normalized_item_label(label)
++                if norm.casefold() in _CANONICAL_LABELS:
++                    label = norm
+                 basis = cells[vi + 1] if vi + 1 < len(cells) else ""
+                 add(f"{label} — {basis}" if basis else label,
+                     standing=(i in verdict_table
+-                              and label.strip().casefold() == _V_LABEL.casefold()))
++                              and norm.casefold() == _V_LABEL.casefold()),
++                    impl=(i in verdict_table and bool(_VERDICT_IMPL_RE.search(cells[vi]))))
+         i += 1
+ 
+     # FAIL CLOSED on ambiguity. The template row is a CONSTANT — it occurs exactly once. If two
+     # survive (a second verdict-shaped table, a duplicated row), at least one of them is not the
+     # constant, and we cannot tell which. Grant STANDING to neither, so the bundle halts for the
+     # human rather than risk archiving a real objection.
+-    if sum(1 for _t, standing in items if standing) > 1:
+-        return [(t, False) for t, _s in items]
++    if sum(1 for _t, standing, _impl in items if standing) > 1:
++        return [(t, False, impl) for t, _s, impl in items]
+     return items
+ 
+ 
+@@ -760,7 +848,8 @@ def _verdict_table_lines(lines: list[str]) -> set[int]:
+         while j < len(lines) and lines[j].strip().startswith("|"):
+             j += 1
+         block = range(i, j)
+-        labels = {lines[k].strip().strip("|").split("|")[0].strip().casefold() for k in block}
++        labels = {_normalized_item_label(lines[k].strip().strip("|").split("|")[0]).casefold()
++                  for k in block}
+         if len(labels & _CANONICAL_LABELS) >= 2:
+             out.update(block)
+         i = j
+diff --git a/template/src/pdca_harness/leaves.py b/template/src/pdca_harness/leaves.py
+index 7dd2e41..0d331cc 100644
+--- a/template/src/pdca_harness/leaves.py
++++ b/template/src/pdca_harness/leaves.py
+@@ -2740,15 +2740,26 @@ _REVIEW_PROMPT = (
+     "with a one-line outline of the task under review (the bug to fix / functionality to "
+     "implement), then a complete verdict table — one row for EVERY element of the "
+     "5/5/1 matrix, in order:\n"
+-    + "\n".join(f"  {elem} — {label}" for elem, label, _kind, _oracle in gates.canonical_elements())
++    # Bare labels, no `{elem} — ` prefix: the Item cell is matched exactly against the label
++    # (#408), and a listed prefix is what reviewers copied into it.
++    + "\n".join(f"  {label}" for _elem, label, _kind, _oracle in gates.canonical_elements())
+     + "\nFormat it as a Markdown table `| Item | Verdict | Basis |`, the Item column "
+-    "carrying the element label above, the Verdict one of PASS / FAIL / NEEDS-HUMAN / "
++    "carrying the element label EXACTLY as listed above (no element-id prefix, no added "
++    "words), the Verdict one of PASS / FAIL / NEEDS-HUMAN / "
+     "N/A, the Basis a one-line reason you re-derived yourself (cite path:line where "
+     "you can) — state the DECISION OWED (the context + impact the verdict turns on, "
+     "what the human must decide and why), not a restatement of the implementation, "
+     "especially for NEEDS-HUMAN rows. Emit NEEDS-HUMAN for the always-human items (validation "
+     "fitness-to-purpose, contested root-cause, ambiguous scope) — each NEEDS-HUMAN "
+-    "row becomes a §6 item the human must clear. Do not omit a row; use N/A with a "
++    "row becomes a §6 item the human must clear. On the "
++    + " and ".join(f"'{label}'" for elem, label, _kind, _oracle in gates.canonical_elements()
++                   if elem in assemble._PROMOTABLE_ELEMENTS)
++    + " rows ONLY, when your NEEDS-HUMAN concern is an IMPLEMENTATION defect the builder "
++    "can fix by iterating (a logic bug, a missed case, a weak or incorrect test), write the "
++    "Verdict `NEEDS-HUMAN [impl]` so the driver routes it straight back to Do; keep plain "
++    "`NEEDS-HUMAN` there for a concern that needs a human decision (scope, root cause, "
++    "fitness-to-purpose). Never tag any other row `[impl]` — it is ignored there. Do not "
++    "omit a row; use N/A with a "
+     "reason when an element does not apply. For a visual / manual-repro NEEDS-HUMAN row, "
+     "verify what you can yourself — where feasible, exercise the change with the patch "
+     "applied at $PDCA_TARGET (run the relevant test, or start/drive the app if the runner "
+@@ -3591,14 +3602,14 @@ def _advisory_prompt(spec: dict, leaf_id: str, rubric: str = "") -> str:
+         "gate you cannot re-run (#403); ground every "
+         "cited path:line on the target source at $PDCA_TARGET, never other checkouts. "
+         f"Write check-advisory-{leaf_id}.md: a short list of findings, each a Markdown "
+-        "bullet with a path:line. For any finding a human must adjudicate, prefix the "
+-        "bullet '- NEEDS-HUMAN — ' (it becomes a SUMMARY §6 item). If the finding is an "
+-        "IMPLEMENTATION defect the builder can fix by iterating — a logic bug, a missed "
+-        "case, a weak or incorrect test, a conformance nit — prefix it "
+-        "'- NEEDS-HUMAN [impl] — ' instead, so the driver can route it straight back to Do "
+-        "without spending the human's attention (issue #264). Keep the plain "
+-        "'- NEEDS-HUMAN — ' form for anything needing a human ARCHITECTURAL / scope / "
+-        "fitness-to-purpose decision; when in doubt, OMIT '[impl]'. You are ADVISORY — you "
++        "bullet with a path:line. Every NEEDS-HUMAN bullet (each becomes a SUMMARY §6 "
++        "item) MUST carry exactly one tag. If the finding is an IMPLEMENTATION defect the "
++        "builder can fix by iterating — a logic bug, a missed case, a weak or incorrect "
++        "test, a conformance nit — write it '- NEEDS-HUMAN [impl] — ', so the driver can "
++        "route it straight back to Do without spending the human's attention (issue #264). "
++        "If it needs a human ARCHITECTURAL / scope / fitness-to-purpose decision, write it "
++        "'- NEEDS-HUMAN [human] — '. Decide which for every bullet; an untagged bullet is "
++        "read as [human]. You are ADVISORY — you "
+         "never gate; the human decides at sign-off. If you find nothing, say so explicitly."
+     ) + rubric + _COMPLETION_INSTRUCTION.format(   # last, after the rubric (#541)
+         artifact=f"check-advisory-{leaf_id}.md")
+diff --git a/template/tests/test_autoiterate.py b/template/tests/test_autoiterate.py
+index 8dbd8e8..826391b 100644
+--- a/template/tests/test_autoiterate.py
++++ b/template/tests/test_autoiterate.py
+@@ -1813,5 +1813,209 @@ class ConfigPlumbing(unittest.TestCase):
+         self.assertTrue(cfg.auto_iterate)
+ 
+ 
++# --- #408: the reviewer states builder-fixability; the V row in every form it is written ---
++
++# The three forms production writes the reviewer's constant Validation row in (#408): the bare
++# label, the label behind its element id (the driver prompt used to list `V — <label>`), and
++# with ASCII `--` for the em dash.
++_STANDING_FORMS = ("Validation — fitness-to-purpose",
++                   "V — Validation — fitness-to-purpose",
++                   "Validation -- fitness-to-purpose")
++
++
++def _full_review(overrides: dict[str, tuple[str, str]] | None = None, *,
++                 item: dict[str, str] | None = None) -> str:
++    """A complete 5/5/1 verdict table as the reviewer writes it: every row PASS except the
++    V row (NEEDS-HUMAN, every cycle), with ``overrides`` mapping an element id to its
++    ``(verdict, basis)`` and ``item`` to the Item cell written for it."""
++    overrides = overrides or {}
++    item = item or {}
++    rows = []
++    for elem, label, _kind, _oracle in gates.canonical_elements():
++        default = (("NEEDS-HUMAN", "fitness is the human's call") if elem == "V"
++                   else ("PASS", "ok"))
++        verdict, basis = overrides.get(elem, default)
++        rows.append(f"| {item.get(elem, label)} | {verdict} | {basis} |")
++    return "# Review\n\n| Item | Verdict | Basis |\n|---|---|---|\n" + "\n".join(rows) + "\n"
++
++
++class ReviewerImplTag(_Base):
++    """#408 clause 1/1b/1c/4: the reviewer's own `[impl]` statement, bounded by the taxonomy."""
++
++    def _review_kinds(self, review: str) -> dict[str, str]:
++        """{§6 text: kind} for the primary review, read the way `collect_needs_human` reads it."""
++        return {it.text: it.kind
++                for it in assemble._items_from_artifact(review, allow_standing=True)}
++
++    def test_promotable_set_is_derived_from_the_taxonomy(self) -> None:
++        expected = {e for e, _l, k, _o in gates.canonical_elements() if k == "judgment"} - {"V"}
++        self.assertEqual(assemble._PROMOTABLE_ELEMENTS, expected)
++        self.assertEqual(expected, {"C5", "T5"})
++
++    def test_impl_verdict_on_c5_or_t5_classifies_impl(self) -> None:
++        for elem, label in (("C5", "C5 Causal adequacy"), ("T5", "T5 Judgment")):
++            with self.subTest(elem=elem):
++                kinds = self._review_kinds(_full_review(
++                    {elem: ("NEEDS-HUMAN [impl]", "the test never exercises the empty case")}))
++                self.assertEqual(kinds[f"{label} — the test never exercises the empty case"],
++                                 assemble.IMPL)
++                self.assertEqual(kinds["Validation — fitness-to-purpose — fitness is the "
++                                       "human's call"], assemble.STANDING)
++
++    def test_impl_verdict_on_c5_auto_iterates_end_to_end(self) -> None:
++        d = self._bundle("C5IMPL", review=_full_review(
++            {"C5": ("NEEDS-HUMAN [impl]", "the guard misses the empty case")}))
++        self.assertTrue(self._try(d), "a builder-fixable C5 finding must reach Do")
++        self.assertEqual(state.state(d), state.ITERATE_DO)
++
++    def test_untagged_c5_and_t5_stay_human(self) -> None:
++        for elem, label in (("C5", "C5 Causal adequacy"), ("T5", "T5 Judgment")):
++            with self.subTest(elem=elem):
++                kinds = self._review_kinds(_full_review({elem: ("NEEDS-HUMAN", "a concern")}))
++                self.assertEqual(kinds[f"{label} — a concern"], assemble.HUMAN)
++
++    def test_impl_verdict_on_an_input_cell_or_the_v_row_is_ignored(self) -> None:
++        kinds = self._review_kinds(_full_review({
++            "C1": ("NEEDS-HUMAN [impl]", "the spec is ambiguous"),
++            "C3": ("NEEDS-HUMAN [impl]", "the change is out of scope"),
++            "V": ("NEEDS-HUMAN [impl]", "fitness is the human's call")}))
++        self.assertEqual(kinds["C1 Spec — the spec is ambiguous"], assemble.HUMAN)
++        self.assertEqual(kinds["C3 Change — the change is out of scope"], assemble.HUMAN)
++        # STANDING is checked BEFORE the tag: V can never be lifted.
++        self.assertEqual(kinds["Validation — fitness-to-purpose — fitness is the human's call"],
++                         assemble.STANDING)
++
++    def test_impl_in_the_basis_cell_of_a_c5_row_is_ignored(self) -> None:
++        kinds = self._review_kinds(_full_review({"C5": ("NEEDS-HUMAN", "[impl] off-by-one")}))
++        self.assertEqual(kinds["C5 Causal adequacy — [impl] off-by-one"], assemble.HUMAN)
++
++    def test_primary_review_bullets_promote_only_c5_t5(self) -> None:
++        review = _full_review() + (
++            "\n- NEEDS-HUMAN [impl] — C1 Spec the criterion is unmeasurable\n"
++            "- NEEDS-HUMAN [impl] — Validation — fitness-to-purpose: patches the wrong layer\n"
++            "- NEEDS-HUMAN [impl] — C5 Causal adequacy the guard misses the empty case\n")
++        d = self._bundle("BULLETS", review=review)
++        kinds = {it.text: it.kind for it in assemble.collect_needs_human(d, self.cfg)}
++        self.assertEqual(kinds["C1 Spec the criterion is unmeasurable"], assemble.HUMAN)
++        self.assertEqual(
++            kinds["Validation — fitness-to-purpose: patches the wrong layer"], assemble.HUMAN)
++        self.assertEqual(kinds["C5 Causal adequacy the guard misses the empty case"],
++                         assemble.IMPL)
++
++    def test_plan_advisory_impl_is_never_promoted(self) -> None:
++        d = self._bundle("PLANIMPL", review=_full_review())
++        (d / "plan-advisory-plan-reviewer.md").write_text(
++            "- NEEDS-HUMAN [impl] — the brief's criterion is a proxy\n", encoding="utf-8")
++        found = [it for it in assemble.collect_needs_human(d, self.cfg)
++                 if "criterion is a proxy" in it.text]
++        self.assertEqual([(it.text, it.kind) for it in found],
++                         [("the brief's criterion is a proxy", assemble.HUMAN)])
++
++    def test_human_tag_on_an_advisory_bullet_is_stripped_and_human(self) -> None:
++        d = self._bundle("ADVHUMAN", review=_full_review(),
++                         advisory="- NEEDS-HUMAN [human] — wrong layer at src/x.py:12\n"
++                                  "- NEEDS-HUMAN [impl] — off-by-one at src/x.py:13\n")
++        kinds = {it.text: it.kind for it in assemble.collect_needs_human(d, self.cfg)}
++        self.assertEqual(kinds["wrong layer at src/x.py:12"], assemble.HUMAN)
++        self.assertEqual(kinds["off-by-one at src/x.py:13"], assemble.IMPL)
++        self.assertNotIn("[human]", _section6(d / "SUMMARY.md"))
++
++
++class ValidationRowForms(_Base):
++    """#408 clause 2: the V row is the constant row in all three forms, compared exactly."""
++
++    def test_every_form_of_the_v_row_is_standing(self) -> None:
++        for form in _STANDING_FORMS:
++            with self.subTest(form=form):
++                review = _full_review(item={"V": form})
++                [(_t, standing)] = assemble._needs_human(review)
++                self.assertTrue(standing, form)
++                [item] = assemble._items_from_artifact(review, allow_standing=True)
++                self.assertEqual(item.kind, assemble.STANDING, form)
++
++    def test_every_form_lets_an_impl_only_review_auto_iterate(self) -> None:
++        # The production cost of a missed form: the constant row read as a real objection.
++        for n, form in enumerate(_STANDING_FORMS):
++            with self.subTest(form=form):
++                d = self._bundle(f"VFORM{n}", review=_full_review(
++                    {"C4": ("NEEDS-HUMAN", "off-by-one")}, item={"V": form}))
++                self.assertTrue(self._try(d))
++                self.assertFalse(_ledger(d), "the V row is not a finding to defer")
++
++    def test_a_mismatched_prefix_is_not_the_v_row(self) -> None:
++        for prefix in ("C5", "T5"):
++            with self.subTest(prefix=prefix):
++                review = _full_review(item={"V": f"{prefix} — Validation — fitness-to-purpose"})
++                [(_t, standing)] = assemble._needs_human(review)
++                self.assertFalse(standing)
++                [item] = assemble._items_from_artifact(review, allow_standing=True)
++                self.assertEqual(item.kind, assemble.HUMAN)
++
++    def test_free_text_after_the_label_is_still_an_objection(self) -> None:
++        for form in _STANDING_FORMS:
++            with self.subTest(form=form):
++                review = _full_review(item={"V": f"{form}: patches the wrong layer"})
++                [item] = assemble._items_from_artifact(review, allow_standing=True)
++                self.assertEqual(item.kind, assemble.HUMAN)
++
++    def test_a_table_written_entirely_in_the_prefixed_form_is_the_verdict_table(self) -> None:
++        prefixed = {e: f"{e} — {label}" for e, label, _k, _o in gates.canonical_elements()}
++        for sep in ("—", "--"):
++            with self.subTest(sep=sep):
++                item = {e: cell.replace("—", sep) for e, cell in prefixed.items()}
++                review = _full_review({"C5": ("NEEDS-HUMAN [impl]", "missed case")}, item=item)
++                self.assertTrue(assemble._verdict_table_lines(review.splitlines()))
++                kinds = {it.text: it.kind
++                         for it in assemble._items_from_artifact(review, allow_standing=True)}
++                self.assertEqual(kinds, {
++                    "C5 Causal adequacy — missed case": assemble.IMPL,
++                    "Validation — fitness-to-purpose — fitness is the human's call":
++                        assemble.STANDING})
++
++    def test_two_v_rows_in_different_forms_are_neither_standing(self) -> None:
++        review = (_full_review()
++                  + "| V — Validation — fitness-to-purpose | NEEDS-HUMAN | again |\n")
++        self.assertEqual([s for _t, s in assemble._needs_human(review)], [False, False])
++
++
++class TagContractPrompts(unittest.TestCase):
++    """#408 clause 3: the prompts carry the contract the classifier honours."""
++
++    _AGENTS = Path(__file__).resolve().parents[1] / "agents"
++
++    def _role(self, name: str) -> str:
++        path = next((p for p in (self._AGENTS / f"{name}.md.jinja", self._AGENTS / f"{name}.md")
++                     if p.exists()), None)
++        self.assertIsNotNone(path, f"no {name} role body under {self._AGENTS}")
++        return path.read_text(encoding="utf-8")
++
++    def test_review_prompt_lists_bare_labels_and_the_c5_t5_tag(self) -> None:
++        prompt = leaves._REVIEW_PROMPT
++        for elem, label, _k, _o in gates.canonical_elements():
++            self.assertIn(f"\n  {label}\n", prompt)
++            self.assertNotIn(f"{elem} — {label}", prompt)
++        self.assertIn("EXACTLY as listed", prompt)
++        self.assertIn("NEEDS-HUMAN [impl]", prompt)
++        self.assertIn("'C5 Causal adequacy' and 'T5 Judgment' rows ONLY", prompt)
++
++    def test_advisory_prompt_requires_a_tag_and_drops_the_omit_default(self) -> None:
++        prompt = leaves._advisory_prompt({}, "adversary")
++        self.assertNotIn("OMIT '[impl]'", prompt)
++        self.assertNotIn("when in doubt", prompt.lower())
++        self.assertIn("'- NEEDS-HUMAN [impl] — '", prompt)
++        self.assertIn("'- NEEDS-HUMAN [human] — '", prompt)
++        self.assertIn("MUST carry exactly one tag", prompt)
++
++    def test_role_bodies_state_the_same_contract(self) -> None:
++        reviewer = self._role("reviewer")
++        self.assertIn("NEEDS-HUMAN [impl]", reviewer)
++        self.assertIn("`C5 Causal\nadequacy` and `T5 Judgment` rows **only**", reviewer)
++        self.assertIn("no element-id\nprefix", reviewer)
++        adversary = self._role("adversary")
++        self.assertNotIn("when in doubt, omit", adversary.lower())
++        self.assertIn("- NEEDS-HUMAN [human] — ", adversary)
++        self.assertIn("an untagged bullet is read as\n`[human]`", adversary)
++
++
+ if __name__ == "__main__":
+     unittest.main()

@@ -1,0 +1,32 @@
+Let the reviewer mark C5/T5 findings fixable; match every V-row form
+
+Auto-iterate never fired on a reviewer's C5 or T5 finding, even when the
+finding was a plain build defect: fixability was inferred only from the
+cell, and C5/T5 are judgment cells, so every such finding went to the
+human. The advisory prompt also told leaves "when in doubt, omit [impl]",
+so most advisory findings arrived untagged. And the always-human
+Validation row, when written "V — Validation — fitness-to-purpose" or
+with "--" (the driver's own prompt produced the prefixed form), failed
+the exact match and was counted as a real objection.
+
+Now the reviewer can write the Verdict cell of a C5 or T5 row as
+"NEEDS-HUMAN [impl]" and the row is sent back to the builder. The set of
+cells that may be promoted is derived from the taxonomy (judgment cells
+minus V). The tag counts only when the whole Verdict cell is that verdict
+and the Item cell is the exact element label; a tag anywhere else (an
+input cell, the V row, the Basis cell, a quoted verdict) is ignored and
+the finding stays with the human. Primary-review bullets are bounded the
+same way, and plan advisories never promote. Advisory bullets must now
+carry "[impl]" or "[human]"; "[human]" is stripped and stays human.
+
+The Validation row is recognised in all three written forms by one
+Item-cell normaliser, used both for the standing-row match and for
+finding the verdict table. A prefix is dropped only when it names the
+label's own element, so "C5 — Validation — ..." is still an objection.
+If two copies of a row merge, the item is standing only when every copy
+is, so a real objection can no longer hide behind the standing row.
+
+The review prompt, the advisory prompt and the reviewer and adversary
+role bodies now state this contract.
+
+Fixes #408
