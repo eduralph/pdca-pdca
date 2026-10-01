@@ -1,0 +1,22 @@
+Design stays as-is; fix three retirement defects from the iteration-3 review (§6 items 3–5):
+1. Unattended retirement via a quoted §6 heading (adversary). `signoff._section` returns the FIRST
+   `## 6. NEEDS-HUMAN` heading (signoff.py:308-313); §5 pastes leaf text verbatim ahead of the real
+   §6 (assemble.py:380-383), so `cleared_needs_human` can read ticks a leaf quoted, and
+   `_retire_cleared_deferrals` (driver.py:135, :141) empties the ledger on an automatic round with
+   no human involved. Fix: make the tick-side reader use the LAST matching §6 heading (or the real,
+   assembled §6), AND/OR skip retirement when §9 was written by auto-iterate. Add a test: ledger entry
+   + an advisory artifact quoting a §6 heading with that row ticked + one [impl] bullet → after an
+   auto-iterate round the entry is still in the ledger.
+2. Fuzzy fail-open beyond labels (adversary). Any shared opening ≥ 20 chars (or ≥ 60% ratio) lets a
+   tick on one finding retire a different one whose own row was deleted (autoiterate.py:181), e.g.
+   "the fix does not cover the retry path" retired by a tick on "...the CLI path", and shared
+   path:line openings. Do not tune thresholds. Rule: a ticked row that exactly equals a row assembly
+   rendered from a FRESH finding is that finding's clearance, never an edit of a ledger entry; fuzzy
+   matching applies only to rows the human actually edited (needs the rendered row list at retire
+   time). Tests for the three repro pairs.
+3. `_same_finding` (autoiterate.py:170-173) applies `_MATCH_FLOOR` before checking equality after
+   `_past_shared_labels`, so a separator-only edit of a short finding doesn't match itself. Add
+   `if a == b: return True` before the floor check; add the case to
+   `test_a_short_row_matches_only_exactly`.
+Stale plan-review items were cleared by the human (resolved by the Plan re-scope). Items 1–2 (T5
+infra-row deferral policy, fitness-to-purpose) were not ruled on — do not change behaviour for them.

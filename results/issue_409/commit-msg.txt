@@ -1,0 +1,31 @@
+auto-iterate: defer human findings instead of halting the rebuild
+
+With auto-iterate on, one finding that needed a human stopped the
+unattended rebuild, even when Check had also found implementation work
+the builder could fix. The loop fired on only 13.5% of the attempts that
+were checked for it, and two bundles reported as broken got no rebuild at
+all.
+
+Now a human finding sitting beside implementation work no longer stops the
+rebuild. It is written to a new bundle file, deferred-findings.json, and
+put back into the NEEDS-HUMAN section of SUMMARY.md at handover, so the
+human still has to clear every one before an accept. The loop stops only
+on the existing hard cap (max_auto_iters) or the size backstop, which
+still halts it when it sees a size finding. No new setting is added; the
+two stop rules are now described in one place, docs/07-crosscutting.md.
+
+A deferred finding leaves the file only when the human ticks it. An open
+row protects its entry, and an edited open row protects every entry it
+could be an edit of, so an unticked finding is never dropped because a
+similar one was ticked (#335). A review or gate row that gave no verdict
+is not deferred: the next Check runs it again.
+
+The accept guard, and the writer that adds a row for an unreadable
+deferral file, now read the last NEEDS-HUMAN heading, the one assembly
+writes. Before, a review that quoted a block of ticked rows could let an
+accept through over open ones. An unreadable deferral file blocks accept
+on both the flow and `pdca signoff --accept` paths.
+
+Closes #335.
+
+Fixes #409

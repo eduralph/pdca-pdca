@@ -1,0 +1,14 @@
+Design is right; fix three implementation defects the adversary review confirmed:
+1. `_same_finding` (autoiterate.py:144) treats unrelated findings on the same element as one:
+   the canonical 5/5/1 label ("C5 Causal adequacy — " = 21 chars) alone clears _MATCH_FLOOR (20).
+   A tick on one can retire an unrelated, never-adjudicated ledger entry (fails open). Measure
+   the shared opening only past a common canonical `Item —` prefix, and add a test with two
+   different findings on one element where one is short. The ratio rule is untested today
+   (`return shared >= _MATCH_FLOOR` passes all 143 tests) — pin it.
+2. `pdca signoff <id> --accept` (cli._signoff, cli.py:1446-1451) runs its own C6 check and never
+   calls `flow._hold_unreadable_ledger`, so an unreadable ledger does not block accept on that
+   path — violates brief clause 2. Share one helper with `_apply_decision` and add a CLI-path test.
+3. Stale comments in assemble.py (:246-248, :278-279, :302-303) still describe the old veto;
+   update them to the defer rule.
+Open design question the human did not rule on (do not change behaviour for it this round):
+whether re-derived infra rows (missing-review placeholder, gate-could-not-run) should be deferred.
