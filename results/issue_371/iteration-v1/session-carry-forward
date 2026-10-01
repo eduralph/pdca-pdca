@@ -1,0 +1,10 @@
+The implementation is accepted as correct; only the clause-4b guard test is too weak.
+`template/tests/test_gate_confirm.py:301-311` (`test_publish_host_ci_rows_run_once`) hand-copies
+publish's `gates._run_one(...)` call instead of driving publish, so it only re-checks that
+`_run_one` defaults to `confirm=False` (already covered at `:292`). Adding `confirm=True` at
+`template/src/pdca_harness/publish.py:930` would leave it green — the exact regression clause 4b
+exists to prevent. Next attempt: make the test drive the real publish host-CI path with a
+fail→pass command and assert it records `fail` after ONE run (or, at minimum, assert the
+`publish.py:930` call does not pass `confirm`). Keep the rest of the patch as is; the minor
+code-review clean-ups (`_flaky_items` list indexing, dead `rc`/`output` args to `_write_gate_log`)
+are optional.

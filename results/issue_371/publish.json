@@ -1,0 +1,12 @@
+{
+  "mode": "stacked-pr",
+  "branch": "enhancement/371-gate-confirm-failed-gating-row",
+  "pr_url": "https://github.com/eduralph/pdca-harness/pull/599",
+  "base": "pdca-integration/main",
+  "repo": "eduralph/pdca-harness",
+  "by": "Eduard Ralph",
+  "date": "2026-09-30",
+  "id_pending": false,
+  "host_ci_base": "00dc9582d48d81a4c5d61713dc26c1b9360fc639",
+  "stacks_on": []
+}

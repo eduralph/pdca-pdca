@@ -1,0 +1,9 @@
+{
+  "band": "ok",
+  "independent_outcomes": [
+    "Implement and test the unified size-signal discount rule: stop charging rounds whose only drivers are deferred-gate findings or environment faults, while maintaining strict fail-safes on malformed records and element-level consistency"
+  ],
+  "proposed_seams": [],
+  "confidence": "high",
+  "brief_sha": "6ac46f8932864ca2"
+}
