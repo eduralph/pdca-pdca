@@ -1365,3 +1365,153 @@ upstream routings, agreed with the human.
 - Plan advisory: the first wave after c3ecbe3 should show `plan-advisory-*.md`
   artifacts with real findings, and no "leaf produced no usable verdict" §6 item. If
   that class comes back, #526 did not fix it on this host.
+
+---
+
+# Act review — 2026-09-30 — cycles considered: issue_371, issue_408, issue_409, issue_477, issue_537, issue_539
+
+Twelfth Act review. Four bundles signed off 2026-09-30..10-01 (371, 408, 409, 477, all
+merged-wider, first wave with plan advisory re-enabled) plus 537 and 539, which froze
+on 2026-09-28 after that day's review ran. The index carried 78; the rest were read
+only for effectiveness follow-up. No instance delta. Ledger updated, and six items routed
+upstream, agreed with the human.
+
+## What the cycles' records exposed
+
+- **Plan advisory works again** (effectiveness check from 2026-09-28). The plan-reviewer
+  wrote an artifact in 4 of 4 bundles (371: 5 findings, 408: 6, 409: 5, 477: 5), every
+  brief was revised, and no bundle has the "leaf produced no usable verdict" item. Upstream
+  #526 (v0.58.0) plus the re-enable (c3ecbe3) fixed it on this host. The feature earns its
+  keep; keep `[[leaves.plan_advisory]]`.
+- **Cleared plan findings come back every round.** `assemble.py:239-249` folds
+  `plan-advisory-*.md` into §6 on every Check, and plan advisory is not re-run on
+  iterate-do, so the human's ruling never carries over. issue_409: the same 5 rows
+  re-entered §6 at each of 4 rounds, after the re-plan resolved them (its own §10 says
+  so). issue_408: 6 rows over 3 rounds. Harness machinery.
+- **The driver's state format keeps producing parser bugs** (raised by the human in this
+  session). Both multi-round bundles spent most rounds on one class: state read back
+  from undelimited markdown keywords.
+  - issue_409 (5 rounds): a §6 heading quoted in §5 retiring ledger entries (v1);
+    `_section` taking the FIRST §6 heading (v3); retirement moved to the LAST heading
+    while C6 still reads the first (v4); a pasted `--delta` becoming the "last" §6
+    (final); the checkbox-normalising rule copied three times plus once in a test helper.
+  - issue_408 (4 rounds): `[impl]` in the Verdict vs Basis cell, a V-row prefix granting
+    STANDING to non-V rows, and similar edge cases in keyword-tagged review prose.
+
+  At the issue_408 round-3 sign-off (2026-10-01) the human ruled: "These issues occur
+  because we use key words without any delineation… the file format change will wait
+  until milestone 0.70." That is a design item, not a delta.
+- **That Act item was lost, and this review only found it because the human asked.**
+  The round-3 sign-off leaf did append it to §10 (`results/issue_408/iteration-v3/
+  SUMMARY.md` §10), but the decision was iterate-do. The iterate archives SUMMARY.md,
+  the next Check writes a new, empty §10 (`src/pdca_harness/assemble.py:359`), and
+  `pdca act` reads only the live SUMMARY (`src/pdca_harness/act.py:548`, `:789`). So any
+  §10 note dictated at an iterate sign-off never reaches Act. The issue_409 round-1
+  sign-off leaf even told the human "the next Check builds a fresh summary anyway".
+  Harness bug.
+- **§6 still cuts multi-line findings.** The #527 fix stops at a blank line or a nested
+  list item (`assemble.py:526-532`, "out of scope: multi-paragraph bullets"). 6 findings
+  cut in 5 of the 6 bundles (371, 408, 409 ×2, 537, 539). On issue_371 the human ticked
+  a row ending "two other second outcomes:"; the outcomes are only in
+  `plan-advisory-plan-reviewer.md:10-13`.
+- **Two issue_409 follow-ups the human asked to have filed** (§10): `signoff --delta`
+  written raw into §9, and the Check decorrelation note deferred across rounds. Both are
+  in PR #598, not yet on main.
+- **False "ineffective delta" flags.** Size backstop: 409 (166 KB, 15 files, 4 rounds,
+  estimated oversized at Plan) and 408 (3 rounds) are true positives. T5 prior art
+  (rows 21-22): recurs in all 6 bundles under a fourth key, as expected until #575.
+- **Quiet:** T2/T3/T4 oracle classes 0 of 6. Validation fitness-to-purpose is structural.
+
+## Process deltas
+
+- **No instance delta warranted.** Every problem above is harness machinery (assemble,
+  act, sign-off, agent prompts from the template); a local edit would be overwritten by
+  `copier update`.
+- **Ledger** (`process/act-ledger.json`): rows 19-20 (plan-reviewer no artifact) →
+  applied, confirmed fixed. Row 18 (0 findings) and row 25 (5 findings, brief revised) →
+  structural: benefit telemetry, not defects. Row 26 (T5, fourth key) → pending #575.
+  Rows 12 and 21-22: notes that the "ineffective" flags are false alarms.
+
+## Follow-ups routed (not process deltas — work handed to an owner)
+
+- **Design issue** (human-requested; milestone 0.70.0, scheduled by the human): state read
+  back from undelimited markdown keywords → filed
+  https://github.com/eduralph/pdca-harness/issues/607. Needs its own design pass before
+  any brief. #604 and #606 are cross-linked as symptoms.
+- Harness bug: a §10 Act candidate dictated at an iterate sign-off is lost → filed
+  https://github.com/eduralph/pdca-harness/issues/608
+- Harness bug: cleared plan-advisory findings re-enter §6 every round → filed
+  https://github.com/eduralph/pdca-harness/issues/603
+- Harness bug (PR #598): `signoff --delta` written raw; a pasted §6 heading makes
+  `retire_cleared` retire uncleared entries → filed
+  https://github.com/eduralph/pdca-harness/issues/604
+- Harness bug (PR #598): the Check decorrelation note is deferred past the round it
+  describes → filed https://github.com/eduralph/pdca-harness/issues/605
+- Harness bug: §6 still cuts a finding at its first blank line or nested list
+  (follow-up to #527) → filed https://github.com/eduralph/pdca-harness/issues/606
+- Milestones (agreed with the human, applied 2026-10-01): 0.60.0 — #603, #604, #605
+  (the #409 / PR #598 path); 0.61.0 — #606, #608, #611, #613, #614; 0.62.0 — #609;
+  0.64.0 — #610; 0.70.0 — #607, #612. PR #598 now links #604/#605, and PR #602 links #607.
+- **Declined by the human:** the instance-side T3 change from issue_495's §10 (point
+  `engine/scripts/run-suite.sh:31` at `python3 -m tests.run_root_suite`). Not applied,
+  and not to be re-raised as overlooked at later reviews.
+- **Sweep for other lost §10 items** (the human asked, after the #608 finding). A
+  comparison of §10 in every `iteration-v*/SUMMARY.md` with the bundle's final §10 found
+  8 lost bullets in 7 bundles. Four were handled another way: issue_408 (→ #607), and
+  issue_420, 475 and 506, whose same note also survived in another summary (handled
+  2026-08-05 and 2026-08-15). Four never reached any review. Filed now, quoting the
+  human's note:
+  - issue_495: a temp dir made before a `SkipTest` in `setUpClass` leaks, and no gate
+    or lens catches it → https://github.com/eduralph/pdca-harness/issues/609
+  - issue_539: a leaf stopped by the usage window should be skipped loudly, with its
+    dependents blocked → https://github.com/eduralph/pdca-harness/issues/610
+  - issue_539: builder retry starts on a worktree holding the dead attempt's edits →
+    https://github.com/eduralph/pdca-harness/issues/611
+  - issue_541: accepted risk, metadata-only change moves the artifact identity tuple
+    (the sign-off said "file an issue and live with it") →
+    https://github.com/eduralph/pdca-harness/issues/612
+  The full list is also on #608.
+- **Bundles no review had considered:** 506, 532, 533, 536, 538, 540 froze 2026-08-16,
+  after the 2026-08-15 review, and the frontier skipped them. The first five have no
+  §10 items (four are split closes). issue_540's "follow-up bug to file on the tracker"
+  (truncation impersonation in `state.neutralize_leaf_text`, plus an orphanable
+  `.partial` temp) was never filed → https://github.com/eduralph/pdca-harness/issues/613
+- Other §10 items checked and already covered: issue_565's `_runnable` claim gap
+  (in #573), issue_537's retry comment (unchanged at upstream `leaves.py:2525-2527`, but accurate
+  since #539 widened the transient rule).
+- **Full sweep (the human asked: "make sure we have not overlooked anything, even from
+  iterations").** Three passes:
+  1. *Every bundle in `results/`*, not only the 78 indexed. Missing from the index: 315
+     and 449 (discontinued; §10 empty, iterations included), 335 (still open), and 496
+     and 545. Those two were published 2026-09-30, but their records sit only on the
+     unmerged branch `chore/record-496-545-bundles` (PR
+     https://github.com/eduralph/pdca-pdca/pull/85); `main` holds only leftover
+     `gate-logs/`. issue_545's §10 follow-up was never filed → filed
+     https://github.com/eduralph/pdca-harness/issues/614 (the resume hint after a forced
+     split omits `--force`). issue_496's §10 holds only plan-advisory telemetry.
+  2. *Every §10 bullet in every live and archived SUMMARY* (47 distinct), each matched
+     to its act-log routing. Everything is routed except one: **issue_495's "point
+     `run-suite.sh` at `python3 -m tests.run_root_suite`"**. The 2026-08-15 review
+     routed upstream #495 but never made this instance-side change.
+     `engine/scripts/run-suite.sh:31` still runs `unittest discover -s tests`, so a root
+     suite whose copier tests all skip still reports OK (green-by-skip), even though
+     v0.58.0 ships `tests/run_root_suite.py` (exit 77 + `PDCA-UNVERIFIABLE:`).
+  3. *Every human message in the Plan/sign-off/publish sessions* that asks to file, track
+     or follow up. All accounted for: the CSV item (→ #549), multi-line §6 (→ #527), drive
+     claims (→ #573), the format rework (→ #607), the issue_537 note (§10, handled). The
+     unguarded `fh.close()` in issue_566 (`drive_claim.py:283`) was explicitly accepted
+     at sign-off ("no, we will accept that"), so it is not filed.
+- Merge https://github.com/eduralph/pdca-pdca/pull/85 so the next Act index sees 496/545.
+- Carried, open upstream, no new filing: #575, #586, #501 (T5 split a fourth time),
+  #556, #573, #577, #579.
+- Open Act item (carried, unchanged): triage rubric should state five buckets
+  explicitly (issue_316 §10). No triage brief ran.
+
+## How effectiveness will be judged
+
+- Until #608 lands: at each review, also read §10 of every `iteration-v*/SUMMARY.md` of
+  the bundles considered, or ask the human whether they dictated Act items at an iterate.
+- #603: on the next bundle with 2+ rounds and plan findings, the human ticks each plan
+  finding once. #606: no §6 row ends mid-thought.
+- #607: no effectiveness check before 0.70.0. Count parser-edge rounds per bundle
+  until then as the baseline.

@@ -101,7 +101,7 @@
     "first_seen": "2026-08-09",
     "status": "applied",
     "applied_date": "2026-09-15",
-    "location": "pdca.toml [driver.size_signal] patch_kb=125, patch_files=25, rounds=3 (Act 2026-09-15). History: rounds=3/patch_kb=125/files=25 set 2026-08-09; patch_kb 125\u219280 applied via PR #60 (closing #50) after the 2026-08-15 calibration; 80 fired on issue_534 (89 KB, 5 build attempts, 1 re-plan) \u2014 a true positive, NOT an ineffective delta: the backstop's job is to fire. Set back to 125 at the 2026-09-15 review by the human's call: a patch a little over the line is not a split signal on its own. The smarter rule (tolerance band; calibration counting pre-re-plan rounds \u2014 size-signal.json records rounds=0 for 534 because iteration_rounds resets at a re-plan) is harness machinery: filed upstream https://github.com/eduralph/pdca-harness/issues/556. Judge firings against loop-telemetry iterations_to_pass, not rounds alone. Related upstream: #446 (merged), #477 (open)."
+    "location": "pdca.toml [driver.size_signal] patch_kb=125, patch_files=25, rounds=3 (Act 2026-09-15). History: rounds=3/patch_kb=125/files=25 set 2026-08-09; patch_kb 125\u219280 applied via PR #60 (closing #50) after the 2026-08-15 calibration; 80 fired on issue_534 (89 KB, 5 build attempts, 1 re-plan) \u2014 a true positive, NOT an ineffective delta: the backstop's job is to fire. Set back to 125 at the 2026-09-15 review by the human's call: a patch a little over the line is not a split signal on its own. The smarter rule (tolerance band; calibration counting pre-re-plan rounds \u2014 size-signal.json records rounds=0 for 534 because iteration_rounds resets at a re-plan) is harness machinery: filed upstream https://github.com/eduralph/pdca-harness/issues/556. Judge firings against loop-telemetry iterations_to_pass, not rounds alone. Related upstream: #446 (merged), #477 (open). Act 2026-09-30: the index flags this delta 'ineffective' (recurred in 408, 409) - false alarm. 409 (166 KB, 15 files, 4 rounds, estimated oversized at Plan) and 408 (3 rounds) are true positives; the backstop firing is its job. No change."
   },
   {
     "signal": "t4 contribution \u2014 confirm the eventual commit message",
@@ -147,25 +147,25 @@
     "signal": "plan advisory: 0 finding(s); brief revised: no (plan-advisory-*.md)",
     "raw": "Plan advisory: 0 finding(s); brief revised: no (plan-advisory-*.md)",
     "first_seen": "2026-08-15",
-    "status": "open",
-    "applied_date": null,
-    "location": "NOT a verdict on the feature: the benefit telemetry is uninterpretable while the leaf cannot run at all (see the two signals below and upstream #526). Do not retire [[leaves.plan_advisory]] on '0 findings \u00d7 9' \u2014 re-judge after the first wave in which the leaf actually produces artifacts."
+    "status": "structural",
+    "applied_date": "2026-09-30",
+    "location": "NOT a verdict on the feature: the benefit telemetry is uninterpretable while the leaf cannot run at all (see the two signals below and upstream #526). Do not retire [[leaves.plan_advisory]] on '0 findings \u00d7 9' \u2014 re-judge after the first wave in which the leaf actually produces artifacts. Act 2026-09-30: re-judged now that the leaf runs - 4 of 4 bundles had 5-6 findings and a revised brief, so the leaf earns its keep; keep [[leaves.plan_advisory]]. This line is benefit telemetry, not a defect."
   },
   {
     "signal": "leaf produced no usable verdict (needs a human)",
     "raw": "leaf produced no usable verdict (needs a human) \u2014 plan-advisory leaf 'plan-reviewer' did not produce findings (produced no artifact); re-run it or adjudicate by hand.",
     "first_seen": "2026-08-15",
-    "status": "open",
-    "applied_date": null,
-    "location": "Cause reproduced at the 2026-08-15 Act review and routed upstream as https://github.com/eduralph/pdca-harness/issues/526: the plan-advisory leaf is the only leaf whose sandbox is seeded fail-closed (leaves.py:2419), this host denies unprivileged userns (apparmor_restrict_unprivileged_userns=1) so every Bash call in it fails, and the leaf has no Write/Edit \u2014 Bash was its only write route. It exits 0, so the harness files the empty result as 'substantive \u2014 do not assume an infra blip', which is exactly wrong. 9 of 9 bundles. Instance-side decision tracked as https://github.com/eduralph/pdca-pdca/issues/51; activation status recorded on https://github.com/eduralph/pdca-pdca/issues/48."
+    "status": "applied",
+    "applied_date": "2026-09-28",
+    "location": "Cause reproduced at the 2026-08-15 Act review and routed upstream as https://github.com/eduralph/pdca-harness/issues/526: the plan-advisory leaf is the only leaf whose sandbox is seeded fail-closed (leaves.py:2419), this host denies unprivileged userns (apparmor_restrict_unprivileged_userns=1) so every Bash call in it fails, and the leaf has no Write/Edit \u2014 Bash was its only write route. It exits 0, so the harness files the empty result as 'substantive \u2014 do not assume an infra blip', which is exactly wrong. 9 of 9 bundles. Instance-side decision tracked as https://github.com/eduralph/pdca-pdca/issues/51; activation status recorded on https://github.com/eduralph/pdca-pdca/issues/48. CONFIRMED FIXED at the 2026-09-30 Act review: first wave after upstream #526 (v0.58.0) and the re-enable (c3ecbe3) - plan-reviewer produced an artifact with findings in 4 of 4 bundles (371: 5, 408: 6, 409: 5, 477: 5), every brief revised, and no 'leaf produced no usable verdict' item. See process/act-log.md entry 2026-09-30."
   },
   {
     "signal": "plan-reviewer produced no artifact in all 5 bundles",
     "raw": "plan-reviewer produced no artifact in all 5 bundles of this sign-off batch (466/474/497/475/506) \u2014 systemic, not per-bundle: those briefs reached Do with no advisory pass, and each cost a human \u00a76 adjudication. Act: find the leaf's failure mode, and decide whether a no-artifact plan advisory should hold Plan rather than pass through.",
     "first_seen": "2026-08-15",
-    "status": "open",
-    "applied_date": null,
-    "location": "Cause reproduced at the 2026-08-15 Act review and routed upstream as https://github.com/eduralph/pdca-harness/issues/526: the plan-advisory leaf is the only leaf whose sandbox is seeded fail-closed (leaves.py:2419), this host denies unprivileged userns (apparmor_restrict_unprivileged_userns=1) so every Bash call in it fails, and the leaf has no Write/Edit \u2014 Bash was its only write route. It exits 0, so the harness files the empty result as 'substantive \u2014 do not assume an infra blip', which is exactly wrong. 9 of 9 bundles. Instance-side decision tracked as https://github.com/eduralph/pdca-pdca/issues/51; activation status recorded on https://github.com/eduralph/pdca-pdca/issues/48."
+    "status": "applied",
+    "applied_date": "2026-09-28",
+    "location": "Cause reproduced at the 2026-08-15 Act review and routed upstream as https://github.com/eduralph/pdca-harness/issues/526: the plan-advisory leaf is the only leaf whose sandbox is seeded fail-closed (leaves.py:2419), this host denies unprivileged userns (apparmor_restrict_unprivileged_userns=1) so every Bash call in it fails, and the leaf has no Write/Edit \u2014 Bash was its only write route. It exits 0, so the harness files the empty result as 'substantive \u2014 do not assume an infra blip', which is exactly wrong. 9 of 9 bundles. Instance-side decision tracked as https://github.com/eduralph/pdca-pdca/issues/51; activation status recorded on https://github.com/eduralph/pdca-pdca/issues/48. CONFIRMED FIXED at the 2026-09-30 Act review: first wave after upstream #526 (v0.58.0) and the re-enable (c3ecbe3) - plan-reviewer produced an artifact with findings in 4 of 4 bundles (371: 5, 408: 6, 409: 5, 477: 5), every brief revised, and no 'leaf produced no usable verdict' item. See process/act-log.md entry 2026-09-30."
   },
   {
     "signal": "t5 judgment \u2014 confirm merged and closed/rejected prior",
@@ -173,7 +173,7 @@
     "first_seen": "2026-09-19",
     "status": "applied",
     "applied_date": "2026-09-19",
-    "location": "Act 2026-09-19: same class under two keys, 8 of 8 patch bundles. Briefs now cite the by-path closed-PR search (PR #64 worked on the brief side); the reviewer still raises it because docs/INTEGRATION.md:132-134 wrongly says it cannot rerun the commands - the gh -R commands need network only (issue_534's reviewer ran them, T5 PASS). APPLIED 2026-09-19: docs/INTEGRATION.md section 5 now has a 'Reviewer re-check (T5)' bullet telling the reviewer to rerun them; see process/act-log.md entry 2026-09-19. Act 2026-09-28: APPLIED BUT MISLOCATED - the class recurred on issue_541 (reviewed 2026-09-28, a week after PR #68 merged) under a third ledger key. The reviewer sandbox never receives this instance's docs/INTEGRATION.md (REVIEWER_INPUTS, src/pdca_harness/leaves.py:70); issue_541's reviewer read target/template/docs/INTEGRATION.md.jinja instead. No instance-docs fix can reach the reviewer. Root cause upstream https://github.com/eduralph/pdca-harness/issues/575 (evidence added: https://github.com/eduralph/pdca-harness/issues/575#issuecomment-5878229756); unseeded pointer filed https://github.com/eduralph/pdca-harness/issues/586. Until #575 lands, the human clears this item at sign-off."
+    "location": "Act 2026-09-19: same class under two keys, 8 of 8 patch bundles. Briefs now cite the by-path closed-PR search (PR #64 worked on the brief side); the reviewer still raises it because docs/INTEGRATION.md:132-134 wrongly says it cannot rerun the commands - the gh -R commands need network only (issue_534's reviewer ran them, T5 PASS). APPLIED 2026-09-19: docs/INTEGRATION.md section 5 now has a 'Reviewer re-check (T5)' bullet telling the reviewer to rerun them; see process/act-log.md entry 2026-09-19. Act 2026-09-28: APPLIED BUT MISLOCATED - the class recurred on issue_541 (reviewed 2026-09-28, a week after PR #68 merged) under a third ledger key. The reviewer sandbox never receives this instance's docs/INTEGRATION.md (REVIEWER_INPUTS, src/pdca_harness/leaves.py:70); issue_541's reviewer read target/template/docs/INTEGRATION.md.jinja instead. No instance-docs fix can reach the reviewer. Root cause upstream https://github.com/eduralph/pdca-harness/issues/575 (evidence added: https://github.com/eduralph/pdca-harness/issues/575#issuecomment-5878229756); unseeded pointer filed https://github.com/eduralph/pdca-harness/issues/586. Until #575 lands, the human clears this item at sign-off. Act 2026-09-30: 'ineffective' flag again (recurred in 371, 477) - expected, the delta is mislocated; still pending #575."
   },
   {
     "signal": "t5 judgment \u2014 confirm the affected-path merged and",
@@ -181,7 +181,7 @@
     "first_seen": "2026-09-19",
     "status": "applied",
     "applied_date": "2026-09-19",
-    "location": "Act 2026-09-19: same class under two keys, 8 of 8 patch bundles. Briefs now cite the by-path closed-PR search (PR #64 worked on the brief side); the reviewer still raises it because docs/INTEGRATION.md:132-134 wrongly says it cannot rerun the commands - the gh -R commands need network only (issue_534's reviewer ran them, T5 PASS). APPLIED 2026-09-19: docs/INTEGRATION.md section 5 now has a 'Reviewer re-check (T5)' bullet telling the reviewer to rerun them; see process/act-log.md entry 2026-09-19. Act 2026-09-28: APPLIED BUT MISLOCATED - the class recurred on issue_541 (reviewed 2026-09-28, a week after PR #68 merged) under a third ledger key. The reviewer sandbox never receives this instance's docs/INTEGRATION.md (REVIEWER_INPUTS, src/pdca_harness/leaves.py:70); issue_541's reviewer read target/template/docs/INTEGRATION.md.jinja instead. No instance-docs fix can reach the reviewer. Root cause upstream https://github.com/eduralph/pdca-harness/issues/575 (evidence added: https://github.com/eduralph/pdca-harness/issues/575#issuecomment-5878229756); unseeded pointer filed https://github.com/eduralph/pdca-harness/issues/586. Until #575 lands, the human clears this item at sign-off."
+    "location": "Act 2026-09-19: same class under two keys, 8 of 8 patch bundles. Briefs now cite the by-path closed-PR search (PR #64 worked on the brief side); the reviewer still raises it because docs/INTEGRATION.md:132-134 wrongly says it cannot rerun the commands - the gh -R commands need network only (issue_534's reviewer ran them, T5 PASS). APPLIED 2026-09-19: docs/INTEGRATION.md section 5 now has a 'Reviewer re-check (T5)' bullet telling the reviewer to rerun them; see process/act-log.md entry 2026-09-19. Act 2026-09-28: APPLIED BUT MISLOCATED - the class recurred on issue_541 (reviewed 2026-09-28, a week after PR #68 merged) under a third ledger key. The reviewer sandbox never receives this instance's docs/INTEGRATION.md (REVIEWER_INPUTS, src/pdca_harness/leaves.py:70); issue_541's reviewer read target/template/docs/INTEGRATION.md.jinja instead. No instance-docs fix can reach the reviewer. Root cause upstream https://github.com/eduralph/pdca-harness/issues/575 (evidence added: https://github.com/eduralph/pdca-harness/issues/575#issuecomment-5878229756); unseeded pointer filed https://github.com/eduralph/pdca-harness/issues/586. Until #575 lands, the human clears this item at sign-off. Act 2026-09-30: 'ineffective' flag again (recurred in 371, 477) - expected, the delta is mislocated; still pending #575."
   },
   {
     "signal": "validation \u2014 fitness-to-purpose \u2014 decide whether a real",
@@ -198,5 +198,21 @@
     "status": "open",
     "applied_date": null,
     "location": "Act 2026-09-28: same class as rows 21-22 under a third key (#501). Pending upstream https://github.com/eduralph/pdca-harness/issues/575 and https://github.com/eduralph/pdca-harness/issues/586; see process/act-log.md entry 2026-09-28."
+  },
+  {
+    "signal": "plan advisory: 5 finding(s); brief revised: yes (plan-advisory-*.md)",
+    "raw": "Plan advisory: 5 finding(s); brief revised: yes (plan-advisory-*.md)",
+    "first_seen": "2026-09-30",
+    "status": "structural",
+    "applied_date": "2026-09-30",
+    "location": "Act 2026-09-30: benefit telemetry from assemble._plan_advisory_act_lines, not a defect (3 of 4 bundles: 371, 409, 477; 408 had 6). No delta. The real problem these bundles exposed - cleared plan findings re-entering \u00a76 every round - is upstream https://github.com/eduralph/pdca-harness/issues/603."
+  },
+  {
+    "signal": "t5 judgment \u2014 confirm affected-file prior art across",
+    "raw": "T5 Judgment \u2014 Confirm affected-file prior art across merged history and closed/rejected work before accepting novelty and scope: the supplied target has one snapshot commit and no remote, while the brief supplies only a narrative of earlier attempts (`reviewer-prior-art.log:1`; `brief.md:185`).",
+    "first_seen": "2026-09-30",
+    "status": "open",
+    "applied_date": null,
+    "location": "Act 2026-09-30: same T5 prior-art class as rows 21, 22, 24 under a fourth key (#501); recurs in 371, 408, 409, 477, 537, 539 as expected. Pending upstream https://github.com/eduralph/pdca-harness/issues/575 (milestone 0.61.0) and #586; the human clears it at sign-off until then."
   }
 ]
