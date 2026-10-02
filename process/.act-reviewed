@@ -1,5 +1,5 @@
 {
-  "count": 72,
+  "count": 78,
   "reviewed": [
     "issue_311",
     "issue_316",
@@ -13,6 +13,7 @@
     "issue_368",
     "issue_369",
     "issue_370",
+    "issue_371",
     "issue_372",
     "issue_375",
     "issue_376",
@@ -25,6 +26,8 @@
     "issue_401",
     "issue_402",
     "issue_403",
+    "issue_408",
+    "issue_409",
     "issue_411",
     "issue_413",
     "issue_419",
@@ -49,6 +52,7 @@
     "issue_474",
     "issue_475",
     "issue_476",
+    "issue_477",
     "issue_480",
     "issue_481",
     "issue_494",
@@ -66,7 +70,9 @@
     "issue_533",
     "issue_534",
     "issue_536",
+    "issue_537",
     "issue_538",
+    "issue_539",
     "issue_540",
     "issue_541",
     "issue_549",
@@ -87,6 +93,7 @@
     "issue_368": "867a70835426f3352e8c762bc5bb2ce7bbbac67faeb713a3f833e914601dc005",
     "issue_369": "d9c796916cc837acb7bb8d2169b993aa1d950161fbf325ef41661559fdd36a82",
     "issue_370": "981b90fc290ea352e0db33b2478a63e53614748039a40ae622c327be5751a103",
+    "issue_371": "d98d1445bf4761247acd467f5de18b131ecd8f1f4acbf3de0c11baa2904977f7",
     "issue_372": "3ac076b86f2f9883a6812d02ca3b449284961f24383ded9e9c6f20fb7dfb8af9",
     "issue_375": "c6013fc1a9b38710970974014205aa93ee337d06f8899035b2a776ad4d9607b4",
     "issue_376": "3ca7c04a85344bce0052768e2f65f98150c7670e85aac7422984f2c2da02f0aa",
@@ -99,6 +106,8 @@
     "issue_401": "e2f7bcd6bb2e73ab20942db67a2cd16a03a456429ce11299bdc4492e63349f69",
     "issue_402": "66b9dc72e6b327120f1ca11c918e37aa23b8a6ac099bdd2fc4a23ffee490cc15",
     "issue_403": "b78e8e0eec7f22447ed0c12544f12c54e1781037a65494188d5ac6fc4b4f794b",
+    "issue_408": "2bdf6624dc23b33d3d12ea193d61b0128f20dd1637361d0942e9c943d96dffa9",
+    "issue_409": "ed4172d087590c6944cbd68c34a33f1a5508c464df8c1712102a2b4103be89da",
     "issue_411": "fbf22aa5580c3c64f5631c4dfe6d5032c3a9b4b18d369f80051456e0d0cd6552",
     "issue_413": "14b624bfbec39424c9ced5bba154e9f555fb82d1d23f67980e4a0bb256289548",
     "issue_419": "86b706894aab022daf79eb814030fc2ab9ce73763ca40745ba55e526f26a7cb8",
@@ -123,6 +132,7 @@
     "issue_474": "c6ed28e82c7fc4c3f5c421c57eb1ec4311760965858a46b24a3db1429df66862",
     "issue_475": "6af9c276e9751e0292f274fd066a9f8aa74931ba5cd20cc7c7dc64bf12884b68",
     "issue_476": "e1e5fe62383d591ca83b513e0696c6543e7521bca9ec61ec47e9c90b8764dc81",
+    "issue_477": "42c3d3e4833f48536c25fe57512e940601019c332c03957df5c7914d55634916",
     "issue_480": "7dea0017b74096fb96607f87a24a8580047a5e53b227c3246be22db02ecd3583",
     "issue_481": "d1f177b53ef04dbbe90830fd55ac858a3d5d3ff05fd9afc328cb49fa479e1684",
     "issue_494": "0b6912a4349b37b60ada06efba4be15c9e408c2ba4b6a5c04b7573c3c9f8f8c2",
@@ -140,7 +150,9 @@
     "issue_533": "e293382ed0b2e64f357c321490f20cc7492682121777cebd1b41cd3b98909733",
     "issue_534": "4a50ffb31db619d6da1257f0b465d969c0165fd5ca2927cf9fad54ab5ac52c54",
     "issue_536": "1c41eec4dec5b010a1144bff37ae01173ba15d55488afb7df43f1225bc952621",
+    "issue_537": "500901b17133dcdbb080d66bbf2d6143b830ca85df92d1d048fe117c47e62943",
     "issue_538": "aa6752e597d74cd46aed08c086e9c851915adbfb252b7591698f405e17cec5bb",
+    "issue_539": "8508f7c3489448c9d7fc338f200e31bcf71b87a2dfdd32172786ad81d29643ae",
     "issue_540": "fe315afce0b3bc030e2b30feafd3088d6d6cc64514af6fa98df63085b54794f3",
     "issue_541": "7c319c5b4e55e1738a86b7bcc4985c668b1748243c520c00f40ec875339e169f",
     "issue_549": "62202f8bf1fcaddfa727fe500ed7ea2c64a24f9aa465e9e7951a3acc9b351539",
@@ -148,5 +160,5 @@
     "issue_565": "38861562d745d4ca58f315b495e745d31435893b992b161d44ec83512d36ef6c",
     "issue_566": "c4a9587cf6817f2594078781d3d6538e8e155b279553fedec89145457287bc68"
   },
-  "last_review_date": "2026-09-28"
+  "last_review_date": "2026-09-30"
 }
