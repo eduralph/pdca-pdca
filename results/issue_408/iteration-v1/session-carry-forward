@@ -1,0 +1,14 @@
+Rebuild to fix the two regressions the reviewer found (both reproduced at sign-off):
+1. assemble.py (_needs_human_rows, ~:814): the [impl] tag is read from cells[vi], where vi is the
+   first cell containing "needs-human" anywhere in the row, not the Verdict column. So
+   `| C5 Causal adequacy | PASS | Quoted NEEDS-HUMAN [impl] from an old review |` in the verdict
+   table becomes an IMPL item and would trigger a needless auto-rebuild. Use the Verdict column
+   for both NEEDS-HUMAN recognition and tag extraction; add a test (PASS verdict + Basis-only
+   quote -> no IMPL item).
+2. assemble.py (~:807 with add() dedup ~:772): a bare and a `V —`-prefixed Validation row with
+   identical Basis now normalise to the same text, so add() drops the second before the
+   "two STANDING rows -> neither" fail-closed guard (~:821) can count it. Count STANDING rows
+   before text dedup; add a test with IDENTICAL Basis cells (the existing test uses different Basis).
+Keep everything else; the rest of the patch (T5 prompt/role changes, V-row normalisation,
+plan-advisory/primary-review bounding) was found fine at sign-off.
+Advisory-tag policy change (mandatory [impl]/[human] on every advisory bullet, "when in doubt, omit" removed) was explicitly ACCEPTED at sign-off — keep it as is.

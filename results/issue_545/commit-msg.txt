@@ -1,0 +1,43 @@
+Keep a split parent open until its children close; bound split depth
+
+After `pdca split --accept`, the parent issue's work lives in its child
+issues. But once the parent's bundle was finished, `pdca cleanup --apply`
+closed the parent as "not planned" with a comment saying the review had
+chosen not to fix it. The parent has no patch of its own, so cleanup
+treated it like any no-fix close. That record is wrong: the work was
+moved into the children, not dropped, and the children may still be open.
+
+cleanup now handles a finished split parent before any other check on an
+open issue, including a merged PR recorded from an attempt made before
+the split. It reads each child's issue state from the tracker, not from
+local bundles:
+
+- any child open, or a child's state that cannot be read: report only,
+  the parent stays open;
+- the children list missing, empty, or holding any entry that is not an
+  issue number: report only, close the parent by hand;
+- all children closed: close the parent as completed if at least one
+  child was completed, else as not planned, with a comment that names
+  every child and its close reason. A hand-written tracker-comment.md is
+  kept, with the child list added after it.
+
+A parent whose bundle ended DISCONTINUED keeps today's behaviour.
+
+Splits could also nest without limit; one instance split a slice three
+levels deep. `pdca split <id> --accept` now refuses a bundle whose
+lineage record says depth 2 or more, before any issue is filed or file
+written. A child of an unsplit issue is depth 1, so an issue, its
+children and its grandchildren are allowed; splitting a grandchild is
+not. The new `--force` flag lifts only this refusal. A damaged lineage
+record counts as depth 0 and is never refused. The depth itself was
+already recorded by 5c83070060c2b3a4b54b3bab8d74012ad1361d3a.
+
+The planner prompt, the splitter comment in pdca.toml, the cleanup table
+in docs/07-crosscutting.md and cleanup's module docstring describe both
+rules. The prompt tells the planner that `--force` is the human's call.
+
+This does not close the parent at `split --accept`, which the issue's
+first acceptance line asked for. The parent stays open on purpose, so an
+open parent still counts as open work until its children are done.
+
+Fixes #545

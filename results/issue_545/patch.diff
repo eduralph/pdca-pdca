@@ -1,0 +1,743 @@
+diff --git a/docs/07-crosscutting.md b/docs/07-crosscutting.md
+index 24ee916..e1caad8 100644
+--- a/docs/07-crosscutting.md
++++ b/docs/07-crosscutting.md
+@@ -670,6 +670,7 @@ pdca cleanup --apply    # execute the matched actions below
+ | `AWAITING_SIGNOFF` | issue CLOSED | records §9 `discontinue` (the same primitive as `pdca signoff --discontinue`) |
+ | mid-flight (`PLANNED`/`BUILT`/`CHECKED`/iterating) | issue CLOSED | **report only** — fabricating a §9 for in-flight work isn't auditable |
+ | not `COMPLETE` | PR MERGED | **report only, always** — never auto-writes an accept past the C6 guard |
++| `COMPLETE` split parent (`close-disposition` = `split`) | issue OPEN | checked **first**, ahead of the PR rows: **report only** while any child issue is open or its state can't be read (or the lineage record's `children` list is missing, empty, or has an entry that is not an issue number — close it by hand); once every child issue is closed, comments (naming every child) + closes as `completed` if at least one child was completed, else `not planned` |
+ | `COMPLETE` with a merged PR | issue OPEN | comments + closes the issue |
+ | `COMPLETE` (close/no-fix) or `DISCONTINUED` | issue OPEN | comments + closes the issue |
+ | `COMPLETE` with an unmerged PR | issue OPEN | **report only** — stays open until the PR actually merges |
+diff --git a/template/agents/planner.md.jinja b/template/agents/planner.md.jinja
+index b3c8978..37a1c89 100644
+--- a/template/agents/planner.md.jinja
++++ b/template/agents/planner.md.jinja
+@@ -161,6 +161,19 @@ You do **not** leave the session to file issues by hand. `--accept` does it (pas
+ instead only when the issues already exist, or when the tracker is not one the driver can
+ reach — it will say so plainly rather than skipping).
+ 
++The parent's tracker issue **stays open** while its children are worked on: `--accept`
++neither closes nor labels it. Once the parent's bundle is COMPLETE and every child issue
++is closed, `{{ cli_name }} cleanup --apply` closes it with a comment naming every child —
++as completed if at least one child was completed, else as not planned. Only a COMPLETE
++parent waits for its children: one whose bundle ends DISCONTINUED is closed as not planned
++like any other discontinued bundle.
++
++`--accept` refuses a bundle that is already two splits deep (its lineage record says
++depth 2 or more): a slice that deep is meant to be built or dropped, not split again.
++`--force` overrides that refusal, and it is the human's decision, not yours. Do not pass
++`--force` unless the human has asked for it in so many words; when the refusal appears,
++show it to the human and stop there.
++
+ What happens next no longer depends on how this run was started:
+ 
+ - **The run you are in adopts them.** A bundle that reaches `close-disposition = split`
+diff --git a/template/pdca.toml.jinja b/template/pdca.toml.jinja
+index cde1589..90e34d9 100644
+--- a/template/pdca.toml.jinja
++++ b/template/pdca.toml.jinja
+@@ -510,6 +510,12 @@ argv = []
+ # as a SUB-ISSUE of the parent, materializes a bundle each, and the run continues into waves
+ # by itself (#358). Pass `--ids 640,641` instead when the issues already exist — or when the
+ # tracker is not a GitHub one this can reach, in which case it says so rather than skipping.
++# The parent's tracker issue stays open until its children are done (#545): once the
++# parent's bundle is COMPLETE and every child issue is closed, `{{ cli_name }} cleanup
++# --apply` closes it with a comment naming every child — as completed if at least one child
++# was completed, else as not planned. (A parent whose bundle ends DISCONTINUED is not held
++# open: cleanup closes it as not planned.) A bundle already two splits deep (lineage depth
++# 2 or more) is not split again unless the human passes `--force` to `--accept`.
+ [leaves.splitter]
+ mode = "{{ leaves_mode }}"
+ family = "{{ interactive_family }}"
+diff --git a/template/src/pdca_harness/cleanup.py b/template/src/pdca_harness/cleanup.py
+index 0df77ff..44b6edf 100644
+--- a/template/src/pdca_harness/cleanup.py
++++ b/template/src/pdca_harness/cleanup.py
+@@ -19,6 +19,13 @@ Reconciliation matrix (local state × remote state):
+   discontinue by hand.
+ * PR MERGED, bundle not COMPLETE → report only, always: auto-writing an accept
+   would forge the human verdict past the C6 guard.
++* issue OPEN, bundle COMPLETE split parent (``close-disposition`` = ``split``) → decided
++  FIRST, ahead of the recorded-PR checks (#545): the parent stays open while any of its
++  children's tracker issues is open or unreadable (report only); once all children are
++  closed it is closed as ``completed`` (at least one child completed) or ``not planned``
++  (none completed), with a comment naming every child. A ``children`` list in its
++  ``split-lineage.json`` that is missing, empty, or has any entry that is not a tracker
++  issue number → report only; close it by hand.
+ * issue OPEN, bundle COMPLETE with a merged PR → comment (the bundle's
+   ``tracker-comment.md`` if present) + ``gh issue close --reason completed``.
+ * issue OPEN, bundle COMPLETE close/no-fix (empty patch) or DISCONTINUED →
+@@ -47,7 +54,7 @@ import sys
+ from dataclasses import dataclass, field
+ from pathlib import Path
+ 
+-from . import brief, driver, publish, signoff, sources, state
++from . import brief, driver, flow, publish, signoff, sources, split, state
+ from .config import Config
+ 
+ _MID_FLIGHT = (state.PLANNED, state.BUILT, state.CHECKED,
+@@ -159,7 +166,16 @@ def _discontinue(cfg: Config, d: Path, remote: dict, *, by: str, today: str) ->
+     return True
+ 
+ 
+-def _close_issue(d: Path, number: str, repo: str, *, reason: str, fallback_body: str) -> bool:
++def _bundle_comment(d: Path) -> str:
++    """The bundle's hand-written ``tracker-comment.md``, stripped, or ``""``."""
++    comment = d / "tracker-comment.md"
++    if comment.is_file():
++        return comment.read_text(encoding="utf-8").strip()
++    return ""
++
++
++def _close_issue(d: Path, number: str, repo: str, *, reason: str, fallback_body: str,
++                 prefer_bundle_comment: bool = True) -> bool:
+     """Close the issue with the comment attached, idempotently under retries.
+ 
+     One ``gh issue close --comment`` call (#300 review) — but that is still TWO API
+@@ -167,14 +183,12 @@ def _close_issue(d: Path, number: str, repo: str, *, reason: str, fallback_body:
+     land and the close still fail transiently. So before closing, probe the issue's
+     existing comments for OUR exact body; when it is already there, close WITHOUT the
+     comment — a ``--apply`` retry never reposts. The bundle's ``tracker-comment.md`` is
+-    preferred as the body, else the fallback. A failing probe degrades to posting (one
+-    possible duplicate only in the double-failure case — fail toward completing the
+-    close, never toward losing the comment)."""
++    preferred as the body, else the fallback — unless ``prefer_bundle_comment`` is False,
++    when the caller has already built the full body (the split parent's, #545). A failing
++    probe degrades to posting (one possible duplicate only in the double-failure case —
++    fail toward completing the close, never toward losing the comment)."""
+     repo_args = ["--repo", repo] if repo else []
+-    comment = d / "tracker-comment.md"
+-    body = fallback_body
+-    if comment.is_file() and comment.read_text(encoding="utf-8").strip():
+-        body = comment.read_text(encoding="utf-8").strip()
++    body = (_bundle_comment(d) if prefer_bundle_comment else "") or fallback_body
+     already = False
+     probe = _gh(["issue", "view", number, *repo_args, "--json", "comments"])
+     if probe.returncode == 0:
+@@ -218,6 +232,82 @@ def _unresolve(d: Path) -> bool:
+     return not notes.exists()
+ 
+ 
++def _split_parent_row(d: Path, st: str, number: str, repo: str) -> _Row:
++    """The row for a COMPLETE split parent whose tracker issue is OPEN (#545).
++
++    The parent stays open while its children are worked on and closes once they are all
++    closed. The children's state is read from the TRACKER, not from local child bundles —
++    a child bundle may be archived, cleaned up, or absent from this checkout, while its
++    issue is what a merged PR closes. Unknown never acts: a missing or damaged ``children``
++    list, a child id that is not a tracker number, or a child whose state cannot be read
++    is report-only. A child that was itself split needs no special case — its issue
++    closes by this same rule, so a chain may take one ``cleanup --apply`` run per level.
++    """
++    by_hand = "no action; close the issue by hand once its children are done"
++    record = split.read_lineage(d)
++    children = flow._lineage_children(record) if record else []
++    # The flow's reader DROPS an entry it cannot use (a null, a number, a blank string) —
++    # right for the flow, which drives the children it can name; wrong here, where the list
++    # decides a close. A dropped entry is a child whose issue this sweep never reads, so
++    # only a list the reader kept WHOLE may close the parent: `["601", null]` with #601
++    # closed must not close it on #601 alone. (The reader returns a non-empty list only
++    # when the record's `children` IS a list, so the second test reads it safely.)
++    if not children or len(children) != len(record["children"]):
++        return _Row(d.name, st, "OPEN",
++                    f"split parent — its children are unknown (the `children` list in "
++                    f"{split.LINEAGE} is missing, empty, or has an entry that is not an "
++                    f"id string: a null, a bare number, a blank) — {by_hand}")
++    not_numbers = [c for c in children if not c.isdigit()]
++    if not_numbers:
++        # The id shape a non-GitHub tracker uses (`MANT-1`) is a valid lineage id, but no
++        # `gh issue view` can ever read it — so this cannot resolve by waiting.
++        return _Row(d.name, st, "OPEN",
++                    "split parent — child id " + ", ".join(f"`{c}`" for c in not_numbers)
++                    + f" in {split.LINEAGE} is not a tracker issue number, so its state "
++                    f"cannot be read — {by_hand}")
++    still_open: list[str] = []
++    unknown: list[str] = []
++    reasons: dict[str, str] = {}
++    for child in children:
++        remote = _issue_state(child, repo)
++        state_ = str((remote or {}).get("state", "") or "")
++        if state_ == "OPEN":
++            still_open.append(child)
++        elif state_ == "CLOSED":
++            # The real gh prints `COMPLETED` / `NOT_PLANNED`; compare without case.
++            reasons[child] = str(remote.get("stateReason", "") or "").upper()
++        else:
++            unknown.append(child)
++    waits = []
++    if still_open:
++        waits.append("waiting on " + ", ".join(f"#{c}" for c in still_open)
++                     + " (still open)")
++    if unknown:
++        waits.append("child state unknown for " + ", ".join(f"#{c}" for c in unknown)
++                     + " (gh failed or gave no usable state; a later run retries)")
++    if waits:
++        return _Row(d.name, st, "OPEN",
++                    "split parent — " + "; ".join(waits) + " — no action; the parent "
++                    "stays open until every child issue is closed")
++    completed = any(r == "COMPLETED" for r in reasons.values())
++    reason = "completed" if completed else "not planned"
++    # Each child's own close reason as gh gives it (`NOT_PLANNED` → "not planned"), so a
++    # child closed as a duplicate is not listed as "not planned".
++    listed = ", ".join(f"#{c} ({reasons[c].replace('_', ' ').lower() or 'closed'})"
++                       for c in children)
++    children_text = (f"This issue was split; all of its child issues are closed: {listed}. "
++                     f"Closing as {reason}.")
++    hand = _bundle_comment(d)
++    body = f"{hand}\n\n{children_text}" if hand else children_text
++    names = ", ".join(f"#{c}" for c in children)
++    return _Row(d.name, st, "OPEN",
++                f"split parent — all children closed ({names}) — comment + close as "
++                f"{reason}",
++                apply=[lambda: _close_issue(d, number, repo, reason=reason,
++                                            fallback_body=body,
++                                            prefer_bundle_comment=False)])
++
++
+ def _plan_bundle(cfg: Config, d: Path, *, issue_side: bool, repo: str,
+                  by: str, today: str) -> _Row | None:
+     """The reconciliation row for one bundle, or None when local and remote agree."""
+@@ -305,6 +395,12 @@ def _plan_bundle(cfg: Config, d: Path, *, issue_side: bool, repo: str,
+         return None                                  # COMPLETE/DISCONTINUED + closed: in sync
+ 
+     if remote.get("state") == "OPEN":
++        if st == state.COMPLETE and flow._is_split_parent(d):
++            # A split parent is decided FIRST (#545), ahead of the recorded-PR checks too:
++            # `split.accept` does not archive `publish.json`, so a parent published before
++            # it was split can still carry a merged `pr_url` — and closing it "Fixed by …"
++            # would close it while its children are still open.
++            return _split_parent_row(d, st, number, repo)
+         if st == state.COMPLETE:
+             # A recorded MERGED PR is checked FIRST (#300 review round 14): it is
+             # definitive evidence a fix shipped, while an absent/blank patch.diff may
+diff --git a/template/src/pdca_harness/cli.py b/template/src/pdca_harness/cli.py
+index 63e6c46..2c7e3f4 100644
+--- a/template/src/pdca_harness/cli.py
++++ b/template/src/pdca_harness/cli.py
+@@ -194,6 +194,10 @@ def main(argv: list[str] | None = None) -> int:
+                          help="comma-separated tracker ids, one per child, IN PROPOSAL "
+                               "ORDER. Omit to have the child issues filed for you, each as "
+                               "a sub-issue of the parent")
++    p_split.add_argument("--force", action="store_true",
++                         help="with --accept: split even a bundle already two or more "
++                              "splits deep (refused by default, #545). The human's call; "
++                              "overrides only the depth refusal")
+ 
+     p_status = sub.add_parser("status", help="list bundle states (cheap-first queue)")
+     p_status.add_argument("issue_id", nargs="?")
+@@ -805,7 +809,9 @@ def _split(cfg: Config, args) -> int:
+     try:
+         proposal_text = (d / split.PROPOSAL).read_text(encoding="utf-8")
+         children = split.parse(proposal_text)
+-        split.preflight(d, children, cfg)
++        # `force` is read with a default: callers that build a bare namespace without it
++        # (tests, scripts) keep today's behaviour — the depth refusal applies (#545).
++        split.preflight(d, children, cfg, force=bool(getattr(args, "force", False)))
+     except OSError:
+         split.advisory(f"split: {d.name} has no {split.PROPOSAL} — run "
+                        f"`{_prog()} split {args.issue_id}` first")
+diff --git a/template/src/pdca_harness/split.py b/template/src/pdca_harness/split.py
+index 5ed8c92..760527d 100644
+--- a/template/src/pdca_harness/split.py
++++ b/template/src/pdca_harness/split.py
+@@ -291,7 +291,32 @@ def advisory(text: str, *, file=None) -> None:
+         pass
+ 
+ 
+-def preflight(parent: Path, children: list[Child], cfg) -> None:
++#: The recorded lineage ``depth`` at which `pdca split <id> --accept` refuses by default
++#: (issue #545). A child of an unsplit parent is depth 1, so 2 allows original → children →
++#: grandchildren and refuses to split a grandchild. Kept in one place so a change of
++#: threshold is a one-line edit.
++MAX_SPLIT_DEPTH = 2
++
++
++def check_depth(parent: Path, *, force: bool = False) -> None:
++    """Refuse to split a bundle already ``MAX_SPLIT_DEPTH`` or more splits deep (#545).
++
++    Splitting takes minutes and building a wave takes hours, so an unbounded chain opens
++    issues faster than the cycle closes them. ``force`` is the human's override and lifts
++    only this refusal. The depth is read through the tolerant pair
++    :func:`read_lineage` / :func:`_recorded_depth`: a damaged record counts as depth 0 and
++    is never refused — a damaged hint never blocks the run.
++    """
++    depth = _recorded_depth(read_lineage(parent))
++    if depth >= MAX_SPLIT_DEPTH and not force:
++        raise SplitError(
++            f"{parent.name} is already {depth} splits deep (recorded depth {depth} in its "
++            f"{LINEAGE}) — a slice this deep is meant to be built or dropped, not split "
++            "again. Nothing was filed or written. Pass --force only if the human has "
++            "decided to split it anyway")
++
++
++def preflight(parent: Path, children: list[Child], cfg, *, force: bool = False) -> None:
+     """Every reason acceptance would fail that does NOT depend on the ids.
+ 
+     Split out of :func:`validate` because filing happens BEFORE the ids exist, and a
+@@ -319,6 +344,9 @@ def preflight(parent: Path, children: list[Child], cfg) -> None:
+             "second acceptance would create a duplicate set of children and leave the "
+             "first orphaned from the parent's breadcrumb. Reopen it first if that is what "
+             "you want")
++    # The depth bound (issue #545): ids-independent, so it refuses here, before any
++    # tracker issue is filed and before anything is written. `force` lifts only this one.
++    check_depth(parent, force=force)
+     # Whether accept can leave the parent a Plan artifact (issue #481). It needs no ids, so
+     # it is asked HERE too: `accept` refusing it alone would come after the CLI had filed
+     # the children as real tracker issues.
+diff --git a/template/tests/test_split_parent_lifecycle.py b/template/tests/test_split_parent_lifecycle.py
+new file mode 100644
+index 0000000..6277997
+--- /dev/null
++++ b/template/tests/test_split_parent_lifecycle.py
+@@ -0,0 +1,449 @@
++"""A split parent's tracker issue, and how deep a split may go (issue #545; offline).
++
++Two behaviours:
++
++* ``pdca cleanup`` keeps a finished split parent's issue OPEN while any child issue is
++  open or unreadable, and closes it — with a comment naming every child — once all of
++  them are closed: ``completed`` if at least one child was completed, else
++  ``not planned``. A ``children`` list it cannot read whole never closes it. Before #545
++  the parent fell into the generic "empty patch → not planned" close, with its children
++  still open.
++* ``pdca split <id> --accept`` refuses a bundle whose recorded lineage depth is 2 or
++  more unless ``--force`` is given.
++
++Only ``gh`` is faked; the production entry points (``cleanup.run``, ``cli._split``,
++``cli.main``) run.
++"""
++
++from __future__ import annotations
++
++import io
++import json
++import shutil
++import tempfile
++import unittest
++from contextlib import redirect_stderr, redirect_stdout
++from pathlib import Path
++from types import SimpleNamespace
++from unittest import mock
++
++from pdca_harness import cleanup, cli, signoff, split, state
++from pdca_harness.config import Config, LeafConfig
++
++TEMPLATES = Path(__file__).resolve().parents[1] / "templates"
++AGENTS = Path(__file__).resolve().parents[1] / "agents"
++REPO = "example-org/example-repo"
++PR = "https://github.com/org/repo/pull/7"
++
++# The real gh prints the reason in upper case (`COMPLETED`, `NOT_PLANNED`).
++OPEN = {"state": "OPEN", "stateReason": "", "closedAt": ""}
++DONE = {"state": "CLOSED", "stateReason": "COMPLETED", "closedAt": "2026-07-01T00:00:00Z"}
++DROPPED = {"state": "CLOSED", "stateReason": "NOT_PLANNED", "closedAt": "2026-07-01T00:00:00Z"}
++
++
++def _cfg(root: Path, tracker_url: str) -> Config:
++    return Config(
++        root=root, bundle_root=root / "results", process_dir=root / "process",
++        templates_dir=TEMPLATES, default_branch="main", tracker_system="github",
++        tracker_url=tracker_url, issue_id_example="1",
++        builder=LeafConfig(mode="stub"), reviewer=LeafConfig(mode="stub"))
++
++
++class SplitParentBase(unittest.TestCase):
++    """Mirrors ``CleanupBase`` (``test_cleanup.py:49-116``): an argv-keyed fake ``gh``."""
++
++    def setUp(self) -> None:
++        self.tmp = Path(tempfile.mkdtemp())
++        self.cfg = _cfg(self.tmp, f"https://github.com/{REPO}/issues")
++        self.gh_calls: list[list[str]] = []
++        self.issue_states: dict[str, dict] = {"500": OPEN}
++        self.pr_states: dict[str, str] = {}
++
++    def tearDown(self) -> None:
++        shutil.rmtree(self.tmp, ignore_errors=True)
++
++    def _fake_run(self, cmd, capture_output=True, text=True):
++        self.gh_calls.append(list(cmd))
++        sub = cmd[1:]
++        if sub[:2] == ["auth", "status"]:
++            return SimpleNamespace(returncode=0, stdout="", stderr="")
++        if sub[:2] == ["issue", "view"]:
++            st = self.issue_states.get(sub[2])
++            if st is None:
++                return SimpleNamespace(returncode=1, stdout="", stderr="not found")
++            return SimpleNamespace(returncode=0, stdout=json.dumps(st), stderr="")
++        if sub[:2] == ["pr", "view"]:
++            s = self.pr_states.get(sub[2], "")
++            if not s:
++                return SimpleNamespace(returncode=1, stdout="", stderr="no pr")
++            return SimpleNamespace(returncode=0, stdout=json.dumps({"state": s}), stderr="")
++        if sub[:2] in (["issue", "comment"], ["issue", "close"]):
++            return SimpleNamespace(returncode=0, stdout="", stderr="")
++        return SimpleNamespace(returncode=1, stdout="", stderr="unexpected gh call")
++
++    def _run(self, *, apply: bool = True) -> tuple[int, str, str]:
++        out, err = io.StringIO(), io.StringIO()
++        with mock.patch.object(cleanup.subprocess, "run", side_effect=self._fake_run), \
++                mock.patch.object(cleanup.shutil, "which", return_value="/usr/bin/gh"), \
++                redirect_stdout(out), redirect_stderr(err):
++            rc = cleanup.run(self.cfg, [], apply=apply, today="2026-07-18")
++        return rc, out.getvalue(), err.getvalue()
++
++    def _closes(self) -> list[list[str]]:
++        return [c for c in self.gh_calls if c[1:3] == ["issue", "close"]]
++
++    def _mutations_for(self, number: str) -> list[list[str]]:
++        return [c for c in self.gh_calls
++                if c[1:3] in (["issue", "comment"], ["issue", "close"]) and c[3] == number]
++
++    def _line(self, out: str, bundle: str = "issue_500") -> str:
++        lines = [ln for ln in out.splitlines() if ln.startswith(bundle + " ")]
++        self.assertEqual(len(lines), 1, out)
++        return lines[0]
++
++    def _complete(self, iid: str, *, patch: str = "", pr_url: str | None = None) -> Path:
++        d = self.cfg.bundle(iid)
++        d.mkdir(parents=True)
++        (d / "brief.md").write_text("- **Slug:** s\n", encoding="utf-8")
++        (d / "patch.diff").write_text(patch, encoding="utf-8")
++        (d / "check-gates.json").write_text("{}", encoding="utf-8")
++        shutil.copyfile(TEMPLATES / "SUMMARY.md.tpl", d / "SUMMARY.md")
++        signoff.record(d / "SUMMARY.md", action="accept", by="T", date="2026-07-01")
++        if pr_url is not None:
++            (d / "publish.json").write_text(json.dumps({"pr_url": pr_url}), encoding="utf-8")
++        return d
++
++    def _split_parent(self, *, lineage: str | None = None, pr_url: str | None = None) -> Path:
++        d = self._complete("500", pr_url=pr_url)
++        (d / state.CLOSE_MARKER).write_text("split\n", encoding="utf-8")
++        if lineage is None:
++            lineage = json.dumps({"version": split.LINEAGE_VERSION, "id": "500",
++                                  "children": ["601", "602"]})
++        if lineage != "<absent>":
++            (d / split.LINEAGE).write_text(lineage, encoding="utf-8")
++        self.assertEqual(state.state(d), state.COMPLETE)
++        return d
++
++
++class TheParentWaitsOnItsChildren(SplitParentBase):
++    def test_p1_one_child_open_makes_no_tracker_change(self) -> None:
++        self._split_parent()
++        self.issue_states.update({"601": OPEN, "602": DONE})
++        rc, out, _err = self._run()
++        self.assertEqual(rc, 0)
++        self.assertEqual(self._mutations_for("500"), [])
++        line = self._line(out)
++        self.assertIn("#601", line)
++        self.assertNotIn("#602", line)
++
++    def test_p2_all_closed_one_completed_closes_completed_naming_every_child(self) -> None:
++        self._split_parent()
++        self.issue_states.update({"601": DONE, "602": DROPPED})
++        rc, _out, _err = self._run()
++        self.assertEqual(rc, 0)
++        closes = self._closes()
++        self.assertEqual(len(closes), 1)
++        close = closes[0]
++        self.assertEqual(close[3], "500")
++        self.assertEqual(close[close.index("--repo") + 1], REPO)
++        self.assertEqual(close[close.index("--reason") + 1], "completed")
++        comment = close[close.index("--comment") + 1]
++        self.assertIn("#601", comment)
++        self.assertIn("#602", comment)
++        # Each child is listed with its own close reason, in words rather than gh's enum.
++        self.assertIn("#601 (completed)", comment)
++        self.assertIn("#602 (not planned)", comment)
++
++    def test_p3_all_closed_none_completed_closes_not_planned(self) -> None:
++        self._split_parent()
++        self.issue_states.update({"601": DROPPED, "602": DROPPED})
++        rc, _out, _err = self._run()
++        self.assertEqual(rc, 0)
++        closes = self._closes()
++        self.assertEqual(len(closes), 1)
++        close = closes[0]
++        self.assertEqual(close[3], "500")
++        self.assertEqual(close[close.index("--reason") + 1], "not planned")
++        comment = close[close.index("--comment") + 1]
++        self.assertIn("#601", comment)
++        self.assertIn("#602", comment)
++
++    def test_completed_is_read_without_regard_to_case(self) -> None:
++        self._split_parent()
++        self.issue_states.update({"601": dict(DONE, stateReason="completed"), "602": DROPPED})
++        self._run()
++        close = self._closes()[0]
++        self.assertEqual(close[close.index("--reason") + 1], "completed")
++
++    def test_p4_unreadable_child_state_never_closes(self) -> None:
++        self._split_parent()
++        self.issue_states.update({"601": DONE})          # 602's `gh issue view` fails
++        rc, out, _err = self._run()
++        self.assertEqual(rc, 0)
++        self.assertEqual(self._mutations_for("500"), [])
++        line = self._line(out)
++        self.assertIn("unknown", line)
++        self.assertIn("#602", line)
++
++    def test_p5_unknown_children_never_close(self) -> None:
++        cases = {
++            "missing": "<absent>",
++            "not json": "{not json",
++            "empty children": json.dumps({"version": split.LINEAGE_VERSION, "children": []}),
++            "no children key": json.dumps({"version": split.LINEAGE_VERSION, "depth": 1}),
++            "children not a list": json.dumps({"version": split.LINEAGE_VERSION,
++                                               "children": 7}),
++        }
++        for why, lineage in cases.items():
++            with self.subTest(case=why):
++                self.tearDown()
++                self.setUp()
++                self._split_parent(lineage=lineage)
++                self.issue_states.update({"601": DONE, "602": DONE})
++                rc, out, _err = self._run()
++                self.assertEqual(rc, 0)
++                self.assertEqual(self._mutations_for("500"), [])
++                line = self._line(out)
++                self.assertIn("children are unknown", line)
++                self.assertIn("by hand", line)
++
++    def test_p5_a_partly_damaged_children_list_never_closes(self) -> None:
++        """One usable id beside one unusable entry is NOT a list of one child.
++
++        The flow's tolerant reader drops the null / number / blank and keeps "601"; if
++        cleanup closed on what is left, #601 alone would close the parent while the child
++        the damaged entry stood for was never read. Every child here is closed as
++        completed, so the ONLY reason not to close is the damaged entry.
++        """
++        cases = {
++            "null entry": ["601", None],
++            "number entry": ["601", 602],
++            "blank entry": ["601", "  "],
++        }
++        for why, children in cases.items():
++            with self.subTest(case=why):
++                self.tearDown()
++                self.setUp()
++                self._split_parent(lineage=json.dumps(
++                    {"version": split.LINEAGE_VERSION, "id": "500", "children": children}))
++                self.issue_states.update({"601": DONE, "602": DONE})
++                rc, out, _err = self._run()
++                self.assertEqual(rc, 0)
++                self.assertEqual(self._mutations_for("500"), [])
++                line = self._line(out)
++                self.assertIn("children are unknown", line)
++                self.assertIn("by hand", line)
++
++    def test_a_child_id_that_is_not_a_tracker_number_is_closed_by_hand(self) -> None:
++        """`MANT-7` is a valid lineage id (a non-GitHub tracker's shape) that no
++        `gh issue view` can read, so waiting never resolves it: the report says so."""
++        self._split_parent(lineage=json.dumps(
++            {"version": split.LINEAGE_VERSION, "id": "500", "children": ["601", "MANT-7"]}))
++        self.issue_states.update({"601": DONE})
++        rc, out, _err = self._run()
++        self.assertEqual(rc, 0)
++        self.assertEqual(self._mutations_for("500"), [])
++        line = self._line(out)
++        self.assertIn("MANT-7", line)
++        self.assertIn("not a tracker issue number", line)
++        self.assertIn("by hand", line)
++
++    def test_p6_dry_run_says_would_and_closes_nothing(self) -> None:
++        self._split_parent()
++        self.issue_states.update({"601": DONE, "602": DONE})
++        rc, out, _err = self._run(apply=False)
++        self.assertEqual(rc, 0)
++        self.assertEqual(self._closes(), [])
++        self.assertIn("would:", self._line(out))
++
++    def test_p7_unsplit_empty_patch_still_closes_not_planned(self) -> None:
++        self._complete("22", patch="   \n")
++        self.issue_states["22"] = OPEN
++        rc, _out, _err = self._run()
++        self.assertEqual(rc, 0)
++        closes = self._closes()
++        self.assertEqual(len(closes), 1)
++        self.assertEqual(closes[0][3], "22")
++        self.assertEqual(closes[0][closes[0].index("--reason") + 1], "not planned")
++
++    def test_p8_tracker_comment_file_does_not_drop_the_children(self) -> None:
++        d = self._split_parent()
++        (d / "tracker-comment.md").write_text("Hand-written closing note.\n", encoding="utf-8")
++        self.issue_states.update({"601": DONE, "602": DONE})
++        self._run()
++        closes = self._closes()
++        self.assertEqual(len(closes), 1)
++        comment = closes[0][closes[0].index("--comment") + 1]
++        self.assertIn("#601", comment)
++        self.assertIn("#602", comment)
++        self.assertIn("Hand-written closing note.", comment)   # kept, not replaced
++
++    def test_p9_merged_pr_from_before_the_split_still_waits_on_children(self) -> None:
++        self._split_parent(pr_url=PR)
++        self.pr_states[PR] = "MERGED"
++        self.issue_states.update({"601": OPEN, "602": DONE})
++        rc, out, _err = self._run()
++        self.assertEqual(rc, 0)
++        self.assertEqual(self._mutations_for("500"), [])
++        self.assertIn("#601", self._line(out))
++
++
++def _proposal(*children: str) -> str:
++    body = "<!-- pdca:split-proposal v1 -->\n# Split proposal\n\n"
++    for i, child in enumerate(children, 1):
++        body += f"<!-- pdca:child child-{i} -->\n{child}\n<!-- pdca:end child-{i} -->\n\n"
++    return body
++
++
++_ONE = "- **Slug:** first\n- **Defect / goal:** a\n"
++_TWO = "- **Slug:** second\n- **Defect / goal:** b\n"
++
++
++class SplitDepthIsBounded(unittest.TestCase):
++    """Driven through ``cli._split`` with only ``gh`` faked — the ``TheWholeChainUnmocked``
++    pattern (``test_split.py:1397-1448``)."""
++
++    def _setup(self, lineage: str | None) -> None:
++        self.tmp = Path(tempfile.mkdtemp())
++        self.addCleanup(shutil.rmtree, self.tmp, True)
++        self.cfg = _cfg(self.tmp, "https://github.com/acme/widgets")
++        self.parent = self.cfg.bundle("500")
++        self.parent.mkdir(parents=True)
++        (self.parent / "brief.md").write_text("- **Slug:** parent\n", encoding="utf-8")
++        (self.parent / split.PROPOSAL).write_text(_proposal(_ONE, _TWO), encoding="utf-8")
++        if lineage is not None:
++            (self.parent / split.LINEAGE).write_text(lineage, encoding="utf-8")
++        self.creates: list[list[str]] = []
++
++    def _fake_gh(self, cmd, capture_output=False, text=False, cwd=None):
++        if list(cmd[:3]) == ["gh", "issue", "view"]:
++            return SimpleNamespace(returncode=0, stdout="{}", stderr="")
++        self.creates.append(list(cmd))
++        n = str(600 + len(self.creates))
++        return SimpleNamespace(returncode=0, stderr="",
++                               stdout=f"https://github.com/acme/widgets/issues/{n}\n")
++
++    def _accept(self, **extra) -> tuple[int, str]:
++        err = io.StringIO()
++        with mock.patch("pdca_harness.split.subprocess", SimpleNamespace(run=self._fake_gh)), \
++             mock.patch("pdca_harness.split.shutil.which", return_value="/usr/bin/gh"), \
++             redirect_stderr(err), redirect_stdout(io.StringIO()):
++            rc = cli._split(self.cfg, SimpleNamespace(issue_id="500", accept=True, ids="",
++                                                      **extra))
++        return rc, err.getvalue()
++
++    @staticmethod
++    def _record(depth) -> str:
++        return json.dumps({"version": split.LINEAGE_VERSION, "id": "500", "parent": "400",
++                           "siblings": [], "depth": depth})
++
++    def _child_depth(self, iid: str) -> int:
++        record = split.read_lineage(self.cfg.bundle(iid))
++        self.assertIsNotNone(record, f"child {iid} has no lineage record")
++        return record["depth"]
++
++    def test_d1_depth_two_or_more_is_refused_without_force(self) -> None:
++        for depth in (2, 3):
++            with self.subTest(depth=depth):
++                self._setup(self._record(depth))
++                rc, err = self._accept()
++                self.assertNotEqual(rc, 0)
++                self.assertEqual(self.creates, [], "a tracker issue was filed")
++                self.assertFalse(self.cfg.bundle("601").exists())
++                self.assertFalse((self.parent / state.CLOSE_MARKER).exists())
++                self.assertIn(f"depth {depth}", err)
++                self.assertIn("--force", err)
++
++    def _main(self, *flags: str) -> tuple[int, str]:
++        """The real CLI entry, argparse included, so ``--force`` is the flag an operator
++        types rather than an attribute a test builds by hand. ``Config.load`` is patched
++        the way ``test_autoiterate.py:776`` does it."""
++        err = io.StringIO()
++        with mock.patch.object(cli.Config, "load", return_value=self.cfg), \
++             mock.patch("pdca_harness.split.subprocess", SimpleNamespace(run=self._fake_gh)), \
++             mock.patch("pdca_harness.split.shutil.which", return_value="/usr/bin/gh"), \
++             redirect_stderr(err), redirect_stdout(io.StringIO()):
++            try:
++                rc = cli.main(["split", "500", "--accept", *flags])
++            except SystemExit as exc:                    # argparse refused the argv
++                self.fail(f"`split` rejected {flags!r} (exit {exc.code}): {err.getvalue()}")
++        return rc, err.getvalue()
++
++    def test_d1_the_real_cli_without_force_is_refused(self) -> None:
++        self._setup(self._record(2))
++        rc, err = self._main()
++        self.assertNotEqual(rc, 0)
++        self.assertEqual(self.creates, [], "a tracker issue was filed")
++        self.assertFalse(self.cfg.bundle("601").exists())
++        self.assertIn("--force", err)
++
++    def test_d2_the_real_cli_accepts_with_force(self) -> None:
++        self._setup(self._record(2))
++        rc, err = self._main("--force")
++        self.assertEqual(rc, 0, err)
++        self.assertEqual(self._child_depth("601"), 3)
++        self.assertEqual(self._child_depth("602"), 3)
++
++    def test_d2_force_accepts_and_children_record_the_next_depth(self) -> None:
++        for depth in (2, 3):
++            with self.subTest(depth=depth):
++                self._setup(self._record(depth))
++                rc, err = self._accept(force=True)
++                self.assertEqual(rc, 0, err)
++                self.assertEqual(self._child_depth("601"), depth + 1)
++                self.assertEqual(self._child_depth("602"), depth + 1)
++
++    def test_d3_shallow_parents_are_accepted_as_today(self) -> None:
++        for lineage, child_depth in ((None, 1), (self._record(1), 2)):
++            with self.subTest(lineage=lineage):
++                self._setup(lineage)
++                rc, err = self._accept()
++                self.assertEqual(rc, 0, err)
++                self.assertEqual(self._child_depth("601"), child_depth)
++
++    def test_d4_a_damaged_record_counts_as_depth_zero(self) -> None:
++        for lineage in ("{not json", self._record("one"), self._record(None),
++                        self._record(True)):
++            with self.subTest(lineage=lineage):
++                self._setup(lineage)
++                rc, err = self._accept()
++                self.assertEqual(rc, 0, err)
++                self.assertTrue(self.cfg.bundle("601").is_dir())
++
++
++class TheWordsSayIt(unittest.TestCase):
++    def _role(self, name: str) -> str:
++        # The way `ThePlannerIsToldItOwnsTheSplit._role` reads it (test_split.py:982-987),
++        # so this works on the template and on a rendered instance.
++        for candidate in (f"{name}.md.jinja", f"{name}.md"):
++            path = AGENTS / candidate
++            if path.is_file():
++                return path.read_text(encoding="utf-8")
++        raise AssertionError(f"no role prompt for {name!r}")
++
++    def test_s1_planner_is_told_the_parent_stays_open_and_force_is_the_humans(self) -> None:
++        text = self._role("planner")
++        self.assertIn("stays open", text)
++        self.assertIn("--force", text)
++        paragraphs = [p for p in text.split("\n\n") if "--force" in p]
++        self.assertTrue(paragraphs)
++        for p in paragraphs:
++            self.assertIn("human", p)
++
++    def test_the_planner_is_not_promised_a_completed_close(self) -> None:
++        """The close reason depends on the children (none completed → not planned), and
++        only a COMPLETE parent waits for them. A paragraph that says "stays open" and then
++        "closes it as completed" promises more than `cleanup` does."""
++        paragraphs = [p for p in self._role("planner").split("\n\n") if "stays open" in p]
++        self.assertTrue(paragraphs)
++        for p in paragraphs:
++            self.assertIn("not planned", p)
++            self.assertIn("COMPLETE", p)
++
++    def test_s2_cleanup_matrix_names_the_split_parent_row(self) -> None:
++        self.assertIn("split", cleanup.__doc__)
++        self.assertIn("children", cleanup.__doc__)
++
++
++if __name__ == "__main__":
++    unittest.main()

@@ -1,0 +1,11 @@
+{
+  "mode": "new-pr",
+  "branch": "enhancement/545-split-parent-closes-with-children-bound-depth",
+  "pr_url": "https://github.com/eduralph/pdca-harness/pull/596",
+  "base": "main",
+  "repo": "eduralph/pdca-harness",
+  "by": "Eduard Ralph",
+  "date": "2026-09-30",
+  "id_pending": false,
+  "host_ci_base": "f33a23f342f0304f726ddbd314a515b83d1d86d7"
+}

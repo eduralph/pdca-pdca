@@ -1,0 +1,12 @@
+{
+  "band": "oversized",
+  "independent_outcomes": [
+    "Split parent close behavior: cleanup queries tracker state of child issues and closes parent as completed/not-planned with child names listed",
+    "Depth refusal on split: split --accept refuses depth 2+ unless --force flag is given"
+  ],
+  "proposed_seams": [
+    "Between cleanup parent-close logic (cleanup.py P1\u2013P9, CleanupBase fixture, cleanup docs) and split depth-refusal logic (split.py + cli.py D1\u2013D4, TheWholeChainUnmocked fixture, split/cli docs). The brief itself notes these share no production files, no fixtures, and brief's Open question 7 explicitly raises splitting them at Plan. Each can be independently tested and merged."
+  ],
+  "confidence": "high",
+  "brief_sha": "3e93a3c29150882d"
+}

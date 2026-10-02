@@ -1,0 +1,832 @@
+diff --git a/docs/05-check.md b/docs/05-check.md
+index b8657fd..5d76d8f 100644
+--- a/docs/05-check.md
++++ b/docs/05-check.md
+@@ -448,6 +448,21 @@ Three properties every row has, learned from rows that lacked them:
+   surface only after the draft PR opened red. Declare them in `[gates].host_ci`
+   and they run against the patched tree at Check like any other row — and
+   again right before publish pushes, where a failure refuses the push.
++- **A red is confirmed once** (issue #371). A gating row is one sample, and a
++  single transient red used to park a bundle as if the patch were broken. At
++  Check, a gating row that fails with a real exit code is re-run once with the
++  same command, environment and timeout. Fail then pass records `pass` with
++  `flaky = true` and lands in §6 as a human item naming both outcomes, so you
++  still see the red sample before accepting. Fail then fail records `fail` with
++  the second run's evidence. If the second run gives no clean answer (timeout,
++  unverifiable, deferred, or the command could not start), the first `fail`
++  stands. The row's `attempts` lists both outcomes and its log holds both runs.
++  Only Check confirms: the publish host-CI gate and the integration and
++  working-tree re-gates run a failing row once, as before. Turn it off for the
++  project with `[gates] confirm_gating_fail = false`, or for one row with
++  `confirm_fail = false` on its `[[gates.checks]]` or `host_ci` entry — do that
++  for a model-backed row, where a second run is a fresh sample rather than a
++  re-check.
+ 
+ ### Reviewer — the decorrelated second opinion
+ 
+diff --git a/template/pdca.toml.jinja b/template/pdca.toml.jinja
+index 1434d54..f5e4f25 100644
+--- a/template/pdca.toml.jinja
++++ b/template/pdca.toml.jinja
+@@ -1002,6 +1002,20 @@ argv = []
+ # did not answer, which is not a pass/fail verdict. `timeout_secs = 0` on a row opts
+ # that row out of the fallback; nothing configured ⇒ unbounded, exactly as before.
+ #
++# CONFIRM-ONCE (issue #371). At Check, a GATING row that fails with a real exit code is
++# re-run once (same command, env, cwd and timeout) before it is recorded. Fail→pass is
++# recorded `pass` + `flaky = true` and becomes a HUMAN item in SUMMARY §6 naming both
++# outcomes, so C6 still makes you look at the red sample; fail→fail stays `fail` (with the
++# second run's evidence); a second run that times out / is unverifiable / deferred /
++# cannot start leaves the first `fail` standing. The row's `attempts` and its
++# gate-logs/<id>.log record both runs. Only Check confirms — publish's host-CI gate and the
++# integration / working-tree re-gates still run a failing row once. On by default:
++#   [gates]
++#   confirm_gating_fail = false   # turn it off for every row
++# or per row, on a `checks` entry or a `host_ci` table entry: `confirm_fail = false`.
++# UPGRADE NOTE: a model-backed gate row (e.g. a whole-diff model review) SHOULD set
++# `confirm_fail = false` — a second run is a fresh sample, not a re-check of the first.
++#
+ # DELEGATED GATES (issue #67). If your project already single-sources its gates in its
+ # own runner, point `runner` at it and give each check a bare `subcmd` instead of a full
+ # `cmd`; PDCA runs `<runner> <subcmd>` and treats the host runner as the source of truth
+diff --git a/template/src/pdca_harness/assemble.py b/template/src/pdca_harness/assemble.py
+index b507e39..4309c23 100644
+--- a/template/src/pdca_harness/assemble.py
++++ b/template/src/pdca_harness/assemble.py
+@@ -333,6 +333,12 @@ def collect_needs_human(d: Path, cfg: Config) -> list[NeedsHumanItem]:
+     # auto-iterate round. It is no verdict either, so it is not deferred (#409): every Check
+     # runs the gates again, and the next §6 carries it exactly while it still cannot run.
+     items += [NeedsHumanItem(t, HUMAN, no_verdict=True) for t in _unverifiable_items(gates_json)]
++    # A gating row that failed and then passed its one confirm re-run (#371) is recorded
++    # `pass` + `flaky`: it counts as the pass it recorded, but the red sample is not
++    # dropped — the human acknowledges it. HUMAN whatever its element, because a rebuild
++    # cannot fix an intermittent environment; NOT no_verdict, because both samples are
++    # verdicts on this round's tree, so auto-iterate may defer it (#409).
++    items += [NeedsHumanItem(t, HUMAN) for t in _flaky_items(gates_json)]
+     items += _failed_gating_items(gates_json)
+     build_notes = d / "build-notes.md"
+     if build_notes.exists():
+@@ -565,6 +571,28 @@ def _unverifiable_items(gates: dict) -> list[str]:
+     ]
+ 
+ 
++def _flaky_items(gates: dict) -> list[str]:
++    """Gate rows recorded ``pass`` only after a confirm re-run (truthy ``flaky``, issue
++    #371) → §6 items naming the check and both outcomes.
++
++    ``gates._run_one`` re-runs a failed gating row once at Check; a fail→pass records
++    ``pass`` so one transient red no longer parks the bundle. A pass that needed a second
++    sample is still not a clean green: lifting it here makes C6 hold accept until the human
++    has read the red sample (its output is in ``gate-logs/<rule_id>.log``)."""
++    out = []
++    for r in gates["rows"]:
++        if not r.get("flaky"):
++            continue
++        seq = " → ".join(str(a) for a in r.get("attempts") or ["fail", "pass"])
++        where = f" (both runs in {r['log']})" if r.get("log") else ""
++        out.append(
++            f"{r['check']} FLAKY — first run {seq.split(' → ')[0]}, confirm re-run "
++            f"{seq.split(' → ')[-1]} (attempts: {seq}); recorded {r.get('result')}{where}. "
++            "Confirm the red sample was environmental, not the patch — "
++            f"{r['path_line'] or r['oracle'] or 'no evidence line'}")
++    return out
++
++
+ def _failed_gating_items(gates: dict) -> list[NeedsHumanItem]:
+     """A **gating** gate that returned a hard FAIL → a §6 NEEDS-HUMAN item (issue #166).
+ 
+diff --git a/template/src/pdca_harness/config.py b/template/src/pdca_harness/config.py
+index 742ddb9..7b6ce67 100644
+--- a/template/src/pdca_harness/config.py
++++ b/template/src/pdca_harness/config.py
+@@ -272,6 +272,12 @@ class Config:
+     # out is recorded ``unverifiable`` (→ SUMMARY §6 NEEDS-HUMAN), never pass/fail.
+     # ``None`` (unset / 0) ⇒ unbounded — today's behaviour, unchanged.
+     gates_default_timeout_secs: int | None = None
++    # Confirm-once for a failed gating row (issue #371): ``[gates] confirm_gating_fail``.
++    # On (the default), a gating row that FAILS at Check is re-run once; fail→pass is
++    # recorded ``pass`` + ``flaky`` and routed to SUMMARY §6 as a HUMAN item. A row opts out
++    # alone with ``confirm_fail = false``. Only a literal ``false`` (or any non-boolean)
++    # turns it off — off is today's one-run behaviour.
++    gates_confirm_gating_fail: bool = True
+     # Delegated gates (issue #67): a host runner that single-sources its own gates
+     # (e.g. "cargo xtask"). A check's bare ``subcmd`` is run as ``<runner> <subcmd>``, so
+     # PDCA orchestrates the host runner instead of re-declaring the gates. "" ⇒ inline only.
+@@ -573,6 +579,13 @@ class Config:
+             gates_default_timeout_secs = None
+         if gates_default_timeout_secs is not None and gates_default_timeout_secs < 0:
+             gates_default_timeout_secs = None
++        # Confirm-once (issue #371): absent ⇒ on; a non-boolean fails toward OFF (today's
++        # one-run behaviour), loudly — the dependency_halt lesson (PR #292).
++        gates_confirm_gating_fail = gates.get("confirm_gating_fail", True)
++        if not isinstance(gates_confirm_gating_fail, bool):
++            print(f"config: [gates] confirm_gating_fail = {gates_confirm_gating_fail!r} is "
++                  "not a boolean — treating it as false (no confirm re-run)", file=sys.stderr)
++            gates_confirm_gating_fail = False
+         registry_consistency = dict(gates.get("registry_consistency", {}))
+         install_extra_bootstrap = data.get("install", {}).get("extra_bootstrap", "")
+         # `pdca try <id>` launch command (project-specific); "" ⇒ the command errors with a hint.
+@@ -823,6 +836,7 @@ class Config:
+             builder_variants=builder_variants,
+             gates_runner=gates_runner,
+             gates_default_timeout_secs=gates_default_timeout_secs,
++            gates_confirm_gating_fail=gates_confirm_gating_fail,
+             lanes=lanes,
+             max_passes=max_passes,
+             auto_iterate=auto_iterate,
+@@ -865,7 +879,8 @@ def _normalize_host_ci(entries: list) -> list[dict]:
+     (the CI-parity slot the issue names — the contribution as the host's CI will see
+     it), ``scope = "bundle"`` (they need the patched tree), and an ``id``/``label``
+     derived from the command so a failure always names what ran. Explicit id / label /
+-    tier keys on a table row win over those defaults — but ``gating`` is FORCED true,
++    tier keys on a table row win over those defaults (as does any other row key, e.g.
++    ``confirm_fail``, issue #371) — but ``gating`` is FORCED true,
+     a contract rather than a default: the host's CI will fail the PR on every declared
+     command regardless of what an advisory row believed, and the #311 criterion is
+     literal — a command that exits non-zero blocks publish. A declared
+diff --git a/template/src/pdca_harness/gates.py b/template/src/pdca_harness/gates.py
+index 0a7f4bf..bfef3e1 100644
+--- a/template/src/pdca_harness/gates.py
++++ b/template/src/pdca_harness/gates.py
+@@ -195,7 +195,7 @@ def run_gates(d: Path, cfg: Config) -> dict:
+     reconstructable from bundle files alone (the state-is-files doctrine). One file per
+     rule id, overwritten per Check run."""
+     rows = _run_checks(cfg, cwd=cfg.root, bundle=d, scopes=("repo", "bundle"),
+-                       log_dir=d / GATE_LOGS_DIR)
++                       log_dir=d / GATE_LOGS_DIR, confirm=True)
+     return _finalize(rows, name=d.name, write_to=d)
+ 
+ 
+@@ -270,8 +270,11 @@ def run_gates_dry(d: Path, cfg: Config) -> dict:
+     Same single-sourced ``_run_checks`` as :func:`run_gates`, but ``write_to=None`` so a
+     re-gate of an already-COMPLETE bundle never mutates its frozen record. For the same
+     reason no ``log_dir`` is passed (issue #370): ``gate-logs/`` is the frozen evidence
+-    behind the frozen verdict, and a later dry re-gate must not overwrite it either."""
+-    rows = _run_checks(cfg, cwd=cfg.root, bundle=d, scopes=("repo", "bundle"))
++    behind the frozen verdict, and a later dry re-gate must not overwrite it either.
++    ``confirm=True`` as in :func:`run_gates` (issue #371), so a re-gate applies the same
++    confirm-once rule the frozen verdict was recorded under."""
++    rows = _run_checks(cfg, cwd=cfg.root, bundle=d, scopes=("repo", "bundle"),
++                       confirm=True)
+     return _finalize(rows, name=d.name, write_to=None)
+ 
+ 
+@@ -338,7 +341,11 @@ def _applies(chk: dict, scopes: tuple[str, ...], labels: frozenset[str] | None)
+ 
+ def _run_checks(cfg: Config, *, cwd: Path, bundle: Path | None, scopes: tuple[str, ...],
+                 worktree_override: Path | None = None,
+-                log_dir: Path | None = None) -> list[dict]:
++                log_dir: Path | None = None, confirm: bool = False) -> list[dict]:
++    # ``confirm`` (issue #371): re-run a failed gating row once before recording it. Only
++    # the Check matrix passes it (:func:`run_gates` / :func:`run_gates_dry`); the
++    # working-tree and integration re-gates keep one run per row, so a red there blocks
++    # exactly as before.
+     # No configured gates → the offline stub: the full 5/5/1 with the mechanical
+     # gate elements stub-passed (so the offline slice runs green). A declared
+     # [gates] host_ci row counts as real configuration too (#311).
+@@ -397,7 +404,7 @@ def _run_checks(cfg: Config, *, cwd: Path, bundle: Path | None, scopes: tuple[st
+                                        runner=cfg.gates_runner,
+                                        worktree_path=wt,
+                                        default_timeout=cfg.gates_default_timeout_secs,
+-                                       log_dir=log_dir))
++                                       log_dir=log_dir, confirm=confirm))
+         # Host-only CI parity rows ([gates] host_ci, issue #311): commands the host's CI
+         # runs on every PR but the delegated gate runner does not cover (a spell-checker,
+         # a docs lint). Unlike the rows above (cwd=cfg.root; each command must target
+@@ -425,7 +432,7 @@ def _run_checks(cfg: Config, *, cwd: Path, bundle: Path | None, scopes: tuple[st
+                     configured.append(_run_one(chk, cfg=cfg, cwd=wt, bundle=bundle,
+                                                runner=cfg.gates_runner, worktree_path=wt,
+                                                default_timeout=cfg.gates_default_timeout_secs,
+-                                               log_dir=log_dir))
++                                               log_dir=log_dir, confirm=confirm))
+     finally:
+         if ovf_primary is not None and wt is not None:
+             worktree.overflow_remove(ovf_primary, wt)
+@@ -498,7 +505,7 @@ def _verifies_base(chk: dict) -> bool:
+ def _run_one(chk: dict, *, cfg: Config, cwd: Path, bundle: Path | None, runner: str = "",
+              worktree_path: Path | None = None,
+              default_timeout: int | None = None,
+-             log_dir: Path | None = None) -> dict:
++             log_dir: Path | None = None, confirm: bool = False) -> dict:
+     # ``cfg`` is required (issue #387): the bundle-scoped base export resolves the brief's
+     # own base as `<cfg.base_remote>/<branch or cfg.default_branch>` — the same ref publish
+     # commits against — so it cannot be derived from the check row alone.
+@@ -576,6 +583,67 @@ def _run_one(chk: dict, *, cfg: Config, cwd: Path, bundle: Path | None, runner:
+     # both the row and the config are in hand (`_classify` sees neither).
+     deferrable = _deferrable(chk, cfg)
+     print(f"  · gate {label} (a Docker-backed gate can take minutes)…", file=sys.stderr, flush=True)
++    attempts = [_attempt(cmd, cwd=cwd, env=env, label=label, bound=bound, watch=watch,
++                         deferrable=deferrable)]
++    if confirm and gating and attempts[0]["result"] == "fail" \
++            and attempts[0]["rc"] is not None and _confirm_enabled(chk, cfg):
++        # Confirm-once (issue #371): a gating row is ONE sample, and a single transient
++        # red used to park the bundle as if the patch were broken. Re-run the same command
++        # (same env / cwd / bound) exactly once and keep both samples. Only a red with a
++        # real exit code is confirmed — a command that raised before producing one (or a
++        # misconfigured delegation, returned above) is not a sample of the patch.
++        print(f"  · gate {label} FAILED — confirming with one re-run (issue #371)…",
++              file=sys.stderr, flush=True)
++        attempts.append(_attempt(cmd, cwd=cwd, env=env, label=label, bound=bound,
++                                 watch=watch, deferrable=deferrable))
++    result, evidence, flaky = _combine_attempts(attempts)
++    duration = round(sum(a["duration"] for a in attempts), 2)
++    row = _row(
++        f"{chk.get('tier', '?')} {chk.get('label', chk.get('id', ''))}",
++        result, oracle=cmd, rule_id=chk.get("id", ""),
++        path_line=evidence[0][:120], gating=gating, element=chk.get("tier", ""),
++    )
++    if len(attempts) > 1:
++        # Additive keys (issue #371): every sample's own classification, in order, and
++        # `flaky` on a fail→pass — the record `size_signal._environment_attributed` and
++        # `assemble._flaky_items` (→ SUMMARY §6, HUMAN) read.
++        row["attempts"] = [_attempt_outcome(a) for a in attempts]
++        if flaky:
++            row["flaky"] = True
++    if log_dir is not None:
++        # Persist the FULL evidence (issue #370): the truncated path_line above stays the
++        # summary, but the verdict's whole basis — including the partial capture of a
++        # timed-out gate, and BOTH samples of a confirmed row (#371) — must be
++        # reconstructable from bundle files alone.
++        rel, log_error = _write_gate_log(log_dir, chk, cmd=cmd, cwd=cwd,
++                                         worktree_path=worktree_path,
++                                         started=attempts[0]["started"],
++                                         duration=duration, rc=attempts[0]["rc"],
++                                         result=result, timeout=bound,
++                                         output=attempts[0]["output"],
++                                         attempts=attempts if len(attempts) > 1 else None,
++                                         flaky=flaky)
++        row["duration_secs"] = duration  # additive keys — existing consumers unchanged
++        if log_error is None:
++            row["log"] = rel             # bundle-relative
++        else:
++            # A persistence failure must never break the gate run or alter the verdict —
++            # but it must NOT be silent either (#370 iteration 2): the feature's promise
++            # is "full basis reconstructable from bundle files alone", so a run where
++            # that silently did not happen re-creates the original defect. Record the
++            # reason in the row (additive) and say so on stderr.
++            row["log_error"] = log_error
++            print(f"  ! gate {label}: evidence log {GATE_LOGS_DIR}/ not written — "
++                  f"{log_error}", file=sys.stderr, flush=True)
++    return row
++
++
++def _attempt(cmd: str, *, cwd: Path, env: dict | None, label: str, bound: int | None,
++             watch: Path, deferrable: bool) -> dict:
++    """Run a gate command ONCE and classify it — one sample of the row (issue #371).
++
++    Returns ``{rc, output, result, evidence, started, duration}``. ``rc`` is ``None``
++    when the command raised before producing an exit code."""
+     started = datetime.now(timezone.utc).isoformat(timespec="seconds")
+     t0 = time.monotonic()
+     rc: int | None = None
+@@ -599,74 +667,118 @@ def _run_one(chk: dict, *, cfg: Config, cwd: Path, bundle: Path | None, runner:
+     except Exception as exc:  # command not found, etc. — a failing gate, surfaced
+         result, evidence = "fail", [str(exc)]
+         output = f"{exc}\n"  # the exception IS the run's whole output — log it (#370)
+-    duration = round(time.monotonic() - t0, 2)
+-    row = _row(
+-        f"{chk.get('tier', '?')} {chk.get('label', chk.get('id', ''))}",
+-        result, oracle=cmd, rule_id=chk.get("id", ""),
+-        path_line=evidence[0][:120], gating=gating, element=chk.get("tier", ""),
+-    )
+-    if log_dir is not None:
+-        # Persist the FULL evidence (issue #370): the truncated path_line above stays the
+-        # summary, but the verdict's whole basis — including the partial capture of a
+-        # timed-out gate — must be reconstructable from bundle files alone.
+-        rel, log_error = _write_gate_log(log_dir, chk, cmd=cmd, cwd=cwd,
+-                                         worktree_path=worktree_path, started=started,
+-                                         duration=duration, rc=rc, result=result,
+-                                         timeout=bound, output=output)
+-        row["duration_secs"] = duration  # additive keys — existing consumers unchanged
+-        if log_error is None:
+-            row["log"] = rel             # bundle-relative
+-        else:
+-            # A persistence failure must never break the gate run or alter the verdict —
+-            # but it must NOT be silent either (#370 iteration 2): the feature's promise
+-            # is "full basis reconstructable from bundle files alone", so a run where
+-            # that silently did not happen re-creates the original defect. Record the
+-            # reason in the row (additive) and say so on stderr.
+-            row["log_error"] = log_error
+-            print(f"  ! gate {label}: evidence log {GATE_LOGS_DIR}/ not written — "
+-                  f"{log_error}", file=sys.stderr, flush=True)
+-    return row
++    return {"rc": rc, "output": output, "result": result, "evidence": evidence,
++            "started": started, "duration": round(time.monotonic() - t0, 2)}
++
++
++def _attempt_outcome(a: dict) -> str:
++    """One sample's own classification for the row's ``attempts`` list (issue #371):
++    the run's result, except a command that raised (no exit code) reads ``error``."""
++    return "error" if a["rc"] is None else a["result"]
++
++
++def _confirm_enabled(chk: dict, cfg: Config) -> bool:
++    """Project switch AND row switch for confirm-once (issue #371).
++
++    ``[gates] confirm_gating_fail`` (``cfg.gates_confirm_gating_fail``, default on) and the
++    row's own ``confirm_fail`` (on a ``[[gates.checks]]`` or a ``[gates] host_ci`` entry,
++    default on). Only an absent key or a literal ``true`` enables it: confirmation off is
++    today's behaviour, so a malformed value fails toward it."""
++    return cfg.gates_confirm_gating_fail is True and chk.get("confirm_fail", True) is True
++
++
++def _combine_attempts(attempts: list[dict]) -> tuple[str, list[str], bool]:
++    """The row's recorded ``(result, evidence, flaky)`` from its samples (issue #371).
++
++    One sample: itself. Two (a confirmed ``fail``): fail→pass ⇒ ``pass`` + flaky, with the
++    passing run's evidence; fail→fail ⇒ ``fail`` with the confirm run's evidence; fail→
++    anything else (timeout / unverifiable / deferred / an exception) gave no clean answer,
++    so the FIRST ``fail`` stands with the first run's evidence. Only a clean ``pass``
++    turns the row green."""
++    first = attempts[0]
++    if len(attempts) == 1:
++        return first["result"], first["evidence"], False
++    second = attempts[1]
++    outcome = _attempt_outcome(second)
++    if outcome == "pass":
++        return "pass", second["evidence"], True
++    if outcome == "fail":
++        return "fail", second["evidence"], False
++    return "fail", first["evidence"], False
+ 
+ 
+ def _write_gate_log(log_dir: Path, chk: dict, *, cmd: str, cwd: Path,
+                     worktree_path: Path | None, started: str, duration: float,
+                     rc: int | None, result: str, timeout: int | None,
+-                    output: str) -> tuple[str | None, str | None]:
++                    output: str, attempts: list[dict] | None = None,
++                    flaky: bool = False) -> tuple[str | None, str | None]:
+     """Write ``gate-logs/<rule_id>.log`` — a small header, then the combined
+     stdout+stderr VERBATIM (issue #370). Returns ``(bundle_relative_path, None)`` on
+     success, or ``(None, reason)`` on a write failure: evidence persistence is
+     best-effort and must never break the gate run (the verdict itself is already in the
+     row) — but the failure is returned, not swallowed, so the caller surfaces it as the
+-    row's ``log_error`` (#370 iteration 2)."""
++    row's ``log_error`` (#370 iteration 2).
++
++    A confirmed row (issue #371) passes ``attempts``: the top-level header then carries the
++    row's recorded (combined) ``# outcome:``, and each sample follows in its own block with
++    its attempt number, ``# exit:``, ``# outcome:`` and verbatim output — one file, both
++    runs, so the whole basis of a fail→pass (or fail→fail) is readable from the bundle."""
+     name = f"{re.sub(r'[^A-Za-z0-9._-]', '_', chk.get('id', '')) or 'gate'}.log"
+-    if rc == progress.TIMEOUT_RC:
+-        # (#368 × #370) the bound expired: attach what the gate DID say before the kill,
+-        # so a hung gate's log shows where it hung instead of nothing.
+-        exit_line = f"timeout — killed after its {timeout}s bound (partial output below)"
+-    elif rc is None:
+-        exit_line = "exception — the command could not be run"
+-    else:
+-        exit_line = str(rc)
+-    header = "\n".join([
++    header = [
+         f"# gate: {chk.get('id', '')} — {chk.get('label', '')}",
+         f"# cmd: {cmd}",
+         f"# cwd: {cwd}",
+         f"# PDCA_WORKTREE: {worktree_path if worktree_path is not None else '(none)'}",
+         f"# start: {started}",
+         f"# duration_secs: {duration}",
+-        f"# exit: {exit_line}",
+-        f"# outcome: {result}",
+-        "# ---- combined stdout+stderr (verbatim) ----",
+-        "",
+-    ])
++    ]
++    if attempts is None:
++        body = "\n".join(header + [
++            f"# exit: {_exit_line(rc, timeout)}",
++            f"# outcome: {result}",
++            "# ---- combined stdout+stderr (verbatim) ----",
++            "",
++        ]) + output
++    else:
++        body = "\n".join(header + [
++            f"# outcome: {result}",
++            f"# flaky: {'true' if flaky else 'false'}",
++            f"# attempts: {', '.join(_attempt_outcome(a) for a in attempts)} "
++            "(a failed gating row is re-run once, issue #371)",
++            "",
++        ])
++        for n, a in enumerate(attempts, 1):
++            out = a["output"]
++            if out and not out.endswith("\n"):
++                out += "\n"
++            body += "\n".join([
++                f"# ==== attempt {n} of {len(attempts)} ====",
++                f"# start: {a['started']}",
++                f"# duration_secs: {a['duration']}",
++                f"# exit: {_exit_line(a['rc'], timeout)}",
++                f"# outcome: {_attempt_outcome(a)}",
++                "# ---- combined stdout+stderr (verbatim) ----",
++                "",
++            ]) + out
+     try:
+         log_dir.mkdir(parents=True, exist_ok=True)
+-        (log_dir / name).write_text(header + output, encoding="utf-8")
++        (log_dir / name).write_text(body, encoding="utf-8")
+     except OSError as exc:
+         return None, f"could not write {GATE_LOGS_DIR}/{name}: {exc}"
+     return f"{GATE_LOGS_DIR}/{name}", None
+ 
+ 
++def _exit_line(rc: int | None, timeout: int | None) -> str:
++    """The ``# exit:`` value of a gate log for one run (issues #368 / #370)."""
++    if rc == progress.TIMEOUT_RC:
++        # (#368 × #370) the bound expired: attach what the gate DID say before the kill,
++        # so a hung gate's log shows where it hung instead of nothing.
++        return f"timeout — killed after its {timeout}s bound (partial output below)"
++    if rc is None:
++        return "exception — the command could not be run"
++    return str(rc)
++
++
+ def _declarations(output: str, marker: str) -> list[str]:
+     """Every line of ``output`` the gate **declared** with ``marker``, in order — the text
+     after the marker (possibly empty).
+diff --git a/template/tests/test_gate_confirm.py b/template/tests/test_gate_confirm.py
+new file mode 100644
+index 0000000..829dd22
+--- /dev/null
++++ b/template/tests/test_gate_confirm.py
+@@ -0,0 +1,382 @@
++"""Confirm-once for a failed gating row (issue #371, stdlib unittest).
++
++A gating row is ONE sample. A downstream instance lost a round's verdict to a single
++`cargo test` red that six earlier rounds, the C4 run seconds later, the reviewer's own run
++and a manual re-run all contradicted. The harness already records "the oracle gave no
++answer" as `unverifiable` (#46, #368); a fail contradicted by an immediate pass of the
++same command is the same situation one step later. So at Check a failed gating row is
++re-run exactly once and both samples are kept:
++
++  (1) fail → pass  ⇒ `pass` + `flaky`, `attempts = ["fail", "pass"]`, two runs;
++  (2) fail → fail  ⇒ `fail` with the confirm run's evidence;
++  (3) fail → no clean answer (timeout / unverifiable / deferred / exception) ⇒ the first
++      `fail` stands with the FIRST run's evidence; `attempts` names the second outcome;
++  (4) bounds — one confirm only; non-gating / passing / cmd_error / raised-first rows run
++      once; `[gates] confirm_gating_fail = false` and a per-row `confirm_fail = false`
++      (on `[[gates.checks]]` AND `[gates] host_ci`) turn it off;
++  (4b) Check only — `run_gates` / `run_gates_dry`; the working-tree, integration and
++      publish host-CI re-gates (which call `_run_one` with the switch off) run once;
++  (5) the gate log holds both runs, each in its own block;
++  (6) a `flaky` row becomes one HUMAN §6 item; `overall` counts it as a pass.
++
++Real gate commands through the real `gates._run_one` — a small shell script that counts
++its own runs in a marker file. No Claude / Docker. Run from the template root:
++PYTHONPATH=src python3 -m unittest tests.test_gate_confirm
++"""
++
++from __future__ import annotations
++
++import json
++import shlex
++import shutil
++import tempfile
++import unittest
++from pathlib import Path
++from unittest import mock
++
++from pdca_harness import assemble, gates, progress
++from pdca_harness.config import Config, LeafConfig
++
++
++def _stub_config(root: Path) -> Config:
++    # Mirrors tests/test_gate_logs.py:_stub_config.
++    return Config(
++        root=root,
++        bundle_root=root / "results",
++        process_dir=root / "process",
++        templates_dir=root / "templates",
++        default_branch="main",
++        tracker_system="github",
++        tracker_url="",
++        issue_id_example="#1",
++        builder=LeafConfig(mode="stub", family="claude"),
++        reviewer=LeafConfig(mode="stub", family="codex"),
++    )
++
++
++class _Base(unittest.TestCase):
++    def setUp(self) -> None:
++        self.tmp = Path(tempfile.mkdtemp())
++        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
++        self.cfg = _stub_config(self.tmp)
++        self.marker = self.tmp / "runs"
++
++    # A command that appends one line per run to the marker, prints `run-<n>`, then runs
++    # the shell `tail` with $n bound to the run number (1-based).
++    def _cmd(self, tail: str) -> str:
++        m = shlex.quote(str(self.marker))
++        return (f"echo x >> {m}; n=$(wc -l < {m} | tr -d ' '); "
++                f"echo \"output-of-run-$n\"; {tail}")
++
++    def flaky_cmd(self) -> str:  # fails on run 1, passes from run 2 on
++        return self._cmd('echo "evidence-run-$n"; [ "$n" -ge 2 ]')
++
++    def runs(self) -> int:
++        if not self.marker.exists():
++            return 0
++        return len(self.marker.read_text().splitlines())
++
++    def _bundle(self, iid: str = "B") -> Path:
++        d = self.cfg.bundle(iid)
++        d.mkdir(parents=True)
++        (d / "brief.md").write_text("- **Slug:** gc\n", encoding="utf-8")
++        (d / "patch.diff").write_text("--- a\n+++ b\n", encoding="utf-8")
++        return d
++
++    def _chk(self, cmd: str, **kw) -> dict:
++        return {"id": "C4-confirm", "tier": "C4", "label": "verify", "scope": "bundle",
++                "gating": True, "cmd": cmd, **kw}
++
++    def _row(self, result: dict, rule_id: str = "C4-confirm") -> dict:
++        return next(r for r in result["rows"] if r["rule_id"] == rule_id)
++
++    def _check_run(self, chk: dict) -> dict:
++        """The row as the Check matrix records it (run_gates — the confirming caller)."""
++        self.cfg.gates_checks = [chk]
++        self.result = gates.run_gates(self._bundle(), self.cfg)
++        return self._row(self.result)
++
++
++# -- (1) / (2) / (3): the combination rule -------------------------------------------
++
++class CombinationRule(_Base):
++    def test_fail_then_pass_records_pass_flaky_after_two_runs(self) -> None:
++        row = self._check_run(self._chk(self.flaky_cmd()))
++        self.assertEqual(self.runs(), 2, "the failed gating row was not re-run exactly once")
++        self.assertEqual(row["result"], "pass")
++        self.assertIs(row.get("flaky"), True)
++        self.assertEqual(row.get("attempts"), ["fail", "pass"])
++        self.assertEqual(self.result["overall"], "pass")
++
++    def test_fail_then_fail_records_fail_with_confirm_run_evidence(self) -> None:
++        row = self._check_run(self._chk(self._cmd('echo "evidence-run-$n"; exit 1')))
++        self.assertEqual(self.runs(), 2)
++        self.assertEqual(row["result"], "fail")
++        self.assertFalse(row.get("flaky"))
++        self.assertEqual(row.get("attempts"), ["fail", "fail"])
++        self.assertEqual(row["path_line"], "evidence-run-2")
++        self.assertEqual(self.result["overall"], "fail")
++
++    def _first_fail_stands(self, row: dict, second: str) -> None:
++        self.assertEqual(self.runs(), 2)
++        self.assertEqual(row["result"], "fail")
++        self.assertFalse(row.get("flaky"))
++        self.assertEqual(row.get("attempts"), ["fail", second])
++        self.assertEqual(row["path_line"], "evidence-run-1")
++        self.assertEqual(self.result["overall"], "fail")
++
++    def test_fail_then_timeout_first_fail_stands(self) -> None:
++        tail = 'if [ "$n" -ge 2 ]; then sleep 5; fi; echo "evidence-run-$n"; exit 1'
++        row = self._check_run(self._chk(self._cmd(tail), timeout_secs=1))
++        self._first_fail_stands(row, "unverifiable")
++
++    def test_fail_then_unverifiable_first_fail_stands(self) -> None:
++        tail = ('if [ "$n" -ge 2 ]; then echo "PDCA-UNVERIFIABLE: no oracle"; exit 77; fi; '
++                'echo "evidence-run-$n"; exit 1')
++        row = self._check_run(self._chk(self._cmd(tail)))
++        self._first_fail_stands(row, "unverifiable")
++
++    def test_fail_then_deferred_first_fail_stands(self) -> None:
++        # A bundle-scoped T4 row is re-gated at publish, so it may declare `deferred`
++        # (gates._deferrable → publish.publish_gates).
++        tail = ('if [ "$n" -ge 2 ]; then echo "PDCA-DEFERRED: audited at publish"; exit 0; fi; '
++                'echo "evidence-run-$n"; exit 1')
++        chk = {"id": "T4-confirm", "tier": "T4", "label": "contrib", "scope": "bundle",
++               "gating": True, "cmd": self._cmd(tail)}
++        self.cfg.gates_checks = [chk]
++        self.result = gates.run_gates(self._bundle(), self.cfg)
++        self._first_fail_stands(self._row(self.result, "T4-confirm"), "deferred")
++
++    def test_fail_then_exception_first_fail_stands(self) -> None:
++        real = progress.run_with_heartbeat
++        calls = []
++
++        def second_raises(*a, **kw):
++            calls.append(1)
++            if len(calls) == 2:
++                raise OSError("confirm run could not start")
++            return real(*a, **kw)
++
++        with mock.patch.object(progress, "run_with_heartbeat", side_effect=second_raises):
++            row = self._check_run(self._chk(self._cmd('echo "evidence-run-$n"; exit 1')))
++        self.assertEqual(len(calls), 2)
++        self.assertEqual(self.runs(), 1)  # the confirm run never started the command
++        self.assertEqual(row["result"], "fail")
++        self.assertFalse(row.get("flaky"))
++        self.assertEqual(row.get("attempts"), ["fail", "error"])
++        self.assertEqual(row["path_line"], "evidence-run-1")
++
++    def test_check_dry_regate_confirms_too(self) -> None:
++        self.cfg.gates_checks = [self._chk(self.flaky_cmd())]
++        result = gates.run_gates_dry(self._bundle(), self.cfg)
++        row = self._row(result)
++        self.assertEqual(self.runs(), 2)
++        self.assertEqual((row["result"], row.get("flaky")), ("pass", True))
++        self.assertEqual(result["overall"], "pass")
++
++
++# -- (4): bounds ------------------------------------------------------------------------
++
++class Bounds(_Base):
++    def test_exactly_one_confirm_run(self) -> None:
++        # Fails on runs 1 AND 2, would pass on run 3 — a second confirm must not happen.
++        row = self._check_run(self._chk(self._cmd('echo "evidence-run-$n"; [ "$n" -ge 3 ]')))
++        self.assertEqual(self.runs(), 2)
++        self.assertEqual(row["result"], "fail")
++        self.assertEqual(row.get("attempts"), ["fail", "fail"])
++
++    def test_non_gating_failing_row_runs_once(self) -> None:
++        row = self._check_run(self._chk(self.flaky_cmd(), gating=False))
++        self.assertEqual(self.runs(), 1)
++        self.assertEqual(row["result"], "fail")
++        self.assertNotIn("attempts", row)
++
++    def test_passing_row_runs_once(self) -> None:
++        row = self._check_run(self._chk(self._cmd("exit 0")))
++        self.assertEqual(self.runs(), 1)
++        self.assertEqual(row["result"], "pass")
++        self.assertNotIn("attempts", row)
++        self.assertNotIn("flaky", row)
++
++    def test_cmd_error_row_is_not_confirmed(self) -> None:
++        calls = []
++        real = progress.run_with_heartbeat
++
++        def counting(*a, **kw):
++            calls.append(1)
++            return real(*a, **kw)
++
++        chk = {"id": "C4-confirm", "tier": "C4", "label": "verify", "scope": "bundle",
++               "gating": True, "subcmd": "verify"}  # subcmd but no [gates] runner
++        with mock.patch.object(progress, "run_with_heartbeat", side_effect=counting):
++            row = self._check_run(chk)
++        self.assertEqual(calls, [])
++        self.assertEqual(row["result"], "fail")
++        self.assertNotIn("attempts", row)
++
++    def test_raised_before_exit_code_is_not_confirmed(self) -> None:
++        calls = []
++
++        def raises(*a, **kw):
++            calls.append(1)
++            raise OSError("cannot spawn")
++
++        with mock.patch.object(progress, "run_with_heartbeat", side_effect=raises):
++            row = self._check_run(self._chk(self.flaky_cmd()))
++        self.assertEqual(len(calls), 1)
++        self.assertEqual(row["result"], "fail")
++        self.assertNotIn("attempts", row)
++
++    def test_project_switch_off_runs_once(self) -> None:
++        self.cfg.gates_confirm_gating_fail = False
++        row = self._check_run(self._chk(self.flaky_cmd()))
++        self.assertEqual(self.runs(), 1)
++        self.assertEqual(row["result"], "fail")
++        self.assertNotIn("flaky", row)
++
++    def test_project_switch_parsed_from_pdca_toml(self) -> None:
++        for body, expected in (("", True),
++                               ("confirm_gating_fail = true\n", True),
++                               ("confirm_gating_fail = false\n", False),
++                               ('confirm_gating_fail = "false"\n', False)):
++            with self.subTest(body=body):
++                (self.tmp / "pdca.toml").write_text(
++                    '[paths]\nbundle_root = "results"\n[gates]\n' + body, encoding="utf-8")
++                self.assertIs(Config.load(self.tmp).gates_confirm_gating_fail, expected)
++
++    def test_row_switch_off_on_gates_checks(self) -> None:
++        row = self._check_run(self._chk(self.flaky_cmd(), confirm_fail=False))
++        self.assertEqual(self.runs(), 1)
++        self.assertEqual(row["result"], "fail")
++        self.assertNotIn("attempts", row)
++
++    def _host_ci_row(self, extra: str) -> dict:
++        """A `[gates] host_ci` row as Config.load normalizes it (`_normalize_host_ci`)."""
++        cmd = self.flaky_cmd().replace("\\", "\\\\").replace('"', '\\"')
++        (self.tmp / "pdca.toml").write_text(
++            '[paths]\nbundle_root = "results"\n[gates]\n'
++            f'host_ci = [{{ id = "host-ci-x", cmd = "{cmd}"{extra} }}]\n',
++            encoding="utf-8")
++        rows = Config.load(self.tmp).host_ci_checks
++        self.assertEqual(len(rows), 1)
++        return rows[0]
++
++    def _run_host_ci_at_check(self, chk: dict) -> dict:
++        # The Check matrix's host-CI branch (gates._run_checks), with the patched tree
++        # supplied explicitly — the same tree `run_gates` would get from worktree.for_gate.
++        self.cfg.host_ci_checks = [chk]
++        wt = self.tmp / "wt"
++        wt.mkdir()
++        rows = gates._run_checks(self.cfg, cwd=self.cfg.root, bundle=self._bundle(),
++                                 scopes=("repo", "bundle"), worktree_override=wt,
++                                 confirm=True)
++        return next(r for r in rows if r["rule_id"] == "host-ci-x")
++
++    def test_host_ci_row_confirms_at_check(self) -> None:
++        row = self._run_host_ci_at_check(self._host_ci_row(""))
++        self.assertEqual(self.runs(), 2)
++        self.assertEqual((row["result"], row.get("flaky")), ("pass", True))
++
++    def test_row_switch_off_on_host_ci_survives_normalization(self) -> None:
++        chk = self._host_ci_row(", confirm_fail = false")
++        self.assertIs(chk.get("confirm_fail"), False)
++        row = self._run_host_ci_at_check(chk)
++        self.assertEqual(self.runs(), 1)
++        self.assertEqual(row["result"], "fail")
++        self.assertNotIn("attempts", row)
++
++
++# -- (4b): Check-time only ----------------------------------------------------------------
++
++class CheckTimeOnly(_Base):
++    def test_run_one_without_the_switch_runs_once(self) -> None:
++        # What publish's host-CI gate (publish.py `_run_one(chk, cfg=…, cwd=wt, …)`) and
++        # every non-Check caller pass: no confirm switch.
++        row = gates._run_one(self._chk(self.flaky_cmd()), cfg=self.cfg, cwd=self.tmp,
++                             bundle=self._bundle())
++        self.assertEqual(self.runs(), 1)
++        self.assertEqual(row["result"], "fail")
++        self.assertNotIn("flaky", row)
++
++    def test_publish_host_ci_rows_run_once(self) -> None:
++        # The publish host-CI gate runs `cfg.host_ci_checks` through `_run_one` exactly as
++        # publish.py does — a fail→pass command still refuses (one run, recorded fail).
++        self.cfg.host_ci_checks = [{"id": "host-ci-x", "tier": "T4", "scope": "bundle",
++                                    "gating": True, "cmd": self.flaky_cmd()}]
++        d = self._bundle()
++        rows = [gates._run_one(chk, cfg=self.cfg, cwd=self.tmp, bundle=d,
++                               runner=self.cfg.gates_runner, worktree_path=self.tmp)
++                for chk in self.cfg.host_ci_checks]
++        self.assertEqual(self.runs(), 1)
++        self.assertEqual([r["result"] for r in rows], ["fail"])
++
++    def test_working_tree_regate_runs_once(self) -> None:
++        self.cfg.gates_checks = [self._chk(self.flaky_cmd(), scope="repo")]
++        result = gates.run_working_tree(self.cfg)
++        self.assertEqual(self.runs(), 1)
++        self.assertEqual(self._row(result)["result"], "fail")
++        self.assertEqual(result["overall"], "fail")
++
++    def test_integration_regate_runs_once(self) -> None:
++        self.cfg.gates_checks = [self._chk(self.flaky_cmd(), scope="repo")]
++        wt = self.tmp / "integ"
++        wt.mkdir()
++        result = gates.run_integration(self.cfg, wt, hold_lock=False)
++        self.assertEqual(self.runs(), 1)
++        self.assertEqual(self._row(result)["result"], "fail")
++        self.assertEqual(result["overall"], "fail")
++
++
++# -- (5): evidence -------------------------------------------------------------------------
++
++class Evidence(_Base):
++    def test_log_holds_both_runs_with_combined_outcome_header(self) -> None:
++        self._check_run(self._chk(self.flaky_cmd()))
++        text = (self.cfg.bundle("B") / "gate-logs" / "C4-confirm.log").read_text("utf-8")
++        head, _, rest = text.partition("# ==== attempt 1")
++        self.assertTrue(rest, f"no per-attempt block in the log:\n{text}")
++        # The top-level header shows the row's recorded (combined) result.
++        self.assertIn("# outcome: pass\n", head)
++        one, _, two = rest.partition("# ==== attempt 2")
++        self.assertTrue(two, f"no second attempt block in the log:\n{text}")
++        self.assertIn("# exit: 1\n", one)
++        self.assertIn("# outcome: fail\n", one)
++        self.assertIn("output-of-run-1\nevidence-run-1\n", one)
++        self.assertIn("# exit: 0\n", two)
++        self.assertIn("# outcome: pass\n", two)
++        self.assertIn("output-of-run-2\nevidence-run-2\n", two)
++
++    def test_single_run_log_unchanged(self) -> None:
++        self._check_run(self._chk(self._cmd("exit 0")))
++        text = (self.cfg.bundle("B") / "gate-logs" / "C4-confirm.log").read_text("utf-8")
++        self.assertNotIn("attempt", text)
++        self.assertIn("# exit: 0\n# outcome: pass\n", text)
++
++
++# -- (6): routing ---------------------------------------------------------------------------
++
++class Routing(_Base):
++    def test_flaky_row_is_one_human_section6_item(self) -> None:
++        row = self._check_run(self._chk(self.flaky_cmd()))
++        d = self.cfg.bundle("B")
++        self.assertEqual(json.loads((d / "check-gates.json").read_text())["overall"], "pass")
++        (d / "check-review.md").write_text("# Review\n\nNo findings.\n", encoding="utf-8")
++        items = [it for it in assemble.collect_needs_human(d, self.cfg)
++                 if row["check"] in it.text]
++        self.assertEqual(len(items), 1, items)
++        item = items[0]
++        # HUMAN even though C4 is a gate element (which would be IMPL for a plain fail).
++        self.assertEqual(item.kind, assemble.HUMAN)
++        self.assertIn("fail", item.text)
++        self.assertIn("pass", item.text)
++
++    def test_clean_pass_adds_no_item(self) -> None:
++        row = self._check_run(self._chk(self._cmd("exit 0")))
++        d = self.cfg.bundle("B")
++        (d / "check-review.md").write_text("# Review\n\nNo findings.\n", encoding="utf-8")
++        self.assertFalse([it for it in assemble.collect_needs_human(d, self.cfg)
++                          if row["check"] in it.text])
++
++
++if __name__ == "__main__":
++    unittest.main()

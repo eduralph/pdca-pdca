@@ -1,0 +1,35 @@
+gates: re-run a failed gating check once before recording it at Check
+
+A gating check is one run of one command. A single transient red, such as
+a test runner that crashed once on a busy machine, used to cost the round
+its verdict: the bundle was parked as if the patch were broken, even when
+every run before and after it was green.
+
+At Check, a gating row that fails with a real exit code is now re-run
+once with the same command, environment, working directory and timeout.
+
+- Fail then pass is recorded `pass` with `flaky = true`. It also becomes
+  a human item in SUMMARY §6 that names both outcomes, so accept is still
+  held until someone has looked at the red run. It is never a silent pass.
+- Fail then fail is recorded `fail`, with the second run's evidence.
+- If the second run gives no clean answer (timeout, unverifiable,
+  deferred, or the command could not start), the first `fail` stands
+  with the first run's evidence.
+
+The row's new `attempts` list records each run's outcome, and its
+gate-logs/<id>.log keeps both runs' output in separate blocks. Rows that
+ran once are unchanged, and their logs are byte-identical to before.
+
+Only Check confirms, through run_gates and its dry re-gate twin. The
+publish host-CI gate and the integration and working-tree re-gates still
+run a failing command once, so a lucky second run can never let a push
+through. Passing rows, non-gating rows and misconfigured delegated rows
+run once as before.
+
+Confirmation is on by default. Turn it off for the project with
+`[gates] confirm_gating_fail = false`, or for one row with
+`confirm_fail = false` on its `[[gates.checks]]` or `host_ci` entry. A
+model-backed gate row should do that, since its second run is a fresh
+sample rather than a re-check of the first.
+
+Fixes #371

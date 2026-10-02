@@ -1,0 +1,1798 @@
+diff --git a/README.md b/README.md
+index 4fab4db..30c7271 100644
+--- a/README.md
++++ b/README.md
+@@ -158,13 +158,13 @@ isolated bundle root.
+   cheap-first burn-down. A run's pass budget is `[driver].max_passes` (`PDCA_MAX_PASSES` /
+   `pdca flow --max-passes N`); a bundle still iterating when it runs out is named with a
+   `pdca flow <id>` resume hint, never silently dropped.
+-- **Auto-iterate on implementation-only findings** — `[driver].auto_iterate`
++- **Auto-iterate on implementation findings** — `[driver].auto_iterate`
+   (`PDCA_AUTO_ITERATE` / `pdca flow --auto-iterate`, **off by default**) lets the driver
+-  record `iterate-do` and rebuild unattended when *every* open §6 item is a `gate` cell of
+-  the 5/5/1 (C2/C4/T1–T4) — the bugs a builder can fix. A judgment cell (C5 causal
+-  adequacy, T5, validation), a gate that couldn't run, an external dependency, or anything
+-  it can't classify still stops for you. It never auto-accepts, and it's bounded by
+-  `[driver].max_auto_iters` rounds per bundle (doc 06).
++  record `iterate-do` and rebuild unattended while §6 still carries a `gate` cell of the
++  5/5/1 (C2/C4/T1–T4) — the bugs a builder can fix. A judgment cell (C5 causal adequacy,
++  T5, validation), a gate that couldn't run, an external dependency, or anything it can't
++  classify is held for you and put back into §6 at handover. It never auto-accepts, and
++  the size backstop or `[driver].max_auto_iters` stops it (doc 07).
+ - **In-driver lane concurrency** — `[driver].lanes = N` (`PDCA_LANES` /
+   `pdca flow --lanes N`) fans the unattended Do + Check band across N workers in
+   one workspace; each gate sees its worker slot as `$PDCA_LANE` to keep checkouts /
+diff --git a/docs/05-check.md b/docs/05-check.md
+index d3b018e..408dfb2 100644
+--- a/docs/05-check.md
++++ b/docs/05-check.md
+@@ -403,10 +403,11 @@ not Check's work), a **gate** (`C2`, `C4`, `T1`–`T4` — deterministic,
+ mechanical, blocks accept on fail), or **judgment** (`C5`, `T5`, validation —
+ always routes to the reviewer first and you last, never gates). That
+ three-way split is the same one [auto-iterate](07-crosscutting.md#auto-iterate-the-driver-deciding-for-itself)
+-reads to decide whether it's safe to rebuild without asking you: only a §6
+-item tagged `gate` is eligible — the driver can plausibly fix a `C2`/`C4`/`T1`–`T4`
+-finding by rebuilding, but it can never rebuild its way past a `C5`/`T5`/validation
+-finding, because those were never mechanical questions to begin with. A gate
++reads to decide whether a rebuild without asking you has anything to do: only
++a §6 item tagged `gate` is work for the builder — the driver can plausibly fix a
++`C2`/`C4`/`T1`–`T4` finding by rebuilding, but it can never settle a
++`C5`/`T5`/validation finding that way, because those were never mechanical
++questions to begin with. Those are held for you instead; step 07 has how. A gate
+ can also come back **`unverifiable`** — it genuinely couldn't run its check
+ (a missing fixture, a skipped environment) rather than having run and failed —
+ which is neither pass nor fail; it routes to §6 like a judgment cell would,
+@@ -771,11 +772,11 @@ you record it:
+ > independent of §6.
+ 
+ **Auto-iterate** — `[driver].auto_iterate = true` lets the driver record
+-`iterate-do` for you when Check's §6 has implementation-only findings and
+-nothing you must see first, so Do→Check keeps iterating while the reviewer
+-keeps finding things only Do can fix. It never accepts, never ticks a `- [ ]`,
+-and is bounded by `max_auto_iters` rounds — full mechanics, the eligibility
+-rule, and its three guarantees are in
++`iterate-do` for you while Check's §6 still has implementation findings, so
++Do→Check keeps iterating while the reviewer keeps finding things only Do can
++fix. Findings that need your judgment are held and handed to you in §6 when it
++stops. It never accepts and never ticks a `- [ ]` — the eligibility rule, the
++deferred findings, what stops the loop, and its guarantees are all in
+ [step 07](07-crosscutting.md#auto-iterate-the-driver-deciding-for-itself).
+ 
+ ### Publish's STOP discipline, and batches
+diff --git a/docs/07-crosscutting.md b/docs/07-crosscutting.md
+index e1caad8..f3f693d 100644
+--- a/docs/07-crosscutting.md
++++ b/docs/07-crosscutting.md
+@@ -431,19 +431,54 @@ spend the pool stops there and says so, naming what it walked away from.
+ Every implementation defect the reviewer catches — a logic slip, a weak test, a
+ red gate — parks a bundle at `AWAITING_SIGNOFF` and asks a human to press
+ `iterate-do`, which is a decision the driver is often positioned to make itself.
+-`[driver].auto_iterate` (default `false` — opt in) lets it: when Check's §6 has
+-**at least one mechanically-checkable ("IMPL") finding and nothing else you'd
+-need to see first**, the driver writes `iterate-do` and rebuilds, unattended.
+-
+-The eligibility split rides on the same `input | gate | judgment` tag every §6
+-item already carries: the `gate` cells (C2 reproduction, C4 verification,
+-T1–T4 conformance) are IMPL — a rebuild can plausibly fix them; the `judgment`
+-cells (C5 causal adequacy, T5, the validation act) and the `input` cells (C1
+-spec, C3 change) stay HUMAN. One exception makes this fire at all in practice:
+-the reviewer's `Validation — fitness-to-purpose` row is hard-coded to
+-NEEDS-HUMAN on *every* cycle by design, so it's a constant, carries no signal,
+-and doesn't veto a rebuild — though it's still rendered in §6 and you still have
+-to clear it to accept.
++`[driver].auto_iterate` (default `false` — opt in) lets it: while Check's §6
++has **at least one mechanically-checkable ("IMPL") finding**, the driver writes
++`iterate-do` and rebuilds, unattended.
++
++The split rides on the same `input | gate | judgment` tag every §6 item already
++carries: the `gate` cells (C2 reproduction, C4 verification, T1–T4
++conformance) are IMPL — a rebuild can plausibly fix them; the `judgment` cells
++(C5 causal adequacy, T5, the validation act) and the `input` cells (C1 spec, C3
++change) stay HUMAN, as do a gate that couldn't run, an external dependency, an
++unmarked advisory finding, and anything it can't classify.
++
++A HUMAN finding next to an IMPL one **does not stop the rebuild — it's
++deferred to you.** The driver records it in the bundle's
++`deferred-findings.json` and merges it back into §6 at every assembly, so it's
++waiting for you as an open `- [ ]` item when the loop hands the bundle over,
++even if no later round's reviewer raises it again. (A single HUMAN row used to
++veto the rebuild; auto-iterate then fired on only 31 of 230 attempts, and
++bundles you'd have called broken spent zero rounds.) A §6 with *no* IMPL
++item — HUMAN findings only, or nothing at all — halts straight away, since
++there's nothing for a rebuild to do. The reviewer's `Validation —
++fitness-to-purpose` row is neither: it's hard-coded to NEEDS-HUMAN on *every*
++cycle, so it's a constant that carries no signal. It isn't deferred, but it's
++still in every fresh §6 and you still clear it to accept.
++
++The ledger is only emptied by you. If you tick a deferred finding in §6 and
++then choose `iterate-do` or `iterate-plan` for some other reason, that entry
++leaves the ledger before the attempt is archived; an entry you left unticked
++(or only edited) stays. If the ledger file exists but can't be read, §6 says so
++as its own `- [ ]` item, and an accept is refused until you clear it.
++
++**Exactly two things stop the loop while there's still implementation work:**
++
++- **The size backstop** — the early stop. At Check the driver measures what the
++  patch actually came to and how many rounds this brief has already spent; past
++  a threshold it raises a `size backstop —` item recommending `iterate-plan`.
++  That's the one HUMAN item that is *not* deferred: it says further rebuilds
++  are the wrong move, so it ends the loop, and the flow names it on stderr. By
++  default it fires at 2 rounds, below the hard cap, on purpose — most bundles
++  that reach a second round go on to a third, and a slice that needs splitting
++  produces implementation-shaped findings every round. The thresholds live
++  once, in `pdca.toml`'s `[driver.size_signal]` block (set one to `0` to
++  switch that rule off).
++- **The hard cap** — `[driver].max_auto_iters` (default `3`) automatic rounds
++  per bundle, tracked in `auto-iterate.json`. It's the ceiling that still
++  holds when the backstop is off or hasn't fired.
++
++There's no third, softer budget. Either way the bundle halts at
++`AWAITING_SIGNOFF` for you, with every deferred finding in §6 — never dropped.
+ 
+ Three guarantees hold by construction, worth knowing before you flip it on:
+ 
+@@ -452,12 +487,11 @@ Three guarantees hold by construction, worth knowing before you flip it on:
+   C6-guarded decision path either way.
+ - **It never ticks a §6 box.** An auto-iterate archives the whole SUMMARY,
+   unticked, into `iteration-v<N>/`; the rebuild produces a fresh §6 from
+-  scratch.
+-- **It's bounded.** `[driver].max_auto_iters` (default `3`) automatic rounds per
+-  bundle, tracked in `auto-iterate.json` — deliberately *not* archived, so the
+-  count survives across rebuilds instead of resetting every iterate. On
+-  exhaustion the bundle halts at `AWAITING_SIGNOFF` for you, same as always,
+-  never dropped.
++  scratch, plus the deferred findings.
++- **It never archives what it counts or holds.** `auto-iterate.json` and
++  `deferred-findings.json` are deliberately *not* archived, so the round count
++  and the deferred findings survive across rebuilds instead of resetting every
++  iterate.
+ 
+ gramps runs `auto_iterate = true` with the default `max_auto_iters = 3`.
+ 
+diff --git a/template/pdca.toml.jinja b/template/pdca.toml.jinja
+index 90e34d9..a41d1ca 100644
+--- a/template/pdca.toml.jinja
++++ b/template/pdca.toml.jinja
+@@ -50,25 +50,26 @@ lanes = 1
+ # this rather than editing source. `PDCA_MAX_PASSES` overrides for one run; `--max-passes`
+ # overrides both.
+ max_passes = 20
+-# Auto-iterate on implementation-only Check findings (issue #264). A big Do typically lands
+-# with implementation defects the reviewer or the adversary catches — a logic slip, a weak
+-# test, a red gate. Each of those parks the bundle at AWAITING_SIGNOFF and asks you to press
+-# "iterate-do", which is the decision the driver could have made itself. With this on, when
+-# the reviewer has found implementation defects and NOTHING you must see first, the driver
+-# records `iterate-do` and rebuilds, unattended — so Do→Check iterates while the reviewer keeps
+-# finding things only Do can fix, and hands over once they are gone. Your judgment is still
+-# required — and the bundle still halts — for anything architectural: a REAL concern on a
+-# judgment cell (C5 causal adequacy, T5 judgment), a gate that could not run, an external
+-# dependency, an unmarked advisory finding, or a §6 item it cannot classify.
++# Auto-iterate while Check still finds implementation work (issues #264, #409). A big Do
++# typically lands with implementation defects the reviewer or the adversary catches — a logic
++# slip, a weak test, a red gate. Each of those parks the bundle at AWAITING_SIGNOFF and asks
++# you to press "iterate-do", which is the decision the driver could have made itself. With
++# this on, while the reviewer keeps finding implementation defects the driver records
++# `iterate-do` and rebuilds, unattended — so Do→Check iterates while there is work only Do can
++# do, and hands over once it is gone.
+ #
+-# One exception, and it is why this works at all: the reviewer's `Validation —
+-# fitness-to-purpose` row is emitted NEEDS-HUMAN on EVERY cycle by design (validation is your
+-# call, always), so it is a constant and carries no signal. It does not veto a rebuild — but it
+-# is still rendered in §6 and you must still clear it to accept. Treating it as an ordinary
+-# blocker is what made this feature never fire at all before v0.54.0 (#293).
++# Your judgment is still required for anything architectural: a REAL concern on a judgment
++# cell (C5 causal adequacy, T5 judgment), a gate that could not run, an external dependency,
++# an unmarked advisory finding, or a §6 item it cannot classify. Beside an implementation
++# defect those no longer halt the bundle — they are DEFERRED: held in the bundle's
++# `deferred-findings.json` and put back into §6 at handover, where you must clear each one
++# before accepting. With no implementation defect beside them, the bundle halts at once.
++# The reviewer's `Validation — fitness-to-purpose` row is emitted NEEDS-HUMAN on EVERY cycle
++# by design, so it is a constant, never deferred — but still in §6 for you to clear (#293).
+ #
+-# It NEVER auto-accepts and never ticks a §6 box.
+-# Bounded by `max_auto_iters` rounds per bundle (clamped below max_passes); on exhaustion the
++# It NEVER auto-accepts and never ticks a §6 box. Two things stop the loop: the size backstop
++# (the empirical size thresholds further down, whose `rounds` rule fires before this cap on
++# purpose) and `max_auto_iters` rounds per bundle (clamped below max_passes). On either the
+ # bundle halts for you as before. `PDCA_AUTO_ITERATE=1` / `--auto-iterate` override.
+ auto_iterate = false
+ max_auto_iters = 3
+@@ -286,7 +287,7 @@ size_guard = "off"
+ # written — and much better at it: against "did this bundle churn >=3 rounds" over the same
+ # 86 settled bundles, patch >=100 KB scores 71% precision and >=20 files 86%, where the
+ # a-priori score peaks at 62%. Crossing a threshold raises a §6 NEEDS-HUMAN item (which
+-# disqualifies auto-iterate) recommending `iterate-plan`; it never blocks — at 70% precision
++# stops auto-iterate) recommending `iterate-plan`; it never blocks — at 70% precision
+ # for the union, roughly three firings in ten are a coherent large change.
+ #
+ # `rounds` fires at 2 while max_auto_iters above defaults to 3, so it deliberately stops the
+diff --git a/template/src/pdca_harness/assemble.py b/template/src/pdca_harness/assemble.py
+index 72e378f..b315429 100644
+--- a/template/src/pdca_harness/assemble.py
++++ b/template/src/pdca_harness/assemble.py
+@@ -304,11 +304,12 @@ def collect_needs_human(d: Path, cfg: Config) -> list[NeedsHumanItem]:
+     for ptext in [p.read_text(encoding="utf-8")
+                   for p in sorted(d.glob("plan-advisory-*.md"))]:
+         items += _items_from_artifact(ptext)
+-    # The empirical size backstop (#324). HUMAN, never IMPL — and that tag is the whole
+-    # mechanism: `autoiterate.eligible()` requires every item be IMPL or STANDING, so this
+-    # DISQUALIFIES auto-iterate, which is what should happen to a bundle behaving
+-    # oversized. Tagged IMPL it would instead count as a reason to rebuild, turning the
+-    # backstop into an accelerator for the very failure it exists to stop.
++    # The empirical size backstop (#324). HUMAN, never IMPL — the tag and the text
++    # together are the mechanism: `autoiterate.eligible()` defers every other HUMAN item
++    # to handover (#409) but STOPS the rebuild loop on a HUMAN item `size_signal.is_size_item`
++    # recognises, which is what should happen to a bundle behaving oversized. Tagged IMPL
++    # it would instead count as a reason to rebuild, turning the backstop into an
++    # accelerator for the very failure it exists to stop.
+     # `current`, not `read`: the recorded file wins, but its ABSENCE must not read as
+     # "measured and small". A failed write would otherwise delete the backstop.
+     size_reasons = size_signal.oversize_reasons(size_signal.current(d, cfg), cfg)
+@@ -355,6 +356,9 @@ def assemble_summary(d: Path, cfg: Config) -> None:
+     # the C6 guard makes the human clear before accept. `collect_needs_human` is the single
+     # source (it also tags each item IMPL/HUMAN for the auto-iterate decision, #264).
+     needs_human = [it.text for it in collect_needs_human(d, cfg)]
++    # …plus every HUMAN finding an auto-iterate round deferred (#409), which lives only in
++    # the ledger once its round's SUMMARY is archived.
++    needs_human += _deferred_needs_human(d, needs_human)
+ 
+     advisory_block = "\n".join(
+         f"\n### Advisory — {p.stem.removeprefix('check-advisory-')}\n\n{t.strip()}"
+@@ -422,6 +426,33 @@ def assemble_summary(d: Path, cfg: Config) -> None:
+     (d / "SUMMARY.md").write_text(out, encoding="utf-8")
+ 
+ 
++def _deferred_needs_human(d: Path, fresh: list[str]) -> list[str]:
++    """The deferred-findings ledger's entries not already among this Check's §6 items (#409).
++
++    Deduplicated on the normalised text, so a finding the reviewer raised again this round
++    renders once. Never deduplicated fuzzily: a near-twin of a fresh finding is a different
++    finding until the human says otherwise, and hiding it behind its neighbour would drop it.
++
++    A ledger that exists but cannot be read becomes one fixed §6 row
++    (``autoiterate.UNREADABLE_LEDGER_ITEM``), which blocks accept until the human clears it.
++    Local import: ``autoiterate`` imports this module at its top level.
++    """
++    from . import autoiterate
++
++    try:
++        ledger = autoiterate.deferred(d)
++    except autoiterate.DeferredLedgerUnreadable:
++        return [autoiterate.UNREADABLE_LEDGER_ITEM]
++    seen = {" ".join(t.split()).casefold() for t in fresh}
++    out: list[str] = []
++    for text in ledger:
++        key = " ".join(text.split()).casefold()
++        if key and key not in seen:
++            seen.add(key)
++            out.append(text)
++    return out
++
++
+ def _plan_advisory_act_lines(d: Path) -> list[str]:
+     """§10 line for the plan-advisory benefit record (#301): benefit telemetry is process
+     signal — exactly what Act reviews to judge whether plan reviews pay off over cycles."""
+diff --git a/template/src/pdca_harness/autoiterate.py b/template/src/pdca_harness/autoiterate.py
+index 226ed5d..a773214 100644
+--- a/template/src/pdca_harness/autoiterate.py
++++ b/template/src/pdca_harness/autoiterate.py
+@@ -1,4 +1,4 @@
+-"""Auto-iterate: resolve implementation-only Check findings without stopping for a human.
++"""Auto-iterate: keep rebuilding while Check still finds implementation work.
+ 
+ Issue #264. A big Do lands with implementation defects the reviewer or the adversary
+ catches — a logic slip, a weak test, a failing gate. Today every one of those parks the
+@@ -13,24 +13,39 @@ verification, T1..T4) are mechanically checkable, so a rebuild can address them;
+ (C1 spec, C3 change) are the human's. ``assemble.collect_needs_human`` tags every §6 item
+ IMPL or HUMAN from exactly that source.
+ 
+-So: when a bundle reaches ``AWAITING_SIGNOFF`` with at least one IMPL item and nothing the
+-human must see first, the driver writes an ``iterate-do`` decision and re-drives Do. Anything
+-else — an empty §6 (a clean bundle awaiting a human accept), a situational HUMAN item, an
+-exhausted budget — halts as before.
++So: when a bundle reaches ``AWAITING_SIGNOFF`` with at least one IMPL item, the driver writes
++an ``iterate-do`` decision and re-drives Do. HUMAN items beside the IMPL ones do NOT veto that
++rebuild (#409): they are **deferred** — held in :data:`DEFERRED_FILE` and merged back into §6
++at handover, so each one still reaches the human under the C6 accept-guard. The veto was what
++stopped the loop in practice: auto-iterate fired on 31 of 230 eligible-checked attempts
++(13.5%), because one situational HUMAN row beside any number of build defects declined the
++round. A set with NO implementation work — an empty §6, or HUMAN items only — still halts at
++once: there is nothing for a rebuild to address.
+ 
+-One item is deliberately NOT "something the human must see first": the reviewer's
+-``Validation — fitness-to-purpose`` row, which its prompt hard-codes to NEEDS-HUMAN on EVERY
+-cycle whatever it finds (:data:`assemble.STANDING`). It is a constant, so it carries no
+-signal. Counting it as an ordinary HUMAN item made the original ``all(IMPL)`` rule impossible
+-to satisfy on a real bundle, and this feature never fired once in production (#293).
++Exactly two things stop the loop while implementation work remains, and neither is new:
+ 
+-Three properties hold by construction:
++* **the size backstop** (#324) — a HUMAN item ``size_signal.is_size_item`` recognises. It is
++  the one HUMAN item that stops the loop by its KIND rather than being deferred, because it
++  is evidence that more rebuilds are the wrong move. It fires at 2 rounds by default, below
++  the hard cap, on purpose (``rounds`` under ``[driver.size_signal]`` in ``pdca.toml``);
++* **the hard cap** — ``[driver].max_auto_iters``.
++
++The reviewer's ``Validation — fitness-to-purpose`` row (:data:`assemble.STANDING`) is neither
++work nor a deferral: its prompt hard-codes it to NEEDS-HUMAN on EVERY cycle, so it is a
++constant that carries no signal (#293). It is not recorded in the ledger — the fresh §6 of
++every Check already carries it.
++
++Four properties hold by construction:
+ 
+ * **It only ever writes ``iterate-do``.** Never ``accept``, never ``discontinue``. The
+   decision goes through the same C6-guarded ``flow._apply_decision`` a human sign-off uses,
+   so §9 stays authored solely by ``signoff.record``.
+ * **It never clears a §6 box.** An ``iterate-do`` archives the whole SUMMARY, unticked, into
+-  ``iteration-v<N>/``; the rebuild produces a fresh §6.
++  ``iteration-v<N>/``; the rebuild produces a fresh §6. Only a box the HUMAN ticked retires
++  a deferred finding (:func:`retire_cleared`).
++* **It defers, it does not drop.** Every HUMAN item a round iterates past is in the ledger
++  before the decision is written, and the ledger is not archived. A ledger that exists but
++  cannot be read is itself a §6 item that blocks accept.
+ * **It is bounded.** ``[driver].max_auto_iters`` automatic rounds per bundle, counted in
+   ``auto-iterate.json`` (deliberately NOT in ``driver.DOWNSTREAM_OF_BRIEF``, so the archive
+   step doesn't move it and the count accumulates across rebuilds). On exhaustion the bundle
+@@ -42,36 +57,119 @@ Opt-in: ``[driver].auto_iterate = false`` by default.
+ from __future__ import annotations
+ 
+ import json
++import os
+ from pathlib import Path
+ 
+-from .assemble import IMPL, STANDING, NeedsHumanItem
++from . import signoff, size_signal
++from .assemble import HUMAN, IMPL, NeedsHumanItem
+ from .leaves import SIGNOFF_DECISION
+ 
+ BUDGET_FILE = "auto-iterate.json"
+ 
++# The HUMAN findings a round iterated PAST (#409). An `iterate-do` archives SUMMARY.md and
++# check-review.md and the rebuild assembles a fresh §6, so a HUMAN finding raised in an early
++# round exists nowhere afterwards unless a later reviewer happens to raise it again. Each one
++# is recorded here and merged back into §6 at every assembly (`assemble.assemble_summary`).
++# Like BUDGET_FILE it is deliberately NOT in `state.DOWNSTREAM_OF_BRIEF`, so the archive
++# step leaves it in place and it accumulates across rebuilds; it IS in
++# `state.CYCLE_EVIDENCE_ONLY`, since a bundle cannot hold one without having run a cycle.
++DEFERRED_FILE = "deferred-findings.json"
++
+ # The only token this module is ever allowed to write.
+ DECISION = "iterate-do"
+ 
++# The §6 row raised when the ledger exists but cannot be read. A FIXED text, so the
++# assembly path and `flow._apply_decision` render the same row and never add a second copy.
++UNREADABLE_LEDGER_ITEM = (
++    f"{DEFERRED_FILE} exists but cannot be read — findings an auto-iterate round deferred "
++    "to this handover may be missing from this §6. Recover them from the archived "
++    "iteration-v*/SUMMARY.md §6, then repair or remove the file before accepting.")
++
++# Matching a §6 row to a ledger entry when the human edited the MIDDLE of the row, so
++# neither string contains the other. A fixed character threshold is brittle exactly where it
++# matters, so the test is PROPORTIONAL: the shared opening must be most of the shorter string.
++# Two different findings on the same 5/5/1 element share only the element and label (~21
++# characters of "C5 Causal adequacy — ") before diverging, a small fraction of a full §6 row;
++# one finding and its annotated self share nearly all of it.
++#
++# The floor bounds CONTAINMENT too. A string under it — an element name, a few words — sits
++# inside countless findings, so a short ticked row that happens to occur in a deleted entry
++# says nothing about that entry, and retiring it would read consent from absence. Below the
++# floor only an exact match counts.
++_MATCH_RATIO = 0.6      # of the shorter string
++_MATCH_FLOOR = 20       # …and never fewer than this many characters, so short rows can't match
++
++_BOXES = ("- [ ]", "- [x]", "- [X]")
++
++
++def _norm(text: str) -> str:
++    """A §6 text reduced for comparison: whitespace collapsed, case folded."""
++    return " ".join(str(text).split()).casefold()
++
++
++def _row_text(line: str) -> str:
++    """A §6 checkbox line reduced to its normalised finding text, checkbox stripped."""
++    body = line.strip()
++    for box in _BOXES:
++        if body.startswith(box):
++            body = body[len(box):]
++            break
++    return _norm(body)
++
++
++def _same_finding(a: str, b: str) -> bool:
++    """Do these two §6 texts name the same finding, allowing for a human's edit?
++
++    Equal after normalisation, one containing the other (an annotation appended, a tail
++    trimmed, a note prefixed), or a shared opening that is most of the shorter string (an
++    edit in the middle) — the last two only when the shorter string is at least
++    :data:`_MATCH_FLOOR` characters. The ONE relation a tick is matched with and an open row
++    protects with (:func:`retire_cleared`) — two relations there is what #335 was.
++    """
++    a, b = _norm(a), _norm(b)
++    if not a or not b:
++        return False
++    if a == b:
++        return True
++    shorter = min(len(a), len(b))
++    if shorter < _MATCH_FLOOR:
++        return False    # too short to name one finding: containment is not evidence
++    if a in b or b in a:
++        return True
++    shared = 0
++    for x, y in zip(a, b):
++        if x != y:
++            break
++        shared += 1
++    return shared >= max(_MATCH_FLOOR, int(shorter * _MATCH_RATIO))
++
+ 
+ def eligible(items: list[NeedsHumanItem]) -> bool:
+-    """True iff a rebuild is the right next step: at least one IMPL finding, and nothing
+-    else the human must see *first*.
++    """True iff a rebuild is the right next step: at least one IMPL finding, and no
++    size-backstop item.
+ 
+     An **empty** §6 is deliberately not eligible — that is a clean bundle awaiting a human
+-    *accept*, and auto-iterate must never accept. A situational HUMAN item still disqualifies
+-    the whole bundle: the human has to look at it anyway, so there is nothing to save by
+-    rebuilding first.
+-
+-    But a **STANDING** item does not. The reviewer's prompt hard-codes `Validation —
+-    fitness-to-purpose` to NEEDS-HUMAN on EVERY cycle regardless of what it found, so that row
+-    is a constant, and a constant is not evidence that a human must look right now. Requiring
+-    `all(IMPL)` therefore made this function unreachable in production: every real review
+-    artifact carries that row, so auto-iterate never fired once (#293). The bundle still halts
+-    for the human as soon as the implementation findings are gone — which is the whole point:
+-    iterate Do→Check while the reviewer keeps finding defects only Do can fix, then hand over.
++    *accept*, and auto-iterate must never accept. Neither is a §6 of HUMAN items with no IMPL
++    item beside them: there is nothing for a rebuild to address, so it goes straight to the
++    human.
++
++    An ordinary HUMAN item beside an IMPL one no longer vetoes the rebuild (#409). It is
++    DEFERRED — :func:`write_decision` records it in :data:`DEFERRED_FILE` and assembly
++    returns it to §6 at handover — because a finding that needs a human is not evidence that
++    the implementation work is done. The veto made the loop fire on 13.5% of attempts.
++
++    The one HUMAN item that still stops the loop is the size backstop's (#324), and it stops
++    it by KIND: ``size_signal.is_size_item`` on a HUMAN item. Its whole message is "further
++    rebuilds are the wrong move", so deferring it would turn the backstop into an
++    accelerator for the spiral it exists to break. The same text tagged IMPL is not the
++    backstop's item and still rebuilds — the tag stays part of the mechanism.
++
++    The STANDING `Validation` row never counted either way (#293): the reviewer's prompt
++    emits it on every cycle whatever it found, so it is a constant, not evidence.
+     """
+     return (any(item.kind == IMPL for item in items)
+-            and all(item.kind in (IMPL, STANDING) for item in items))
++            and not any(item.kind == HUMAN and size_signal.is_size_item(item.text)
++                        for item in items))
+ 
+ 
+ def count(d: Path) -> int:
+@@ -90,28 +188,185 @@ def bump(d: Path) -> int:
+     return n
+ 
+ 
++class DeferredLedgerUnreadable(Exception):
++    """The deferred ledger exists but cannot be read.
++
++    Kept apart from an ABSENT ledger on purpose. Absent means "nothing has been deferred" —
++    the ordinary state, read as an empty list. A file that exists and will not parse is a
++    ledger whose contents are LOST, and reading that as empty is the one failure this
++    mechanism exists to prevent: the next :func:`defer` would rewrite the file from the
++    current §6 alone, and the next ``iterate-do`` would archive the current SUMMARY, so every
++    finding deferred in an earlier round would be gone from every live artifact at once.
++
++    Every other bundle-file reader in the driver is tolerant of a garbled file. This one is
++    not, because the tolerant reading fails in the ACCEPTING direction.
++    """
++
++
++def deferred(d: Path) -> list[str]:
++    """Every HUMAN finding this bundle has iterated past, oldest first.
++
++    An absent file is ``[]``. A file that exists but cannot be read — not JSON, not an
++    ``items`` list, a non-string entry — raises :class:`DeferredLedgerUnreadable`. A
++    non-string entry fails closed too: filtering it out would report the ledger readable
++    while dropping an entry nobody can interpret, and the next write would erase it.
++    """
++    p = d / DEFERRED_FILE
++    if not p.exists() and not p.is_symlink():
++        return []
++    try:
++        raw = json.loads(p.read_text(encoding="utf-8"))
++    except (OSError, ValueError) as exc:   # UnicodeDecodeError is a ValueError
++        raise DeferredLedgerUnreadable(f"{p} exists but cannot be read: {exc}") from exc
++    rows = raw.get("items") if isinstance(raw, dict) else None
++    if not isinstance(rows, list):
++        raise DeferredLedgerUnreadable(f"{p} holds no `items` list")
++    if not all(isinstance(r, str) for r in rows):
++        raise DeferredLedgerUnreadable(
++            f"{p} holds a non-string entry — cannot tell what was deferred")
++    return list(rows)
++
++
++def ledger_problem(d: Path) -> str:
++    """Why the ledger cannot be read, or ``""`` when it can (or is absent)."""
++    try:
++        deferred(d)
++    except DeferredLedgerUnreadable as exc:
++        return str(exc)
++    return ""
++
++
++def _write_ledger(d: Path, entries: list[str]) -> None:
++    """Replace the ledger in one step (temp sibling + ``os.replace``), so an interrupted
++    write leaves the previous ledger, not a torn one that reads as unreadable."""
++    p = d / DEFERRED_FILE
++    tmp = d / f".{DEFERRED_FILE}.{os.getpid()}.tmp"
++    tmp.write_text(json.dumps({"items": entries}, indent=1, ensure_ascii=False) + "\n",
++                   encoding="utf-8")
++    os.replace(tmp, p)
++
++
++def defer(d: Path, items: list[NeedsHumanItem]) -> list[str]:
++    """Record the HUMAN findings this round is iterating past; return the full ledger.
++
++    Deduplicated on the normalised text, oldest first: a reviewer that raises the same
++    objection every round must not grow the handover §6 by one copy per round. IMPL items
++    are the round's work, not a deferral, and STANDING is emitted every cycle whatever the
++    reviewer found — neither is recorded. Raises :class:`DeferredLedgerUnreadable` rather than
++    rewrite a ledger it could not read. Writes nothing when there is nothing new, so a bundle
++    that never deferred anything never grows the file.
++    """
++    ledger = deferred(d)
++    seen = {_norm(t) for t in ledger}
++    added = False
++    for item in items:
++        key = _norm(item.text)
++        if item.kind != HUMAN or not key or key in seen:
++            continue
++        seen.add(key)
++        ledger.append(item.text)
++        added = True
++    if added:
++        _write_ledger(d, ledger)
++    return ledger
++
++
++def retire_cleared(d: Path, summary_path: Path) -> list[str]:
++    """Drop the ledger entries the human positively TICKED in §6; return what remains.
++
++    Called at an iterate transition, before ``driver._archive_iteration`` moves the ticked
++    SUMMARY away. Without it an entry the human adjudicated re-enters §6 unticked at the next
++    assembly and blocks accept again — every round, with no way to clear it.
++
++    Only a tick retires, read POSITIVELY from ``- [x]`` rows: absence is not consent (an
++    edited row is neither open under its old text nor ticked). The two §6 readers take
++    OPPOSITE fail-safe directions, per ``signoff._section``'s contract:
++
++    * ticks come from :func:`signoff.cleared_needs_human` — strict, no §6 heading means no
++      ticks, so a ``- [x]`` quoted in §5's review text can never retire an entry;
++    * open rows come from :func:`signoff.open_needs_human` — lenient, no §6 heading scans
++      the whole document, which finds more open rows and so protects more.
++
++    A tick retires exactly one entry or none: EXACT match first (an exact match is the row
++    the ledger rendered, not an ambiguity), else :func:`_same_finding`; more than one fuzzy
++    hit fails closed. And a still-open row protects entries by the SAME relation, assigned
++    exact-first in two tiers (#335):
++
++    * an open row verbatim-equal to a ledger entry protects THAT entry only — so a still-open
++      near-twin cannot shield its exactly-ticked neighbour, and a near-identical pair stays
++      drainable one tick at a time;
++    * an EDITED open row that verbatim-owns nothing protects EVERY entry it matches — fail
++      closed: a lingering finding is visible, a lost one is unrecoverable.
++
++    Not the flat ``any(_same_finding(entry, o) for o in still_open)``: that protects an
++    exactly-ticked entry behind its open near-twin and re-creates the unclearable pair.
++
++    An unreadable ledger is left untouched (never rewritten from a partial read); §6 already
++    carries :data:`UNREADABLE_LEDGER_ITEM` for it.
++    """
++    try:
++        ledger = deferred(d)
++    except DeferredLedgerUnreadable:
++        return []
++    if not ledger:
++        return ledger
++    norm = [_norm(t) for t in ledger]
++    still_open = [_row_text(line) for line in signoff.open_needs_human(summary_path)]
++    ticked = [_row_text(line) for line in signoff.cleared_needs_human(summary_path)]
++
++    protected: set[int] = set()
++    for o in still_open:
++        owned = [i for i, t in enumerate(norm) if t == o]
++        protected.update(owned if owned else
++                         [i for i, t in enumerate(ledger) if _same_finding(t, o)])
++
++    retire: set[int] = set()
++    for row in ticked:
++        exact = [i for i, t in enumerate(norm) if t == row]
++        hits = exact if exact else [i for i, t in enumerate(ledger) if _same_finding(t, row)]
++        if len(hits) == 1 and hits[0] not in protected:
++            retire.add(hits[0])
++    if not retire:
++        return ledger
++    kept = [t for i, t in enumerate(ledger) if i not in retire]
++    _write_ledger(d, kept)
++    return kept
++
++
+ def rationale(items: list[NeedsHumanItem], *, attempt: int) -> str:
+     """The §9 "Iteration delta" line, which the driver folds into the brief's carry-forward
+     so the next Do iteration isn't blind about why it was rejected.
+ 
+-    IMPL items ONLY. The STANDING `Validation` row rides along in ``items`` (it does not veto
+-    the rebuild, #293), but it is not a finding and no builder can act on it — carrying it
+-    forward would hand the next Do a human-only judgment call as though it were a defect to fix,
+-    under a sentence claiming the set is "implementation-level items only" (PR #294 review).
++    It names what the round addresses — the IMPL findings, quoted — and what it deferred.
++    The deferred HUMAN findings are COUNTED, never quoted: this line IS the builder's
++    carry-forward, and handing the next Do a human-only judgment call as though it were a
++    defect to fix is the failure PR #294's review caught. Their text is in
++    :data:`DEFERRED_FILE` and returns to §6 at handover. The STANDING row is neither.
+     """
+     findings = "; ".join(item.text for item in items if item.kind == IMPL)
+-    return (f"Auto-iterate (round {attempt}): Check found implementation-level items only, "
+-            f"no architectural judgment required — {findings}")
++    line = (f"Auto-iterate (round {attempt}): rebuilding for the implementation-level "
++            f"findings — {findings}")
++    held = sum(1 for item in items if item.kind == HUMAN)
++    if held:
++        line += (f". Deferred, not addressed here: {held} finding(s) that need human "
++                 f"judgment, held in {DEFERRED_FILE} for the human at handover — not build "
++                 "work")
++    return line
+ 
+ 
+ def write_decision(d: Path, items: list[NeedsHumanItem]) -> None:
+-    """Write the ``iterate-do`` decision + rationale, and spend one round of the budget.
++    """Record the deferrals, write the ``iterate-do`` decision + rationale, and spend one
++    round of the budget.
+ 
+     Guarded: refuses to write anything for an ineligible item set, so no caller can turn
+-    this into an auto-accept.
++    this into an auto-accept. The ledger is written FIRST: if it cannot be read,
++    :class:`DeferredLedgerUnreadable` propagates before any budget is spent or any decision
++    exists, so no round can archive a SUMMARY whose HUMAN findings were not recorded.
+     """
+     if not eligible(items):
+-        raise ValueError("auto-iterate: refusing to decide on a non-implementation finding set")
++        raise ValueError("auto-iterate: refusing to decide on a finding set with no "
++                         "implementation work, or one the size backstop has stopped")
++    defer(d, items)
+     attempt = bump(d)
+     (d / SIGNOFF_DECISION).write_text(
+         f"{DECISION}\n{rationale(items, attempt=attempt)}\n", encoding="utf-8")
+diff --git a/template/src/pdca_harness/cli.py b/template/src/pdca_harness/cli.py
+index 2c7e3f4..a933a64 100644
+--- a/template/src/pdca_harness/cli.py
++++ b/template/src/pdca_harness/cli.py
+@@ -177,7 +177,7 @@ def main(argv: list[str] | None = None) -> int:
+     p_flow.add_argument("--by", default="", help="who signed off (recorded in §9)")
+     p_flow.add_argument("--lanes", type=int, help="unattended Do+Check worker-pool size (docs 09; overrides [driver].lanes / PDCA_LANES)")
+     p_flow.add_argument("--max-passes", type=int, help="sign-off pass budget before the driver stops driving a bundle (#260; overrides [driver].max_passes / PDCA_MAX_PASSES)")
+-    p_flow.add_argument("--auto-iterate", action="store_true", help="rebuild without stopping when every Check finding is implementation-level; a judgment finding still halts (#264; overrides [driver].auto_iterate / PDCA_AUTO_ITERATE)")
++    p_flow.add_argument("--auto-iterate", action="store_true", help="rebuild without stopping while Check finds implementation-level work; findings needing human judgment are deferred to the handover §6, and the loop stops at [driver].max_auto_iters or the size backstop (#264, #409; overrides [driver].auto_iterate / PDCA_AUTO_ITERATE)")
+     p_flow.add_argument("--no-inhibit", action="store_true", help="don't hold a suspend inhibitor for the run (also PDCA_NO_INHIBIT=1) — for CI/containers where it's unavailable or unwanted (#244)")
+ 
+     p_size = sub.add_parser("size",
+diff --git a/template/src/pdca_harness/driver.py b/template/src/pdca_harness/driver.py
+index 708c7dc..6f86d5a 100644
+--- a/template/src/pdca_harness/driver.py
++++ b/template/src/pdca_harness/driver.py
+@@ -16,8 +16,8 @@ import shutil
+ import sys
+ from pathlib import Path
+ 
+-from . import (assemble, brief, dependency_halt, gates, leaves, plan_policy, signoff,
+-               size_signal, state)
++from . import (assemble, autoiterate, brief, dependency_halt, gates, leaves, plan_policy,
++               signoff, size_signal, state)
+ from .config import Config
+ 
+ 
+@@ -132,11 +132,13 @@ def advance(d: Path, cfg: Config) -> None:
+         n = _next_iteration_no(d)
+         _say(f"→ {d.name}: iterate-to-Do — archiving the attempt to iteration-v{n}/, rebuilding…")
+         _carry_forward_into_brief(d, n)  # fold prior insight into the surviving brief
++        _retire_cleared_deferrals(d)     # read the human's §6 ticks before SUMMARY moves
+         _archive_iteration(d, n, include_brief=False)  # rebuild against the annotated brief
+     elif s == state.ITERATE_PLAN:
+         n = _next_iteration_no(d)
+         _say(f"→ {d.name}: iterate-to-Plan — archiving the attempt to iteration-v{n}/, re-planning…")
+         _carry_forward_into_brief(d, n)  # appended to the brief, archived with it
++        _retire_cleared_deferrals(d)     # read the human's §6 ticks before SUMMARY moves
+         _archive_iteration(d, n, include_brief=True)  # brief archived too → UNPLANNED
+     # UNPLANNED / AWAITING_SIGNOFF / COMPLETE / DISCONTINUED: nothing for the driver to do.
+ 
+@@ -312,6 +314,23 @@ def _size_backstop(d: Path, cfg: Config) -> None:
+              "Raising a §6 NEEDS-HUMAN item; auto-iterate will decline.")
+ 
+ 
++def _retire_cleared_deferrals(d: Path) -> None:
++    """Retire the deferred findings (#409) the human ticked in this SUMMARY's §6 (#335).
++
++    Runs at the iterate transition, after the carry-forward and before
++    :func:`_archive_iteration` moves ``SUMMARY.md`` — the last moment the ticks are at the
++    top level. Without it a finding the human adjudicated returns to §6 unticked at the next
++    assembly and blocks accept again, every round. Best-effort like the carry-forward: a
++    failure here must not break the transition, and it fails in the safe direction — the
++    entry stays in the ledger, visible, rather than being dropped.
++    """
++    try:
++        autoiterate.retire_cleared(d, d / "SUMMARY.md")
++    except Exception as exc:  # noqa: BLE001 — never break the iterate on a ledger write
++        _say(f"⚠ {d.name}: could not retire cleared deferred findings "
++             f"({type(exc).__name__}: {exc}); they stay in {autoiterate.DEFERRED_FILE}")
++
++
+ def _next_iteration_no(d: Path) -> int:
+     """Next iteration number = (count of existing iteration-v* archives) + 1."""
+     return len(list(d.glob("iteration-v*"))) + 1
+diff --git a/template/src/pdca_harness/flow.py b/template/src/pdca_harness/flow.py
+index 7751e42..b072a01 100644
+--- a/template/src/pdca_harness/flow.py
++++ b/template/src/pdca_harness/flow.py
+@@ -173,6 +173,8 @@ def _apply_decision(
+     problem = signoff.unrecordable(d / "SUMMARY.md")
+     if problem:
+         return _repair_unsignable(d, action=action, today=today, why=problem)
++    if action == "accept":
++        _hold_unreadable_ledger(d)
+     if action == "accept" and signoff.open_needs_human(d / "SUMMARY.md"):
+         print(f"flow: {d.name} — cannot accept, §6 NEEDS-HUMAN still open (C6)", file=sys.stderr)
+         return "blocked"
+@@ -211,6 +213,23 @@ def _apply_decision(
+     return action
+ 
+ 
++def _hold_unreadable_ledger(d: Path) -> None:
++    """Put an unreadable deferred-findings ledger (#409) into §6 before C6 reads it.
++
++    Assembly already renders the row when the ledger is unreadable at assembly time. This
++    covers the rest: a ledger that became unreadable AFTER the SUMMARY was assembled, whose
++    findings the SUMMARY on disk may not carry. Here, on the one decision path every
++    sign-off takes (single, batch, an already-recorded decision), and whether or not
++    auto-iterate is on — a ledger written by an earlier run outlives the setting that wrote
++    it. The row is added unticked, so the C6 check below blocks the accept until the human
++    clears it; a row the human has already ticked is their clearance and is left alone.
++    """
++    problem = autoiterate.ledger_problem(d)
++    if problem and signoff.ensure_needs_human_item(d / "SUMMARY.md",
++                                                  autoiterate.UNREADABLE_LEDGER_ITEM):
++        print(f"flow: {d.name} — {problem}; added it to §6 NEEDS-HUMAN", file=sys.stderr)
++
++
+ #: :func:`_apply_recorded_decision` outcome meaning "the bundle carries no decision, so it
+ #: still owes a sign-off session". Deliberately distinct from every other outcome, because
+ #: only this one may open a session: ``None`` means a decision WAS on disk but could not be
+@@ -276,12 +295,15 @@ def _signoff_and_apply(
+ def _maybe_auto_iterate(
+     cfg: Config, d: Path, *, by: str, today: str, apply_now: bool
+ ) -> bool:
+-    """Rebuild without asking, when Check found only implementation defects (issue #264).
++    """Rebuild without asking while Check still finds implementation work (#264, #409).
+ 
+-    Returns True iff the bundle was routed to ITERATE_DO. Every other outcome — auto-iterate
+-    off, the bundle not halted at AWAITING_SIGNOFF, a decision already recorded in the bundle
+-    and not yet consumed, an empty §6, any HUMAN-kind finding, or the per-bundle budget
+-    spent — returns False and leaves the bundle exactly where it was, for the human.
++    Returns True iff the bundle was routed to ITERATE_DO. HUMAN findings beside the IMPL ones
++    do not stop it: ``autoiterate.write_decision`` defers them to the ledger, and assembly
++    returns them to §6 at handover. Every other outcome — auto-iterate off, the bundle not
++    halted at AWAITING_SIGNOFF, a decision already recorded in the bundle and not yet
++    consumed, a §6 with no IMPL item (empty, or HUMAN only), the size backstop's item, the
++    per-bundle budget spent, or a deferred ledger it cannot read — returns False and leaves
++    the bundle exactly where it was, for the human.
+ 
+     Deliberately routed through the existing ``_apply_decision`` rather than calling
+     ``signoff.record`` directly: §9 then stays authored solely by ``signoff.record``, and the
+@@ -316,12 +338,13 @@ def _maybe_auto_iterate(
+               f"not auto-iterating", file=sys.stderr)
+         return False
+     if not autoiterate.eligible(items):
+-        # Say WHY when it was the size backstop (#324). This rule fires at 2 rounds while
+-        # `max_auto_iters` defaults to 3, so it deliberately stops the loop with a round
+-        # still nominally available — and an operator who set that number and sees the
+-        # loop halt early has to be able to read the reason, or their setting simply
+-        # appears not to work. Every other decline is an ordinary HUMAN finding the human
+-        # is about to read in §6 anyway.
++        # The loop has exactly two stops while implementation work remains (#409): the size
++        # backstop here and the hard cap below. Say WHY when it was the size backstop
++        # (#324). It fires at 2 rounds while `max_auto_iters` defaults to 3, so it
++        # deliberately stops the loop with a round still nominally available — and an
++        # operator who set that number and sees the loop halt early has to be able to read
++        # the reason, or their setting simply appears not to work. Every other decline is a
++        # §6 with no implementation work at all, which the human is about to read anyway.
+         for item in items:
+             if size_signal.is_size_item(item.text):
+                 print(f"flow: {d.name} — not auto-iterating: {item.text}",
+@@ -333,10 +356,21 @@ def _maybe_auto_iterate(
+         print(f"flow: {d.name} — auto-iterate budget spent ({spent}/{cfg.max_auto_iters}); "
+               f"handing the implementation findings to the human", file=sys.stderr)
+         return False
+-    autoiterate.write_decision(d, items)
+-    print(f"flow: {d.name} — auto-iterate {spent + 1}/{cfg.max_auto_iters}: "
+-          f"{len(items)} implementation-level finding(s), no human judgment needed",
+-          file=sys.stderr)
++    try:
++        autoiterate.write_decision(d, items)
++    except autoiterate.DeferredLedgerUnreadable as exc:
++        # Raised before any budget is spent or decision written. Rebuilding now would
++        # archive this SUMMARY while the ledger could not record its HUMAN findings, so hand
++        # over instead. The unreadable-ledger row blocks accept: assembly renders it, and
++        # `_hold_unreadable_ledger` adds it if the ledger broke after assembly.
++        print(f"flow: {d.name} — not auto-iterating: {exc}", file=sys.stderr)
++        return False
++    impl = sum(1 for item in items if item.kind == assemble.IMPL)
++    held = sum(1 for item in items if item.kind == assemble.HUMAN)
++    deferred = (f"; {held} finding(s) needing human judgment deferred to handover "
++                f"({autoiterate.DEFERRED_FILE})" if held else "")
++    print(f"flow: {d.name} — auto-iterate {spent + 1}/{cfg.max_auto_iters}: rebuilding for "
++          f"{impl} implementation-level finding(s){deferred}", file=sys.stderr)
+     return _apply_decision(cfg, d, by="auto-iterate", today=today,
+                            apply_now=apply_now) == "iterate-do"
+ 
+diff --git a/template/src/pdca_harness/signoff.py b/template/src/pdca_harness/signoff.py
+index 26555b3..7519d81 100644
+--- a/template/src/pdca_harness/signoff.py
++++ b/template/src/pdca_harness/signoff.py
+@@ -120,6 +120,61 @@ def open_needs_human(summary_path: Path) -> list[str]:
+     ]
+ 
+ 
++def cleared_needs_human(summary_path: Path) -> list[str]:
++    """Ticked ``- [x]`` items under §6 NEEDS-HUMAN — what the human positively cleared.
++
++    The STRICT side of :func:`_section`, the opposite of :func:`open_needs_human`, because
++    the failure directions are opposite. A tick RETIRES a deferred finding
++    (``autoiterate.retire_cleared``), so leniency here fails open: with no §6 heading a
++    whole-document scan would read a ``- [x]`` quoted in §5's review text — which
++    ``assemble`` pastes in verbatim — as the human's clearance. With no §6 there are no
++    ticks. Absent ``SUMMARY.md`` is "no ticks" for the same reason.
++    """
++    if not summary_path.exists():
++        return []
++    section = _section(summary_path.read_text(encoding="utf-8"), NEEDS_HUMAN_HEADING,
++                       whole_on_missing=False)
++    return [
++        line.strip()
++        for line in section.splitlines()
++        if line.lstrip().startswith(("- [x]", "- [X]"))
++    ]
++
++
++def ensure_needs_human_item(summary_path: Path, item: str) -> bool:
++    """Make sure §6 carries ``item`` as a checkbox row; add it UNTICKED if it is missing.
++
++    Returns True iff a row was added. A row already there — open, or ticked by the human —
++    is left alone: a tick is the human's clearance, and C6 honours it for every other row.
++    The ``- (none — …)`` placeholder an empty §6 renders is dropped, since it would now be
++    false. A summary with no §6 section is not touched (returns False); callers settle
++    :func:`unrecordable` first, which refuses exactly that shape.
++    """
++    if not summary_path.exists():
++        return False
++    text = summary_path.read_text(encoding="utf-8")
++    section = _section(text, NEEDS_HUMAN_HEADING, whole_on_missing=False)
++    if not section:
++        return False
++    want = " ".join(item.split()).casefold()
++    lines = section.splitlines(keepends=True)
++    for line in lines[1:]:
++        body = line.strip()
++        for box in ("- [ ]", "- [x]", "- [X]"):
++            if body.startswith(box) and " ".join(body[len(box):].split()).casefold() == want:
++                return False
++    body = [ln for ln in lines[1:] if not ln.strip().startswith("- (none")]
++    end = len(body)
++    while end and not body[end - 1].strip():
++        end -= 1
++    head = [lines[0]] + body[:end]
++    if not head[-1].endswith("\n"):
++        head[-1] += "\n"
++    new_section = "".join(head + [f"- [ ] {item}\n"] + body[end:])
++    summary_path.write_text(text.replace(section, new_section, 1), encoding="utf-8")
++    return True
++
++
+ def unrecordable(summary_path: Path) -> str:
+     """Why a sign-off cannot be written into this summary, or ``""`` when it can.
+ 
+diff --git a/template/src/pdca_harness/size_signal.py b/template/src/pdca_harness/size_signal.py
+index 136b0b6..bd1d6f8 100644
+--- a/template/src/pdca_harness/size_signal.py
++++ b/template/src/pdca_harness/size_signal.py
+@@ -38,9 +38,10 @@ item** and the human decides — the same disposition #321 reached, on better ev
+ 
+ ## The tag is the mechanism, and getting it wrong inverts the feature
+ 
+-The item is **HUMAN**, never IMPL. ``autoiterate.eligible()`` requires every item to be
+-IMPL or STANDING, so a HUMAN item **disqualifies auto-iterate** — which is precisely what
+-should happen to a bundle that is behaving oversized. Tagged IMPL it would instead *count
++The item is **HUMAN**, never IMPL. ``autoiterate.eligible()`` defers every other HUMAN item
++to handover (#409) but stops on a HUMAN item :func:`is_size_item` recognises, so this item
++**ends auto-iterate** — which is precisely what should happen to a bundle that is behaving
++oversized. Tagged IMPL it would instead *count
+ as a reason to rebuild*, turning the backstop into an accelerator for the failure it exists
+ to stop: more rounds burned re-implementing a slice that needs splitting.
+ 
+diff --git a/template/src/pdca_harness/state.py b/template/src/pdca_harness/state.py
+index d2ea9a0..13fe3e4 100644
+--- a/template/src/pdca_harness/state.py
++++ b/template/src/pdca_harness/state.py
+@@ -158,16 +158,20 @@ DOWNSTREAM_GLOBS = ("check-advisory-*.md", "*.error.log", "*.memory.jsonl")
+ # and "what proves a cycle ran" deliberately differ, so it is deliberately NOT read by
+ # `_archive_iteration`.
+ #
+-# Both files accumulate ACROSS rebuilds by design, and archiving either breaks the
++# Each file accumulates ACROSS rebuilds by design, and archiving any of them breaks the
+ # feature that depends on the accumulation:
+-#   auto-iterate.json   — the round budget; archive it and the count resets every
+-#                         iterate, so auto-iterate never terminates.
+-#   loop-telemetry.json — `leaves._record_loop_attempt`: "The file persists across
+-#                         iterations (it is not archived), so it accumulates."
+-# Yet a bundle cannot hold either without having run a cycle, so both are unambiguous
++#   auto-iterate.json      — the round budget; archive it and the count resets every
++#                            iterate, so auto-iterate never terminates.
++#   loop-telemetry.json    — `leaves._record_loop_attempt`: "The file persists across
++#                            iterations (it is not archived), so it accumulates."
++#   deferred-findings.json — `autoiterate.DEFERRED_FILE` (#409): the HUMAN findings an
++#                            auto-iterate round iterated past. Archive it and every one of
++#                            them leaves the live bundle with the SUMMARY that carried it,
++#                            so the handover §6 would never show it to the human.
++# Yet a bundle cannot hold any of them without having run a cycle, so each is unambiguous
+ # evidence. Adding them to DOWNSTREAM_OF_BRIEF instead would fix the misclassification
+ # below and break termination, which is the worse bug.
+-CYCLE_EVIDENCE_ONLY = ("auto-iterate.json", "loop-telemetry.json")
++CYCLE_EVIDENCE_ONLY = ("auto-iterate.json", "loop-telemetry.json", "deferred-findings.json")
+ 
+ # §9 outcome token → bundle state. state owns the state names, so the mapping
+ # lives here; signoff knows only the tokens (no import cycle).
+diff --git a/template/tests/test_autoiterate.py b/template/tests/test_autoiterate.py
+index 765ab55..9ab408e 100644
+--- a/template/tests/test_autoiterate.py
++++ b/template/tests/test_autoiterate.py
+@@ -1,20 +1,30 @@
+-"""Auto-iterate on implementation-only Check findings (issue #264, stdlib unittest).
+-
+-The driver may rebuild a bundle unattended when EVERY open SUMMARY §6 item is an
+-implementation defect — a `gate` cell of the 5/5/1 (C2/C4/T1..T4), or an advisory finding
+-the leaf tagged `[impl]`. Anything architectural (a `judgment` cell C5/T5/V, an `input` cell
+-C1/C3), a gate that could not run, an external dependency, an unmarked advisory bullet, or a
+-row it cannot classify still halts for the human.
++"""Auto-iterate while Check still finds implementation work (issues #264, #409; stdlib
++unittest).
++
++The driver may rebuild a bundle unattended when its SUMMARY §6 carries at least one
++implementation defect — a `gate` cell of the 5/5/1 (C2/C4/T1..T4), or an advisory finding the
++leaf tagged `[impl]`. Since #409 a HUMAN finding beside it (a `judgment` cell C5/T5/V, an
++`input` cell C1/C3, a gate that could not run, an external dependency, an unmarked advisory
++bullet, a row it cannot classify) no longer vetoes that rebuild: it is DEFERRED to
++`deferred-findings.json` and returns to §6 at handover, where C6 still makes the human clear
++it. A §6 with no implementation work still halts at once. Exactly two things stop the loop
++while implementation work remains: the size backstop's item and `max_auto_iters`.
+ 
+ Load-bearing negatives, each its own test: it must never auto-accept, never tick a §6 box,
+-never iterate past a judgment finding, and never run past its budget. Offline: stub leaves,
+-real gate commands, no Claude.
++never lose a HUMAN finding it iterated past, never retire one the human did not tick, and
++never run past either stop. Offline: stub leaves, real gate commands, no Claude.
++
++New symbols are reached as module attributes (`autoiterate.retire_cleared`), never imported
++at module top: with the production change reverted, an import error would read as "the
++module never loaded", not as the red leg.
+ """
+ 
+ from __future__ import annotations
+ 
+ import io
++import json
+ import os
++import re
+ import shutil
+ import tempfile
+ import unittest
+@@ -22,7 +32,8 @@ from contextlib import redirect_stderr, redirect_stdout
+ from pathlib import Path
+ from unittest import mock
+ 
+-from pdca_harness import assemble, autoiterate, cli, driver, flow, gates, leaves, signoff, state
++from pdca_harness import (assemble, autoiterate, cli, driver, flow, gates, leaves, signoff,
++                          size_signal, state)
+ from pdca_harness.config import Config, LeafConfig
+ 
+ _GATE = {"id": "C4", "tier": "C4", "label": "verify", "scope": "bundle", "gating": True}
+@@ -49,6 +60,40 @@ def _review_table(item: str, verdict: str = "NEEDS-HUMAN", basis: str = "off-by-
+     return f"# Review\n\n| Item | Verdict | Basis |\n|---|---|---|\n{rows}"
+ 
+ 
++# The ledger's file name, spelled here so a helper can read it on either leg of the C4
++# verify; `test_the_ledger_is_cycle_evidence_and_is_never_archived` pins it to the module.
++_LEDGER = "deferred-findings.json"
++
++# The production shape #409 is about: a Do-fixable defect beside a situational judgment
++# concern, with the reviewer's standing Validation row as every real review carries it.
++_C5_TEXT = "C5 Causal adequacy — guards the symptom, not the cause"
++_MIXED_REVIEW = ("# Review\n\n| Item | Verdict | Basis |\n|---|---|---|\n"
++                 "| C4 Verification (red→green) | NEEDS-HUMAN | off-by-one |\n"
++                 "| C5 Causal adequacy | NEEDS-HUMAN | guards the symptom, not the cause |\n"
++                 f"{_STANDING_ROW}\n")
++_IMPL_ONLY_REVIEW = ("# Review\n\n| Item | Verdict | Basis |\n|---|---|---|\n"
++                     "| C4 Verification (red→green) | NEEDS-HUMAN | off-by-one |\n"
++                     "| C5 Causal adequacy | PASS | ok |\n"
++                     f"{_STANDING_ROW}\n")
++
++
++def _ledger(d: Path) -> list[str] | None:
++    """The ledger's entries as written on disk, or None when there is no ledger."""
++    p = d / _LEDGER
++    if not p.exists():
++        return None
++    return json.loads(p.read_text(encoding="utf-8"))["items"]
++
++
++def _write_ledger(d: Path, entries: list[str]) -> None:
++    (d / _LEDGER).write_text(json.dumps({"items": entries}), encoding="utf-8")
++
++
++def _section6(summary: Path) -> str:
++    text = summary.read_text(encoding="utf-8")
++    return text.split("## 6. NEEDS-HUMAN", 1)[1].split("\n## ", 1)[0]
++
++
+ def _stub_config(root: Path) -> Config:
+     return Config(
+         root=root,
+@@ -98,12 +143,21 @@ class _Base(unittest.TestCase):
+                 self.cfg, d, by="", today="2026-07-09", apply_now=apply_now)
+ 
+     def _assert_halted(self, d: Path) -> None:
+-        """No decision written, no budget spent, bundle still waiting on the human."""
++        """No decision written, no budget spent, nothing deferred (the human is about to read
++        this §6 directly), bundle still waiting on the human."""
+         self.assertEqual(state.state(d), state.AWAITING_SIGNOFF)
+         self.assertFalse((d / leaves.SIGNOFF_DECISION).exists())
+         self.assertEqual(autoiterate.count(d), 0)
++        self.assertIsNone(_ledger(d))
+         self.assertTrue(signoff.open_needs_human(d / "SUMMARY.md") or True)  # §6 untouched
+ 
++    def _assert_deferred(self, d: Path, expected: list[str]) -> None:
++        """The round FIRED, and the ledger holds exactly ``expected`` — the HUMAN findings it
++        iterated past, and nothing else (no IMPL item, no STANDING row)."""
++        self.assertEqual(state.state(d), state.ITERATE_DO)
++        self.assertEqual(autoiterate.count(d), 1)
++        self.assertEqual(_ledger(d), expected)
++
+ 
+ class AutoIterates(_Base):
+     """Implementation-only findings ⇒ the driver rebuilds without asking."""
+@@ -178,17 +232,22 @@ class TheStandingValidationRow(_Base):
+         self.assertFalse(self._try(d))
+         self._assert_halted(d)
+ 
+-    def test_a_situational_judgment_concern_beside_it_still_halts(self) -> None:
++    def test_a_situational_judgment_concern_beside_it_is_deferred_not_dropped(self) -> None:
+         # The distinction that makes this safe: C5/T5 are judgment cells too, but the reviewer
+-        # raises them only on a REAL concern — so they carry signal and must still stop the
+-        # bundle, standing row or not.
+-        review = ("# Review\n\n| Item | Verdict | Basis |\n|---|---|---|\n"
+-                  "| C4 Verification (red→green) | NEEDS-HUMAN | off-by-one |\n"
+-                  "| C5 Causal adequacy | NEEDS-HUMAN | guards the symptom, not the cause |\n"
+-                  f"{_STANDING_ROW}\n")
+-        d = self._bundle("SV3", review=review)
+-        self.assertFalse(self._try(d), "a real judgment concern must still halt")
+-        self._assert_halted(d)
++        # raises them only on a REAL concern — so they carry signal and must reach the human,
++        # standing row or not. Since #409 that means the ledger, not a veto: the rebuild runs,
++        # and the concern returns to §6 at handover. The standing row is not a deferral.
++        d = self._bundle("SV3", review=_MIXED_REVIEW)
++        self.assertTrue(self._try(d), "a judgment concern beside a defect defers, not vetoes")
++        self._assert_deferred(d, [_C5_TEXT])
++
++    # The four tests below are PR #294's scopings of STANDING. Each once asserted a HALT,
++    # because STANDING was then the only non-IMPL kind that did not veto. Since #409 an
++    # ordinary HUMAN item does not veto either, so what tells the two kinds apart is the
++    # LEDGER: a HUMAN finding is recorded there and returned to §6 at handover; STANDING is
++    # not. A real objection mistaken for the standing row would be archived with its round
++    # and never reach the handover — so each test now asserts the objection is in the ledger
++    # and the standing row is not.
+ 
+     def test_an_advisory_fitness_objection_is_never_standing(self) -> None:
+         """PR #294 review (codex). STANDING is the PRIMARY review's privilege, and nothing
+@@ -198,17 +257,16 @@ class TheStandingValidationRow(_Base):
+         same classifier. The adversary's prompt tells it to raise architectural / scope /
+         fitness objections as free-form `- NEEDS-HUMAN — …` bullets — so one that happens to
+         begin "Validation — fitness-to-purpose" was being read as the reviewer's signal-free
+-        standing row, and an unattended rebuild would ARCHIVE a real objection instead of
+-        halting for sign-off. The basis for STANDING is "this row is a constant", which is true
+-        of the reviewer's mandated table and of nothing else.
++        standing row, and an unattended rebuild would ARCHIVE a real objection. The basis for
++        STANDING is "this row is a constant", which is true of the reviewer's mandated table
++        and of nothing else.
+         """
+-        advisory = ("# Adversary\n\n- NEEDS-HUMAN — Validation — fitness-to-purpose: this "
+-                    "patches the wrong layer; the success criterion cannot be met by this "
+-                    "design\n")
++        objection = ("Validation — fitness-to-purpose: this patches the wrong layer; the "
++                     "success criterion cannot be met by this design")
+         d = self._bundle("SV5", review=_review_table("C4 Verification (red→green)"),
+-                         advisory=advisory)
+-        self.assertFalse(self._try(d), "a real fitness objection must halt, not be archived")
+-        self._assert_halted(d)
++                         advisory=f"# Adversary\n\n- NEEDS-HUMAN — {objection}\n")
++        self.assertTrue(self._try(d))
++        self._assert_deferred(d, [objection])   # held for the human; the standing row is not
+ 
+     def test_a_legacy_validation_bullet_in_the_review_is_never_standing(self) -> None:
+         """PR #294 review (codex), second pass. Scoping STANDING to the primary ARTIFACT was
+@@ -225,8 +283,8 @@ class TheStandingValidationRow(_Base):
+                   f"{_STANDING_ROW}\n"
+                   "- NEEDS-HUMAN — Validation — fitness-to-purpose: patches the wrong layer\n")
+         d = self._bundle("SV6", review=review)
+-        self.assertFalse(self._try(d), "a legacy fitness bullet is a finding — it must halt")
+-        self._assert_halted(d)
++        self.assertTrue(self._try(d))
++        self._assert_deferred(d, ["Validation — fitness-to-purpose: patches the wrong layer"])
+ 
+     def test_a_second_table_never_earns_the_standing_exemption(self) -> None:
+         """PR #294 review (codex), third pass. Keying on "came from a table" was STILL too wide.
+@@ -245,10 +303,11 @@ class TheStandingValidationRow(_Base):
+                   "| Validation — fitness-to-purpose: patches the wrong layer | NEEDS-HUMAN "
+                   "| the criterion cannot be met by this design |\n")
+         d = self._bundle("SV7", review=review)
+-        self.assertFalse(self._try(d), "a concerns-table objection must halt, not be archived")
+-        self._assert_halted(d)
++        self.assertTrue(self._try(d))
++        self._assert_deferred(d, ["Validation — fitness-to-purpose: patches the wrong layer — "
++                                  "the criterion cannot be met by this design"])
+ 
+-    def test_a_concerns_table_with_the_EXACT_label_still_halts(self) -> None:
++    def test_a_concerns_table_with_the_EXACT_label_is_still_a_real_objection(self) -> None:
+         """PR #294, local codex pass. The fourth scoping of the same rule, and the one that
+         finally names the right thing.
+ 
+@@ -269,21 +328,24 @@ class TheStandingValidationRow(_Base):
+                   "\n## Concerns\n\n| Item | Verdict | Basis |\n|---|---|---|\n"
+                   "| Validation — fitness-to-purpose | NEEDS-HUMAN | patches the wrong layer |\n")
+         d = self._bundle("SV9", review=review)
+-        self.assertFalse(self._try(d), "an exact-label concerns row is still a real objection")
+-        self._assert_halted(d)
++        self.assertTrue(self._try(d))
++        self._assert_deferred(d, ["Validation — fitness-to-purpose — patches the wrong layer"])
+ 
+     def test_two_standing_candidates_fail_closed(self) -> None:
+         # The template row is a CONSTANT — it occurs once. If two survive (a duplicated row, a
+         # second verdict-shaped table), at least one is not the constant and we cannot tell
+-        # which. Grant STANDING to neither and halt, rather than risk archiving a real objection.
++        # which. Grant STANDING to neither — so BOTH are held for the human, rather than risk
++        # archiving a real objection as the constant.
+         review = ("# Review\n\n| Item | Verdict | Basis |\n|---|---|---|\n"
+                   "| C4 Verification (red→green) | NEEDS-HUMAN | [impl] off-by-one |\n"
+                   "| C5 Causal adequacy | PASS | ok |\n"
+                   f"{_STANDING_ROW}\n"
+                   "| Validation — fitness-to-purpose | NEEDS-HUMAN | and again, differently |\n")
+         d = self._bundle("SV10", review=review)
+-        self.assertFalse(self._try(d), "ambiguous standing rows must fail closed")
+-        self._assert_halted(d)
++        self.assertTrue(self._try(d))
++        self._assert_deferred(d, [
++            "Validation — fitness-to-purpose — fitness is the human's call",
++            "Validation — fitness-to-purpose — and again, differently"])
+ 
+     def test_the_standing_row_is_never_carried_forward_to_the_builder(self) -> None:
+         """PR #294 review (codex). STANDING rides along in `items` so it cannot veto the rebuild
+@@ -309,10 +371,13 @@ class TheStandingValidationRow(_Base):
+ 
+ 
+ class HaltsForTheHuman(_Base):
+-    """Anything architectural, environmental, or unclassifiable still stops."""
++    """A §6 with no implementation work still stops at once: architectural, environmental,
++    or unclassifiable findings with nothing beside them for a rebuild to address. (Beside an
++    IMPL finding they are deferred instead — see `DefersHumanFindings`.)"""
+ 
+     def test_judgment_cells_halt(self) -> None:
+-        # THE load-bearing negative: C5 causal adequacy, T5 judgment, the validation act.
++        # THE load-bearing negative: C5 causal adequacy, T5 judgment, the validation act —
++        # with no implementation work beside them, there is nothing to rebuild for.
+         for elem in ("C5 Causal adequacy", "T5 Judgment", "Validation — fitness-to-purpose"):
+             with self.subTest(elem=elem):
+                 d = self._bundle(f"J{abs(hash(elem)) % 9999}", review=_review_table(elem))
+@@ -326,14 +391,6 @@ class HaltsForTheHuman(_Base):
+                 self.assertFalse(self._try(d))
+                 self._assert_halted(d)
+ 
+-    def test_one_judgment_item_disqualifies_the_whole_bundle(self) -> None:
+-        review = ("# Review\n\n| Item | Verdict | Basis |\n|---|---|---|\n"
+-                  "| C4 Verification (red→green) | NEEDS-HUMAN | off-by-one |\n"
+-                  "| C5 Causal adequacy | NEEDS-HUMAN | guards the symptom |\n")
+-        d = self._bundle("MIXED", review=review)
+-        self.assertFalse(self._try(d))
+-        self._assert_halted(d)
+-
+     def test_unverifiable_gate_halts(self) -> None:
+         # A gate that COULD NOT RUN is a gate-kind element, but rebuilding can't fix a
+         # missing mechanic — it would spin. Forced HUMAN.
+@@ -341,15 +398,15 @@ class HaltsForTheHuman(_Base):
+         self.assertFalse(self._try(d))
+         self._assert_halted(d)
+ 
+-    def test_declared_external_dependency_halts(self) -> None:
+-        d = self._bundle("EXTDEP", gate=_FAIL,
++    def test_declared_external_dependency_alone_halts(self) -> None:
++        d = self._bundle("EXTDEP",
+                          build_notes="NEEDS-HUMAN external dependency: protoc — cannot compile\n")
+         self.assertFalse(self._try(d))
+         self._assert_halted(d)
+ 
+-    def test_unregistered_dependency_halts(self) -> None:
++    def test_unregistered_dependency_alone_halts(self) -> None:
+         self.cfg.doctor_checks = []
+-        d = self._bundle("UNREG", gate=_FAIL,
++        d = self._bundle("UNREG",
+                          brief_body="- **Slug:** ai\n- **External dependencies:** `protoc` (build)\n")
+         self.assertFalse(self._try(d))
+         self._assert_halted(d)
+@@ -374,11 +431,12 @@ class HaltsForTheHuman(_Base):
+         self.assertEqual(state.state(d), state.AWAITING_SIGNOFF)   # NOT COMPLETE
+         self.assertNotEqual(signoff.outcome_token(d / "SUMMARY.md"), "merged-wider")
+ 
+-    def test_missing_review_halts(self) -> None:
+-        d = self._bundle("NOREV", gate=_FAIL)
++    def test_missing_review_alone_halts(self) -> None:
++        d = self._bundle("NOREV")
+         (d / "check-review.md").unlink()
+         assemble.assemble_summary(d, self.cfg)
+         self.assertFalse(self._try(d))
++        self._assert_halted(d)
+ 
+     def test_bundle_not_awaiting_signoff_is_a_noop(self) -> None:
+         d = self._bundle("NOTREADY", gate=_FAIL)
+@@ -597,6 +655,435 @@ class BatchSweep(_Base):
+         self.assertEqual(state.state(d), state.AWAITING_SIGNOFF)   # isolated, still reviewable
+ 
+ 
++class DefersHumanFindings(_Base):
++    """#409 clause 2 — defer, don't veto.
++
++    A HUMAN finding beside implementation work no longer declines the round: the veto made
++    auto-iterate fire on 31 of 230 attempts (13.5%), and bundles the maintainer reported as
++    broken spent zero rounds. The finding is held in the ledger instead, which is never
++    archived and is merged back into §6 at every assembly — so it still reaches the human,
++    and C6 still makes them clear it before accept.
++    """
++
++    def test_a_judgment_finding_beside_a_defect_no_longer_vetoes_the_rebuild(self) -> None:
++        d = self._bundle("MIXED", review=_MIXED_REVIEW)
++        self.assertTrue(self._try(d), "a HUMAN finding beside a defect must defer, not veto")
++        self._assert_deferred(d, [_C5_TEXT])   # held for the human; IMPL + STANDING are not
++
++    def test_a_human_only_set_still_halts_at_once(self) -> None:
++        # Nothing for a rebuild to address: straight to the human, nothing deferred.
++        d = self._bundle("HONLY", review=_review_table(
++            "C5 Causal adequacy", basis="guards the symptom, not the cause"))
++        self.assertFalse(self._try(d))
++        self._assert_halted(d)
++
++    def test_environmental_findings_beside_a_red_gate_are_deferred(self) -> None:
++        # Each once vetoed the rebuild of an otherwise Do-fixable bundle. Beside real
++        # implementation work they are now held for the handover like any HUMAN finding.
++        cases = {
++            "EXTDEP2": ({"build_notes": "NEEDS-HUMAN external dependency: protoc — cannot "
++                                        "compile\n"},
++                        "external dependency: protoc — cannot compile"),
++            "ADVPLAIN2": ({"advisory": "- NEEDS-HUMAN — the scope looks wider than the brief\n"},
++                          "the scope looks wider than the brief"),
++        }
++        for iid, (kwargs, text) in cases.items():
++            with self.subTest(case=iid):
++                d = self._bundle(iid, gate=_FAIL, **kwargs)
++                self.assertTrue(self._try(d))
++                self._assert_deferred(d, [text])
++
++    def test_a_missing_review_beside_a_red_gate_is_deferred(self) -> None:
++        d = self._bundle("NOREV2", gate=_FAIL)
++        (d / "check-review.md").unlink()
++        assemble.assemble_summary(d, self.cfg)
++        self.assertTrue(self._try(d))
++        [entry] = _ledger(d)
++        self.assertIn("no check-review.md was produced", entry)
++
++    def test_deferred_findings_reach_the_handover_section6_and_block_accept(self) -> None:
++        """THE loss-proof property. Round 1's reviewer raised C5; the rebuild's reviewer did
++        not. Before the ledger C5 existed only in `iteration-v1/` — the handover §6 the human
++        signs off against would never have shown it."""
++        self.cfg.max_auto_iters = 1
++        d = self._bundle("HANDOVER", review=_MIXED_REVIEW)
++
++        def impl_only_review(bundle: Path, cfg: Config) -> None:
++            (bundle / "check-review.md").write_text(_IMPL_ONLY_REVIEW, encoding="utf-8")
++
++        buf = io.StringIO()
++        with mock.patch.object(leaves, "run_review", impl_only_review), \
++             redirect_stderr(buf), redirect_stdout(io.StringIO()):
++            fired = [flow._maybe_auto_iterate(self.cfg, d, by="", today="2026-09-30",
++                                              apply_now=True) for _ in range(2)]
++        self.assertEqual(fired, [True, False])
++        self.assertIn("auto-iterate budget spent (1/1)", buf.getvalue())
++        self.assertIn("deferred to handover", buf.getvalue())       # the round said so
++        self.assertEqual(state.state(d), state.AWAITING_SIGNOFF)
++        self.assertNotIn("guards the symptom",                      # this round never raised it…
++                         (d / "check-review.md").read_text(encoding="utf-8"))
++        summ = d / "SUMMARY.md"
++        self.assertIn(f"- [ ] {_C5_TEXT}", signoff.open_needs_human(summ))   # …yet §6 has it
++        # C6 holds on that row alone: clear everything else, and accept is still refused.
++        summ.write_text(summ.read_text(encoding="utf-8").replace("- [ ]", "- [x]")
++                        .replace(f"- [x] {_C5_TEXT}", f"- [ ] {_C5_TEXT}"), encoding="utf-8")
++        (d / leaves.SIGNOFF_DECISION).write_text("accept\n", encoding="utf-8")
++        with redirect_stderr(io.StringIO()):
++            outcome = flow._apply_decision(self.cfg, d, by="human", today="2026-09-30",
++                                           apply_now=False)
++        self.assertEqual(outcome, "blocked")
++        self.assertEqual(state.state(d), state.AWAITING_SIGNOFF)
++
++    def test_the_ledger_is_cycle_evidence_and_is_never_archived(self) -> None:
++        # Pinned against the module constants: archive it and every deferred finding leaves the
++        # live bundle with the SUMMARY that carried it.
++        self.assertEqual(autoiterate.DEFERRED_FILE, _LEDGER)
++        self.assertIn(autoiterate.DEFERRED_FILE, state.CYCLE_EVIDENCE_ONLY)
++        self.assertNotIn(autoiterate.DEFERRED_FILE, state.DOWNSTREAM_OF_BRIEF)
++        d = self._bundle("KEEP", review=_MIXED_REVIEW)
++        with redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
++            flow._maybe_auto_iterate(self.cfg, d, by="", today="2026-09-30", apply_now=True)
++        self.assertTrue((d / "iteration-v1").is_dir())               # the round was archived…
++        self.assertFalse((d / "iteration-v1" / _LEDGER).exists())    # …the ledger was not
++        self.assertEqual(_ledger(d), [_C5_TEXT])
++        self.assertIn(f"- [ ] {_C5_TEXT}", _section6(d / "SUMMARY.md"))   # rebuilt §6 has it
++
++    def test_rationale_names_what_was_addressed_and_what_was_deferred(self) -> None:
++        items = [assemble.NeedsHumanItem("C4 Verification (red→green) — off-by-one",
++                                         assemble.IMPL),
++                 assemble.NeedsHumanItem(_C5_TEXT, assemble.HUMAN),
++                 assemble.NeedsHumanItem("Validation — fitness-to-purpose — the human's call",
++                                         assemble.STANDING)]
++        r = autoiterate.rationale(items, attempt=2)
++        self.assertNotIn("\n", r)
++        self.assertIn("round 2", r)
++        self.assertIn("off-by-one", r)                       # addressed: named
++        self.assertIn("Deferred", r)
++        self.assertIn("1 finding(s)", r)                     # deferred: counted…
++        self.assertNotIn("guards the symptom", r)            # …never quoted (#294)
++        self.assertNotIn("Validation", r)
++        self.assertNotIn("implementation-level items only", r)   # no longer true
++
++    def test_deferred_findings_never_reach_the_builders_carry_forward(self) -> None:
++        # The #294 property end to end: the brief the next Do reads names the defect and the
++        # fact of a deferral, but carries no human-only judgment call as though it were work.
++        d = self._bundle("CARRY2", review=_MIXED_REVIEW)
++        with redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
++            flow._maybe_auto_iterate(self.cfg, d, by="", today="2026-09-30", apply_now=True)
++        brief_text = (d / "brief.md").read_text(encoding="utf-8")
++        self.assertIn("C4 Verification", brief_text)
++        self.assertIn("Deferred", brief_text)
++        self.assertNotIn("guards the symptom", brief_text)
++        self.assertNotIn("Validation — fitness-to-purpose", brief_text)
++
++    def test_an_unreadable_ledger_is_a_section6_item_at_assembly(self) -> None:
++        d = self._bundle("BADLEDGER")                        # clean: §6 is otherwise empty
++        (d / _LEDGER).write_text("{ not json", encoding="utf-8")
++        assemble.assemble_summary(d, self.cfg)
++        [row] = signoff.open_needs_human(d / "SUMMARY.md")
++        self.assertIn(f"{_LEDGER} exists but cannot be read", row)
++
++    def test_an_unreadable_ledger_blocks_accept_on_the_shared_decision_path(self) -> None:
++        """Not only when auto-iterate is on: a ledger written by an earlier run outlives the
++        setting that wrote it, and a SUMMARY assembled before the ledger broke does not carry
++        the row. `_apply_decision` is the one path every sign-off takes."""
++        self.cfg.auto_iterate = False
++        d = self._bundle("BADACCEPT")
++        summ = d / "SUMMARY.md"
++        self.assertEqual(signoff.open_needs_human(summ), [])  # an accept would go through…
++        (d / _LEDGER).write_text('{"items": ["a held finding", 7]}', encoding="utf-8")
++        (d / leaves.SIGNOFF_DECISION).write_text("accept\n", encoding="utf-8")
++        with redirect_stderr(io.StringIO()):
++            outcome = flow._apply_decision(self.cfg, d, by="human", today="2026-09-30",
++                                           apply_now=False)
++        self.assertEqual(outcome, "blocked")                  # …until the ledger broke
++        self.assertEqual(state.state(d), state.AWAITING_SIGNOFF)
++        six = _section6(summ)
++        self.assertIn(f"- [ ] {_LEDGER} exists but cannot be read", six)
++        self.assertNotIn("- (none", six)                      # the empty-§6 line is now false
++        # The human clears it deliberately: that tick is honoured and not re-added.
++        summ.write_text(summ.read_text(encoding="utf-8").replace("- [ ]", "- [x]"),
++                        encoding="utf-8")
++        with redirect_stderr(io.StringIO()):
++            outcome = flow._apply_decision(self.cfg, d, by="human", today="2026-09-30",
++                                           apply_now=False)
++        self.assertEqual(outcome, "accept")
++        self.assertEqual(state.state(d), state.COMPLETE)
++        self.assertEqual(_section6(summ).count("exists but cannot be read"), 1)
++
++    def test_an_unreadable_ledger_stops_auto_iterate_without_spending_a_round(self) -> None:
++        d = self._bundle("BADAUTO", gate=_FAIL)              # implementation work: would fire
++        (d / _LEDGER).write_text("{ not json", encoding="utf-8")
++        assemble.assemble_summary(d, self.cfg)
++        buf = io.StringIO()
++        with redirect_stderr(buf), redirect_stdout(io.StringIO()):
++            fired = flow._maybe_auto_iterate(self.cfg, d, by="", today="2026-09-30",
++                                             apply_now=False)
++        self.assertFalse(fired)
++        self.assertEqual(autoiterate.count(d), 0)
++        self.assertFalse((d / leaves.SIGNOFF_DECISION).exists())
++        self.assertEqual((d / _LEDGER).read_text(encoding="utf-8"), "{ not json")  # untouched
++        self.assertIn("cannot be read", buf.getvalue())
++
++
++class TwoStops(_Base):
++    """#409 clause 1 — the loop's stopping rules are exactly two, and neither is new: the size
++    backstop (early, 2 rounds by default) and the hard cap `max_auto_iters`. A soft round
++    budget with a convergence test (#332 item 1) was dropped at Plan: on a default instance
++    the backstop always fires first, so it would add a setting that never binds."""
++
++    def _drive(self, d: Path, review: str = _MIXED_REVIEW) -> tuple[int, str]:
++        """Re-drive the bundle with auto-iterate until it declines; (rounds fired, stderr)."""
++        def reviewer(bundle: Path, cfg: Config) -> None:
++            (bundle / "check-review.md").write_text(review, encoding="utf-8")
++
++        buf = io.StringIO()
++        fired = 0
++        with mock.patch.object(leaves, "run_review", reviewer), \
++             redirect_stderr(buf), redirect_stdout(io.StringIO()):
++            for _ in range(8):
++                if not flow._maybe_auto_iterate(self.cfg, d, by="", today="2026-09-30",
++                                                apply_now=True):
++                    break
++                fired += 1
++        return fired, buf.getvalue()
++
++    def test_there_is_no_soft_budget_key(self) -> None:
++        # Guards the drop against being re-added; not a red leg (it passes on main too).
++        self.assertNotIn("soft_auto_iters", Config.__dataclass_fields__)
++        self.assertFalse(hasattr(self.cfg, "soft_auto_iters"))
++        root = Path(__file__).resolve().parents[1]
++        # `pdca.toml.jinja` in the template repo, `pdca.toml` in a rendered instance (this
++        # file ships into the render). A key the template never declares cannot be rendered.
++        sources = [root / n for n in ("pdca.toml.jinja", "pdca.toml") if (root / n).is_file()]
++        if not sources:
++            self.skipTest("no pdca.toml(.jinja) beside the tests")
++        text = sources[0].read_text(encoding="utf-8")
++        self.assertIsNone(re.search(r"^\s*#?\s*soft_auto_iters\s*=", text, re.MULTILINE))
++
++    def test_mixed_checks_fire_until_the_hard_cap(self) -> None:
++        # The size backstop OFF, so the hard cap is the only stop left.
++        self.cfg.size_signal = {"rounds": 0}
++        self.cfg.max_auto_iters = 3
++        d = self._bundle("CAP", review=_MIXED_REVIEW)
++        fired, err = self._drive(d)
++        self.assertEqual(fired, 3, "an [IMPL, HUMAN] Check must keep firing to the cap")
++        self.assertEqual(autoiterate.count(d), 3)
++        self.assertIn("auto-iterate budget spent (3/3)", err)
++        self.assertEqual(state.state(d), state.AWAITING_SIGNOFF)   # handed over, not dropped
++        # Raised by every round, recorded once, rendered once.
++        self.assertEqual(_ledger(d), [_C5_TEXT])
++        self.assertEqual(_section6(d / "SUMMARY.md").count(_C5_TEXT), 1)
++
++    def test_mixed_checks_stop_at_the_size_backstop_first_by_default(self) -> None:
++        # Default `[size_signal].rounds = 2`, below the cap of 3 on purpose.
++        self.cfg.max_auto_iters = 3
++        d = self._bundle("SIZE", review=_MIXED_REVIEW)
++        fired, err = self._drive(d)
++        self.assertEqual(fired, 2)
++        self.assertEqual(autoiterate.count(d), 2)
++        self.assertIn("not auto-iterating: size backstop", err)   # it says why, on stderr
++        self.assertNotIn("budget spent", err)
++        self.assertEqual(state.state(d), state.AWAITING_SIGNOFF)
++        self.assertIn(f"- [ ] {_C5_TEXT}", _section6(d / "SUMMARY.md"))
++
++
++def _summary(rows: list[str], *, heading: bool = True, elsewhere: str = "") -> str:
++    """A SUMMARY.md with the given §6 checkbox rows (or none, and no §6 heading at all)."""
++    six = "## 6. NEEDS-HUMAN — items the human must clear before sign-off\n" if heading else ""
++    return ("# Result — issue 1 / retire\n\n"
++            "## 5. Advisory review (artifact-only, decorrelated)\n"
++            f"{elsewhere}\n\n"
++            f"{six}" + "".join(f"{r}\n" for r in rows) + "\n"
++            "## 7. Proven / not proven\n- n/a\n\n"
++            "## 9. Check sign-off                     ← human completes Check here\n"
++            "- Outcome:\n")
++
++
++class RetiresOnlyWhatTheHumanTicked(unittest.TestCase):
++    """#409 clause 3, with #335 folded in — `autoiterate.retire_cleared`.
++
++    A deferred finding leaves the ledger only on a POSITIVE tick in §6. A still-open row
++    protects entries by the SAME `_same_finding` relation the tick is matched with, assigned
++    exact-first: a verbatim open row protects its own entry only (so a near-identical pair
++    stays drainable), an edited open row protects every entry it matches (fail closed).
++    The #335 repro and the matcher-drift test are written to fail against BOTH wrong
++    protection shapes: exact-only protection (the #335 bug) and the flat symmetric-fuzzy
++    exclusion (the permanently unclearable pair). Each of the others pins one further rule,
++    named in its test.
++    """
++
++    # Two different findings that `_same_finding` cannot tell apart (a long shared opening).
++    P = "C5 Causal adequacy — guards the symptom in the parser"
++    R = "C5 Causal adequacy — guards the symptom in the renderer"
++    E = "T5 Judgment — the retry loop swallows the first failure and reports the last one"
++    X = "C1 Spec — the brief never says which config file wins"
++
++    def setUp(self) -> None:
++        self.tmp = Path(tempfile.mkdtemp())
++        self.n = 0
++
++    def tearDown(self) -> None:
++        shutil.rmtree(self.tmp, ignore_errors=True)
++
++    def _retire(self, ledger: list[str], rows: list[str], **summary_kw) -> list[str]:
++        self.n += 1
++        d = self.tmp / f"issue_{self.n}"
++        d.mkdir()
++        _write_ledger(d, ledger)
++        (d / "SUMMARY.md").write_text(_summary(rows, **summary_kw), encoding="utf-8")
++        kept = autoiterate.retire_cleared(d, d / "SUMMARY.md")
++        self.assertEqual(kept, _ledger(d), "the return value must be what is on disk")
++        return kept
++
++    def test_a_tick_retires_its_entry_and_absence_is_not_consent(self) -> None:
++        kept = self._retire([self.P, self.E, self.X],
++                            [f"- [x] {self.E}",
++                             f"- [ ] {self.P}",
++                             f"- [ ] {self.X} (owner: plan)"])   # edited, never ticked
++        self.assertEqual(kept, [self.P, self.X])
++
++    def test_335_an_annotated_open_row_survives_a_similar_ticked_new_finding(self) -> None:
++        self.assertTrue(autoiterate._same_finding(self.P, self.R), "precondition: near-twins")
++        # The #335 repro: the human annotated the deferred parser row but did not tick it,
++        # and ticked a similar NEW finding (not in the ledger). The tick fuzzy-matches the
++        # parser entry; only the open annotated row can protect it, and only if protection
++        # uses the relation the tick does. Exact-only protection retires it here.
++        self.assertEqual(self._retire([self.P],
++                                      [f"- [ ] {self.P} (owner: architecture)",
++                                       f"- [x] {self.R}"]),
++                         [self.P], "an unadjudicated deferred finding was retired")
++        # …and the fix must not overshoot into symmetric-fuzzy protection: a VERBATIM open row
++        # protects its own entry only, so its exactly-ticked near-twin still drains.
++        self.assertEqual(self._retire([self.P, self.R],
++                                      [f"- [ ] {self.P}", f"- [x] {self.R}"]),
++                         [self.P], "an exactly-ticked entry was shielded by its open near-twin")
++
++    def test_every_edit_shape_a_tick_tolerates_also_protects_when_left_open(self) -> None:
++        """Matcher drift. Whatever `_same_finding` accepts for a tick, an open row must
++        accept for protection — even when the entry's own row is ticked exactly beside it."""
++        shapes = {
++            "annotated": f"{self.E} (owner: architecture)",
++            "prefixed": f"Re-raised: {self.E}",
++            "trimmed": self.E.rsplit(" ", 3)[0],
++            "edited in the middle": self.E.replace("reports the last one",
++                                                   "logs only the last one"),
++            "case and spacing": "  ".join(self.E.upper().split()),
++        }
++        for name, edited in shapes.items():
++            with self.subTest(shape=name):
++                self.assertTrue(autoiterate._same_finding(self.E, edited), "precondition")
++                # Left open, the edited row protects the entry against an exact tick.
++                self.assertEqual(self._retire([self.E], [f"- [ ] {edited}", f"- [x] {self.E}"]),
++                                 [self.E])
++                if " ".join(edited.split()).casefold() == self.E.casefold():
++                    continue   # the same entry after normalisation: no distinct twin to drain
++                # A VERBATIM open row owns its own entry only — the exactly-ticked twin drains,
++                # in either direction.
++                self.assertEqual(self._retire([self.E, edited],
++                                              [f"- [ ] {self.E}", f"- [x] {edited}"]),
++                                 [self.E])
++                self.assertEqual(self._retire([self.E, edited],
++                                              [f"- [ ] {edited}", f"- [x] {self.E}"]),
++                                 [edited])
++
++    def test_an_edited_open_row_matching_two_near_twins_protects_both(self) -> None:
++        edited = "C5 Causal adequacy — guards the symptom in the pipeline (owner: architecture)"
++        self.assertTrue(autoiterate._same_finding(self.P, edited), "precondition")
++        self.assertTrue(autoiterate._same_finding(self.R, edited), "precondition")
++        # It owns neither verbatim, so it could be an edit of either: fail closed, protect both
++        # — even the one ticked exactly.
++        self.assertEqual(self._retire([self.P, self.R], [f"- [ ] {edited}", f"- [x] {self.R}"]),
++                         [self.P, self.R])
++
++    def test_a_tick_matching_two_entries_retires_neither(self) -> None:
++        """A tick retires ONE entry or none. The human deleted P's row, then edited R's row and
++        ticked it. The edit owns neither entry verbatim and `_same_finding`-matches both
++        near-twins, so it cannot say which one the human cleared: fail closed, both stay.
++        Retiring the first match would drop P, which nobody ticked; so would retiring every
++        match."""
++        edited = f"{self.R} (fixed by the rebuild)"
++        for entry in (self.P, self.R):
++            self.assertTrue(autoiterate._same_finding(entry, edited), "precondition")
++            self.assertNotEqual(" ".join(edited.split()).casefold(), entry.casefold(),
++                                "precondition: a fuzzy match, not an exact one")
++        self.assertEqual(self._retire([self.P, self.R], [f"- [x] {edited}"]), [self.P, self.R])
++        # Control: with only R in the ledger the same tick is unambiguous, and it retires R.
++        self.assertEqual(self._retire([self.R], [f"- [x] {edited}"]), [])
++
++    def test_a_short_row_matches_only_exactly(self) -> None:
++        """`_MATCH_FLOOR` bounds containment as well as the shared opening. A ticked fragment
++        under the floor — an element name, a few words — occurs inside countless findings, so a
++        deleted entry that merely CONTAINS it was never ticked: retiring it would read consent
++        from absence. The same holds the other way round, for a short entry inside a long row.
++        """
++        fragments = {"prefix": "T5 Judgment",
++                     "middle": "retry loop swallows",    # one character under the floor
++                     "suffix": "the last one"}
++        for where, short in fragments.items():
++            with self.subTest(where=where):
++                self.assertIn(short.casefold(), self.E.casefold(), "precondition: a substring")
++                self.assertLess(len(short), autoiterate._MATCH_FLOOR, "precondition: short")
++                # E's own row was deleted; the only tick is the fragment.
++                self.assertEqual(self._retire([self.E], [f"- [x] {short}"]), [self.E])
++        short_entry = "C1 Spec — vague"
++        with self.subTest(where="a short entry inside a long ticked row"):
++            self.assertEqual(self._retire([short_entry],
++                                          [f"- [x] {short_entry} about which config file wins"]),
++                             [short_entry])
++        # Controls: a short entry still retires on its exact tick, and containment at full
++        # length still matches — an annotated tick retires its entry.
++        self.assertEqual(self._retire([short_entry], [f"- [x] {short_entry}"]), [])
++        self.assertEqual(self._retire([self.E], [f"- [x] {self.E} (fixed in round 2)"]), [])
++
++    def test_a_summary_with_no_section6_heading_retires_nothing(self) -> None:
++        # The tick reader is STRICT (`whole_on_missing=False`): a `- [x]` quoted in §5's review
++        # text — pasted verbatim at assembly — is not the human's clearance.
++        quoted = f"The reviewer quoted a cleared row:\n\n- [x] {self.E}\n"
++        self.assertEqual(self._retire([self.E], [], heading=False, elsewhere=quoted), [self.E])
++        # Control: the very same row under a real §6 heading does retire it.
++        self.assertEqual(self._retire([self.E], [f"- [x] {self.E}"]), [])
++
++    def test_an_unreadable_ledger_is_never_rewritten(self) -> None:
++        d = self.tmp / "issue_bad"
++        d.mkdir()
++        (d / _LEDGER).write_text("{ not json", encoding="utf-8")
++        (d / "SUMMARY.md").write_text(_summary([f"- [x] {self.E}"]), encoding="utf-8")
++        self.assertEqual(autoiterate.retire_cleared(d, d / "SUMMARY.md"), [])
++        self.assertEqual((d / _LEDGER).read_text(encoding="utf-8"), "{ not json")
++
++
++class RetireAtTheIterate(_Base):
++    """The wiring: `driver.advance` retires what the human ticked BEFORE the iterate archives
++    the SUMMARY that carries the ticks — in both iterate branches."""
++
++    A = "C5 Causal adequacy — the parser guards the symptom"
++    B = "T5 Judgment — the retry loop hides the first failure"
++
++    def _iterated(self, iid: str, action: str) -> Path:
++        d = self._bundle(iid)
++        _write_ledger(d, [self.A, self.B])
++        assemble.assemble_summary(d, self.cfg)                   # §6 renders both, unticked
++        summ = d / "SUMMARY.md"
++        summ.write_text(summ.read_text(encoding="utf-8")
++                        .replace(f"- [ ] {self.A}", f"- [x] {self.A}"), encoding="utf-8")
++        signoff.record(summ, action=action, by="human", date="2026-09-30")
++        with redirect_stderr(io.StringIO()):
++            driver.advance(d, self.cfg)                          # the one iterate beat
++        return d
++
++    def test_a_human_iterate_do_retires_what_they_ticked(self) -> None:
++        d = self._iterated("RETDO", "iterate-do")
++        self.assertEqual(_ledger(d), [self.B])
++        self.assertIn(f"- [x] {self.A}",                         # the tick is archived intact
++                      (d / "iteration-v1" / "SUMMARY.md").read_text(encoding="utf-8"))
++
++    def test_a_human_iterate_plan_retires_what_they_ticked(self) -> None:
++        d = self._iterated("RETPLAN", "iterate-plan")
++        self.assertEqual(state.state(d), state.UNPLANNED)
++        self.assertEqual(_ledger(d), [self.B])
++
++
+ class DecisionModule(unittest.TestCase):
+     """`autoiterate` itself — the guard that keeps this from ever becoming an auto-accept."""
+ 
+@@ -609,11 +1096,70 @@ class DecisionModule(unittest.TestCase):
+     def _items(self, *kinds: str) -> list[assemble.NeedsHumanItem]:
+         return [assemble.NeedsHumanItem(f"finding {i}", k) for i, k in enumerate(kinds)]
+ 
+-    def test_eligible_only_when_nonempty_and_all_impl(self) -> None:
++    def test_eligible_iff_there_is_implementation_work(self) -> None:
+         self.assertTrue(autoiterate.eligible(self._items(assemble.IMPL, assemble.IMPL)))
+         self.assertFalse(autoiterate.eligible([]))                                 # never accept
+-        self.assertFalse(autoiterate.eligible(self._items(assemble.IMPL, assemble.HUMAN)))
++        self.assertTrue(autoiterate.eligible(self._items(assemble.IMPL, assemble.HUMAN)))  # #409
++        self.assertTrue(autoiterate.eligible(self._items(assemble.IMPL, assemble.STANDING)))
+         self.assertFalse(autoiterate.eligible(self._items(assemble.HUMAN)))
++        self.assertFalse(autoiterate.eligible(self._items(assemble.HUMAN, assemble.STANDING)))
++
++    def test_the_size_item_stops_by_kind_not_every_human_item(self) -> None:
++        """#409 clause 4, the #324 composition. The size backstop stops the loop by KIND of
++        item; ordinary HUMAN items defer. Both legs in ONE test so neither wrong rule passes:
++        today's veto fails the first leg, a naive `any(item.kind == IMPL)` fails the second."""
++        defect = assemble.NeedsHumanItem("C4 Verification (red→green) — off-by-one",
++                                         assemble.IMPL)
++        ordinary = assemble.NeedsHumanItem(_C5_TEXT, assemble.HUMAN)
++        size = assemble.NeedsHumanItem(
++            size_signal.needs_human_text(["2 round(s) already spent (threshold 2)"]),
++            assemble.HUMAN)
++        self.assertTrue(autoiterate.eligible([defect, ordinary]),
++                        "an ordinary HUMAN finding must defer, not veto")
++        self.assertFalse(autoiterate.eligible([defect, ordinary, size]),
++                         "the size backstop's item must stop the loop")
++        # The same text tagged IMPL is not the backstop's item, and still rebuilds.
++        self.assertTrue(autoiterate.eligible([defect, ordinary,
++                                              size._replace(kind=assemble.IMPL)]))
++
++    def test_write_decision_defers_the_human_items_before_spending_the_round(self) -> None:
++        items = [assemble.NeedsHumanItem("finding 0", assemble.IMPL),
++                 assemble.NeedsHumanItem("finding 1", assemble.HUMAN),
++                 assemble.NeedsHumanItem("finding 2", assemble.STANDING),
++                 assemble.NeedsHumanItem("FINDING  1", assemble.HUMAN)]   # same, re-worded case
++        autoiterate.write_decision(self.tmp, items)
++        self.assertEqual(_ledger(self.tmp), ["finding 1"])   # HUMAN only, deduplicated
++        self.assertEqual(autoiterate.count(self.tmp), 1)
++        autoiterate.write_decision(self.tmp, items)          # a later round re-raising it
++        self.assertEqual(_ledger(self.tmp), ["finding 1"])   # …does not grow the handover
++        self.assertEqual(autoiterate.count(self.tmp), 2)
++
++    def test_write_decision_refuses_the_size_backstop_set(self) -> None:
++        size = size_signal.needs_human_text(["patch is 253 KB (threshold 100 KB)"])
++        with self.assertRaises(ValueError):
++            autoiterate.write_decision(self.tmp, [assemble.NeedsHumanItem("d", assemble.IMPL),
++                                                  assemble.NeedsHumanItem(size, assemble.HUMAN)])
++        self.assertFalse((self.tmp / leaves.SIGNOFF_DECISION).exists())
++        self.assertEqual(autoiterate.count(self.tmp), 0)
++        self.assertIsNone(_ledger(self.tmp))
++
++    def test_an_unreadable_ledger_is_told_apart_from_an_absent_one(self) -> None:
++        self.assertEqual(autoiterate.deferred(self.tmp), [])          # absent: nothing deferred
++        self.assertEqual(autoiterate.ledger_problem(self.tmp), "")
++        for garbage in ("{ not json", '["a list, not an object"]', '{"items": "text"}',
++                        '{"items": ["ok", 7]}'):
++            with self.subTest(content=garbage):
++                (self.tmp / _LEDGER).write_text(garbage, encoding="utf-8")
++                with self.assertRaises(autoiterate.DeferredLedgerUnreadable):
++                    autoiterate.deferred(self.tmp)
++                self.assertTrue(autoiterate.ledger_problem(self.tmp))
++                # …and a round refuses to rewrite it: no decision, no budget, file untouched.
++                with self.assertRaises(autoiterate.DeferredLedgerUnreadable):
++                    autoiterate.write_decision(
++                        self.tmp, self._items(assemble.IMPL, assemble.HUMAN))
++                self.assertFalse((self.tmp / leaves.SIGNOFF_DECISION).exists())
++                self.assertEqual(autoiterate.count(self.tmp), 0)
++                self.assertEqual((self.tmp / _LEDGER).read_text(encoding="utf-8"), garbage)
+ 
+     def test_write_decision_only_ever_writes_iterate_do(self) -> None:
+         autoiterate.write_decision(self.tmp, self._items(assemble.IMPL))
+@@ -627,6 +1173,7 @@ class DecisionModule(unittest.TestCase):
+             autoiterate.write_decision(self.tmp, self._items(assemble.HUMAN))
+         self.assertFalse((self.tmp / leaves.SIGNOFF_DECISION).exists())
+         self.assertEqual(autoiterate.count(self.tmp), 0)          # no budget spent either
++        self.assertIsNone(_ledger(self.tmp))                      # and nothing deferred
+ 
+     def test_write_decision_refuses_an_empty_set(self) -> None:
+         with self.assertRaises(ValueError):
+diff --git a/template/tests/test_size_signal.py b/template/tests/test_size_signal.py
+index abb2388..58cd98a 100644
+--- a/template/tests/test_size_signal.py
++++ b/template/tests/test_size_signal.py
+@@ -216,7 +216,10 @@ class TheOverrideAnnouncesItself(unittest.TestCase):
+         """The whole point of re-enabling this rule rather than leaving it off: the
+         override is fine, the SILENCE was not."""
+         from pdca_harness import flow
++        # An ordinary HUMAN finding rides along (#409): it would only be deferred, so it is
++        # the size item — by its kind — that declines the round, and the one that is named.
+         items = [NeedsHumanItem("a real defect", IMPL),
++                 NeedsHumanItem("C5 Causal adequacy — a real concern", HUMAN),
+                  NeedsHumanItem(size_signal.needs_human_text(
+                      ["2 round(s) already spent (threshold 2)"]), HUMAN)]
+         err = io.StringIO()
+@@ -236,10 +239,12 @@ class TheOverrideAnnouncesItself(unittest.TestCase):
+ 
+     def test_an_ordinary_human_finding_declines_without_the_extra_line(self) -> None:
+         """Every other decline is a §6 item the human is about to read anyway; narrating
+-        those too would bury the one message that carries new information."""
++        those too would bury the one message that carries new information.
++
++        HUMAN-only since #409: beside an IMPL item an ordinary HUMAN finding no longer
++        declines the round at all — it is deferred and the rebuild fires."""
+         from pdca_harness import flow
+-        items = [NeedsHumanItem("a real defect", IMPL),
+-                 NeedsHumanItem("C5 Causal adequacy — a real concern", HUMAN)]
++        items = [NeedsHumanItem("C5 Causal adequacy — a real concern", HUMAN)]
+         err = io.StringIO()
+         with mock.patch.object(flow.assemble, "collect_needs_human",
+                                lambda d, cfg: items), \

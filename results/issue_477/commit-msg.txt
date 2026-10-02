@@ -1,0 +1,40 @@
+size-signal: stop charging rounds driven by deferred-gate findings
+
+The size backstop warns when a slice has needed too many build rounds. It
+was charging a round whose only review finding sat on a gate the harness
+deliberately deferred, such as the Check-time contribution check (T4),
+whose commit message and PR description are only written at publish. No
+rebuild can change that finding, so the round was noise, yet it counted
+and could push a modest slice over the threshold.
+
+Such a round is now discounted, alongside the environment-fault rounds
+already discounted by 363ac7293f88c4057560da074a90ddf7a1cd0a59. A round is
+discounted only when every recorded driver is something no rebuild can
+change. Any builder-actionable or unclear evidence still counts it:
+
+- a plain gating fail, or a FAIL verdict cell in the review;
+- a review finding on any element whose gate was not deferred, a finding
+  with no leading element id, or a finding tagged [impl];
+- a deferred row whose element also has a failing, unverifiable, flaky or
+  malformed sibling row;
+- an advisory review with an implementation finding, or one that did not
+  complete;
+- a gate record or review that is missing, unreadable or malformed,
+  including a gating row whose result or gating flag is not one the
+  writer produces;
+- a round whose only finding is the standing Validation row.
+
+Two changes also tighten the existing environment discount. A gating row
+with a missing, null or unknown result now counts the round instead of
+being ignored. An advisory implementation finding now counts it too, since
+advisory files were never read before. A plain human-judgment advisory
+bullet does not count, so the discount still works on projects that
+configure advisory reviewers.
+
+Since 07766ed3a235e623c0ecdaea7b9b90358bdb810d the reviewer is told to
+write N/A for a deferred row. In the 39 recent archived rounds that have
+one, it never raised a finding on it. So this is a guard for a reviewer
+that ignores that instruction; it is not expected to lower today's
+counts. A scan of 89 archived rounds found no record whose count changes.
+
+Fixes #477

@@ -1,0 +1,11 @@
+# Advisory code review — issue 371 (confirm-once for a failed gating row)
+
+No correctness bugs found. The gates are green (C4-verify, T3-suite, host-ci-docs all `pass` in `gate-logs/`). The iteration-1 blocker is fixed: `template/tests/test_gate_confirm.py:323-411` (`PublishHostCiRunsOnce`) now drives the real `publish.publish` against a toy bare origin and asserts one run, `rc == 1`, nothing pushed, and `host-ci.json` row `fail` with no `flaky`/`attempts`. Adding `confirm=True` at `template/src/pdca_harness/publish.py:930` would now turn it red. A control test (`test_control_the_same_row_is_confirmed_at_check`) proves the same row *is* confirmed at Check. The combine rule (`gates.py:686-703`), the confirm guard (`gates.py:588-589`: gating, `fail`, real exit code, both switches) and the log format (`gates.py:706+`) match clauses 1–5 of the brief.
+
+Minor, optional items (none blocks):
+
+- `template/src/pdca_harness/assemble.py:596-597` — on fail→pass the row's `path_line` is the *passing* run's evidence (`gates.py:700`), so the §6 line says "Confirm the red sample was environmental — <green evidence>". The red sample's own evidence line is only in `gate-logs/<id>.log`. If the log write failed (`log_error`), the first run's evidence is in no bundle file at all. A one-line improvement is to carry the first run's evidence into the item (e.g. an extra `first_evidence` row key), so the human sees what went red without opening the log. This is not required by the brief.
+- `template/src/pdca_harness/gates.py:683` — a non-boolean per-row `confirm_fail` (e.g. `"false"`) silently turns confirmation off. The project-level key warns on stderr for the same mistake (`config.py` parse block added at ~`:582-588`). The fail direction is safe either way (off = today's behaviour); it's only an inconsistency in how loudly a typo is reported.
+- `template/src/pdca_harness/assemble.py:592-597` — `r['log']`, `r['check']`, `r['path_line']`, `r['oracle']` are indexed directly. This matches `_unverifiable_items` just above (`assemble.py:567-570`), so it's consistent with existing code. The sign-off called it optional, and I agree.
+
+The earlier "dead `rc`/`output` args to `_write_gate_log`" clean-up has already been done: the new signature takes `attempts` only, and the one caller is `gates.py:618`.

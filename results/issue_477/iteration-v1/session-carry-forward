@@ -1,0 +1,17 @@
+Keep the design; fix the implementation so it honours its own fail-safe ("anything missing,
+unreadable or malformed counts the round"). These cases are most likely on a new machine where
+a dependency has not been captured yet, so gate records can come out incomplete or odd — exactly
+when the backstop must NOT go quiet.
+1. Malformed gate-row results (reviewer C3 FAIL): `_environment_attributed` only rejects the
+   literal `fail`, so a gating row whose `result` is missing, `null` or an unknown string is
+   ignored, and a deferred-T4 finding then discounts the round (2,0) → (1,0). Validate every
+   gating row's `result` against the known set (`pass` / `deferred` / `unverifiable`, or `fail`
+   with truthy `flaky`); anything else counts the round. Add tests for missing, null and
+   unknown-string results beside a deferred T4 finding.
+2. Element keyed too loosely (code-review §6 item, `size_signal.py:204-210`): an element counts
+   as deferred only if NONE of its rows (gating or not) is `fail` / `unverifiable` / malformed —
+   a deferred row must not shelter a live failing sibling of the same element (e.g. T2-docs vs
+   host-ci-docs). Add a test for an element whose rows disagree.
+Optional, low stakes: a primary-review `- NEEDS-HUMAN [impl] — T4 …` bullet should keep the round
+charged, as the advisory path does; `_review_drove_the_iterate` is now test-only — document or
+remove it.
