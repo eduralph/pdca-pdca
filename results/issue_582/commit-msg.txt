@@ -1,0 +1,38 @@
+fix(merge): confirm a green check rollup before merging a PR
+
+In merge mode, the wave waits for a PR's checks and merges on the first
+green rollup it reads. Seconds after a PR is opened, the rollup lists
+only the checks that have registered so far. A fast check that already
+passed (a DCO or issue-link check) reads as green while a slow job has
+not created its check run yet. The wave then merges on that partial
+green. If the slow job is a required check, `gh pr merge` refuses and the
+wave stops. If it is not required, which is the case
+`merge_requires = "all"` exists for, the PR merges and the check fails
+afterwards on the base branch.
+
+A green read is now confirmed before it is believed. The wait reads the
+rollup again one full poll interval (15 s) later, charged to
+`merge_wait_secs`, and merges only if that read is green too. A confirm
+read that is pending or empty goes back into the wait. A failing or
+unreadable one refuses at once and returns the PR to draft, as a failing
+rollup already does. The confirm is never shortened to fit the budget:
+a green first seen with less than 15 s of budget left is refused as not
+finished, with a message that says the green could not be confirmed.
+Total wait time still never exceeds `merge_wait_secs`.
+
+Behaviour change for small budgets: `merge_wait_secs` from 1 to 14 now
+refuses every PR under `merge_requires = "all"`, and with 15 a rollup
+that turns green only after one wait is refused. Raise the bound if your
+checks are slow to report. `merge_wait_secs = 0` is unchanged: one read,
+no wait. The comments for `merge_wait_secs` in pdca.toml and config.py
+describe the new rule.
+
+This narrows the problem but does not close it. The confirm compares the
+verdict only, not which checks are present, so a slow job that has not
+registered within 15 s still gets through. Closing that needs a check-name
+comparison or a configured list of expected checks.
+
+The wait being fixed was added in
+87c73520ae6805d2c3a3f7d2866991b71e9fd3aa.
+
+Fixes #582

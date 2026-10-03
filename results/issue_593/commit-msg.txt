@@ -1,0 +1,39 @@
+stack mode: keep wave PRs intact and open them against the real base
+
+With wave_mode = "stack", a batch of three or more waves could not finish
+as a PR stack the human merges afterwards. Two things went wrong:
+
+- Middle-wave PRs broke during the run. Every fold rebuilt
+  pdca-integration/<base> from the base, re-applied each accepted patch as
+  a new commit and force-pushed. A wave-1 PR opened against that branch
+  then found its own change there as a different commit, and went empty,
+  conflicting or failed DCO before anyone could merge it.
+- Wave 1+ PRs on an own-repo target were opened against the integration
+  branch, and nothing moved them or the branch on to the real base. Merging
+  the stack bottom-up landed only wave 0 on the target.
+
+Now every wave PR opens against the real base (e.g. main). A later wave is
+cut from the integration line tip recorded when it was pointed at the
+line, so a late publish never picks up later waves; if a later run has
+replaced that line, publish refuses instead of cutting from an orphaned
+commit. The fold merges each accepted bundle's actual PR branch into the
+line with signed-off --no-ff merges, so the PRs' own commits are on the
+line. Within one run the line only grows and is pushed without --force;
+it starts fresh at each run's first fold, and a fold refuses if another
+run moved the line.
+
+A prerequisite whose branch was merged and deleted is judged by the
+merged PR's head commit (gh pr view --json state,headRefOid): skipped if
+the line already has it, taken in through the base if the base has it,
+otherwise the fold stops. The base remote is now fetched last so it
+cannot be older than a deletion the fold saw. An accepted bundle that
+pushed no branch in this run now holds only the bundles that depend on
+it, instead of stopping the whole run.
+
+This replaces the re-applied pdca-integrate commits that
+cb52d0647e20a22fbd9fc2bcb1750ab3575f746a signed off for DCO. Docs and the
+vendored model spec now say: every PR targets the real base, merge the
+stack bottom-up with merge commits, and use "Update branch" when a PR
+keeps showing an already-merged change.
+
+Fixes #593

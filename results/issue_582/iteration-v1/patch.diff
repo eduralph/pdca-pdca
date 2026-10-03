@@ -1,0 +1,260 @@
+diff --git a/template/pdca.toml.jinja b/template/pdca.toml.jinja
+index f5e4f25..30fad8f 100644
+--- a/template/pdca.toml.jinja
++++ b/template/pdca.toml.jinja
+@@ -148,6 +148,10 @@ merge_requires = "all"
+ # verdict. `_merge_one` re-reads the rollup until it clears pending/empty or this many
+ # wall-clock seconds elapse; only then does an unresolved rollup refuse (with a message
+ # that says the checks never reported in time, distinct from a check that actually failed).
++# A green read is confirmed by one more read a poll interval (15 s) later, charged to this
++# budget: an early rollup can be green on the fast checks alone, before a slow job has
++# registered (issue #582). A green first seen with no budget left to confirm it refuses as
++# not finished — raise this bound if your checks are slow to report.
+ # On every refusal after the ready-mark — timeout, a red/unreadable rollup, or a failing
+ # `gh pr merge` — the PR is returned to draft (`gh pr ready --undo`) before the run STOPs,
+ # so a stopped wave never leaves a PR advertising a readiness no human granted.
+diff --git a/template/src/pdca_harness/config.py b/template/src/pdca_harness/config.py
+index 7b6ce67..80eda85 100644
+--- a/template/src/pdca_harness/config.py
++++ b/template/src/pdca_harness/config.py
+@@ -377,8 +377,11 @@ class Config:
+     # queued or not yet registered, so a rollup read that moment is `pending` or `empty`:
+     # absence of evidence, not a verdict. `_merge_one` re-reads the rollup until it resolves
+     # or this many wall-clock seconds elapse; only an unresolved rollup at the bound (or a
+-    # genuinely failing/unreadable one) refuses. `0` performs no wait at all — a single
+-    # read, the original immediate-refusal behaviour. [driver].merge_wait_secs.
++    # genuinely failing/unreadable one) refuses. A green read is confirmed by one more read
++    # a poll interval later, charged to this budget (issue #582: an early rollup can be
++    # green on the fast checks alone); a green with no budget left to confirm it refuses as
++    # pending. `0` performs no wait at all — a single read, the original immediate-refusal
++    # behaviour. [driver].merge_wait_secs.
+     merge_wait_secs: int = 300
+     # Optional integration re-gate (#wave-model): after each wave folds onto the
+     # integration branch, run the repo-scoped gates over that tip before the next wave
+diff --git a/template/src/pdca_harness/merge.py b/template/src/pdca_harness/merge.py
+index 86c7ba1..7f67aa9 100644
+--- a/template/src/pdca_harness/merge.py
++++ b/template/src/pdca_harness/merge.py
+@@ -36,7 +36,11 @@ seconds between create and ready_for_review), so the FIRST rollup read above is
+ ``_wait_for_green`` re-reads the rollup until it resolves or ``[driver].merge_wait_secs``
+ (default 300; ``0`` disables the wait — the original immediate-refusal behaviour) of
+ wall-clock time elapses, through the patchable ``_sleep`` below so a test costs no real
+-time. Whichever way ``_merge_one`` declines to merge a PR it already readied — the rollup
++time. A ``green`` read is confirmed once before it is believed (issue #582): the rollup
++lists only the checks registered so far, so a fast check that passed can read green while
++a slow job has not reported yet. The wait re-reads one poll interval later and merges only
++if that read is green too; a green with no budget left to confirm it refuses as pending.
++Whichever way ``_merge_one`` declines to merge a PR it already readied — the rollup
+ never resolving green, a failing ``gh pr merge`` — ``_undo_ready`` marks it back to draft
+ (``gh pr ready --undo``) before returning, so a stopped wave never leaves a PR advertising
+ a readiness no human granted (``docs/INTEGRATION.md`` §10).
+@@ -143,21 +147,44 @@ def _names(checks: list) -> str:
+ def _wait_for_green(pr_url: str, wait_secs: int, *, poll_interval: int = 15) -> tuple[str, str]:
+     """Re-read ``pr_url``'s check rollup (``_check_rollup``) until it clears ``pending``/
+     ``empty`` or ``wait_secs`` of (patchable) wall-clock time is exhausted (issue #462).
+-    Returns the final ``(verdict, detail)`` unchanged — this never itself decides to merge.
++    Returns the final ``(verdict, detail)`` — this never itself decides to merge.
+ 
+-    ``wait_secs <= 0`` performs exactly one read and returns immediately: the original
+-    behaviour, for a host whose checks are known to already be in by the time the wave
+-    boundary fires. Sleeps go through the module-level ``_sleep`` so a test can make the
+-    whole loop cost no real time.
++    A ``green`` read is not believed on its own (issue #582): seconds after a PR opens, the
++    rollup lists only the checks registered SO FAR, so one fast check that already passed
++    reads as ``green`` while a slow job has not created its check run yet. A green is
++    therefore re-read once more, one poll interval later (charged to ``wait_secs``), and
++    returned only if that read is ``green`` too. A confirm that reads ``pending``/``empty``
++    goes back into the wait; ``failing``/``unreadable`` is returned at once. A green first
++    seen with no budget left to confirm it is returned as ``pending`` (fail-closed), with a
++    detail that says so. This compares verdicts only, not check names: a slow job that has
++    not registered within one poll interval still gets through.
++
++    ``wait_secs <= 0`` performs exactly one read and returns its verdict as-is: the
++    original behaviour, for a host whose checks are known to already be in by the time the
++    wave boundary fires. Sleeps go through the module-level ``_sleep`` so a test can make
++    the whole loop cost no real time; their sum never exceeds ``wait_secs``.
+     """
+     verdict, detail = _check_rollup(pr_url)
++    if wait_secs <= 0:
++        return verdict, detail
+     waited = 0
+-    while verdict in ("pending", "empty") and waited < wait_secs:
++    while True:
++        while verdict in ("pending", "empty") and waited < wait_secs:
++            step = min(poll_interval, wait_secs - waited)
++            _sleep(step)
++            waited += step
++            verdict, detail = _check_rollup(pr_url)
++        if verdict != "green":
++            return verdict, detail
++        if waited >= wait_secs:
++            return "pending", (f"green first seen with no wait budget left to confirm it "
++                               f"({detail})")
+         step = min(poll_interval, wait_secs - waited)
+         _sleep(step)
+         waited += step
+         verdict, detail = _check_rollup(pr_url)
+-    return verdict, detail
++        if verdict == "green":
++            return verdict, detail
+ 
+ 
+ def _undo_ready(pr_url: str) -> None:
+diff --git a/template/tests/test_merge.py b/template/tests/test_merge.py
+index 8069a61..bab837f 100644
+--- a/template/tests/test_merge.py
++++ b/template/tests/test_merge.py
+@@ -77,6 +77,13 @@ class MergeWave(unittest.TestCase):
+     def setUp(self) -> None:
+         self.tmp = Path(tempfile.mkdtemp())
+         self.cfg = _cfg(self.tmp)
++        # issue #582: every green rollup is now re-read once more, one poll interval later,
++        # before it is believed — so any test that reaches a green rollup would sleep a
++        # real 15 s. Patch the wait's sleep for the whole class; a test that patches it
++        # again in its own `with` (to inspect the calls) just nests over this one.
++        sleeper = mock.patch.object(merge, "_sleep")
++        sleeper.start()
++        self.addCleanup(sleeper.stop)
+ 
+     def tearDown(self) -> None:
+         shutil.rmtree(self.tmp, ignore_errors=True)
+@@ -308,7 +315,9 @@ class MergeWave(unittest.TestCase):
+                 redirect_stdout(io.StringIO()):
+             rc = merge.merge_wave(self.cfg, [b], method="merge")
+         self.assertEqual(rc, 0)
+-        self.assertEqual(reads["n"], 3)               # pending, pending, then green
++        # pending, pending, green, then green again — issue #582: the first green is
++        # re-read once more, one poll interval later, before it is believed.
++        self.assertEqual(reads["n"], 4)
+         self.assertTrue(sleep.called)                 # the wait actually slept in between
+         self.assertIn(["gh", "pr", "merge", "https://gh/pr/1", "--merge"], calls)
+         self.assertNotIn(["gh", "pr", "ready", "https://gh/pr/1", "--undo"], calls)
+@@ -330,8 +339,9 @@ class MergeWave(unittest.TestCase):
+         rc, calls, _ = self._drive("ME")
+         self.assertEqual(rc, 0)
+         gh = [c[:3] for c in calls if c[:2] == ["gh", "pr"]]
++        # Rollup read AFTER ready; issue #582: read twice — the green is confirmed once.
+         self.assertEqual(gh, [["gh", "pr", "ready"], ["gh", "pr", "checks"],
+-                              ["gh", "pr", "merge"]])   # rollup read AFTER ready
++                              ["gh", "pr", "checks"], ["gh", "pr", "merge"]])
+ 
+     def test_empty_rollup_refuses_under_the_default(self) -> None:
+         # Absence of evidence is not green: nothing reported ⇒ nothing verified.
+@@ -424,6 +434,117 @@ class MergeWave(unittest.TestCase):
+         self.assertFalse(any(c[:3] == ["gh", "pr", "checks"] for c in calls))
+         self.assertTrue(self._merged(calls))
+ 
++    # ---- issue #582: a green rollup is believed only once it has held -----------------
++
++    def _drive_reads(self, iid: str, reads: list[SimpleNamespace], *,
++                     cfg: Config | None = None) -> tuple[int, list[list[str]], str, list]:
++        """Run one bundle through `merge_wave` where `gh pr checks` returns ``reads`` in
++        order (the last one repeating). Returns the exit code, every command shelled,
++        stderr, and the arguments `merge._sleep` was called with."""
++        b = self._bundle(iid)
++        calls: list[list[str]] = []
++        n = {"read": 0}
++
++        def fake_run(cmd, **kw):
++            calls.append(cmd)
++            if cmd[:3] == ["gh", "pr", "checks"]:
++                n["read"] += 1
++                return reads[min(n["read"], len(reads)) - 1]
++            return SimpleNamespace(returncode=0, stdout="", stderr="")
++
++        with mock.patch("pdca_harness.merge.subprocess.run", side_effect=fake_run), \
++                mock.patch.object(merge, "_sleep") as sleep, \
++                mock.patch.object(merge.state, "state", return_value=state.COMPLETE), \
++                mock.patch.object(merge.merged, "is_merged", return_value=False), \
++                redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()) as err:
++            rc = merge.merge_wave(cfg or self.cfg, [b])
++        slept = [c.args[0] for c in sleep.call_args_list]
++        return rc, calls, err.getvalue(), slept
++
++    @staticmethod
++    def _checks(calls: list[list[str]]) -> list[list[str]]:
++        return [c for c in calls if c[:3] == ["gh", "pr", "checks"]]
++
++    def test_partial_green_then_failing_does_not_merge(self) -> None:
++        # The defect: a fast check (dco) has passed while a slow one (e2e) has not yet
++        # registered, so the first read is a partial `green`. Before #582 that merged at
++        # once; the confirm read sees e2e fail and refuses, exactly as a red rollup does.
++        rc, calls, err, slept = self._drive_reads("MK1", [
++            _rollup(("dco", "pass")),
++            _rollup(("dco", "pass"), ("e2e", "fail"), code=1)])
++        self.assertEqual(rc, 1)
++        self.assertFalse(self._merged(calls))
++        self.assertIn("FAILING", err)
++        self.assertIn("e2e (fail)", err)               # names the failing check
++        self.assertIn(["gh", "pr", "ready", "https://gh/pr/1", "--undo"], calls)
++        self.assertEqual(len(self._checks(calls)), 2)  # failing returns at once
++        self.assertLessEqual(sum(slept), self.cfg.merge_wait_secs)
++
++    def test_partial_green_then_pending_merges_only_after_the_fourth_read(self) -> None:
++        # (i)+(ii): the confirm read is pending, so the wait resumes; the rollup then goes
++        # green and holds — merge only after that 4th read, never on the first green.
++        rc, calls, _, slept = self._drive_reads("MK2", [
++            _rollup(("dco", "pass")),
++            _rollup(("dco", "pass"), ("e2e", "pending"), code=8),
++            _rollup(("dco", "pass"), ("e2e", "pass")),
++            _rollup(("dco", "pass"), ("e2e", "pass"))])
++        self.assertEqual(rc, 0)
++        self.assertTrue(self._merged(calls))
++        gh = [c[:3] for c in calls if c[:2] == ["gh", "pr"]]
++        self.assertEqual(gh, [["gh", "pr", "ready"]] + [["gh", "pr", "checks"]] * 4
++                         + [["gh", "pr", "merge"]])     # merge strictly after read 4
++        self.assertNotIn(["gh", "pr", "ready", "https://gh/pr/1", "--undo"], calls)
++        self.assertLessEqual(sum(slept), self.cfg.merge_wait_secs)
++
++    def test_confirm_read_unreadable_returns_at_once(self) -> None:
++        # (ii): an unreadable confirm read refuses with no further reads.
++        rc, calls, err, _ = self._drive_reads("MK3", [
++            _rollup(("dco", "pass")),
++            SimpleNamespace(returncode=4, stdout="", stderr="HTTP 502")])
++        self.assertEqual(rc, 1)
++        self.assertFalse(self._merged(calls))
++        self.assertIn("could not be read", err)
++        self.assertEqual(len(self._checks(calls)), 2)
++
++    def test_green_with_no_budget_left_to_confirm_is_not_believed(self) -> None:
++        # (iii): with a 15 s budget, pending → (15 s) → green leaves nothing to confirm the
++        # green with, so it is refused as pending — saying why — and the bound holds.
++        cfg = _cfg(self.tmp, merge_wait_secs=15)
++        rc, calls, err, slept = self._drive_reads("MK4", [
++            _rollup(("dco", "pass"), ("e2e", "pending"), code=8),
++            _rollup(("dco", "pass"), ("e2e", "pass"))], cfg=cfg)
++        self.assertEqual(rc, 1)
++        self.assertFalse(self._merged(calls))
++        self.assertIn("not finished within 15s", err)
++        self.assertIn("confirm", err)
++        self.assertIn("green first seen with no wait budget left to confirm it "
++                      "(2 checks)", err)
++        self.assertIn(["gh", "pr", "ready", "https://gh/pr/1", "--undo"], calls)
++        self.assertEqual(len(self._checks(calls)), 2)
++        self.assertLessEqual(sum(slept), 15)
++
++    def test_wait_never_exceeds_the_bound_while_green_flickers(self) -> None:
++        # (iii): green and pending alternating — every confirm fails, the loop keeps
++        # waiting, and the total slept time stays within merge_wait_secs.
++        cfg = _cfg(self.tmp, merge_wait_secs=100)
++        flicker = [_rollup(("dco", "pass")),
++                   _rollup(("dco", "pass"), ("e2e", "pending"), code=8)] * 50
++        rc, calls, err, slept = self._drive_reads("MK5", flicker, cfg=cfg)
++        self.assertEqual(rc, 1)
++        self.assertFalse(self._merged(calls))
++        self.assertIn("not finished within 100s", err)
++        self.assertTrue(slept)
++        self.assertLessEqual(sum(slept), 100)
++
++    def test_wait_bound_zero_returns_a_single_green_read_as_is(self) -> None:
++        # (iv): merge_wait_secs = 0 is unchanged — one read, no sleep, verdict as-is.
++        cfg = _cfg(self.tmp, merge_wait_secs=0)
++        rc, calls, _, slept = self._drive_reads("MK6", [_rollup(("dco", "pass"))], cfg=cfg)
++        self.assertEqual(rc, 0)
++        self.assertTrue(self._merged(calls))
++        self.assertEqual(len(self._checks(calls)), 1)
++        self.assertEqual(slept, [])
++
+     def test_merge_requires_comes_from_the_driver_table(self) -> None:
+         # Through the REAL config loader, not a hand-built Config: `[driver]
+         # merge_requires` in a rendered pdca.toml has to actually reach `_merge_one`.

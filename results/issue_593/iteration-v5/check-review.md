@@ -1,0 +1,38 @@
+Review issue #593: make stack-mode folds append-only within a run, preserve published commits, target the real base, and hold dependents when no fresh branch was published.
+
+| Item | Verdict | Basis |
+|------|---------|-------|
+| C1 Spec | PASS | The brief defines observable ancestry, PR-base, publication-failure, and run-isolation requirements, including the latest carry-forward corrections; `brief.md:26`, `brief.md:342`. |
+| C2 Reproduction (red pre-fix) | PASS | Independently stashing production changes while retaining regression tests yields 27 assertion failures and 10 errors across 179 tests, including ancestry and PR-base failures; `reviewer-red.log:828`, `reviewer-red.log:894`, `reviewer-red.log:903`. |
+| C3 Change | FAIL | A later stacked PR merged into main hides earlier fold markers from the moving-base history range, so an already-carried deleted prerequisite unnecessarily imports main and can stop unrelated work; `target/template/src/pdca_harness/integrate.py:414`, `target/template/src/pdca_harness/integrate.py:431`; reproduced at `reviewer-gone-history.log:9`. |
+| C4 Verification (red→green) | PASS | Restoring the same production patch makes all 179 affected-module tests pass; this independently confirms the asserted regression evidence, while C3 records an additional uncovered case; `reviewer-red.log:905`, `reviewer-green.log:481`, `gate-logs/C4-verify.log:2284`. |
+| C5 Causal adequacy | PASS | Real-commit ancestry and real-base targeting address both specified causes, and tests exercise production against real Git; no optional-capability probe masks a load-time cause; `target/template/tests/test_integrate_stack_bases.py:187`, `target/template/src/pdca_harness/integrate.py:375`, `target/template/src/pdca_harness/publish.py:274`; C3 identifies the remaining edge defect. |
+| T1 Structure | PASS | Publication eligibility shares one candidate/ref resolver, while flow owns run-local tips and publication holds; the changes fit existing integration/publishing boundaries; `target/template/src/pdca_harness/integrate.py:127`, `target/template/src/pdca_harness/flow.py:1710`. |
+| T2 Shape | PASS | Independently rerun docs lint, 22-page rendering/link audit, and whitespace checks pass; frozen host-CI parity agrees; `reviewer-docs.log:1`, `reviewer-render.log:3`, `gate-logs/host-ci-docs.log:15`. |
+| T3 Runtime | PASS | Independent driver suite: 2,253 tests, two skips, zero failures; frozen root-suite evidence shows 24 tests passed, while the local root rerun lacks importable Copier; `reviewer-suite.log:1782`, `gate-logs/T3-suite.log:54`, `reviewer-root-suite.log:36`. |
+| T4 Contribution | N/A | Contribution texts are intentionally drafted after Check; the substantive contribution audit must rerun at publish; `gate-logs/T4-contribution.log:10`. |
+| T5 Judgment | NEEDS-HUMAN | Confirm the supplied path-based prior-art claims and applicability of the prior approval to the vendored-spec edits: this synthetic target cannot establish merged/closed history, and the brief identifies those edits as human-only; `reviewer-prior-art.log:4`, `brief.md:271`, `brief.md:287`, `target/template/PCDA/quality-cycle/09-parallel-lanes.md:69`. |
+| Validation — fitness-to-purpose | NEEDS-HUMAN | Decide whether the workflow is fit after resolving C3 and completing live-host validation: GitHub Files changed/Update branch and the real merged-PR lookup were not exercised, so those outcomes rest on local Git and mocked host state; `brief.md:208`, `target/template/tests/test_integrate_stack_bases.py:319`. |
+
+**Finding — P2: the moving base erases evidence that a deleted prerequisite is already carried.**
+
+`target/template/src/pdca_harness/integrate.py:430` queries first-parent subjects in `<base_remote>/<base>..HEAD`. After a later stacked PR merges, its ancestry carries earlier integration merge commits into the base. Those subjects disappear from this range even though the integration line still contains them. Consequently the check at line 414 fails and line 424 imports the current base unnecessarily. An unrelated conflicting base change then raises `IntegrationError`, stopping subsequent waves. This is the unnecessary STOP the latest carry-forward explicitly asks to avoid, rather than an overlap between accepted bundle branches.
+
+Independent reproduction, runnable from this review directory with `python3 reviewer-repro.py`:
+
+1. Publish A and C, then fold them to T1.
+2. Publish B and D from T1, then fold A/C/B/D to T2.
+3. Merge A, C, then B into main with actual Git merge commits; delete A's branch. Add a conflicting `d.txt` change to main.
+4. Fold A/C/B/D again with this run's recorded T2.
+
+Observed: A's published tip **is an ancestor** of T2; its fold subject is present in the full first-parent history but absent from the base-relative range. The fold fails on `d.txt` while processing A (`reviewer-gone-history.log:1`, `:5`, `:8`, `:9`). The remote line remains unchanged. All branch operations and merges are real Git against a local bare origin; only the GitHub `is_merged` lookup is replaced with the true state established by those merges. Preserve evidence of previously folded work independently of the moving target base, and add this topology to the regression coverage.
+
+**Evidence and limits.** Production changes were stashed only in the supplied disposable target and restored successfully; regression tests stayed in place for both legs. No target source was edited. The production-import scanner also passed (`reviewer-prod-path.log:1`). The red leg contains substantive assertion failures, not merely errors from newly introduced APIs. The target matches the supplied patch; no stale-target caveat applies.
+
+The local root runner returned 77 because Copier is not importable by `/usr/bin/python3`; this is a reviewer-host limitation, not a patch failure. Its frozen log reports the render/update suite actually passed (`gate-logs/T3-suite.log:54`). All six frozen gate logs were available. T4's deferred result is intentionally N/A. The instance-specific wrappers were adjudicated through their logs and, where available, their underlying tools were independently rerun.
+
+The prior-art investigation against the supplied target found only synthetic base commit `df21c9a` and no remotes (`reviewer-prior-art.log:1`). The brief reports merged and closed-unmerged searches by `integrate.py`/`publish.py` path; it supplies no independently inspectable search output or equivalent coverage for the other affected paths. No other checkout was consulted. The available `target/template/docs/INTEGRATION.md.jinja:80` leaves the project-specific human-only list as TODO; the vendored-spec requirement is therefore taken from the explicit brief, not inferred from that template. Earlier sign-off decisions recorded in the brief are acknowledged; no redesign or scope re-entry is requested.
+
+**Live-host validation owed.** In a disposable configured GitHub repository, prepare A and C in wave 0 and B depending on both, each changing a distinct file, and run `pdca flow A C B`. Inspect each URL with `gh pr view <URL> --json baseRefName,headRefName` and confirm the real target base. Have the human merge A and C with merge commits, inspect `gh pr diff <B-URL> --name-only`, use GitHub's “Update branch,” and confirm only B's change remains before merging B. In a separate run paused at a later wave's sign-off, merge and delete a prerequisite branch, then resume and confirm the real `gh pr view` lookup recognizes the merge and the continuing integration line retains the prerequisite's content. These live-host outcomes have not been observed by this reviewer.
+
+This review is advisory; it does not change acceptance or gate results.

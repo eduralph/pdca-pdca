@@ -1,0 +1,287 @@
+diff --git a/docs/03-plan.md b/docs/03-plan.md
+index 7b2e671..a3fb1bc 100644
+--- a/docs/03-plan.md
++++ b/docs/03-plan.md
+@@ -101,8 +101,9 @@ shape and the driver schedules it. Optional brief fields, set at Plan:
+ 
+ Declaring the constraints is a Plan judgment — the planner sets them from the batch's real
+ dependency/conflict structure; an unschedulable graph (a cycle, or a dep that is neither in
+-the batch nor already COMPLETE) is rejected up front. `pdca waves <ids…>` prints the
+-computed wave plan without building.
++the batch nor already COMPLETE) is rejected up front — `pdca flow` exits 2 before building
++anything, naming the bundle and the dependency (or the cycle) and the ways out.
++`pdca waves <ids…>` prints the computed wave plan without building.
+ 
+ ### What a real brief looks like
+ 
+diff --git a/template/src/pdca_harness/cli.py b/template/src/pdca_harness/cli.py
+index dd18c65..d3bd6a7 100644
+--- a/template/src/pdca_harness/cli.py
++++ b/template/src/pdca_harness/cli.py
+@@ -658,6 +658,13 @@ def _flow_claimed(cfg: Config, args: argparse.Namespace, claims: drive_claim.Run
+     except flow.PreflightError as exc:
+         print(f"flow: {exc}", file=sys.stderr)
+         return 1
++    except waves.DependencyGraphError as exc:
++        # An unschedulable dependency graph is operator input (#589), refused like a bad
++        # pdca.toml (rc 2, #92) — not a traceback. Only this subtype: any other ValueError
++        # out of `flow_ids` is a real fault and still propagates.
++        print(f"flow: {exc}\n  refusing to start — no bundle was built.\n"
++              f"  Ways out: {exc.remedy}.", file=sys.stderr)
++        return 2
+ 
+     # Two PRESENTATIONS of that one map — never two drive paths, and never a second source
+     # of truth: both read only `results`, so neither can report what the other cannot see.
+diff --git a/template/src/pdca_harness/waves.py b/template/src/pdca_harness/waves.py
+index d19d951..dfdac89 100644
+--- a/template/src/pdca_harness/waves.py
++++ b/template/src/pdca_harness/waves.py
+@@ -48,12 +48,27 @@ def declared_deps(bp: Path) -> list[str]:
+     return brief.depends_on(bp) + brief.depends_on_merged(bp) + brief.stacks_on(bp)
+ 
+ 
++class DependencyGraphError(ValueError):
++    """The declared dependency graph is unschedulable — operator input, not a crash (#589).
++
++    Still a ``ValueError``, so every caller that already expects one keeps working; the
++    distinct type lets ``pdca flow`` turn exactly THIS refusal into a short message and
++    rc 2 without swallowing any other ``ValueError``. ``remedy`` is the one-line "ways out"
++    the CLI prints under the message.
++    """
++
++    def __init__(self, message: str, remedy: str) -> None:
++        super().__init__(message)
++        self.remedy = remedy
++
++
+ def check_dep_graph(cfg: Config, bundles: list[Path]) -> None:
+     """Validate the declared dependency DAG before any build (issue #36).
+ 
+     A dependency that is neither in this batch nor an already-COMPLETE bundle on disk
+-    is a misconfigured brief; a cycle is unschedulable. Both raise ``ValueError`` so the
+-    run aborts before touching any bundle. No deps declared ⇒ no-op.
++    is a misconfigured brief; a cycle is unschedulable. Both raise
++    :class:`DependencyGraphError` (a ``ValueError``) so the run aborts before touching any
++    bundle. No deps declared ⇒ no-op.
+     """
+     names = {b.name for b in bundles}
+     graph: dict[str, list[str]] = {}
+@@ -75,9 +90,12 @@ def check_dep_graph(cfg: Config, bundles: list[Path]) -> None:
+             # Stacks on against bundle() (an archived-only stack parent stays rejected).
+             resolved = cfg.bundle(dep) if dep in stacks else cfg.find_bundle(dep)
+             if state.state(resolved) != state.COMPLETE:
+-                raise ValueError(
++                raise DependencyGraphError(
+                     f"{b.name}: declared dependency '{dep}' is neither in this batch "
+-                    f"nor an existing COMPLETE bundle")
++                    f"nor an existing COMPLETE bundle",
++                    remedy=f"add {dep} to this run's ids; or, if it landed outside the "
++                           f"cycle, drop the edge from {b.name}'s brief; or finish {dep} "
++                           f"first")
+         graph[b.name] = edges
+ 
+     WHITE, GRAY, BLACK = 0, 1, 2
+@@ -90,7 +108,10 @@ def check_dep_graph(cfg: Config, bundles: list[Path]) -> None:
+         for m in graph[n]:
+             if color[m] == GRAY:
+                 cyc = path[path.index(m):] + [m]
+-                raise ValueError("dependency cycle: " + " → ".join(cyc))
++                raise DependencyGraphError(
++                    "dependency cycle: " + " → ".join(cyc),
++                    remedy="drop one edge of the cycle from its brief (`Depends on` / "
++                           "`Depends on (merged)` / `Stacks on`)")
+             if color[m] == WHITE:
+                 visit(m)
+         path.pop()
+@@ -142,9 +163,10 @@ def compute_waves(cfg: Config, bundles: list[Path]) -> list[list[Path]]:
+ 
+     ``wave[k]`` holds the bundles whose every prerequisite is in an earlier wave; within
+     a wave there is no dependency *and* no conflict edge, so it builds in parallel and
+-    folds onto the integration branch in one step. Raises ``ValueError`` (via
+-    :func:`check_dep_graph`) on an unschedulable graph — a cycle, or a dependency neither
+-    in this batch nor already COMPLETE. No fields declared ⇒ one wave, sort-by-name.
++    folds onto the integration branch in one step. Raises :class:`DependencyGraphError`
++    (a ``ValueError``, via :func:`check_dep_graph`) on an unschedulable graph — a cycle,
++    or a dependency neither in this batch nor already COMPLETE. No fields declared ⇒ one
++    wave, sort-by-name.
+     """
+     check_dep_graph(cfg, bundles)  # cycle / unresolved dep → ValueError, before any work
+     by_name = {b.name: b for b in bundles}
+diff --git a/template/tests/test_flow_dependency_refusal.py b/template/tests/test_flow_dependency_refusal.py
+new file mode 100644
+index 0000000..9e042e6
+--- /dev/null
++++ b/template/tests/test_flow_dependency_refusal.py
+@@ -0,0 +1,172 @@
++"""`pdca flow <ids>` refuses an unschedulable dependency graph with rc 2, not a traceback (#589).
++
++`waves.check_dep_graph` rejects, before any build, a brief whose `Depends on` names a bundle
++that is neither in the batch nor COMPLETE, and a dependency cycle. That refusal is right; it
++used to reach the operator as a raw `ValueError` traceback out of `cli._flow`, because only
++`flow.PreflightError` was caught around `flow.flow_ids`. These tests drive `cli._flow` — the
++function `pdca flow` dispatches to — with named ids and assert on behaviour only: the return
++code, the stderr text, and that no bundle was built.
++
++Modules are imported, never the new exception class (`from pdca_harness import cli, …`): on
++the C4 red leg the production hunks are reverted, and a module-level import of a symbol the
++fix adds would fail to load (PDCA-UNVERIFIABLE) instead of going red.
++
++All leaves stubbed, gates empty, no tracker / network / `gh` / container — the fixture shape
++of `tests/test_flow_adopt_recovery.py:47-66` and `:135-146`.
++
++    cd template && PYTHONPATH=src python3 -m unittest tests.test_flow_dependency_refusal
++"""
++
++from __future__ import annotations
++
++import io
++import shutil
++import tempfile
++import unittest
++from contextlib import redirect_stderr, redirect_stdout
++from pathlib import Path
++from types import SimpleNamespace
++
++from pdca_harness import cli, driver, flow, state
++from pdca_harness.config import Config, LeafConfig
++
++
++def _stub_config(root: Path) -> Config:
++    """All six leaves stubbed, gates empty — `tests/test_flow_adopt_recovery.py:47-66`."""
++    return Config(
++        root=root,
++        bundle_root=root / "results",
++        process_dir=root / "process",
++        templates_dir=root / "templates",
++        default_branch="main",
++        tracker_system="github",
++        tracker_url="",
++        issue_id_example="#1",
++        builder=LeafConfig(mode="stub", family="claude"),
++        reviewer=LeafConfig(mode="stub", family="codex"),
++        planner=LeafConfig(mode="stub", family="claude", interactive=True),
++        signoff=LeafConfig(mode="stub", family="claude", interactive=True),
++        publisher=LeafConfig(mode="stub", family="claude", interactive=True),
++        act=LeafConfig(mode="stub", family="claude", interactive=True),
++        act_cadence=1,
++        repo_checkouts={"example-org/example-repo": str(root / "example-repo")},
++    )
++
++
++def _brief(slug: str, *extra: str) -> str:
++    """An authored brief (a filled Slug, so `state` reads PLANNED)."""
++    return (f"# Brief — {slug}\n\n"
++            f"- **Slug:** {slug}\n"
++            f"- **Defect:** stub defect for {slug}.\n"
++            "- **Success criterion:** the stub test passes.\n"
++            "- **Repo + branch target:** example-repo @ main\n"
++            "- **Test file:** test_stub.py\n"
++            + "".join(line + "\n" for line in extra))
++
++
++class FlowDependencyRefusal(unittest.TestCase):
++    def setUp(self) -> None:
++        tmp = Path(tempfile.mkdtemp())
++        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
++        self.cfg = _stub_config(tmp)
++        self.err = io.StringIO()
++        self.out = io.StringIO()
++        # Count every build: Do must never run on any bundle of a refused batch
++        # (the same probe as `tests/test_flow_slice.py:1068-1082`).
++        self.built: list[str] = []
++        real = driver.run_issue
++        self.addCleanup(setattr, driver, "run_issue", real)
++
++        def counting(d: Path, cfg: Config) -> str:
++            self.built.append(d.name)
++            return real(d, cfg)
++        driver.run_issue = counting
++
++    def _bundle(self, iid: str, *extra: str) -> Path:
++        d = self.cfg.bundle(iid)
++        d.mkdir(parents=True)
++        (d / "brief.md").write_text(_brief(f"slug-{iid.lower()}", *extra), encoding="utf-8")
++        return d
++
++    def _cli(self, ids: list[str]) -> int:
++        """`pdca flow <ids…>` through `cli._flow`, `--no-publish --no-act`."""
++        args = SimpleNamespace(issue_ids=ids, from_csv=None, from_briefs=None,
++                               no_publish=True, no_act=True, by="", lanes=None,
++                               max_passes=None)
++        with redirect_stderr(self.err), redirect_stdout(self.out):
++            return cli._flow(self.cfg, args)
++
++    def _assert_nothing_built(self, *ids: str) -> None:
++        self.assertEqual(self.built, [], "Do ran on a bundle of a refused batch")
++        for iid in ids:
++            d = self.cfg.bundle(iid)
++            self.assertFalse((d / "patch.diff").exists(), f"{d.name} was built")
++            self.assertEqual(state.state(d), state.PLANNED)
++
++    def _assert_refusal(self, rc: int) -> str:
++        err = self.err.getvalue()
++        self.assertEqual(rc, 2, f"expected rc 2, got {rc}; stderr:\n{err}")
++        self.assertNotIn("Traceback", err)
++        return err
++
++    def _call(self, ids: list[str]) -> int:
++        """`_cli`, but a raised exception is a FAILURE of this test (the pre-fix defect),
++        reported with its message rather than as an error."""
++        try:
++            return self._cli(ids)
++        except ValueError as exc:  # the pre-fix behaviour: a traceback to the operator
++            self.fail(f"`pdca flow {' '.join(ids)}` raised instead of refusing: "
++                      f"{type(exc).__name__}: {exc}")
++
++    # -- unresolved dependency ----------------------------------------------------------
++
++    def test_unresolved_dependency_single_id_refuses_rc2(self) -> None:
++        self._bundle("A", "- **Depends on:** 773")
++        rc = self._call(["A"])
++        err = self._assert_refusal(rc)
++        self.assertIn("issue_A: declared dependency '773' is neither in this batch nor an "
++                      "existing COMPLETE bundle", err)
++        # …plus the ways out: add it to the batch, drop the edge, or finish it first.
++        self.assertIn("add 773", err)
++        self.assertIn("drop the edge", err)
++        self.assertIn("finish 773 first", err)
++        self._assert_nothing_built("A")
++
++    def test_unresolved_dependency_two_ids_refuses_rc2(self) -> None:
++        self._bundle("A", "- **Depends on:** 773")
++        self._bundle("B")
++        rc = self._call(["A", "B"])
++        err = self._assert_refusal(rc)
++        self.assertIn("issue_A: declared dependency '773' is neither in this batch nor an "
++                      "existing COMPLETE bundle", err)
++        self._assert_nothing_built("A", "B")
++
++    # -- dependency cycle ---------------------------------------------------------------
++
++    def test_dependency_cycle_refuses_rc2(self) -> None:
++        self._bundle("A", "- **Depends on:** B")
++        self._bundle("B", "- **Depends on:** A")
++        rc = self._call(["A", "B"])
++        err = self._assert_refusal(rc)
++        self.assertIn("dependency cycle: issue_A → issue_B → issue_A", err)
++        self._assert_nothing_built("A", "B")
++
++    # -- (iii): no over-broad catch -----------------------------------------------------
++
++    def test_other_value_error_still_propagates(self) -> None:
++        # Green on both legs by design: the new handling must catch ONLY the
++        # unschedulable-graph refusal, never an arbitrary ValueError out of `flow_ids`.
++        self._bundle("A")
++        real = flow.flow_ids
++        self.addCleanup(setattr, flow, "flow_ids", real)
++
++        def boom(*_a: object, **_k: object) -> dict[str, str]:
++            raise ValueError("something else")
++        flow.flow_ids = boom
++        with self.assertRaises(ValueError) as cm:
++            self._cli(["A"])
++        self.assertEqual(str(cm.exception), "something else")
++
++
++if __name__ == "__main__":
++    unittest.main()
