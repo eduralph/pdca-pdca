@@ -1515,3 +1515,116 @@ upstream, agreed with the human.
   finding once. #606: no §6 row ends mid-thought.
 - #607: no effectiveness check before 0.70.0. Count parser-edge rounds per bundle
   until then as the baseline.
+
+---
+
+# Act review — 2026-10-02 — cycles considered: issue_582, issue_589, issue_593, issue_597
+
+Thirteenth Act review. Four bundles signed off 2026-10-02, all merged-wider (PRs
+eduralph/pdca-harness#617, #618, #619, #620). The index carried 84; the other 80 were
+handled at earlier reviews. No instance delta. Sixteen items filed upstream and one PR
+closing line fixed, agreed with the human.
+
+## What the cycles' records exposed
+
+- **Deferrals don't reach Act.** The human asked whether the first pass had missed Act
+  items in earlier iterations. It had. Reading only §10 (live and `iteration-v*`) found
+  two items. Reading the iterate carry-forwards (`iteration-v*/session-carry-forward`),
+  the advisory reviews of every round (`check-advisory-*.md`) and the PR bodies ("Known
+  limits", "Not fixed here") found 13 items that were knowingly set aside at Check and
+  tracked nowhere: 2 in 582, 1 in 589, 9 in 593, 1 in 597. Only one of them was ever in a
+  §10 (593 v6, lost to #608). Harness machinery: neither sign-off nor publish turns a
+  deferral into a §10 line.
+- **A `Fixes` line that overclaimed.** PR #617's body said "this narrows #582 but does not
+  fully close it" and ended with a bare `Fixes #582`. Merging it would close #582 with the
+  check-name gap open.
+- **The Act index cuts multi-line §10 bullets** to their first line
+  (`src/pdca_harness/act.py:860-868`, same on upstream main). issue_582's publisher note
+  showed as "…Its attempt to apply".
+- **The publisher cannot check citations against patched code** (issue_582 §10): `git
+  worktree add` + `git apply` in scratch was denied; line numbers were derived by hand.
+- **Full §10 sweep** (all 86 bundles with a SUMMARY, all 100 `iteration-v*` summaries,
+  multi-line bullets joined): 46 distinct non-telemetry items. All were routed at earlier
+  reviews except the two above (582 publisher, 593 v6 live-GitHub). issue_335 has no
+  SUMMARY yet (still open).
+- **Expected recurrences, no action:** cleared plan findings re-entering §6 on 593 (v4
+  delta: "cleared … the six old plan-review items" again; #603 not merged); a §6 row cut
+  mid-sentence on 593 (#606); T5 prior art in all 4 (#575).
+- **False "ineffective" flag:** size backstop on 593 (188 KB, 17 files, 7 build iterations,
+  2 re-plans) is a true positive; the human set the split aside on purpose (v5 delta).
+  `size-signal.json` says rounds=1 because rounds reset at a re-plan (#556).
+- **Quiet:** issue_589 went through in one round with no deferrals beyond item #628.
+
+## Process deltas
+
+- **No instance delta warranted.** Everything above is harness machinery (sign-off,
+  publish, act index, publisher leaf permissions); a local edit would be overwritten by
+  `copier update`.
+- **Review practice (this log, until upstream #636 lands):** each Act review reads, for
+  every bundle considered, all `iteration-v*/session-carry-forward` files, all
+  `check-advisory-*.md` (live and archived), and the PR body's "Known limits" / "Not fixed
+  here" / "follow-up" lines, not only §10. See "How effectiveness will be judged".
+- **Ledger** (`process/act-ledger.json`): row 27 (plan advisory 6 findings) → structural,
+  benefit telemetry. Row 12 (size backstop): 593 flag noted as a true positive. Rows 21,
+  22, 24, 26 (T5): recurred in all 4, still pending #575.
+
+## Follow-ups routed (not process deltas — work handed to an owner)
+
+All filed on eduralph/pdca-harness, no milestone yet (the human sets milestones).
+
+Set aside at Check, tracked nowhere until now:
+
+- 582 residual: the confirm read compares only the verdict, not which checks are present
+  → https://github.com/eduralph/pdca-harness/issues/621
+- 582: `merge_wait_secs` 1-14 quietly refuses every PR under `merge_requires = "all"`
+  → https://github.com/eduralph/pdca-harness/issues/622
+- 593 known limit: a reverted prerequisite passes the ancestry check
+  → https://github.com/eduralph/pdca-harness/issues/623
+- 593 known limit: the hold does not cascade through a pre-COMPLETE dependent
+  → https://github.com/eduralph/pdca-harness/issues/624
+- 593: live GitHub validation of the stack workflow (the v6 §10 item lost to #608)
+  → https://github.com/eduralph/pdca-harness/issues/625
+- 593: squash/rebase-merged stack PRs stop the next fold
+  → https://github.com/eduralph/pdca-harness/issues/626
+- 597: `flow --from-csv` exits 0 when every swept bundle is skipped
+  → https://github.com/eduralph/pdca-harness/issues/627
+- 589: `pdca waves` omits the remedy; "outside the cycle" wording
+  → https://github.com/eduralph/pdca-harness/issues/628
+- 593 v2 ("out of scope this round"): a `Conflicts with` partner of an unpublished bundle
+  is not held → https://github.com/eduralph/pdca-harness/issues/629
+- 593 v3: a wave>0 PR lands every earlier-wave bundle on the base, including closed ones
+  (relates to #463) → https://github.com/eduralph/pdca-harness/issues/630
+- 593 v3: the re-gate leaves build output in the integration worktree; the next fold
+  stops (message fixed in v4, cause not) → https://github.com/eduralph/pdca-harness/issues/631
+- 593 v5: publish raising after the push holds a pushed bundle without saying so
+  (deliberate fail-closed; filed as a decision) → https://github.com/eduralph/pdca-harness/issues/632
+- 593 v1: re-publishing a folded bundle during a live run (relates to #573)
+  → https://github.com/eduralph/pdca-harness/issues/633
+
+Found by this review:
+
+- Act index truncates multi-line §10 bullets → https://github.com/eduralph/pdca-harness/issues/634
+- Publisher cannot check citations against patched code (582 §10)
+  → https://github.com/eduralph/pdca-harness/issues/635
+- Deferrals decided at Check never reach Act (the class behind #621-#633)
+  → https://github.com/eduralph/pdca-harness/issues/636
+- Comment on #608 recording the 593 v6 loss and pointing at #636:
+  https://github.com/eduralph/pdca-harness/issues/608#issuecomment-5972924667
+- **PR #617 closing line** (human's call): `Fixes #582` → `Fixes #582 (narrowed: the
+  check-name gap stays open as #621)`, and the "narrows #582" sentence now names #621.
+  `Fixes` is kept because the target's required `require-linked-issue` check needs a
+  closing keyword. The frozen `results/issue_582/pr-description.md` is left as it was.
+- Carried, open upstream, no new filing: #556, #573, #575, #586, #603, #606, #607, #608.
+- Open Act item (carried, unchanged): triage rubric should state five buckets explicitly
+  (issue_316 §10). No triage brief ran.
+
+## How effectiveness will be judged
+
+- Until #636 lands: at each review, read every bundle's carry-forwards, advisory reviews
+  (all rounds) and PR "Known limits" as well as §10, and list each deferral with its issue
+  or a reason it needs none. The count of untracked deferrals found per review is the
+  baseline (this review: 13 in 4 bundles).
+- #636: after it lands, a review that reads only §10 finds every deferral the sweep above
+  would find.
+- #634: the next index shows multi-line §10 bullets whole.
+- #621: #582 may close with #617; #621 stays open until the check-name gap is closed.
