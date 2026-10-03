@@ -1,0 +1,11 @@
+{
+  "mode": "new-pr",
+  "branch": "fix/589-flow-dep-graph-refusal-not-traceback",
+  "pr_url": "https://github.com/eduralph/pdca-harness/pull/618",
+  "base": "main",
+  "repo": "eduralph/pdca-harness",
+  "by": "Eduard Ralph",
+  "date": "2026-10-02",
+  "id_pending": false,
+  "host_ci_base": "24c7f83cca82764c279e75d0103f51ca33b97b18"
+}
