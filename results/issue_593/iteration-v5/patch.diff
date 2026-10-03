@@ -1,0 +1,2415 @@
+diff --git a/docs/05-check.md b/docs/05-check.md
+index 5d76d8f..8d0f6ef 100644
+--- a/docs/05-check.md
++++ b/docs/05-check.md
+@@ -810,12 +810,13 @@ base; even there the **final** wave's PR stays a draft for your ready-mark.
+ This holds for a **batch**, too. A multi-id `pdca flow` runs the batch as
+ dependency waves ([09 parallel lanes in the spec](../template/PCDA/quality-cycle/09-parallel-lanes.md);
+ mechanics in [step 07](07-crosscutting.md#waves-in-execution)); in the default
+-`stack` mode each wave's accepted work is folded onto a run-scoped integration
+-branch the next wave builds on, and each dependent opens a **stacked** draft
+-PR — the harness still never merges, so you review and merge the stack
+-bottom-up yourself. Only the opt-in `[driver].wave_mode = "merge"` (own-repo /
+-CD, where you hold merge rights on the base) relaxes this, `gh pr merge`-ing
+-each wave before the next builds.
++`stack` mode each wave's published PR branches are folded onto a run-scoped
++integration branch the next wave builds on, and each dependent opens a
++**stacked** draft PR against the real base — the harness still never merges,
++so you review and merge the stack bottom-up yourself, with merge commits.
++Only the opt-in `[driver].wave_mode = "merge"` (own-repo / CD, where you hold
++merge rights on the base) relaxes this, `gh pr merge`-ing each wave before the
++next builds.
+ 
+ State: `COMPLETE`, published. On to the cross-cycle beat — [step 06](06-act.md).
+ 
+diff --git a/docs/07-crosscutting.md b/docs/07-crosscutting.md
+index 6455262..498a77c 100644
+--- a/docs/07-crosscutting.md
++++ b/docs/07-crosscutting.md
+@@ -639,12 +639,31 @@ does with that declaration once a batch actually runs: bundles in the same wave
+ build in parallel; each wave's *accepted* result then becomes the base the next
+ wave builds on, via `[driver].wave_mode`:
+ 
+-- **`"stack"`** (default, fork-safe) — folds each wave's accepted patches onto a
+-  run-scoped integration branch the next wave builds on, and opens every PR as a
+-  stacked PR. Push-only, so it works from a fork with no merge rights, and it
+-  keeps STOP discipline — the harness never merges anything; you merge the PR
+-  stack bottom-up with a merge commit (never squash, or the stack's history
+-  breaks).
++- **`"stack"`** (default, fork-safe) — merges each wave's accepted, published PR
++  branches onto a run-scoped integration branch the next wave builds on, and
++  opens every PR against the real base. Push-only, so it works from a fork with
++  no merge rights, and it keeps STOP discipline — the harness never merges
++  anything into your target; you merge the PR stack bottom-up with a merge commit
++  (never squash or rebase: they put a change on the base as new commits, not the
++  ones its dependents carry). The fold puts every published branch of a target
++  on its line, so a later wave's PR carries every earlier-wave branch on the
++  line, not only its prerequisites', and shows their changes until they merge.
++  Once they have all merged, its diff is its own change when the line is a
++  plain chain: one branch per earlier wave, and no newer base taken in (your
++  base did not move between the wave-0 publishes and the run's first fold, and
++  no fold merged it in to pick up a merged prerequisite whose branch was
++  deleted). Otherwise a fold merge commit joined histories your base got
++  separately, so the PR has several merge bases with it and can keep showing an
++  already-merged change: use "Update branch" (merge the base into it) and its
++  diff is its own change again. Within a run the integration line only grows:
++  the run's first fold starts it fresh from the base with a force-push (if your
++  origin refuses force-pushes, delete the old `pdca-integration/<base>` first,
++  or allow force-pushes on `pdca-integration/*`), and later folds continue it
++  without force — and stop the run if another run moved it. An accepted bundle
++  whose publish pushed no branch holds only the bundles that depend on it; the
++  rest of the run goes on. When you publish it later (`pdca publish <id>`), its
++  PR branch is cut from the line commit it was built on, so it carries no later
++  wave's work.
+ - **`"merge"`** (own-repo / continuous-delivery only) — actually `gh pr merge`s
+   each non-final wave's PRs, so the next wave builds on a genuinely merged base.
+   Needs merge rights on the base remote and relaxes STOP discipline for the
+diff --git a/template/PCDA/quality-cycle/08-glossary.md b/template/PCDA/quality-cycle/08-glossary.md
+index 4bd2042..a809d75 100644
+--- a/template/PCDA/quality-cycle/08-glossary.md
++++ b/template/PCDA/quality-cycle/08-glossary.md
+@@ -283,14 +283,17 @@ status: active
+   prerequisite is a **hard error rejected before any build** ([09](09-parallel-lanes.md)).
+ - **`Depends on (merged)` / `Stacks on`** — *deprecated, still parsed*; both fold into a plain
+   `Depends on` edge. Author `Depends on` ([09](09-parallel-lanes.md)).
+-- **Integration branch** — the run-scoped branch a wave's accepted patches are folded onto so
+-  the next wave builds on them within one run (one per `(repo, base)` target); carries the diff
+-  forward with **no merge by the harness** ([09](09-parallel-lanes.md)).
++- **Integration branch** — the run-scoped branch a wave's published PR branches are merged onto
++  so the next wave builds on them within one run (one per `(repo, base)` target); it carries the
++  PRs' own commits, only grows within a run, and is never merged into the target — **nothing is
++  merged into the target by the harness** ([09](09-parallel-lanes.md)).
+ - **wave_mode (`stack` / `merge`)** — how a wave's work reaches the next base (`[driver].wave_mode`):
+   **`stack`** (default, fork-safe) folds onto a push-only integration branch and cuts each
+-  dependent off it — an own-repo PR is a clean increment-only **stacked PR** `--base`d on the
+-  branch, a fork PR opens against the upstream base carrying the *cumulative* diff; in stack
+-  mode the harness **never merges** (you merge the PR stack bottom-up). **`merge`** (own-repo /
++  dependent off it; every PR, own-repo or fork, targets the real base. A later wave's PR carries
++  every earlier-wave branch on the line, not only its prerequisites', and shows their changes
++  until they merge (and, unless the line is a plain chain, until its branch is also updated from
++  the base — see [09](09-parallel-lanes.md)). In stack mode the harness **never merges** (you merge
++  the PR stack bottom-up with a merge commit, not squash or rebase). **`merge`** (own-repo /
+   CD only, needs merge rights) instead **`gh pr merge`s each non-final wave** so the next wave
+   builds on the genuinely-merged base ([09](09-parallel-lanes.md)).
+ - **Overlap audit** — a post-Do check flagging two same-wave bundles whose patches touch a
+diff --git a/template/PCDA/quality-cycle/09-parallel-lanes.md b/template/PCDA/quality-cycle/09-parallel-lanes.md
+index 74d2682..9fd48fa 100644
+--- a/template/PCDA/quality-cycle/09-parallel-lanes.md
++++ b/template/PCDA/quality-cycle/09-parallel-lanes.md
+@@ -54,9 +54,9 @@ Partitioning by issue id alone is not enough — it isolates the *runs* but not
+ 
+ ### Declared ordering — `Depends on:` / `Conflicts with:` → dependency waves [built]
+ 
+-Manual wave-splitting (run a prerequisite batch to COMPLETE, *then* the next) enforces ordering by hand; it does not scale to a batch with a real dependency graph. A brief instead **declares** its ordering constraints and the scheduler computes the order: a batch handed to `pdca flow` runs as an ordered sequence of **dependency waves** (`waves.compute_waves`). Each wave holds only mutually-independent work; its bundles build in parallel, are signed off and published, and then the wave's accepted patches are **folded onto a run-scoped integration branch the next wave builds on** (one branch per `(repo, base)` target, so a batch spanning several targets keeps a separate integration line per target, and a later bundle stacks on the branch for *its own* target) — so a dependent builds on its prerequisite's accepted result *within one run*, with no merge by the harness.
++Manual wave-splitting (run a prerequisite batch to COMPLETE, *then* the next) enforces ordering by hand; it does not scale to a batch with a real dependency graph. A brief instead **declares** its ordering constraints and the scheduler computes the order: a batch handed to `pdca flow` runs as an ordered sequence of **dependency waves** (`waves.compute_waves`). Each wave holds only mutually-independent work; its bundles build in parallel, are signed off and published, and then the wave's published PR branches are **folded onto a run-scoped integration branch the next wave builds on** (one branch per `(repo, base)` target, so a batch spanning several targets keeps a separate integration line per target, and a later bundle stacks on the branch for *its own* target) — so a dependent builds on its prerequisite's accepted result *within one run*, with nothing merged into the target by the harness.
+ 
+-- **`- **Depends on:** <id>[, <id>…]`** — the topological edge. The dependent lands in a **later wave** than every prerequisite and builds on the integration branch that carries the prereqs' accepted diffs. Because the fold carries the diff forward without a merge, this single field now **subsumes** the former `Depends on (merged)` and `Stacks on`.
++- **`- **Depends on:** <id>[, <id>…]`** — the topological edge. The dependent lands in a **later wave** than every prerequisite and builds on the integration branch that carries the prereqs' accepted work. Because the fold carries that work forward without merging anything into the target, this single field now **subsumes** the former `Depends on (merged)` and `Stacks on`.
+ - **`- **Conflicts with:** <id>[, <id>…]`** — an undirected "edit a shared resource" relation. Because each wave is folded onto the base before the next builds, two conflicting bundles must not share a wave; the leveler **orients each conflict pair into different waves** (by a deterministic id order, unless a dependency path already separates them), so the later one rebuilds on the earlier's folded result instead of colliding.
+ - **`- **Depends on (merged):** / **Stacks on:**`** — *deprecated, still parsed.* Both fold into a plain `Depends on` edge: the wave model gives the dependent the prerequisite's accepted diff (via the integration branch) without the old cross-run merge wait (`Depends on (merged)`) or the single-chain branch-stacking (`Stacks on`, whose multi-parent gap the integration branch fixes). Author `Depends on`.
+ 
+@@ -66,7 +66,7 @@ With no fields declared the batch is a **single wave**, dispatched byte-for-byte
+ 
+ How a wave's accepted work reaches the next wave's base is `[driver].wave_mode`:
+ 
+-- **`stack`** (default) — fold the accepted patches onto a run-scoped integration branch on `origin` (push-only, so a **fork** contributor can do it) and cut each dependent's branch off it so it carries its prerequisites' diffs. How the dependent's PR then opens depends on where the base lives, because `gh --base` must name a branch in the **upstream** repo: for an **own-repo** contribution the integration branch *is* upstream, so each PR is a clean, increment-only **stacked PR** `--base`d onto it; for a **fork** the integration branch lives on the fork and can't be a `--base`, so each PR opens against the **upstream base** and carries the **cumulative** stacked diff (a prerequisite's diff shows in its dependent's PR). That cumulative diff does **not** auto-reduce when the prerequisite merges — the fold's integration commits aren't ancestors of the prerequisite's PR-merge, so the PR merge-base never advances; it clears only when the dependent is rebuilt off the merged base (a later `pdca flow` run). The PR still merges cleanly bottom-up (the already-merged prerequisite content re-merges as a no-op) — the cost is just a noisier review diff. #185. Either way the harness never merges; you merge the PR stack bottom-up with a **merge commit** (not squash, which would drop a parent's commits). A non-applying patch (an undeclared overlap) STOPs the run. STOP discipline holds throughout.
++- **`stack`** (default) — merge each accepted bundle's **published PR branch** onto a run-scoped integration branch on `origin` (push-only, so a **fork** contributor can do it), and cut each later wave's branches off it so they carry the earlier waves' work: those bundles' own PR commits, joined by signed-off merge commits, never re-applied copies. **Every PR targets the real base**, own-repo and fork alike — the integration branch is a staging line nothing merges into the target, so no PR is opened against it. The fold puts every published branch of a target on its line, so a later wave's PR carries **every earlier-wave branch on the line**, not only its prerequisites', and shows their changes until they merge (merging it first would land their commits with it). Once they have all merged with merge commits, its diff against the base is its own change when the line is a plain chain: each earlier wave put one branch on it, and it never took in a base newer than a branch on it (the base did not move between the wave-0 publishes and the run's first fold, and no fold merged the base in — a fold does that to pick up a merged prerequisite whose branch was deleted). Otherwise a fold merge commit joined histories the base got separately; that commit never reaches the base, so the PR has several merge bases with it and can keep showing an already-merged change. Updating its branch from the base (GitHub's "Update branch") then leaves only its own change. Within one run the line only grows: the run's first fold of a target starts it fresh from the base (a force-push that replaces any earlier run's line — on an origin that refuses force-pushes, delete the old `pdca-integration/<base>` or allow force-pushes on `pdca-integration/*`), and every later fold continues the tip that run pushed, without force, so no fold rewrites a commit an open PR depends on. The harness never merges; you merge the PR stack bottom-up with a **merge commit** — not squash or rebase, which put a prerequisite's change on the base as new commits rather than the ones its dependents carry. A branch that does not merge cleanly onto the line (an undeclared overlap), or a line another run moved meanwhile, STOPs the run; an accepted bundle whose publish pushed no branch holds only the bundles that depend on it, and the rest of the run goes on — published later, its PR branch is cut from the line commit it was built on, so it carries no later wave's work. STOP discipline holds throughout.
+ - **`merge`** (own-repo / continuous-delivery only) — `gh pr merge` each non-final wave's PRs so the next wave builds on the genuinely-merged base. Needs **merge rights** on the base remote (a fork lacks them upstream — keep `stack` there) and relaxes STOP discipline; fail-closed (a non-mergeable PR STOPs the run).
+ 
+ Optionally (`[driver].regate_between_waves`), the repo-scoped gates re-run over the folded integration tip before the next wave builds on it, so a combination that is red though each fix was green *alone* STOPs the run.
+diff --git a/template/pdca.toml.jinja b/template/pdca.toml.jinja
+index f5e4f25..9eefeb5 100644
+--- a/template/pdca.toml.jinja
++++ b/template/pdca.toml.jinja
+@@ -112,11 +112,15 @@ overflow = 0
+ # them as an ordered sequence of dependency waves (computed from each brief's `Depends on`
+ # / `Conflicts with`): a wave's bundles build in parallel, then its accepted work reaches
+ # the NEXT wave's base one of two ways.
+-#   wave_mode = "stack"  (default) — fold each wave's accepted patches onto a run-scoped
+-#       integration branch the next wave builds on, and open each PR as a stacked PR. This
+-#       is PUSH-ONLY (a fork has push), keeps the STOP discipline (the harness never merges;
+-#       you merge the PR stack bottom-up with a merge commit, not squash), and completes a
+-#       dependent batch in one run. The fork-safe default.
++#   wave_mode = "stack"  (default) — merge each wave's accepted, published PR branches onto a
++#       run-scoped integration branch the next wave builds on; every PR targets the real
++#       base. This is PUSH-ONLY (a fork has push), keeps the STOP discipline (the harness
++#       never merges into your target; you merge the PR stack bottom-up with a merge commit,
++#       not squash or rebase), and completes a dependent batch in one run. Within a run the
++#       line only grows: the first fold force-pushes it fresh off the base (if origin refuses
++#       force-pushes, delete the old pdca-integration/<base> or allow force-pushes on
++#       pdca-integration/*), later folds push without force. A bundle whose publish pushed
++#       no branch holds only its dependents. The fork-safe default.
+ #   wave_mode = "merge"  (own-repo / continuous-delivery ONLY) — `gh pr merge` each
+ #       non-final wave's PRs so the next wave builds on the genuinely-merged base. Needs
+ #       MERGE RIGHTS on the base remote (a fork contributor lacks them upstream — keep
+@@ -173,8 +177,9 @@ act_cadence = 5
+ # mid-`cargo test` — an environment fault misattributed to the patch.
+ #   "clean"  (default) — strip lane worktrees of build state (`git clean -fdxq` +
+ #            `reset --hard`; the bulk of the footprint) but keep the checkouts warm;
+-#            remove integration + overflow trees outright (folds rebuild from the base
+-#            every call, so their reuse value is nil).
++#            remove integration + overflow trees outright (each fold resets its tree to a
++#            freshly fetched ref — the base, or the run's pushed tip — so their reuse value
++#            is nil).
+ #   "remove" — remove lane worktrees too (Do / `{{ cli_name }} try` recreate them on demand).
+ #   "off"    — never sweep automatically; `{{ cli_name }} sweep` still reclaims on demand.
+ sweep_worktrees = "clean"
+diff --git a/template/src/pdca_harness/cli.py b/template/src/pdca_harness/cli.py
+index dd18c65..631555e 100644
+--- a/template/src/pdca_harness/cli.py
++++ b/template/src/pdca_harness/cli.py
+@@ -1055,8 +1055,10 @@ def _publish_flag(d: Path) -> str:
+     url, base = rec.get("pr_url"), rec.get("base")
+     if not url:
+         return "  [published]"
+-    # A stacked PR (#wave-model / #123) targets the wave integration branch, not the base —
+-    # show ↑<base> so the human knows to merge the stack bottom-up.
++    # A stacked PR (#wave-model / #123) is part of a stack — show ↑<base> so the human knows
++    # to merge the stack bottom-up. A wave stack's PRs all target the real base (#593), so
++    # <base> is that target (e.g. ↑main), not a branch the PR merges into first; the merge
++    # order comes from the briefs' `Depends on` / the wave order, not from this cue.
+     stacked = rec.get("mode") in ("stacked-pr", "stacked")
+     return f"  [PR {url}{f' ↑{base}' if stacked else ''}]"
+ 
+diff --git a/template/src/pdca_harness/flow.py b/template/src/pdca_harness/flow.py
+index 376c06a..1c53691 100644
+--- a/template/src/pdca_harness/flow.py
++++ b/template/src/pdca_harness/flow.py
+@@ -24,6 +24,7 @@ import datetime
+ import re
+ import sys
+ import threading
++from collections.abc import Mapping
+ from pathlib import Path
+ 
+ from . import (act, assemble, autoiterate, brief, drive_claim, driver, gates, integrate, lane,
+@@ -639,11 +640,19 @@ def _sweep_quietly(cfg: Config, bundles: list[Path]) -> None:
+ 
+ 
+ def _publish_bundle(cfg: Config, d: Path, *, by: str, today: str,
+-                    texts_prevalidated: bool = False) -> None:
++                    texts_prevalidated: bool = False) -> bool:
+     """Publish one COMPLETE bundle (Check's closing step), isolated so a single failure
+     can't abort the batch (testbed #3); a non-zero return is loud, never silent (#97).
+     ``texts_prevalidated`` (#295 review): the wave pre-pass already drafted + T4-gated
+-    the texts, so publish runs mechanics-only (no second T4 run mid-wave)."""
++    the texts, so publish runs mechanics-only (no second T4 run mid-wave).
++
++    Returns False when this call pushed no branch, so the wave fold has none of it to merge
++    (#593). A real publish exits 0 only after its push; it writes a fresh ``publish.json``
++    right after the push, also when ``gh pr create`` then fails (rc 1 — e.g. an iterated
++    bundle whose old draft PR is still open), and that pushed branch is folded. A publish
++    that failed before its push leaves at most an earlier run's record, which an iterate
++    keeps: that one never counts."""
++    before = _record_stamp(d)
+     rc = _isolate(d, "publish", lambda: publish.publish(
+         cfg, d.name.removeprefix("issue_"),
+         dry_run=cfg.publisher.mode == "stub", by=by, today=today, skip_if_no_target=True,
+@@ -651,18 +660,35 @@ def _publish_bundle(cfg: Config, d: Path, *, by: str, today: str,
+     if rc not in (0, None):  # None ⇒ _isolate already logged an exception
+         print(f"flow: {d.name} is COMPLETE but publish did not complete (rc {rc}) — NOT "
+               f"published; run `pdca publish {d.name.removeprefix('issue_')}`.", file=sys.stderr)
++    after = _record_stamp(d)
++    return rc == 0 or (after is not None and after != before)
++
++
++def _record_stamp(d: Path) -> tuple[int, bytes] | None:
++    """``publish.json``'s modification time and content, or None when there is none — to
++    tell a record the publish call just wrote from one an earlier run left (#593)."""
++    record = d / "publish.json"
++    try:
++        return record.stat().st_mtime_ns, record.read_bytes()
++    except OSError:
++        return None
+ 
+ 
+ # ----------------------------------------------------------------------------
+ # Shared multi-bundle driver: compute waves → per wave (drive → cheap-first sign-off →
+ # publish → fold onto the integration branch the next wave builds on) → Act once (docs 09).
+ # ----------------------------------------------------------------------------
+-def _runnable(cfg: Config, wave: list[Path], batch_names: set[str]) -> list[Path]:
++def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
++              unpublished: set[str] | frozenset[str] = frozenset()) -> list[Path]:
+     """Drop a wave bundle whose declared prerequisite isn't ready to build on top of.
+ 
+     A prerequisite **in this run's batch** is carried into the dependent's base by the wave
+     fold once it reaches COMPLETE (it sits in an earlier wave), so COMPLETE is the bar — e.g.
+-    a prereq DISCONTINUED earlier never gets there, and its dependent is skipped loudly. A
++    a prereq DISCONTINUED earlier never gets there, and its dependent is skipped loudly. An
++    in-batch prerequisite named in ``unpublished`` (bundle dir names, #593) is not ready
++    either: it is COMPLETE, but this run pushed no branch of it (its publish failed before
++    the push, or none is on record), so the fold has nothing of it to carry — its dependents
++    are held while the rest of the run goes on. A
+     prerequisite **outside this batch** (a prior run's) is gated on its on-disk COMPLETE state
+     (archived `completed/` too, #171) — **except** an out-of-batch ``Depends on (merged)``
+     prereq, which keeps its stricter #107 merge-gate (#186): nothing in *this* run carries an
+@@ -683,6 +709,8 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str]) -> list[Path
+                     unmet.append(dep)
+             elif state.state(cfg.find_bundle(dep)) != state.COMPLETE:  # archived prereq too (#171)
+                 unmet.append(dep)
++            elif not out_of_batch and cfg.bundle(dep).name in unpublished:
++                unmet.append(dep)  # accepted, but not published this run: nothing to fold (#593)
+         if unmet:
+             print(f"flow: {d.name} skipped — prerequisite(s) not ready "
+                   f"({', '.join(unmet)}); not built on a base missing them.", file=sys.stderr)
+@@ -691,18 +719,24 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str]) -> list[Path
+     return runnable
+ 
+ 
+-def _point_at_integration(integ: dict[tuple[str, str], str], runnable: list[Path]) -> None:
++def _point_at_integration(integ: dict[tuple[str, str], str], runnable: list[Path],
++                          tips: Mapping[tuple[str, str], str | None] | None = None) -> None:
+     """Reconcile each runnable bundle's stack base with THIS run's integration state (#187).
+ 
+     ``integ`` maps each integrated target to its run-scoped integration branch. A bundle is
+     pointed at the branch for **its own** ``(repo, base)`` target only — never a sibling
+     target's, which is absent on that repo or carries unrelated patches. A bundle whose target
+     wasn't integrated this run has any **stale** stack base (left by a prior/resumed run)
+-    cleared, so it builds off its own target base rather than an old integration branch."""
++    cleared, so it builds off its own target base rather than an old integration branch.
++
++    ``tips`` maps a target to the line commit the run's last fold pushed (#593): the commit
++    the bundle is built on. It is recorded with the branch, so publish cuts the PR branch
++    from it even after later waves have grown the line (a held bundle published late)."""
+     for d in runnable:
+-        branch = integ.get(publish._resolve_target(d)[:2])
++        target = publish._resolve_target(d)[:2]
++        branch = integ.get(target)
+         if branch:
+-            publish.write_stack_base(d, branch)
++            publish.write_stack_base(d, branch, (tips or {}).get(target))
+         else:
+             publish.clear_stack_base(d)
+ 
+@@ -1673,8 +1707,17 @@ def _drive_and_act(
+     # if a later reschedule holds it (:func:`_adopt_split_children`).
+     named = frozenset(batch_names)
+     published: set[str] = set()
++    # Bundles that pushed no branch THIS run (texts not ready, or publish failed before its
++    # push): an iterate keeps an earlier attempt's publish.json, so the disk cannot tell (#593).
++    not_pushed: set[str] = set()
++    # Accepted bundles the fold has no branch of to carry (#593): left out of every fold,
++    # their in-batch dependents held by `_runnable`, instead of stopping the run.
++    unpublished: set[str] = set()
+     accepted: list[Path] = []        # cumulative COMPLETE bundles, wave then name order
+     integ: dict[tuple[str, str], str] = {}  # per-target (repo, base) → integration branch (#187)
++    # Per-target (repo, base) → the tip this run's last fold pushed (None in a dry-run), so
++    # each later fold continues THIS run's line, append-only (`integrate.fold`, #593).
++    folded_tips: dict[tuple[str, str], str | None] = {}
+     preflighted = False              # per-lane preflight runs at most once, before the first pool
+     # The batch the caller NAMED is levelled first and strictly, exactly as before —
+     # `compute_waves` raises on a cycle or an unresolvable dependency. That contract belongs
+@@ -1722,7 +1765,7 @@ def _drive_and_act(
+     # read live below (never cached in a `last`), and an adopted child's wave is driven,
+     # published and folded by exactly the code every other wave goes through.
+     for k, wave in enumerate(wave_list):
+-        runnable = _runnable(cfg, wave, batch_names)
++        runnable = _runnable(cfg, wave, batch_names, unpublished=unpublished)
+         if not runnable:
+             continue
+         # The pool, read off the schedule as it stands NOW — so a splice below has already
+@@ -1762,10 +1805,11 @@ def _drive_and_act(
+                     f"lane preflight failed for a lanes={cfg.lanes} batch — not fanning out "
+                     "(fix the per-lane resources above, then re-run)")
+         # Reconcile each runnable bundle's stack base with this run's integration state:
+-        # point it at its OWN (repo, base) target's branch, or clear a stale marker a
+-        # prior/resumed run left so it builds off its own base (#187). Unconditional — the
+-        # stale-clear must run even before any wave has folded (integ still empty).
+-        _point_at_integration(integ, runnable)
++        # point it at its OWN (repo, base) target's branch, and the line commit it builds on
++        # (#593), or clear a stale marker a prior/resumed run left so it builds off its own
++        # base (#187). Unconditional — the stale-clear must run even before any wave has
++        # folded (integ still empty).
++        _point_at_integration(integ, runnable, folded_tips)
+         # This wave's allowance is its own cap AND what is left of the run's pool, whichever
+         # is smaller — the second term is the admission rule again, applied to the wave that
+         # was let in (#469); with the pool covering the live schedule (#473) it can only bite
+@@ -1813,11 +1857,14 @@ def _drive_and_act(
+                     # Mechanics-only: the pre-pass drafted AND T4-gated the texts — a
+                     # second T4 run here could transiently fail AFTER siblings pushed,
+                     # recreating the half-published wave (#295 review).
+-                    _publish_bundle(cfg, d, by=by, today=today, texts_prevalidated=True)
++                    if not _publish_bundle(cfg, d, by=by, today=today,
++                                           texts_prevalidated=True):
++                        not_pushed.add(d.name)
+                 else:
+                     print(f"flow: {d.name} — publish texts not ready (draft/T4 failed); "
+                           f"NOT published this run; fix and run `pdca publish "
+                           f"{d.name.removeprefix('issue_')}`.", file=sys.stderr)
++                    not_pushed.add(d.name)
+                 published.add(d.name)
+         accepted += complete
+         # Carry this wave's accepted work to the NEXT wave's base (skipped on the final
+@@ -1833,6 +1880,20 @@ def _drive_and_act(
+                           file=sys.stderr)
+                     break
+             else:  # default: stack — fold onto a per-target integration branch
++                # An accepted, patched, targeted bundle with no branch pushed this run
++                # (texts failed draft/T4, publish failed before its push, or none on record
++                # — an earlier attempt's publish.json names the old, rejected branch) leaves
++                # the fold nothing to carry (#593). Hold it, and via `_runnable` its
++                # dependents, rather than stop the run. A branch pushed this run is folded
++                # even if `gh pr create` failed after it. Not in a dry-run: the stub records
++                # no branch.
++                if not dry:
++                    for d in integrate.unpublished(accepted, failed=not_pushed):
++                        if d.name not in unpublished:
++                            unpublished.add(d.name)
++                            print(f"flow: {d.name} pushed no branch this run — left out "
++                                  f"of the integration fold; bundles that depend on it are "
++                                  f"held this run.", file=sys.stderr)
+                 # ONE lock scope covers fold AND re-gate (#297 review round 10): the
+                 # locks stack keeps every target's integ lock held between the two,
+                 # so no gap exists in which another flow's publish-boundary sweep
+@@ -1841,7 +1902,14 @@ def _drive_and_act(
+                 stop_wave = False
+                 with contextlib.ExitStack() as locks:
+                     try:
+-                        folded = integrate.fold(cfg, accepted, dry_run=dry, locks=locks)
++                        folded = integrate.fold(
++                            cfg, [d for d in accepted if d.name not in unpublished],
++                            dry_run=dry, locks=locks, folded_this_run=dict(folded_tips))
++                        # Record each target's pushed tip at once, before any re-gate: the
++                        # next fold continues from exactly that tip and refuses a line
++                        # another run moved (#593). A dry-run pushes nothing (None).
++                        for tgt, (_branch, wt) in folded.items():
++                            folded_tips[tgt] = integrate.pushed_tip(wt) if wt is not None else None
+                     except integrate.IntegrationError as exc:
+                         print(f"flow: wave {k} did not integrate ({exc}); STOPPING — "
+                               f"later waves not run.", file=sys.stderr)
+diff --git a/template/src/pdca_harness/gates.py b/template/src/pdca_harness/gates.py
+index 7d8186e..58c4a1f 100644
+--- a/template/src/pdca_harness/gates.py
++++ b/template/src/pdca_harness/gates.py
+@@ -534,10 +534,11 @@ def _run_one(chk: dict, *, cfg: Config, cwd: Path, bundle: Path | None, runner:
+     #      before it ever reads the stack-base marker), so it is also the test base.
+     #   2. else the wave's folded integration branch (#273) → PDCA_VERIFY_BASE. A wave>0
+     #      bundle's Do worktree is cut off the run-scoped integration branch (prior waves'
+-    #      folded patches, pushed to origin), and publish opens its PR against that branch. A
+-    #      verifier that instead reset to the brief's origin base would, for a dependent
+-    #      sharing a file with its prereq, either false-fail "patch does not apply — stale" or
+-    #      measure red→green against a tree LACKING the prereq.
++    #      published PR branches, merged onto it and pushed to origin), and publish cuts its
++    #      PR branch from the line commit it was built on (the PR targets the real base,
++    #      #593). A verifier that instead reset to the brief's origin base would, for a
++    #      dependent sharing a file with its prereq, either false-fail "patch does not apply
++    #      — stale" or measure red→green against a tree LACKING the prereq.
+     #   3. else the brief's own `Repo + branch target` base (#387) → PDCA_BRIEF_BASE, as
+     #      `<base_remote>/<branch>` — the very ref publish checks the fix out against
+     #      (`publish.publish`'s `checkout_base`: `f"{base_remote}/{base}"`), or
+diff --git a/template/src/pdca_harness/integrate.py b/template/src/pdca_harness/integrate.py
+index 4035012..00d92a0 100644
+--- a/template/src/pdca_harness/integrate.py
++++ b/template/src/pdca_harness/integrate.py
+@@ -1,38 +1,55 @@
+ """Integration-branch stacking — fold each wave's accepted work onto a run-scoped
+ branch the next wave builds on (the default, fork-safe wave sequencing).
+ 
+-After a wave's bundles are accepted, the *next* wave must build on a base that already
+-contains this wave's diffs — otherwise a dependent built off the untouched base misses
+-its prerequisite's change and conflicts. Rather than *merge* the wave's PRs (which needs
+-merge rights on the upstream base — impossible in a fork model — and relaxes the STOP
+-discipline), this folds every accepted patch onto a single run-scoped **integration
+-branch** on ``origin`` (push-only — a fork has push). The next wave's Do worktree and
+-its stacked PRs base off that branch, so a dependent batch completes in one run as a
+-reviewable PR stack the human merges bottom-up — generalising the single-chain
+-``Stacks on`` (#123) to whole waves, and fixing its multi-parent gap (the branch carries
+-*all* prerequisites, not just ``parents[0]``).
+-
+-Idempotent + resumable: :func:`fold` rebuilds the branch from the target base every call,
+-applying the **cumulative** accepted patches (waves 0..k) in order — so a re-run
+-reproduces the same branch, and a patch that no longer applies (an undeclared cross-wave
+-overlap) is a loud :class:`IntegrationError` that stops the run before the next wave
+-builds on a broken base. Mechanics are deterministic ``git`` subprocesses (no model).
++After a wave's bundles are accepted and published, the *next* wave must build on a base
++that already contains this wave's work — otherwise a dependent built off the untouched
++base misses its prerequisite's change and conflicts. Rather than *merge* the wave's PRs
++into the target (which needs merge rights on the upstream base — impossible in a fork
++model — and relaxes the STOP discipline), this merges every accepted bundle's **published
++PR branch** onto a single run-scoped **integration branch** on ``origin`` (push-only — a
++fork has push). The next wave's Do worktree and PR branches are cut from that branch, so
++a dependent batch completes in one run as a reviewable PR stack the human merges
++bottom-up — generalising the single-chain ``Stacks on`` (#123) to whole waves, and fixing
++its multi-parent gap (the branch carries *all* prerequisites, not just ``parents[0]``).
++
++Every PR the stack opens targets the real base (publish), and the line carries the PR
++branches' own commits (same SHAs), joined by signed-off merge commits — never re-applied
++as new commits (#593). So merging the stack bottom-up with merge commits lands every wave
++on the target. The fold puts every published branch of a target on its line, so a later
++wave's PR, cut from the line, carries every earlier-wave branch on the line — not only its
++prerequisites' — and shows their changes until they merge. Once they have all merged, its
++diff against the base is its own change when the line is a plain chain: one branch per
++earlier wave, and no base newer than a branch on it taken in (the base did not move
++between the wave-0 publishes and the run's first fold, and no fold merged the base in for
++a merged prerequisite whose branch is gone). Otherwise a fold merge commit joined
++histories the base got separately; that commit never reaches the base, so the PR has
++several merge bases with it and can keep showing an already-merged change. Updating its
++branch from the base (GitHub's "Update branch") then leaves only its own change. Within
++one run the line is **append-only**: the run's first fold of a target starts fresh from
++the base (a force-push that replaces an earlier run's line); every later fold continues
++from the tip this run pushed, pushed without force, and refuses a line another run moved
++(``folded_this_run``, #591). A branch that does not merge cleanly (an undeclared
++cross-wave overlap) is a loud :class:`IntegrationError` that stops the run before the next
++wave builds on a broken base. Mechanics are deterministic ``git`` subprocesses (no model).
+ """
+ 
+ from __future__ import annotations
+ 
+ import contextlib
+ import subprocess
++import sys
++from collections.abc import Collection, Iterable, Mapping
+ from pathlib import Path
+ 
+-from . import publish
++from . import merged, publish
+ from .config import Config
+ 
+ 
+ class IntegrationError(RuntimeError):
+-    """A wave's accepted work could not be folded onto the integration branch — a patch
+-    no longer applies (undeclared overlap), or a git step failed. The caller STOPs rather
+-    than build the next wave on an incomplete base."""
++    """A wave's accepted work could not be folded onto the integration branch — a published
++    branch does not merge cleanly (undeclared overlap) or is missing, another run moved the
++    line, or a git step failed. The caller STOPs rather than build the next wave on an
++    incomplete base."""
+ 
+ 
+ def integration_branch(cfg: Config, base: str) -> str:
+@@ -68,6 +85,68 @@ def _git(repo: Path, *args: str) -> int:
+                           capture_output=True, text=True).returncode
+ 
+ 
++def _rev(repo: Path, ref: str) -> str | None:
++    """The commit SHA ``ref`` resolves to in ``repo``, or None when it does not resolve."""
++    r = subprocess.run(["git", "-C", str(repo), "rev-parse", "--verify", "--quiet",
++                        ref + "^{commit}"], capture_output=True, text=True)
++    sha = r.stdout.strip()
++    return sha if r.returncode == 0 and sha else None
++
++
++def pushed_tip(wt: Path) -> str:
++    """The tip a fold just pushed from integration worktree ``wt`` (``git rev-parse HEAD``),
++    for the caller's ``folded_this_run`` (#593); raises when unreadable."""
++    sha = _rev(wt, "HEAD")
++    if not sha:
++        raise IntegrationError(f"could not read the folded tip in {wt}")
++    return sha
++
++
++def _published_ref(d: Path) -> tuple[str, str, bool] | None:
++    """``(remote, ref, onto)`` of the branch bundle ``d`` published, from its
++    ``publish.json`` (read the way ``publish._stack_base_branch`` reads a parent's) — None
++    when it has none.
++
++    A ``"stacked"`` record (``Onto branch``, #54; ``onto`` True) committed onto an existing
++    PR branch that may live on another remote: its own ``base`` (``<remote>/<branch>``,
++    ``publish._publish_stacked``) IS that branch — never a same-named one on ``origin``; a
++    ``base`` of any other shape names no remote, so no branch is on record. Every other
++    record (``"new-pr"`` / ``"stacked-pr"``) pushed ``branch`` to ``origin``."""
++    rec = publish._publish_record(d)
++    branch = rec.get("branch") if isinstance(rec, dict) else None
++    if not branch or not isinstance(branch, str):
++        return None
++    if rec.get("mode") == "stacked":
++        ref, suffix = rec.get("base"), "/" + branch
++        if isinstance(ref, str) and ref.endswith(suffix) and len(ref) > len(suffix):
++            return ref[:-len(suffix)], ref, True
++        return None
++    return "origin", f"origin/{branch}", False
++
++
++def _fold_candidates(bundles: Iterable[Path]
++                     ) -> list[tuple[Path, str, str, str, tuple[str, str, bool] | None]]:
++    """``(bundle, repo_spec, base, slug, published)`` for each bundle the fold carries — a
++    non-empty ``patch.diff`` and a usable target — where ``published`` is its
++    :func:`_published_ref` (None: no branch on record). The ONE definition :func:`fold` and
++    :func:`unpublished` share (#593), so what the fold merges and what the flow holds back
++    cannot drift apart."""
++    return [(d, repo_spec, base, slug, _published_ref(d))
++            for d, repo_spec, base, slug in _targeted([d for d in bundles if _has_patch(d)])]
++
++
++def unpublished(bundles: Iterable[Path], *, failed: Collection[str] = ()) -> list[Path]:
++    """The bundles the fold has no branch of to carry (#593): each one it would merge
++    (:func:`_fold_candidates`) whose ``publish.json`` names no branch, or whose name is in
++    ``failed`` — the bundles that pushed no branch THIS run. ``publish.json`` survives an
++    iterate, so a re-publish that failed before its push leaves the old, rejected branch on
++    record. Outside a dry-run :func:`fold` refuses the first kind itself; the flow holds
++    both, and what depends on them, out of the fold. A patched bundle with no target is
++    neither."""
++    return [d for d, _repo, _base, _slug, ref in _fold_candidates(bundles)
++            if ref is None or d.name in failed]
++
++
+ # The harness-owned sibling-dir infix for integration worktrees; single-sourced so the
+ # footprint sweeper (issue #297) globs exactly what this module creates.
+ INTEG_INFIX = ".pdca-integ-"
+@@ -118,36 +197,60 @@ def integ_lock(wt: Path, *, wait: bool = True):
+         fh.close()
+ 
+ 
+-def _targeted(patched: list[Path]) -> list[tuple[Path, str, str]]:
+-    """``(bundle, repo_spec, base)`` for each patched bundle that resolves a usable
++def _targeted(patched: list[Path]) -> list[tuple[Path, str, str, str]]:
++    """``(bundle, repo_spec, base, slug)`` for each patched bundle that resolves a usable
+     upstream target; bundles with no target (non-contributing cycles) are dropped."""
+-    out: list[tuple[Path, str, str]] = []
++    out: list[tuple[Path, str, str, str]] = []
+     for d in patched:
+-        repo_spec, base, _slug = publish._resolve_target(d)
++        repo_spec, base, slug = publish._resolve_target(d)
+         if repo_spec and base:
+-            out.append((d, repo_spec, base))
++            out.append((d, repo_spec, base, slug))
+     return out
+ 
+ 
+ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
+-         locks: contextlib.ExitStack | None = None
++         locks: contextlib.ExitStack | None = None,
++         folded_this_run: Mapping[tuple[str, str], str | None] | None = None,
+          ) -> dict[tuple[str, str], tuple[str, Path | None]]:
+-    """Fold the cumulative accepted bundles' patches onto a per-target integration branch.
++    """Fold the cumulative accepted bundles' published branches onto a per-target
++    integration branch.
+ 
+     ``accepted`` is every accepted bundle (waves 0..k) in stack order (the caller passes
+     them wave by wave, name-sorted within each). Bundles are grouped by their upstream
+     ``(repo, base)`` target and **each group folds onto its own integration branch** — a
+     batch spanning several targets (two repos, or two base branches on one repo) keeps one
+     integration line per target, so a later wave's bundle stacks on the branch for *its* own
+-    target, never a sibling target's (#187). Returns ``{(repo, base): (branch, worktree)}``
+-    — each target's integration branch and the worktree it was built in (for an optional
+-    re-gate) — or ``{}`` when there is nothing to integrate (no patches, or none with a
+-    target). Raises :class:`IntegrationError` on a real failure (a patch no longer applies,
+-    or a git step fails) so the caller STOPs.
++    target, never a sibling target's (#187). Each bundle's published branch
++    (:func:`_published_ref`) is merged onto the line with a signed-off merge commit, so the
++    line carries the PR's own commits rather than a re-applied copy (#593); a branch already
++    in the line is not merged again. Returns ``{(repo, base): (branch, worktree)}`` — each
++    target's integration branch and the worktree it was built in (for an optional re-gate)
++    — or ``{}`` when there is nothing to integrate (no patches, or none with a target).
++    Raises :class:`IntegrationError` on a real failure (a branch does not merge cleanly, the
++    line was moved by another run, or a git step fails) so the caller STOPs.
++
++    ``folded_this_run`` (#593) maps each target THIS run has already folded to the tip its
++    last fold pushed (``None`` in a dry-run, where nothing is pushed). A **listed** target
++    continues from that tip and pushes WITHOUT force (append-only, so no push rewrites a
++    commit an open PR's base or head depends on), and refuses when origin's line is not that
++    SHA — another run on the same base moved it (#591). A target **not listed** is the run's
++    first fold of it: it starts fresh from ``<base_remote>/<base>`` and force-pushes,
++    replacing any earlier run's line. ``None`` (a direct caller) continues the line if
++    origin has it, else starts fresh.
++
++    Fail-closed outside a dry-run: a targeted, patched bundle with no published branch
++    raises before any git step (the flow holds such bundles, and failed publishes, out:
++    :func:`unpublished`). A published branch gone after the (pruning) fetch raises unless
++    the bundle's PR is merged (:func:`_gone_branch`): then a continued line that already
++    carries it skips it; otherwise its work is in the base, and the line takes the base in
++    (:func:`_take_in_base`) so it still reaches the next wave — except for an ``Onto
++    branch`` record, whose PR may have merged into another base, which raises.
+ 
+     Dry-run (offline rehearse / CI, where the publisher leaf is stubbed) prints each group's
+     git plan and returns the branches with ``None`` worktrees — no worktree, no push — so the
+-    next wave falls back to the target base, which is what an offline rehearse wants.
++    next wave falls back to the target base, which is what an offline rehearse wants. A
++    bundle with no ``publish.json`` (the stub records none) is planned as merging
++    ``origin/<branch>`` for the branch a real publish would push.
+ 
+     ``locks`` (#297 review round 10): when the caller passes an ``ExitStack``, each
+     target's :func:`integ_lock` is entered on IT and stays held after fold returns —
+@@ -157,15 +260,32 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
+     lock by exiting the stack; ``None`` keeps the per-group scope (lock released when
+     the group's build finishes).
+     """
+-    targeted = _targeted([d for d in accepted if _has_patch(d)])
+-    if not targeted:
++    candidates = _fold_candidates(accepted)
++    if not candidates:
+         return {}  # nothing to integrate — the next wave builds on the base
+ 
++    # What each bundle merges — resolved for EVERY bundle before any git step, so a fold
++    # that cannot carry one of them fails before it touches anything.
++    refs: dict[str, tuple[str, str, bool]] = {}      # bundle name → (remote, ref, onto)
++    missing: list[str] = []
++    for d, _repo_spec, _base, slug, ref in candidates:
++        if ref is None and dry_run:
++            ref = ("origin", "origin/" + publish._branch_name(cfg, d, slug), False)
++        if ref is None:
++            missing.append(d.name)
++        else:
++            refs[d.name] = ref
++    if missing:
++        raise IntegrationError(
++            f"{', '.join(missing)} accepted but not published (no publish.json branch) — "
++            f"there is nothing of it to fold; publish it, or leave it out of the fold, then "
++            f"re-run")
++
+     # One integration line per (repo, base): group the accepted bundles by target so a
+     # multi-target batch folds each onto its own branch (the common single-target batch is
+-    # just one group). Preserve stack order within a group (targeted keeps accepted's order).
++    # just one group). Preserve stack order within a group (candidates keep accepted's order).
+     groups: dict[tuple[str, str], list[Path]] = {}
+-    for d, repo_spec, base in targeted:
++    for d, repo_spec, base, _slug, _ref in candidates:
+         groups.setdefault((repo_spec, base), []).append(d)
+ 
+     base_remote = cfg.base_remote
+@@ -179,14 +299,22 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
+     for (repo_spec, base), bundles in sorted(groups.items()):
+         branch = integration_branch(cfg, base)
+         repo = publish._checkout_path(cfg, repo_spec)
++        start = ("auto" if folded_this_run is None
++                 else "continue" if (repo_spec, base) in folded_this_run else "fresh")
+         if dry_run:
+             print(f"integrate --dry-run — fold {len(bundles)} patch(es) onto {branch} "
+                   f"(off {base_remote}/{base} on {repo_spec}):")
+-            print(f"  git worktree → {_integ_worktree(repo, base)} @ {base_remote}/{base}; "
+-                  f"checkout -B {branch}")
++            plan = {"fresh": f"start {branch} fresh from {base_remote}/{base}",
++                    "continue": f"continue {branch} from this run's tip",
++                    "auto": f"continue {branch} if origin has it, else start fresh "
++                            f"from {base_remote}/{base}"}[start]
++            print(f"  git worktree → {_integ_worktree(repo, base)}; {plan}")
+             for d in bundles:
+-                print(f"  git apply {(d / 'patch.diff')}  &&  git commit   ({d.name})")
+-            print(f"  git push --force origin {branch}")
++                print(f"  git merge --no-ff --signoff {refs[d.name][1]}   ({d.name})")
++            print({"fresh": f"  git push --force origin {branch}",
++                   "continue": f"  git push origin {branch}",
++                   "auto": f"  git push origin {branch}   (--force only if it started "
++                           f"fresh)"}[start])
+             result[(repo_spec, base)] = (branch, None)
+             continue
+ 
+@@ -205,40 +333,175 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
+                     f"could not take the integration lock next to "
+                     f"{_integ_worktree(repo, base).name} — fix the checkout's parent "
+                     f"directory (permissions?), then re-run")
+-            wt = _prepare_worktree(repo, base_remote, base)
+-            if _git(wt, "checkout", "-B", branch, f"{base_remote}/{base}") != 0:
+-                raise IntegrationError(f"could not start {branch} off {base_remote}/{base}")
+-            for d in bundles:
+-                patch = (d / "patch.diff").resolve()
+-                if _git(wt, "apply", str(patch)) != 0:
++            wt = _prepare_worktree(repo, base_remote, base,
++                                   remotes=[refs[d.name][0] for d in bundles])
++            line = _rev(wt, f"origin/{branch}")  # origin's line, as just fetched
++            if start == "continue":
++                pushed = folded_this_run[(repo_spec, base)]
++                if line is None or line != pushed:
+                     raise IntegrationError(
+-                        f"{d.name}'s patch does not apply onto {branch} — an undeclared "
+-                        f"cross-wave overlap; declare the conflict / re-order, then re-run")
+-                _git(wt, "add", "--all")
+-                # `-s` adds the Signed-off-by trailer (DCO) — same as publish (#81): the
+-                # branch is rebuilt each fold, so a stacked PR cut from an EARLIER fold
+-                # carries these commits outside the base's ancestry, where a DCO-gated
+-                # host inspects them (#405).
+-                if _git(wt, "commit", "-s", "-m", f"pdca-integrate: {d.name}") != 0:
+-                    raise IntegrationError(f"could not commit {d.name} onto {branch}")
+-            # A harness-owned, rebuilt-each-run branch: a plain force is correct (every fold
+-            # rewrites it off the base), and it isn't a human PR branch needing lease safety.
+-            if _git(wt, "push", "--force", "origin", branch) != 0:
++                        f"origin's {branch} is at {line or '(absent)'}, not at "
++                        f"{pushed or '(no tip recorded)'}, the tip this run's last fold "
++                        f"pushed — another run on the same base has likely moved it "
++                        f"(#591). Not building on a line this run did not push; let the "
++                        f"other run finish, then re-run")
++            fresh = start == "fresh" or (start == "auto" and line is None)
++            start_ref = f"{base_remote}/{base}" if fresh else line
++            if _git(wt, "checkout", "-B", branch, start_ref) != 0:
++                raise IntegrationError(f"could not start {branch} off {start_ref}")
++            for d in bundles:
++                _merge_published(cfg, wt, d, refs[d.name], branch=branch, base=base,
++                                 this_runs_line=start == "continue")
++            # Fresh: the run's first fold of this target replaces any earlier run's line, so
++            # it is forced. Continuing: a fast-forward of this run's own tip, pushed WITHOUT
++            # force, so it lands on an origin with receive.denyNonFastForwards too, and can
++            # never rewrite a commit an open PR's base or head depends on (#593).
++            push = ("push", "--force", "origin", branch) if fresh else ("push", "origin", branch)
++            if _git(wt, *push) != 0:
++                why = (" (the run's first fold force-pushes over any earlier run's line: if "
++                       f"origin refuses force-pushes, delete the old {branch} there or allow "
++                       "force-pushes on pdca-integration/*)" if fresh else
++                       " (an unforced fast-forward was refused — did another run move it? "
++                       "#591)")
+                 raise IntegrationError(
+-                    f"could not push {branch} to origin — the next wave cannot stack on it")
++                    f"could not push {branch} to origin{why} — the next wave cannot stack "
++                    f"on it")
+         result[(repo_spec, base)] = (branch, wt)
+     return result
+ 
+ 
+-def _prepare_worktree(repo: Path, base_remote: str, base: str) -> Path:
++def _merge_published(cfg: Config, wt: Path, d: Path, published: tuple[str, str, bool], *,
++                     branch: str, base: str, this_runs_line: bool) -> None:
++    """Merge bundle ``d``'s published branch onto the line checked out in ``wt`` (#593):
++    its own commits, joined by a signed-off merge commit — not a re-applied copy."""
++    _remote, ref, onto = published
++    head = _rev(wt, ref)
++    if head is None:
++        _gone_branch(cfg, wt, d, ref, onto, branch=branch, base=base,
++                     this_runs_line=this_runs_line)
++        return
++    if _in_line(wt, head, f"{d.name}'s branch {ref}", branch):
++        return  # already in the line (an earlier fold carried it) — never merged twice
++    rc, conflicts = _merge(wt, head, f"pdca-integrate: {d.name}")
++    if rc == 0:
++        return
++    if conflicts:
++        raise IntegrationError(
++            f"{d.name}'s branch {ref} does not merge cleanly onto {branch} (conflicts in "
++            f"{', '.join(conflicts)}) — an undeclared cross-wave overlap; declare the "
++            f"conflict / re-order, then re-run")
++    raise IntegrationError(
++        f"could not merge {d.name}'s branch {ref} onto {branch} — `git merge` exited {rc} "
++        f"with no conflicting path in {wt}, so a git step failed (not an overlap): check "
++        f"that checkout and the branch, then re-run")
++
++
++def _gone_branch(cfg: Config, wt: Path, d: Path, ref: str, onto: bool, *, branch: str,
++                 base: str, this_runs_line: bool) -> None:
++    """``d``'s published branch ``ref`` does not resolve after the pruning fetch — a merged
++    PR's branch is commonly deleted on merge (#593). Its PR not merged: raise, naming the
++    ref. Merged: a line this run alone built (``this_runs_line``: continued from this run's
++    pushed tip, started fresh from the base at the run's first fold) that has a
++    ``pdca-integrate: <bundle>`` merge past the base already carries it — skip it, never
++    taking the base in for work the line has. Otherwise its work reaches the line through
++    the base (:func:`_take_in_base`) — unless it is an ``Onto branch`` record (``onto``): its
++    PR is another PR, which may have merged into a different base, so that raises."""
++    base_ref = f"{cfg.base_remote}/{base}"
++    if not merged.is_merged(cfg, d.name.removeprefix("issue_")):
++        raise IntegrationError(
++            f"{d.name}'s published branch {ref} does not resolve after fetching (deleted?) "
++            f"and its PR is not merged — restore or re-publish the branch, then re-run")
++    if this_runs_line and f"pdca-integrate: {d.name}" in _merges_past(wt, base_ref, branch):
++        print(f"integrate: {d.name}'s branch {ref} is gone and its PR is merged — {branch} "
++              f"already carries it (folded earlier this run).", file=sys.stderr)
++        return
++    if onto:
++        raise IntegrationError(
++            f"{d.name}'s branch {ref} is gone and its PR is merged, but it is an `Onto "
++            f"branch` commit on another PR, which may have merged into a base other than "
++            f"{base_ref} — the fold cannot tell its work reaches {branch}; restore the "
++            f"branch, then re-run")
++    _take_in_base(wt, d, ref, branch, base_ref)
++
++
++def _merges_past(wt: Path, base_ref: str, branch: str) -> list[str]:
++    """The subjects of the line's first-parent commits past ``base_ref`` — every fold merge
++    sits on that chain."""
++    r = subprocess.run(["git", "-C", str(wt), "log", "--first-parent", "--format=%s",
++                        f"{base_ref}..HEAD"], capture_output=True, text=True)
++    if r.returncode != 0:
++        raise IntegrationError(
++            f"could not read {branch}'s history past {base_ref} in {wt} — `git log` exited "
++            f"{r.returncode}; a git step failed: check that checkout, then re-run")
++    return r.stdout.splitlines()
++
++
++def _take_in_base(wt: Path, d: Path, ref: str, branch: str, base_ref: str) -> None:
++    """``d``'s branch ``ref`` is gone and its PR is merged, so its work is in the base. A
++    line started fresh from the base carries it; a continued line may not, and skipping
++    ``d`` there would leave its work off the line. So merge the base in (signed off, on top
++    of the line: a fast-forward for the push, never a rewrite — #593)."""
++    if not _in_line(wt, base_ref, base_ref, branch):
++        rc, conflicts = _merge(wt, base_ref, f"pdca-integrate: {base_ref} (carries merged "
++                                             f"{d.name})")
++        if rc != 0:
++            why = (f"conflicts in {', '.join(conflicts)}; update the clashing PR's branch "
++                   f"from the base" if conflicts else
++                   f"`git merge` exited {rc} with no conflicting path: a git step failed")
++            raise IntegrationError(
++                f"{d.name}'s branch {ref} is gone and its PR is merged, but {base_ref}, which "
++                f"carries its work, does not merge onto {branch} ({why}), then re-run")
++    print(f"integrate: {d.name}'s branch {ref} is gone and its PR is merged — its work "
++          f"reaches {branch} through {base_ref}.", file=sys.stderr)
++
++
++def _in_line(wt: Path, rev: str, what: str, branch: str) -> bool:
++    """Whether ``rev`` is an ancestor of the line checked out in ``wt``. ``git merge-base
++    --is-ancestor`` exits 0 for yes, 1 for no; anything else (128) is git failing, so it
++    raises — never read as "not in the line", or reported as an overlap."""
++    rc = _git(wt, "merge-base", "--is-ancestor", rev, "HEAD")
++    if rc in (0, 1):
++        return rc == 0
++    raise IntegrationError(
++        f"could not tell whether {what} is already in {branch} — `git merge-base "
++        f"--is-ancestor` exited {rc} in {wt}; a git step failed (not an overlap): check that "
++        f"checkout, then re-run")
++
++
++def _merge(wt: Path, rev: str, message: str) -> tuple[int, list[str]]:
++    """Merge ``rev`` onto the line in ``wt``; return the exit code and, on a failure, the
++    paths left conflicting (none: it failed for another reason). A failed merge is aborted.
++    ``--signoff`` (DCO, as publish #81): later waves' PRs carry these merge commits outside
++    the base's ancestry, where a DCO-gated host inspects them (#405)."""
++    rc = _git(wt, "merge", "--no-ff", "--no-edit", "--signoff", "-m", message, rev)
++    if rc == 0:
++        return 0, []
++    r = subprocess.run(["git", "-C", str(wt), "diff", "--name-only", "--diff-filter=U"],
++                       capture_output=True, text=True)
++    conflicts = r.stdout.splitlines() if r.returncode == 0 else []
++    _git(wt, "merge", "--abort")   # a no-op when the merge never started
++    return rc, conflicts
++
++
++def _prepare_worktree(repo: Path, base_remote: str, base: str,
++                      remotes: Iterable[str] = ()) -> Path:
+     """Create (or reuse) the integration worktree off the freshly-fetched base; raise
+     :class:`IntegrationError` if it can't be made (worktree isolation is required here —
+-    unlike Do/Check, there is no in-place fallback that would still produce the branch)."""
++    unlike Do/Check, there is no in-place fallback that would still produce the branch).
++
++    Fetches the base remote, ``origin`` (the line and the PR branches) and every remote a
++    ``"stacked"`` record's branch lives on (#593). The remotes holding PR branches are
++    fetched with ``--prune``: a published branch deleted on its remote must stop resolving
++    here, and a stale remote-tracking ref would hide that. A fetch that fails is a failed
++    git step (the run stops)."""
+     if not (repo / ".git").exists():
+         raise IntegrationError(f"checkout not found at {repo}")
+-    _git(repo, "fetch", base_remote)
+-    if base_remote != "origin":
+-        _git(repo, "fetch", "origin")
++    branch_remotes = set(("origin", *remotes))
++    for remote in dict.fromkeys((base_remote, "origin", *remotes)):
++        prune = ("--prune",) if remote in branch_remotes else ()
++        if _git(repo, "fetch", *prune, remote) != 0:
++            raise IntegrationError(f"could not fetch {remote} in {repo} — the fold cannot "
++                                   f"see the branches it merges")
+     wt = _integ_worktree(repo, base)
+     if not (wt / ".git").exists() and _git(repo, "worktree", "add", "--force",
+                                            str(wt), f"{base_remote}/{base}") != 0:
+diff --git a/template/src/pdca_harness/publish.py b/template/src/pdca_harness/publish.py
+index f618e0e..e8a02d5 100644
+--- a/template/src/pdca_harness/publish.py
++++ b/template/src/pdca_harness/publish.py
+@@ -40,8 +40,9 @@ from .config import Config
+ COMMIT_MSG = "commit-msg.txt"
+ PR_BODY = "pr-description.md"
+ # The wave driver records the run's integration branch here for a wave>0 bundle, so its
+-# Do worktree and stacked PR base off the prior waves' folded work (#wave-model); absent ⇒
+-# build / open the PR off the target base.
++# Do worktree is cut from the prior waves' folded work (#wave-model), and on a second line
++# the line commit it was built on, which its PR branch is cut from (#593); its PR targets
++# the real base. Absent ⇒ build and cut the PR branch off the target base.
+ STACK_BASE_FILE = "stack-base"
+ # The pre-push host-CI record (issue #311): the [gates] host_ci rows as run against the
+ # pinned base + patch.diff tree, written when the gate REFUSES (so the refusal survives
+@@ -227,8 +228,10 @@ def publish(
+     # produced earlier in THIS run — build + publish a NEW draft PR based on that branch (a
+     # separate stacked PR), not on the target base. Distinct from `Onto branch` (#54), which
+     # appends a commit to one existing PR. The base is derived from the prereq's publish.json
+-    # (never hand-written — it doesn't exist at Plan time).
+-    stack_branch = _stack_base_branch(cfg, d)
++    # (never hand-written — it doesn't exist at Plan time). A wave's recorded stack base wins,
++    # as in :func:`_stack_base_branch`; its marker is read once, for the cut and the PR base.
++    wave_base, wave_tip = _stack_marker(d)
++    stack_branch = wave_base or _stacks_on_branch(cfg, d)
+     if brief.stacks_on(d / "brief.md") and not stack_branch:
+         print(f"publish: {d.name} `Stacks on` a prereq with no published branch yet — the "
+               "prereq must publish first (the flow schedules this).", file=sys.stderr)
+@@ -240,23 +243,35 @@ def publish(
+ 
+     git = lambda *a: ["git", "-C", str(repo), *a]
+     base_remote = cfg.base_remote
++    own_repo = base_remote == "origin"
++    wave_stacked = cfg.wave_mode != "merge" and bool(wave_base)
+     # Stacked: cut the dependent's branch off the PARENT / integration branch (on origin) so it
+-    # carries the predecessors' diffs; otherwise off the target base (#123). pr_base is what
++    # carries the predecessors' work; otherwise off the target base (#123). A wave>0 bundle is
++    # cut from the line commit it was built on, when the run recorded one (#593): the line
++    # keeps growing after its wave, so a held bundle published later off the branch as it is
++    # THEN would carry later waves' work into its PR against the real base. pr_base is what
+     # `gh --base` gets — and it MUST be a branch in the upstream (`--repo`) repo.
+-    checkout_base = f"origin/{stack_branch}" if stack_branch else f"{base_remote}/{base}"
+-    # Own-repo (base on origin): the integration/parent branch IS an upstream branch, so
+-    # `--base` it for a clean, increment-only stacked PR. Fork (base on a separate upstream a
+-    # fork contributor can't push to): that branch lives on origin (the fork) and can't be a
+-    # `--base`, so the PR opens against the upstream base and carries the CUMULATIVE stacked
+-    # diff (predecessors + this fix). It still merges cleanly bottom-up — once a prerequisite
+-    # is merged, its identical content re-merges as a no-op — but the displayed diff does NOT
+-    # auto-reduce on merge: the fold's `pdca-integrate:*` commits aren't ancestors of the
+-    # prereq's PR-merge, so the PR merge-base doesn't advance; the diff clears only when the
+-    # dependent is rebuilt off the merged base (a later `pdca flow` run). That visible overlap
+-    # is the cost of fork wave-stacking (#185). The dependent's branch is cut off the parent
+-    # branch either way.
+-    own_repo = base_remote == "origin"
+-    pr_base = stack_branch if (stack_branch and own_repo) else base
++    if wave_stacked and wave_tip:
++        checkout_base = wave_tip
++    else:
++        checkout_base = f"origin/{stack_branch}" if stack_branch else f"{base_remote}/{base}"
++    # A wave>0 bundle (a recorded `stack-base`) opens its PR against its REAL target base, on
++    # the own-repo and fork paths alike (#593): the integration branch is a run-scoped
++    # staging line, and a PR merged into it never reaches the target. The PR carries every
++    # earlier-wave branch on the line, not only its own predecessors', and shows their
++    # changes until they merge. Those are the commits of their own PRs (the fold merges the
++    # published branches, never re-applied copies), so merging the stack bottom-up with
++    # merge commits lands every wave on the target. Once they have all merged, this PR's diff
++    # against the base is its own change when the line is a plain chain (one branch per
++    # earlier wave, no newer base taken in). Otherwise a fold merge commit joined histories
++    # the base got separately, and the PR can keep showing an already-merged change until its
++    # branch is updated from the base (GitHub's "Update branch"); integrate's module docstring
++    # has the detail.
++    # Only a hand-declared legacy `Stacks on:` parent (no stack-base) keeps the parent branch
++    # as the `--base` on own-repo (#123). A fork can never `--base` a branch on origin (the
++    # fork), so a fork PR always opens against the upstream base (#185). Merge mode records
++    # no stack-base, and its own guard (#411, below) judges the base this picks, unchanged.
++    pr_base = stack_branch if (stack_branch and own_repo and not wave_stacked) else base
+     # Merge-mode base guard (#411) — fail-closed, BEFORE any branch/push/PR work. Under
+     # `[driver].wave_mode = "merge"` the driver merges each accepted bundle's PR "into its
+     # base" (merge.py:32-33), unattended, mid-flow — whatever base that PR happens to carry.
+@@ -311,7 +326,9 @@ def publish(
+     if dry_run:
+         kind = "draft PR"
+         if stack_branch:
+-            kind = "stacked draft PR" if own_repo else "stacked draft PR (fork: cumulative diff vs base)"
++            kind = ("stacked draft PR" if pr_base == stack_branch
++                    else "stacked draft PR (fork: cumulative diff vs base)" if not own_repo
++                    else "stacked draft PR (cumulative diff vs base)")
+         print(f"publish --dry-run — {d.name} → {kind} on {repo_spec} ({branch} → {pr_base}):")
+         print(f"  # stash the target working tree (Do/Check leave it dirty), restore it after")
+         if cfg.host_ci_checks:
+@@ -598,24 +615,35 @@ def _publish_record(d: Path) -> dict | None:
+         return None
+ 
+ 
+-def write_stack_base(d: Path, branch: str) -> None:
+-    """Record the integration branch a wave>0 bundle stacks on, so its Do worktree and
+-    stacked PR base off the prior waves' folded work (read by :func:`_stack_base_branch`)."""
+-    (d / STACK_BASE_FILE).write_text(branch + "\n", encoding="utf-8")
++def write_stack_base(d: Path, branch: str, tip: str | None = None) -> None:
++    """Record the integration branch a wave>0 bundle stacks on, so its Do worktree is cut
++    from the prior waves' folded work (read by :func:`_stack_base_branch`), and ``tip``, the
++    line commit the run's last fold pushed — the one it is built on, and the one its PR
++    branch is cut from, however much the line grows before it is published (#593)."""
++    (d / STACK_BASE_FILE).write_text(branch + "\n" + (f"{tip}\n" if tip else ""),
++                                     encoding="utf-8")
+ 
+ 
+ def clear_stack_base(d: Path) -> None:
+     """Remove any recorded integration stack base so the bundle builds off its own target
+     base. Clears a **stale** marker a prior/resumed run wrote for a target that this run does
+-    not integrate — otherwise the bundle would build + open its PR against an old integration
+-    branch (read via :func:`_stack_base_branch`) instead of its own base (#187)."""
++    not integrate — otherwise the bundle would build on (and cut its PR branch from) an old
++    integration branch (read via :func:`_stack_base_branch`) instead of its own base (#187)."""
+     (d / STACK_BASE_FILE).unlink(missing_ok=True)
+ 
+ 
++def _stack_marker(d: Path) -> tuple[str, str]:
++    """``(branch, tip)`` recorded by :func:`write_stack_base`; "" for what is not recorded
++    (no marker: build off the base; no tip: a dry-run's marker, or one written before #593)."""
++    p = d / STACK_BASE_FILE
++    lines = [ln.strip() for ln in p.read_text(encoding="utf-8").splitlines()
++             if ln.strip()] if p.exists() else []
++    return (lines[0] if lines else "", lines[1] if len(lines) > 1 else "")
++
++
+ def _read_stack_base(d: Path) -> str:
+     """The recorded integration branch for a wave>0 bundle, or "" (absent ⇒ build off base)."""
+-    p = d / STACK_BASE_FILE
+-    return p.read_text(encoding="utf-8").strip() if p.exists() else ""
++    return _stack_marker(d)[0]
+ 
+ 
+ def read_stack_base(d: Path) -> str:
+@@ -630,16 +658,19 @@ def read_stack_base(d: Path) -> str:
+ 
+ 
+ def _stack_base_branch(cfg: Config, d: Path) -> str | None:
+-    """The branch a stacked bundle bases off (worktree + ``gh --base``), or None.
++    """The branch a stacked bundle bases off (its worktree, its PR branch), or None.
+ 
+     The wave driver's run-scoped integration branch — recorded in the bundle's
+-    ``stack-base`` file (#wave-model) — wins: a wave>0 bundle builds + opens its PR on the
+-    prior waves' folded work. Else the legacy single-chain ``Stacks on:`` (#123) parent
+-    branch from its publish.json, for a brief that still hand-declares a stack. None when
++    ``stack-base`` file (#wave-model) — wins: a wave>0 bundle builds on, and cuts its PR
++    branch from, the prior waves' folded work (its PR targets the real base, #593). Else
++    the legacy single-chain ``Stacks on:`` (#123) parent branch from its publish.json, for a
++    brief that still hand-declares a stack (also its own-repo ``gh --base``). None when
+     neither applies (or the legacy prereq hasn't published yet)."""
+-    wave_base = _read_stack_base(d)
+-    if wave_base:
+-        return wave_base
++    return _read_stack_base(d) or _stacks_on_branch(cfg, d)
++
++
++def _stacks_on_branch(cfg: Config, d: Path) -> str | None:
++    """A legacy ``Stacks on:`` (#123) parent's published branch, or None."""
+     parents = brief.stacks_on(d / "brief.md")
+     if not parents:
+         return None
+@@ -701,9 +732,10 @@ def _batch_branch_producer(cfg: Config, d: Path, repo_spec: str, branch: str) ->
+ def _warn_if_squash_only(repo_spec: str) -> None:
+     """Warn if the target repo can't merge a stacked PR with a merge commit (issue #123).
+ 
+-    Stacked PRs must be merged bottom-up with merge-commit / rebase-merge: a SQUASH drops
+-    the parent's commits from the base, so a child retargeted to the base re-shows the
+-    parent's diff until rebased. Best-effort via ``gh repo view``; any failure is silent."""
++    Stacked PRs must be merged bottom-up with a merge commit: a squash or rebase merge puts
++    the parent's change on the base as NEW commits, not the ones the child carries, so the
++    child keeps showing the parent's diff until its branch is updated from the base (#593).
++    Best-effort via ``gh repo view``; any failure is silent."""
+     try:
+         r = subprocess.run(
+             ["gh", "repo", "view", repo_spec, "--json", "mergeCommitAllowed,squashMergeAllowed"],
+diff --git a/template/src/pdca_harness/sweep.py b/template/src/pdca_harness/sweep.py
+index d1d4307..dbce672 100644
+--- a/template/src/pdca_harness/sweep.py
++++ b/template/src/pdca_harness/sweep.py
+@@ -15,8 +15,8 @@ after a run's waves complete, when nothing reuses the trees) and on demand via
+ 
+ * ``"clean"`` (default) — lane worktrees are kept as warm checkouts but stripped of
+   build state (``git clean -fdxq`` + ``reset --hard``, the bulk of the footprint);
+-  integration and overflow trees are removed outright (folds rebuild from the base
+-  every call, so their reuse value is nil).
++  integration and overflow trees are removed outright (each fold resets its tree to a
++  freshly fetched ref — the base, or the run's pushed tip — so their reuse value is nil).
+ * ``"remove"`` — lane worktrees are removed too (Do/``pdca try`` recreate on demand).
+ * ``"off"`` — the flow never sweeps; ``pdca sweep`` still works (explicit mode).
+ 
+diff --git a/template/tests/test_flow_adopt_split.py b/template/tests/test_flow_adopt_split.py
+index fbd8200..2ac6431 100644
+--- a/template/tests/test_flow_adopt_split.py
++++ b/template/tests/test_flow_adopt_split.py
+@@ -265,9 +265,9 @@ class AdoptSplitChildren(unittest.TestCase):
+                 self.after_wave()      # fault injection BETWEEN the wave and adoption
+             return used
+ 
+-        def spy_point(integ, runnable: list[Path]) -> None:
++        def spy_point(integ, runnable: list[Path], *args) -> None:   # + the line tips (#593)
+             self.pointed.append([d.name for d in runnable])
+-            return real_point(integ, runnable)
++            return real_point(integ, runnable, *args)
+ 
+         flow._build_all = counting
+         flow._drive_wave = spy_wave
+@@ -375,10 +375,9 @@ class AdoptSplitChildren(unittest.TestCase):
+         folds: list[list[str]] = []
+         real_fold = flow.integrate.fold
+ 
+-        def spy_fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
+-                     locks=None):
++        def spy_fold(cfg: Config, accepted: list[Path], **kwargs):  # dry_run, locks, …
+             folds.append([d.name for d in accepted])
+-            return real_fold(cfg, accepted, dry_run=dry_run, locks=locks)
++            return real_fold(cfg, accepted, **kwargs)
+ 
+         flow.integrate.fold = spy_fold
+         self.addCleanup(setattr, flow.integrate, "fold", real_fold)
+diff --git a/template/tests/test_flow_slice.py b/template/tests/test_flow_slice.py
+index a891cf6..b0efbfc 100644
+--- a/template/tests/test_flow_slice.py
++++ b/template/tests/test_flow_slice.py
+@@ -9,10 +9,13 @@ publisher leaf is stubbed (never pushes offline). Run from the project root:
+ 
+ from __future__ import annotations
+ 
++import contextlib
+ import io
++import json
+ import os
+ import re
+ import shutil
++import subprocess
+ import tempfile
+ import unittest
+ from contextlib import redirect_stderr, redirect_stdout
+@@ -1121,9 +1124,9 @@ class WaveModel(unittest.TestCase):
+         calls: list[list[str]] = []
+         real = flow.integrate.fold
+ 
+-        def spy(cfg: Config, accepted: list, *, dry_run: bool = False, locks=None):
++        def spy(cfg: Config, accepted: list, **kwargs):   # dry_run, locks, folded_this_run
+             calls.append([d.name for d in accepted])
+-            return real(cfg, accepted, dry_run=dry_run, locks=locks)
++            return real(cfg, accepted, **kwargs)
+ 
+         flow.integrate.fold = spy
+         try:
+@@ -1238,6 +1241,11 @@ class WaveModel(unittest.TestCase):
+         self.assertIsNone(flow.publish._stack_base_branch(self.cfg, d))
+         flow.publish.write_stack_base(d, "pdca-integration/main")
+         self.assertEqual(flow.publish._stack_base_branch(self.cfg, d), "pdca-integration/main")
++        # The line commit recorded with it (#593) is publish's alone: every other reader
++        # (Do's worktree, $PDCA_VERIFY_BASE) still gets just the branch.
++        flow.publish.write_stack_base(d, "pdca-integration/main", "0123abcd")
++        self.assertEqual(flow.publish._stack_base_branch(self.cfg, d), "pdca-integration/main")
++        self.assertEqual(flow.publish.read_stack_base(d), "pdca-integration/main")
+ 
+     def test_waves_command_prints_plan(self) -> None:
+         # `pdca waves` prints the computed wave plan without building (B3 observability).
+@@ -1258,15 +1266,470 @@ class WaveModel(unittest.TestCase):
+         self.assertIn("unschedulable", err.getvalue())
+ 
+     def test_publish_flag_marks_stacked_pr(self) -> None:
+-        # A stacked PR's status flag shows ↑<integration-branch> so the human merges the
+-        # stack bottom-up.
++        # A stacked PR's status flag shows ↑<base> so the human merges the stack bottom-up.
++        # A wave stack's PRs all target the real base (#593), so the cue reads ↑main; an
++        # ordinary new-pr record shows none.
+         d = self._brief("SF")
+         (d / "publish.json").write_text(
+-            '{"pr_url": "https://gh/pr/9", "base": "pdca-integration/main", '
+-            '"mode": "stacked-pr"}', encoding="utf-8")
++            '{"pr_url": "https://gh/pr/9", "base": "main", "mode": "stacked-pr"}',
++            encoding="utf-8")
+         flag = cli._publish_flag(d)
+         self.assertIn("https://gh/pr/9", flag)
+-        self.assertIn("↑pdca-integration/main", flag)
++        self.assertIn("↑main", flag)
++        (d / "publish.json").write_text(
++            '{"pr_url": "https://gh/pr/9", "base": "main", "mode": "new-pr"}',
++            encoding="utf-8")
++        self.assertNotIn("↑", cli._publish_flag(d))
++
++
++class StackModeFlow(unittest.TestCase):
++    """#593, the flow's half of stack mode: the run's first fold of a target starts fresh
++    and every later one continues the tip the run's last fold pushed (``folded_this_run``),
++    and an accepted bundle that did not publish holds only what depends on it.
++
++    The non-dry cases swap the publisher leaf off ``stub`` (so the flow is NOT a dry-run)
++    and spy the text pre-pass, publish and — where named — the fold, so no model leaf, no
++    push and no ``gh`` runs; the end-to-end case runs the REAL fold against real git."""
++
++    TARGET = ("example-org/example-repo", "main")
++
++    def setUp(self) -> None:
++        self.tmp = Path(tempfile.mkdtemp())
++        self.cfg = _stub_config(self.tmp)
++
++    def tearDown(self) -> None:
++        shutil.rmtree(self.tmp, ignore_errors=True)
++
++    def _brief(self, iid: str, *, depends_on: str = "", target: bool = True) -> Path:
++        d = self.cfg.bundle(iid)
++        d.mkdir(parents=True)
++        body = _TOY_BRIEF.format(slug=iid.lower())
++        if not target:
++            body = "".join(ln for ln in body.splitlines(keepends=True)
++                           if "Repo + branch target" not in ln)
++        if depends_on:
++            body += f"- **Depends on:** {depends_on}\n"
++        (d / "brief.md").write_text(body, encoding="utf-8")
++        return d
++
++    def _spy_fold(self, calls: list[dict]):
++        """A fold spy taking any keyword, returning a worktree that is a real git repo
++        whose HEAD moves on every call (so each fold "pushes" a distinct tip)."""
++        wt = self.tmp / "integ-wt"
++        subprocess.run(["git", "init", "-q", str(wt)], check=True)
++
++        def spy(cfg: Config, accepted: list, **kwargs):
++            calls.append({"accepted": [d.name for d in accepted], **kwargs})
++            subprocess.run(["git", "-C", str(wt), "-c", "user.name=T", "-c",
++                            "user.email=t@example.com", "-c", "commit.gpgsign=false",
++                            "commit", "-q", "--allow-empty", "-m", "fold"], check=True)
++            calls[-1]["pushed"] = subprocess.run(
++                ["git", "-C", str(wt), "rev-parse", "HEAD"], check=True,
++                capture_output=True, text=True).stdout.strip()
++            return {self.TARGET: ("pdca-integration/main", wt)}
++
++        return spy
++
++    def _live(self, *, fold=None, fail_publish: frozenset = frozenset(), publish_fn=None,
++              fail_texts: frozenset = frozenset()):
++        """Patches for a NON-dry run: a non-stub publisher, the text pre-pass spied (no
++        leaf; ``fail_texts`` bundle names fail it, as a failed draft/T4 does), publish spied
++        (``fail_publish`` ids fail: rc 1, nothing recorded — the real path's failure
++        shape), and optionally the fold."""
++        self.cfg.publisher = LeafConfig(mode="command", family="claude", interactive=True)
++        real_publish = flow.publish.publish
++
++        def fake_publish(cfg: Config, issue_id: str, **kw) -> int:
++            d = cfg.bundle(issue_id)
++            if not all(flow.publish._resolve_target(d)[:2]):
++                return real_publish(cfg, issue_id, **kw)   # no target: rc 0, no record
++            if issue_id in fail_publish:
++                return 1
++            if publish_fn is not None:
++                return publish_fn(cfg, d)
++            (d / "publish.json").write_text(json.dumps(
++                {"mode": "new-pr", "branch": f"fix/{issue_id}", "base": "main",
++                 "repo": self.TARGET[0]}), encoding="utf-8")
++            return 0
++
++        stack = contextlib.ExitStack()
++        stack.enter_context(mock.patch.object(flow.publish, "draft_texts",
++                                              lambda cfg, d, **kw: d.name not in fail_texts))
++        stack.enter_context(mock.patch.object(flow.publish, "publish", fake_publish))
++        if fold is not None:
++            stack.enter_context(mock.patch.object(flow.integrate, "fold", fold))
++        return stack
++
++    def test_each_later_fold_continues_the_tip_the_runs_last_fold_pushed(self) -> None:
++        # Three waves → two folds. The first gets an empty map (start fresh); the second
++        # gets the target with the HEAD the first fold's worktree held when it returned.
++        self._brief("SA")
++        self._brief("SB", depends_on="SA")
++        self._brief("SC", depends_on="SB")
++        calls: list[dict] = []
++        with self._live(fold=self._spy_fold(calls)), redirect_stderr(io.StringIO()):
++            results = flow.flow_ids(self.cfg, ["SA", "SB", "SC"], do_act=False,
++                                    today="2026-10-02")
++        self.assertEqual(results, {"SA": state.COMPLETE, "SB": state.COMPLETE,
++                                   "SC": state.COMPLETE})
++        self.assertEqual([c["accepted"] for c in calls],
++                         [["issue_SA"], ["issue_SA", "issue_SB"]])
++        self.assertEqual(calls[0].get("folded_this_run"), {})
++        self.assertEqual(calls[1].get("folded_this_run"), {self.TARGET: calls[0]["pushed"]})
++
++    def test_a_dry_run_lists_the_folded_target_and_plans_start_then_continue(self) -> None:
++        # Stub publisher ⇒ dry-run: the REAL fold prints its plan, pushes nothing (None).
++        self._brief("DA")
++        self._brief("DB", depends_on="DA")
++        self._brief("DC", depends_on="DB")
++        calls: list[dict] = []
++        real = flow.integrate.fold
++
++        def spy(cfg: Config, accepted: list, **kwargs):
++            calls.append(dict(kwargs))
++            return real(cfg, accepted, **kwargs)
++
++        with mock.patch.object(flow.integrate, "fold", spy), \
++                redirect_stdout(io.StringIO()) as out, redirect_stderr(io.StringIO()):
++            results = flow.flow_ids(self.cfg, ["DA", "DB", "DC"], do_act=False,
++                                    today="2026-10-02")
++        self.assertTrue(all(s == state.COMPLETE for s in results.values()))
++        self.assertEqual([c.get("folded_this_run") for c in calls],
++                         [{}, {self.TARGET: None}])
++        text = out.getvalue()
++        start = text.find("start pdca-integration/main fresh from upstream/main")
++        cont = text.find("continue pdca-integration/main from this run's tip")
++        self.assertNotEqual(start, -1, text)
++        self.assertNotEqual(cont, -1, text)
++        self.assertLess(start, cont)
++
++    def test_an_unpublished_bundle_holds_only_its_dependents(self) -> None:
++        # Wave 0 = {HI, HU}; wave 1 = {HD (on HU), HJ (on HI)}; wave 2 = {HE (on HD)}. HU's
++        # publish fails, so it has no branch: it is left out of every fold, HD is skipped
++        # naming it, the skip cascades to HE, HJ is built, and the run goes on — no STOP.
++        self._brief("HU")
++        self._brief("HI")
++        self._brief("HD", depends_on="HU")
++        self._brief("HJ", depends_on="HI")
++        self._brief("HE", depends_on="HD")
++        calls: list[dict] = []
++        with self._live(fold=self._spy_fold(calls), fail_publish=frozenset({"HU"})), \
++                redirect_stderr(io.StringIO()) as err:
++            results = flow.flow_ids(self.cfg, ["HU", "HI", "HD", "HJ", "HE"], do_act=False,
++                                    today="2026-10-02")
++        self.assertEqual([c["accepted"] for c in calls],
++                         [["issue_HI"], ["issue_HI", "issue_HJ"]])
++        self.assertEqual(results.get("HJ"), state.COMPLETE)
++        self.assertNotEqual(results.get("HD"), state.COMPLETE)
++        self.assertNotEqual(results.get("HE"), state.COMPLETE)
++        self.assertIn("issue_HD skipped — prerequisite(s) not ready (HU)", err.getvalue())
++        self.assertIn("issue_HE skipped — prerequisite(s) not ready (HD)", err.getvalue())
++        self.assertNotIn("STOPPING", err.getvalue())
++
++    def test_texts_not_ready_hold_the_bundle_though_an_earlier_record_survives(self) -> None:
++        # The other failure path: TU's publish texts fail draft/T4, so publish never runs
++        # for it this run — while an earlier attempt's publish.json (kept by an iterate) is
++        # still on disk. That record must not stand in for a publish: TU stays out of the
++        # fold, TD (on TU) is skipped naming it, and TJ (on TI) still builds.
++        self._brief("TU")
++        self._brief("TI")
++        self._brief("TD", depends_on="TU")
++        self._brief("TJ", depends_on="TI")
++        (self.cfg.bundle("TU") / "publish.json").write_text(json.dumps(
++            {"mode": "new-pr", "branch": "fix/TU", "base": "main",
++             "repo": self.TARGET[0]}), encoding="utf-8")
++        calls: list[dict] = []
++        with self._live(fold=self._spy_fold(calls), fail_texts=frozenset({"issue_TU"})), \
++                redirect_stderr(io.StringIO()) as err:
++            results = flow.flow_ids(self.cfg, ["TU", "TI", "TD", "TJ"], do_act=False,
++                                    today="2026-10-02")
++        self.assertEqual([c["accepted"] for c in calls], [["issue_TI"]])
++        self.assertEqual(results.get("TJ"), state.COMPLETE)
++        self.assertNotEqual(results.get("TD"), state.COMPLETE)
++        self.assertIn("issue_TU — publish texts not ready", err.getvalue())
++        self.assertIn("issue_TD skipped — prerequisite(s) not ready (TU)", err.getvalue())
++        self.assertNotIn("STOPPING", err.getvalue())
++
++    def test_a_patched_bundle_with_no_target_does_not_hold_its_dependents(self) -> None:
++        # NN publishes with rc 0 and no publish.json (no upstream contribution, the real
++        # publish path) and the REAL fold drops it — its dependent still builds.
++        self._brief("NN", target=False)
++        self._brief("NM", depends_on="NN")
++        with self._live(), redirect_stderr(io.StringIO()) as err:
++            results = flow.flow_ids(self.cfg, ["NN", "NM"], do_act=False,
++                                    today="2026-10-02")
++        self.assertEqual(results.get("NM"), state.COMPLETE, err.getvalue())
++        self.assertNotIn("issue_NM skipped", err.getvalue())
++
++    # -- end to end with the REAL fold against real git -----------------------------------
++    # The drive itself (Do/Check/sign-off) is replaced by accepting each bundle with a real
++    # patch (`_accept_wave`) and publish by pushing its branch the way `publish` does
++    # (`_push_branch`) — neither is what these cases test; the fold and the hold are.
++
++    def _real_origin(self) -> None:
++        """A bare ``origin`` that refuses non-fast-forwards, and the target checkout the
++        config maps ``example-org/example-repo`` to, with ``main`` pushed."""
++        self.origin, self.repo = self.tmp / "origin.git", self.tmp / "example-repo"
++        subprocess.run(["git", "init", "--bare", "-q", str(self.origin)], check=True)
++        subprocess.run(["git", "-C", str(self.origin), "config",
++                        "receive.denyNonFastForwards", "true"], check=True)
++        subprocess.run(["git", "init", "-q", "-b", "main", str(self.repo)], check=True)
++        self._git("config", "user.email", "t@example.com")
++        self._git("config", "user.name", "Tester")
++        self._git("config", "commit.gpgsign", "false")
++        (self.repo / "base.txt").write_text("base\n", encoding="utf-8")
++        self._git("add", "-A")
++        self._git("commit", "-q", "-m", "base")
++        self._git("remote", "add", "origin", str(self.origin))
++        self._git("push", "-q", "origin", "main")
++        self.cfg.base_remote = "origin"
++        self.cut_from: dict[str, str] = {}
++
++    def _git(self, *args: str) -> str:
++        return subprocess.run(["git", "-C", str(self.repo), *args], check=True,
++                              capture_output=True, text=True).stdout.strip()
++
++    def _accept_wave(self, cfg: Config, wave: list, **_kw) -> int:
++        for d in wave:
++            (d / "patch.diff").write_text(
++                f"diff --git a/{d.name}.txt b/{d.name}.txt\nnew file mode 100644\n"
++                f"--- /dev/null\n+++ b/{d.name}.txt\n@@ -0,0 +1 @@\n+{d.name}\n",
++                encoding="utf-8")
++            (d / "check-gates.json").write_text("{}", encoding="utf-8")
++            shutil.copyfile(TEMPLATES / "SUMMARY.md.tpl", d / "SUMMARY.md")
++            signoff.record(d / "SUMMARY.md", action="accept", by="T", date="2026-10-02")
++        return 1
++
++    def _push_branch(self, cfg: Config, d: Path) -> int:
++        stack = flow.publish.read_stack_base(d)
++        base = f"origin/{stack}" if stack else "origin/main"
++        self.cut_from[d.name] = base
++        branch = f"fix/{d.name}"
++        self._git("fetch", "-q", "origin")
++        self._git("checkout", "-q", "-B", branch, base)
++        self._git("apply", str(d / "patch.diff"))
++        self._git("add", "--all")
++        self._git("commit", "-q", "-s", "-m", f"fix {d.name}")
++        self._git("push", "-q", "--force-with-lease", "origin", branch)   # as publish does
++        self._git("checkout", "-q", "main")
++        (d / "publish.json").write_text(json.dumps(
++            {"mode": "stacked-pr" if stack else "new-pr", "branch": branch,
++             "base": "main", "repo": self.TARGET[0]}), encoding="utf-8")
++        return 0
++
++    def _earlier_attempt(self, iid: str) -> str:
++        """An earlier run published ``iid``: its branch is on origin and its record (with
++        its still-open PR) in the bundle, which an iterate keeps. Returns that commit."""
++        branch = f"fix/issue_{iid}"
++        self._git("checkout", "-q", "-B", branch, "main")
++        (self.repo / f"{iid.lower()}-old.txt").write_text("rejected\n", encoding="utf-8")
++        self._git("add", "--all")
++        self._git("commit", "-q", "-s", "-m", f"fix issue_{iid} (earlier run, rejected)")
++        self._git("push", "-q", "origin", branch)
++        self._git("checkout", "-q", "main")
++        (self.cfg.bundle(iid) / "publish.json").write_text(json.dumps(
++            {"mode": "new-pr", "branch": branch, "pr_url": "https://example.test/pr/1",
++             "base": "main", "repo": self.TARGET[0]}), encoding="utf-8")
++        return self._origin_rev(branch)
++
++    def _origin_rev(self, ref: str) -> str:
++        return subprocess.run(["git", "-C", str(self.origin), "rev-parse", ref], check=True,
++                              capture_output=True, text=True).stdout.strip()
++
++    def _in_line(self, commit: str) -> bool:
++        return subprocess.run(["git", "-C", str(self.origin), "merge-base", "--is-ancestor",
++                               commit, "pdca-integration/main"]).returncode == 0
++
++    def _ancestor(self, commit: str, of: str) -> bool:
++        return subprocess.run(["git", "-C", str(self.origin), "merge-base", "--is-ancestor",
++                               commit, of]).returncode == 0
++
++    def _diff(self, base: str, head: str) -> list[str]:
++        """What the PR view shows: the three-dot diff of ``head`` against ``base``."""
++        return subprocess.run(["git", "-C", str(self.origin), "diff", "--name-only",
++                               f"{base}...{head}"], check=True, capture_output=True,
++                              text=True).stdout.split()
++
++    def _merge_into_main(self, branch: str) -> None:
++        """The maintainer merges ``branch``'s PR into main with a merge commit."""
++        self._git("fetch", "-q", "origin")
++        self._git("checkout", "-q", "-B", "main", "origin/main")
++        self._git("merge", "-q", "--no-ff", "--no-edit", f"origin/{branch}")
++        self._git("push", "-q", "origin", "main")
++
++    def _update_from_main(self, branch: str) -> None:
++        """GitHub's "Update branch": merge main into ``branch``."""
++        self._git("fetch", "-q", "origin")
++        self._git("checkout", "-q", "-B", branch, f"origin/{branch}")
++        self._git("merge", "-q", "--no-ff", "--no-edit", "origin/main")
++        self._git("push", "-q", "origin", branch)
++        self._git("checkout", "-q", "main")
++
++    def test_a_three_wave_run_folds_append_only_onto_a_real_origin(self) -> None:
++        # Origin refuses non-fast-forwards; the second fold must continue the line and carry
++        # both PR branches' own commits. A REBUILT line passes that too (fix/issue_EB
++        # descends from the old tip, so even a forced push fast-forwards), so also pin: EA
++        # is merged onto the line once, and only the first fold forces. Each fold commits at
++        # its own clock time, so a rebuilt merge commit cannot match the first by chance.
++        self._real_origin()
++        for iid, dep in (("EA", ""), ("EB", "EA"), ("EC", "EB")):
++            self._brief(iid, depends_on=dep)
++        pushes: list[list[str]] = []
++        real_fold, real_git = flow.integrate.fold, flow.integrate._git
++        clock = iter(range(1_790_000_000, 1_800_000_000, 60))
++
++        def dated_fold(cfg: Config, accepted: list, **kwargs):
++            stamp = f"@{next(clock)} +0000"
++            with mock.patch.dict(os.environ, {"GIT_AUTHOR_DATE": stamp,
++                                              "GIT_COMMITTER_DATE": stamp}):
++                return real_fold(cfg, accepted, **kwargs)
++
++        def spy_git(repo: Path, *args: str) -> int:
++            if args[:1] == ("push",):
++                pushes.append(list(args))
++            return real_git(repo, *args)
++
++        with self._live(publish_fn=self._push_branch), \
++                mock.patch.object(flow, "_drive_wave", self._accept_wave), \
++                mock.patch.object(flow.integrate, "fold", dated_fold), \
++                mock.patch.object(flow.integrate, "_git", spy_git), \
++                redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()) as err:
++            results = flow.flow_ids(self.cfg, ["EA", "EB", "EC"], do_act=False,
++                                    today="2026-10-02")
++        self.assertNotIn("STOPPING", err.getvalue())
++        self.assertEqual(results, {"EA": state.COMPLETE, "EB": state.COMPLETE,
++                                   "EC": state.COMPLETE})
++        self.assertEqual(self.cut_from["issue_EB"], "origin/pdca-integration/main")
++        self.assertTrue(self._in_line(self._origin_rev("fix/issue_EA")))   # A's own commit
++        self.assertTrue(self._in_line(self._origin_rev("fix/issue_EB")))   # B's own commit
++        # B was cut from the first fold's tip, and that tip is still in the line.
++        self.assertTrue(self._in_line(self._origin_rev("fix/issue_EB~1")))
++        merges = subprocess.run(
++            ["git", "-C", str(self.origin), "log", "--merges", "--format=%s",
++             "pdca-integration/main"], check=True, capture_output=True,
++            text=True).stdout.splitlines()
++        self.assertEqual(merges.count("pdca-integrate: issue_EA"), 1, merges)
++        self.assertEqual(len(pushes), 2, pushes)            # a fold after waves 0 and 1
++        self.assertIn("--force", pushes[0])                 # the run's first fold only
++        self.assertEqual([x for x in pushes[1] if x.startswith("--force")], [], pushes[1])
++
++    def test_a_dependent_carries_every_earlier_wave_branch_not_only_its_prerequisite(
++            self) -> None:
++        # Wave 0 = {ZA, ZZ}; ZB depends on ZA alone, yet carries ZZ too (the line holds every
++        # published branch) and shows its change until ZZ merges. Once both merge, the fold
++        # commit joining them never reaches main: two merge bases, until "Update branch".
++        self._real_origin()
++        self._brief("ZA")
++        self._brief("ZZ")
++        self._brief("ZB", depends_on="ZA")
++        with self._live(publish_fn=self._push_branch), \
++                mock.patch.object(flow, "_drive_wave", self._accept_wave), \
++                redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()) as err:
++            results = flow.flow_ids(self.cfg, ["ZA", "ZZ", "ZB"], do_act=False,
++                                    today="2026-10-02")
++        self.assertEqual(results, {"ZA": state.COMPLETE, "ZZ": state.COMPLETE,
++                                   "ZB": state.COMPLETE}, err.getvalue())
++        self.assertEqual(self.cut_from["issue_ZB"], "origin/pdca-integration/main")
++        za, zz = self._origin_rev("fix/issue_ZA"), self._origin_rev("fix/issue_ZZ")
++        self.assertTrue(self._ancestor(za, "fix/issue_ZB"))
++        self.assertTrue(self._ancestor(zz, "fix/issue_ZB"))   # though ZB never named ZZ
++        self.assertEqual(self._diff("main", "fix/issue_ZB"),
++                         ["issue_ZA.txt", "issue_ZB.txt", "issue_ZZ.txt"])
++        self._merge_into_main("fix/issue_ZA")
++        self.assertEqual(self._diff("main", "fix/issue_ZB"),
++                         ["issue_ZB.txt", "issue_ZZ.txt"])     # ZZ rides until it merges
++        self._merge_into_main("fix/issue_ZZ")
++        bases = subprocess.run(
++            ["git", "-C", str(self.origin), "merge-base", "--all", "main", "fix/issue_ZB"],
++            check=True, capture_output=True, text=True).stdout.split()
++        self.assertEqual(sorted(bases), sorted([za, zz]))
++        self._update_from_main("fix/issue_ZB")
++        self.assertEqual(self._diff("main", "fix/issue_ZB"), ["issue_ZB.txt"])
++
++    def test_a_failed_re_publish_is_held_though_an_earlier_record_survives(self) -> None:
++        # publish.json survives an iterate. RP was published by an EARLIER run — its old
++        # branch is on origin, its record still in the bundle — then iterated, rebuilt and
++        # accepted again in THIS run, and its re-publish FAILS. The old record must not
++        # stand in for this run's publish: RP is held, so the old, rejected branch never
++        # enters the line, RD (on RP) is skipped naming it, and RJ (on RI) still builds —
++        # the run goes on, no STOP.
++        self._real_origin()
++        for iid, dep in (("RP", ""), ("RI", ""), ("RD", "RP"), ("RJ", "RI")):
++            self._brief(iid, depends_on=dep)
++        old = self._earlier_attempt("RP")
++        with self._live(publish_fn=self._push_branch, fail_publish=frozenset({"RP"})), \
++                mock.patch.object(flow, "_drive_wave", self._accept_wave), \
++                redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()) as err:
++            results = flow.flow_ids(self.cfg, ["RP", "RI", "RD", "RJ"], do_act=False,
++                                    today="2026-10-02")
++        log = err.getvalue()
++        self.assertNotIn("STOPPING", log)
++        self.assertEqual(results.get("RJ"), state.COMPLETE, log)
++        self.assertNotEqual(results.get("RD"), state.COMPLETE)
++        self.assertIn("issue_RD skipped — prerequisite(s) not ready (RP)", log)
++        self.assertEqual(self._origin_rev("fix/issue_RP"), old)   # nothing re-pushed it
++        self.assertTrue(self._in_line(self._origin_rev("fix/issue_RI")))
++        self.assertFalse(self._in_line(old), "the old, rejected branch was folded")
++
++    def test_a_re_publish_whose_pr_create_failed_is_folded_and_its_dependents_build(
++            self) -> None:
++        # What the hold must NOT catch: PP's re-publish pushed its rebuilt branch and wrote a
++        # fresh publish.json, then `gh pr create` failed (rc 1) because PP's old draft PR is
++        # still open. A branch WAS pushed this run, so it is folded — the new commit, never
++        # the earlier attempt's — and PD (on PP) builds.
++        self._real_origin()
++        subprocess.run(["git", "-C", str(self.origin), "config",   # the re-push is forced
++                        "receive.denyNonFastForwards", "false"], check=True)
++        for iid, dep in (("PP", ""), ("PD", "PP")):
++            self._brief(iid, depends_on=dep)
++        old = self._earlier_attempt("PP")
++
++        def pr_create_fails(cfg: Config, d: Path) -> int:
++            self._push_branch(cfg, d)                 # pushed, record written …
++            return 1 if d.name == "issue_PP" else 0   # … then `gh pr create` failed
++
++        with self._live(publish_fn=pr_create_fails), \
++                mock.patch.object(flow, "_drive_wave", self._accept_wave), \
++                redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()) as err:
++            results = flow.flow_ids(self.cfg, ["PP", "PD"], do_act=False, today="2026-10-03")
++        log = err.getvalue()
++        self.assertNotIn("STOPPING", log)
++        self.assertEqual(results.get("PD"), state.COMPLETE, log)
++        new = self._origin_rev("fix/issue_PP")
++        self.assertNotEqual(new, old)
++        self.assertTrue(self._in_line(new), "this run's pushed branch was not folded")
++        self.assertFalse(self._in_line(old), "the old, rejected branch was folded")
++
++    def test_a_held_bundle_published_later_is_cut_from_the_line_it_was_built_on(
++            self) -> None:
++        # Waves {LA} → {LU, LJ} → {LK} → {LL}. LU's publish fails, so it is held while the
++        # run folds LJ and then LK onto the line. Publishing LU afterwards (what the flow
++        # tells the human to do) must cut its PR branch from the line commit LU was built
++        # on: cut from the line as later waves left it, its PR against main would carry
++        # LJ's and LK's work, and merging it would land them unreviewed.
++        self._real_origin()
++        for iid, dep in (("LA", ""), ("LU", "LA"), ("LJ", "LA"), ("LK", "LJ"), ("LL", "LK")):
++            self._brief(iid, depends_on=dep)
++        with self._live(publish_fn=self._push_branch, fail_publish=frozenset({"LU"})), \
++                mock.patch.object(flow, "_drive_wave", self._accept_wave), \
++                redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()) as err:
++            results = flow.flow_ids(self.cfg, ["LA", "LU", "LJ", "LK", "LL"], do_act=False,
++                                    today="2026-10-03")
++        self.assertNotIn("STOPPING", err.getvalue())
++        self.assertEqual(results.get("LL"), state.COMPLETE, err.getvalue())
++        lk = self._origin_rev("fix/issue_LK")
++        self.assertTrue(self._in_line(lk))                   # the line grew past LU's wave
++        u = self.cfg.bundle("LU")
++        for name in ("commit-msg.txt", "pr-description.md"):
++            (u / name).write_text("Fix LU\n\nFixes #1\n", encoding="utf-8")
++        with mock.patch.object(flow.publish, "_warn_if_squash_only"), \
++                redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
++            rc = flow.publish.publish(self.cfg, "LU", open_pr=False, by="T",
++                                      today="2026-10-03")
++        self.assertEqual(rc, 0)
++        branch = json.loads((u / "publish.json").read_text(encoding="utf-8"))["branch"]
++        self.assertFalse(self._ancestor(lk, branch), "LU's PR branch carries LK")
++        self.assertEqual(self._diff("main", branch), ["issue_LA.txt", "issue_LU.txt"])
+ 
+ 
+ class ProgName(unittest.TestCase):
+diff --git a/template/tests/test_integrate.py b/template/tests/test_integrate.py
+index ff3c57e..0176bc7 100644
+--- a/template/tests/test_integrate.py
++++ b/template/tests/test_integrate.py
+@@ -1,6 +1,6 @@
+ """Slice for integration-branch stacking (`integrate.fold`) — the default wave
+-sequencing that folds each wave's accepted patches onto a run-scoped branch the next
+-wave builds on, without merging (#wave-model).
++sequencing that folds each wave's accepted, published branches onto a run-scoped branch
++the next wave builds on, without merging anything into the target (#wave-model, #593).
+ 
+ Two halves: pure/dry-run cases (no git — naming, nothing-to-fold, dry-run shells
+ nothing, different-target exclusion) and real-git folds against a bare ``origin`` +
+@@ -12,6 +12,7 @@ a primary checkout (a clean fold pushes the branch; an undeclared overlap raises
+ from __future__ import annotations
+ 
+ import io
++import json
+ import shutil
+ import subprocess
+ import tempfile
+@@ -156,8 +157,25 @@ class FoldGit(unittest.TestCase):
+             f"- **Slug:** {iid.lower()}\n- **Repo + branch target:** org/repo @ main\n",
+             encoding="utf-8")
+         (d / "patch.diff").write_text(patch, encoding="utf-8")
++        self._publish(d)
+         return d
+ 
++    def _publish(self, d: Path, base: str = "main") -> None:
++        """What publish does for the bundle (#593: the fold merges the PUBLISHED branch):
++        cut its branch off origin/<base>, commit its patch.diff signed off, push it to
++        origin, and record it in publish.json."""
++        branch = f"fix/{d.name.removeprefix('issue_')}"
++        self._git(self.primary, "fetch", "-q", "origin")
++        self._git(self.primary, "checkout", "-q", "-B", branch, f"origin/{base}")
++        self._git(self.primary, "apply", str(d / "patch.diff"))
++        self._git(self.primary, "add", "--all")
++        self._git(self.primary, "commit", "-q", "-s", "-m", f"fix {d.name}")
++        self._git(self.primary, "push", "-q", "origin", branch)
++        self._git(self.primary, "checkout", "-q", "main")
++        (d / "publish.json").write_text(json.dumps(
++            {"mode": "new-pr", "branch": branch, "base": base, "repo": "org/repo"}),
++            encoding="utf-8")
++
+     def _pushed(self, branch: str) -> bool:
+         out = subprocess.run(
+             ["git", "-C", str(self.primary), "ls-remote", "--heads", "origin", branch],
+@@ -174,9 +192,8 @@ class FoldGit(unittest.TestCase):
+         self.assertTrue(self._pushed("pdca-integration/main"))
+ 
+     def test_fold_commits_carry_a_dco_signoff(self) -> None:
+-        # #405: the integration branch is rebuilt each fold, so a stacked PR cut from an
+-        # earlier fold carries these commits outside the base's ancestry — where a
+-        # DCO-gated host inspects them. Sign them like publish does (#81).
++        # #405: every later wave's PR carries the fold's merge commits outside the base's
++        # ancestry — where a DCO-gated host inspects them. Sign them like publish does (#81).
+         b = self._bundle("S1", self._modify_patch("one\n"))
+         _, wt = integrate.fold(self.cfg, [b])[("org/repo", "main")]
+         trailer = subprocess.run(
+@@ -207,7 +224,7 @@ class FoldGit(unittest.TestCase):
+             yield False
+ 
+         with mock.patch.object(integrate, "integ_lock", unheld):
+-            with self.assertRaises(integrate.IntegrationError):
++            with self.assertRaisesRegex(integrate.IntegrationError, "integration lock"):
+                 integrate.fold(self.cfg, [b])
+         self.assertFalse(self._pushed("pdca-integration/main"))  # nothing left origin
+ 
+@@ -228,6 +245,7 @@ class FoldGit(unittest.TestCase):
+             encoding="utf-8")
+         (b_aa / "patch.diff").write_text(self._add_patch("f2.txt", "hi\n"),
+                                          encoding="utf-8")
++        self._publish(b_aa, base="aa")
+         order: list[str] = []
+         real_lock = integrate.integ_lock
+ 
+@@ -272,13 +290,14 @@ class FoldGit(unittest.TestCase):
+                 gates.run_integration(self.cfg, self.primary)
+ 
+     def test_overlap_raises_integration_error(self) -> None:
+-        # Two patches that each rewrite base.txt's only line — the second can't apply onto
+-        # the first, an undeclared cross-wave overlap → a loud STOP.
++        # Two branches that each rewrite base.txt's only line — the second can't merge onto
++        # the first, an undeclared cross-wave overlap → a loud STOP, nothing pushed.
+         b1 = self._bundle("C1", self._modify_patch("one\n"))
+         b2 = self._bundle("C2", self._modify_patch("two\n"))
+         with redirect_stderr(io.StringIO()):
+-            with self.assertRaises(integrate.IntegrationError):
++            with self.assertRaisesRegex(integrate.IntegrationError, "does not merge cleanly"):
+                 integrate.fold(self.cfg, [b1, b2])
++        self.assertFalse(self._pushed("pdca-integration/main"))   # the line left as it was
+ 
+ 
+ class PointAtIntegration(unittest.TestCase):
+diff --git a/template/tests/test_integrate_stack_bases.py b/template/tests/test_integrate_stack_bases.py
+new file mode 100644
+index 0000000..43e3b59
+--- /dev/null
++++ b/template/tests/test_integrate_stack_bases.py
+@@ -0,0 +1,691 @@
++"""Stack mode lands every wave on the target (#593). Before: every fold rebuilt
++`pdca-integration/<base>` from the base, re-applying each `patch.diff` as a NEW commit,
++and force-pushed (a wave-1 PR `--base`d on it found its own change there as a different
++commit); and a wave>0 own-repo PR targeted that branch, which never reaches the target.
++
++These cases pin the fix: the fold MERGES each accepted bundle's published PR branch (its
++own commits, same SHAs), append-only within a run and unforced after the run's first fold;
++a merged prerequisite whose branch is gone is skipped when this run's line already carries
++it, else reaches the line through the base (never so for an `Onto branch` record); a
++line another run moved is refused; a wave>0 PR targets the real base. They also pin the
++diff a dependent PR shows once the earlier waves merge — its own change for a plain chain,
++and, where the line joined histories the base got separately (two branches of one wave; a
++base that moved before the first fold), several merge bases until "Update branch". Real
++git against a bare ``origin`` + a primary checkout (the ``FoldGit`` shape of
++``tests/test_integrate.py``), plus offline dry-run publish/fold cases.
++
++Only modules are imported (never a symbol the fix adds), so with the production change
++reverted these cases still load and run — and fail.
++    PYTHONPATH=src python -m unittest tests.test_integrate_stack_bases
++"""
++
++from __future__ import annotations
++
++import io
++import json
++import shutil
++import subprocess
++import tempfile
++import unittest
++from contextlib import redirect_stderr, redirect_stdout
++from pathlib import Path
++from unittest import mock
++
++from pdca_harness import integrate, publish, signoff
++from pdca_harness.config import Config, LeafConfig
++
++TEMPLATES = Path(__file__).resolve().parents[1] / "templates"
++TARGET = ("org/repo", "main")
++LINE = "pdca-integration/main"
++
++
++def _cfg(root: Path, primary: Path, *, base_remote: str = "origin") -> Config:
++    return Config(
++        root=root, bundle_root=root / "results", process_dir=root / "process",
++        templates_dir=TEMPLATES, default_branch="main", tracker_system="github",
++        tracker_url="", issue_id_example="#1",
++        builder=LeafConfig(mode="stub"), reviewer=LeafConfig(mode="stub"),
++        publisher=LeafConfig(mode="stub", interactive=True), gates_checks=[],
++        base_remote=base_remote, repo_checkouts={"org/repo": str(primary)})
++
++
++def _run(repo: Path, *args: str) -> subprocess.CompletedProcess:
++    return subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True)
++
++
++def _git(repo: Path, *args: str) -> str:
++    r = _run(repo, *args)
++    if r.returncode != 0:
++        raise AssertionError(f"git {' '.join(args)} failed in {repo}: {r.stderr}")
++    return r.stdout
++
++
++def _identity(repo: Path) -> None:
++    _git(repo, "config", "user.email", "t@example.com")
++    _git(repo, "config", "user.name", "Tester")
++    _git(repo, "config", "commit.gpgsign", "false")
++    # Pin the host-independent default, so the fold's own `--prune` is what is tested.
++    _git(repo, "config", "fetch.prune", "false")
++
++
++def _brief(d: Path, *, extra: str = "") -> None:
++    d.mkdir(parents=True, exist_ok=True)
++    (d / "brief.md").write_text(
++        f"- **Slug:** {d.name.removeprefix('issue_').lower()}\n"
++        f"- **Repo + branch target:** org/repo @ main\n{extra}", encoding="utf-8")
++
++
++class StackFoldGit(unittest.TestCase):
++    """Real git. A scratch clone (``human``) plays the people outside the harness: the
++    maintainer merging PRs, a foreign run, a reviewer's existing PR branch."""
++
++    def setUp(self) -> None:
++        self.tmp = Path(tempfile.mkdtemp())
++        self.origin = self.tmp / "origin.git"
++        self.primary = self.tmp / "repo"
++        subprocess.run(["git", "init", "--bare", "-q", str(self.origin)], check=True)
++        subprocess.run(["git", "init", "-q", "-b", "main", str(self.primary)], check=True)
++        _identity(self.primary)
++        (self.primary / "base.txt").write_text("base\n", encoding="utf-8")
++        _git(self.primary, "add", "-A")
++        _git(self.primary, "commit", "-q", "-m", "base")
++        _git(self.primary, "remote", "add", "origin", str(self.origin))
++        _git(self.primary, "push", "-q", "origin", "main")
++        self.human = self.tmp / "human"
++        subprocess.run(["git", "clone", "-q", str(self.origin), str(self.human)],
++                       check=True, capture_output=True)
++        _identity(self.human)
++        self.cfg = _cfg(self.tmp, self.primary)
++
++    def tearDown(self) -> None:
++        shutil.rmtree(self.tmp, ignore_errors=True)
++
++    # -- helpers -------------------------------------------------------------------------
++
++    def _publish(self, iid: str, files: dict[str, str], *, cut_from: str = "origin/main") -> Path:
++        """What `publish` does for an accepted bundle: cut ``fix/<iid>`` off ``cut_from``
++        in the primary checkout, commit the change signed off, push it to origin, and
++        record it in publish.json. The bundle's patch.diff is that commit's diff (so the
++        pre-fix fold, which re-applied patch.diff, can still apply it)."""
++        d = self.cfg.bundle(iid)
++        _brief(d)
++        branch = f"fix/{iid}"
++        _git(self.primary, "fetch", "-q", "origin")
++        _git(self.primary, "checkout", "-q", "-B", branch, cut_from)
++        for name, text in files.items():
++            (self.primary / name).write_text(text, encoding="utf-8")
++        _git(self.primary, "add", "--all")
++        _git(self.primary, "commit", "-q", "-s", "-m", f"fix {iid}")
++        (d / "patch.diff").write_text(_git(self.primary, "diff", "HEAD~1", "HEAD"),
++                                      encoding="utf-8")
++        _git(self.primary, "push", "-q", "origin", branch)
++        _git(self.primary, "checkout", "-q", "main")
++        mode = "new-pr" if cut_from == "origin/main" else "stacked-pr"
++        (d / "publish.json").write_text(json.dumps(
++            {"mode": mode, "branch": branch, "base": "main", "repo": "org/repo"}),
++            encoding="utf-8")
++        return d
++
++    def _push_from_human(self, files: dict[str, str], *, to: str, url: str = "",
++                         off: str = "origin/main", force: bool = False) -> str:
++        """Commit ``files`` off ``off`` in the scratch clone and push it to branch ``to``
++        on ``url`` (origin by default); return the pushed commit."""
++        _git(self.human, "fetch", "-q", "origin")
++        _git(self.human, "checkout", "-q", "-B", "scratch", off)
++        for name, text in files.items():
++            (self.human / name).write_text(text, encoding="utf-8")
++        _git(self.human, "add", "--all")
++        _git(self.human, "commit", "-q", "-s", "-m", f"commit for {to}")
++        _git(self.human, "push", "-q", *(["--force"] if force else []),
++             url or "origin", f"HEAD:refs/heads/{to}")
++        return _git(self.human, "rev-parse", "HEAD").strip()
++
++    def _merge_pr(self, iid: str) -> None:
++        """The maintainer merges ``fix/<iid>``'s PR into main with a merge commit."""
++        _git(self.human, "fetch", "-q", "origin")
++        _git(self.human, "checkout", "-q", "-B", "main", "origin/main")
++        _git(self.human, "merge", "-q", "--no-ff", "--no-edit", f"origin/fix/{iid}")
++        _git(self.human, "push", "-q", "origin", "main")
++
++    def _update_branch(self, iid: str) -> None:
++        """GitHub's "Update branch": merge the base into ``fix/<iid>``."""
++        _git(self.human, "fetch", "-q", "origin")
++        _git(self.human, "checkout", "-q", "-B", f"fix/{iid}", f"origin/fix/{iid}")
++        _git(self.human, "merge", "-q", "--no-ff", "--no-edit", "origin/main")
++        _git(self.human, "push", "-q", "origin", f"fix/{iid}")
++
++    def _tip(self, branch: str) -> str:
++        return _git(self.origin, "rev-parse", f"refs/heads/{branch}").strip()
++
++    def _has(self, branch: str) -> bool:
++        return _run(self.origin, "rev-parse", "--verify", "--quiet",
++                    f"refs/heads/{branch}").returncode == 0
++
++    def _ancestor(self, commit: str, of: str) -> bool:
++        return _run(self.origin, "merge-base", "--is-ancestor", commit, of).returncode == 0
++
++    def _diff_files(self, base: str, head: str) -> list[str]:
++        """What the PR view shows: the three-dot diff of ``head`` against ``base``."""
++        return _git(self.origin, "diff", "--name-only", f"{base}...{head}").split()
++
++    def _pushes(self, fn) -> list[list[str]]:
++        """The argument lists of every `git push` ``fn`` makes through ``integrate._git``."""
++        pushes: list[list[str]] = []
++        real = integrate._git
++
++        def spy(repo: Path, *args: str) -> int:
++            if args[:1] == ("push",):
++                pushes.append(list(args))
++            return real(repo, *args)
++
++        with mock.patch.object(integrate, "_git", spy):
++            fn()
++        return pushes
++
++    # -- (ii)/(iii) the line carries the PR commits, append-only ---------------------------
++
++    def test_a_later_fold_appends_to_the_line_and_carries_the_pr_commits(self) -> None:
++        # The red case: on an origin refusing non-fast-forwards, the second fold must land,
++        # and T1 plus both PRs' own commits must be in the line it pushed. The pre-fix fold
++        # rebuilt the line from the base as new commits and force-pushed it: refused here,
++        # unless the rebuilt commits come out byte-identical to T1's (same second) — and
++        # either way the PR branches' own commits are not in its line.
++        _git(self.origin, "config", "receive.denyNonFastForwards", "true")
++        a = self._publish("A", {"a.txt": "a\n"})
++        integrate.fold(self.cfg, [a])
++        t1 = self._tip(LINE)
++        b = self._publish("B", {"b.txt": "b\n"}, cut_from=f"origin/{LINE}")
++        integrate.fold(self.cfg, [a, b])                     # no keyword: a direct caller
++        tip = self._tip(LINE)
++        self.assertTrue(self._ancestor(t1, tip), "the line was rewritten, not appended to")
++        self.assertTrue(self._ancestor(self._tip("fix/A"), tip))   # A's own commit
++        self.assertTrue(self._ancestor(self._tip("fix/B"), tip))   # B's own commit
++
++    def test_a_continuing_fold_pushes_without_force(self) -> None:
++        # receive.denyNonFastForwards ACCEPTS a forced push that happens to fast-forward,
++        # so the flag itself is what this pins.
++        a = self._publish("A", {"a.txt": "a\n"})
++        integrate.fold(self.cfg, [a])
++        b = self._publish("B", {"b.txt": "b\n"}, cut_from=f"origin/{LINE}")
++        pushes = self._pushes(lambda: integrate.fold(self.cfg, [a, b]))
++        self.assertEqual(len(pushes), 1, pushes)
++        self.assertEqual([x for x in pushes[0] if x.startswith("--force")], [], pushes[0])
++
++    def test_a_listed_target_continues_this_runs_tip_without_force(self) -> None:
++        _git(self.origin, "config", "receive.denyNonFastForwards", "true")
++        a = self._publish("A", {"a.txt": "a\n"})
++        integrate.fold(self.cfg, [a], folded_this_run={})
++        t1 = self._tip(LINE)
++        b = self._publish("B", {"b.txt": "b\n"}, cut_from=f"origin/{LINE}")
++        pushes = self._pushes(
++            lambda: integrate.fold(self.cfg, [a, b], folded_this_run={TARGET: t1}))
++        self.assertEqual([x for x in pushes[0] if x.startswith("--force")], [], pushes[0])
++        tip = self._tip(LINE)
++        self.assertTrue(self._ancestor(t1, tip))
++        self.assertTrue(self._ancestor(self._tip("fix/B"), tip))
++        # A branch already in the line is not merged again: one new merge commit, B's.
++        self.assertEqual(_git(self.origin, "rev-list", "--count", f"{t1}..{tip}").strip(),
++                         "2")                                # B's commit + its merge
++
++    def test_a_runs_first_fold_starts_fresh_over_an_earlier_runs_line(self) -> None:
++        old = self._push_from_human({"old.txt": "old\n"}, to=LINE)     # an earlier run's
++        a = self._publish("A", {"a.txt": "a\n"})
++        pushes = self._pushes(lambda: integrate.fold(self.cfg, [a], folded_this_run={}))
++        tip = self._tip(LINE)
++        self.assertFalse(self._ancestor(old, tip))           # replaced, not built on
++        self.assertTrue(self._ancestor(self._tip("main"), tip))      # off origin/main
++        self.assertTrue(self._ancestor(self._tip("fix/A"), tip))
++        self.assertIn("--force", pushes[0])                  # replacing a line is forced
++
++    def test_a_line_another_run_moved_is_refused(self) -> None:
++        a = self._publish("A", {"a.txt": "a\n"})
++        integrate.fold(self.cfg, [a], folded_this_run={})
++        t1 = self._tip(LINE)
++        other = self._push_from_human({"other.txt": "x\n"}, to=LINE, force=True)  # #591
++        b = self._publish("B", {"b.txt": "b\n"})
++        with self.assertRaises(integrate.IntegrationError) as ctx:
++            integrate.fold(self.cfg, [a, b], folded_this_run={TARGET: t1})
++        msg = str(ctx.exception)
++        for part in (LINE, t1, other):
++            self.assertIn(part, msg)
++        self.assertEqual(self._tip(LINE), other)             # origin untouched
++
++    # -- (ii) record-mode resolution ------------------------------------------------------
++
++    def test_an_onto_branch_record_merges_that_remotes_branch_not_origins(self) -> None:
++        upstream = self.tmp / "upstream.git"
++        subprocess.run(["git", "init", "--bare", "-q", str(upstream)], check=True)
++        _git(self.primary, "remote", "add", "upstream", str(upstream))
++        # The existing PR branch the fix was committed onto (`Onto branch: upstream/feat`)…
++        _git(self.human, "checkout", "-q", "-B", "work", "origin/main")
++        (self.human / "feat.txt").write_text("feat\n", encoding="utf-8")
++        _git(self.human, "add", "--all")
++        _git(self.human, "commit", "-q", "-s", "-m", "someone's PR")
++        (self.human / "fix.txt").write_text("fix\n", encoding="utf-8")
++        _git(self.human, "add", "--all")
++        _git(self.human, "commit", "-q", "-s", "-m", "the fix, stacked onto it")
++        patch = _git(self.human, "diff", "HEAD~1", "HEAD")
++        _git(self.human, "push", "-q", str(upstream), "HEAD:refs/heads/feat")
++        feat = _git(self.human, "rev-parse", "HEAD").strip()
++        # …and an unrelated same-named branch on origin the fold must never look up.
++        decoy = self._push_from_human({"decoy.txt": "decoy\n"}, to="feat")
++        d = self.cfg.bundle("S")
++        _brief(d, extra="- **Onto branch:** upstream/feat\n")
++        (d / "patch.diff").write_text(patch, encoding="utf-8")
++        (d / "publish.json").write_text(json.dumps(
++            {"mode": "stacked", "branch": "feat", "base": "upstream/feat",
++             "repo": "org/repo"}), encoding="utf-8")
++        integrate.fold(self.cfg, [d])
++        tip = self._tip(LINE)
++        self.assertTrue(self._ancestor(feat, tip))           # the PR branch, all of it
++        self.assertFalse(self._ancestor(decoy, tip))         # never origin's `feat`
++
++    # -- (iv) published branch gone / never published --------------------------------------
++
++    def _gone(self, iid: str) -> Path:
++        """A published bundle whose branch was then deleted on origin (as a merged PR's
++        often is), while the primary still holds a stale tracking ref for it."""
++        d = self._publish(iid, {f"{iid}.txt": "x\n"})
++        _git(self.primary, "fetch", "-q", "origin")
++        _git(self.origin, "branch", "-D", f"fix/{iid}")
++        return d
++
++    def test_a_gone_branch_whose_pr_merged_is_skipped(self) -> None:
++        d = self._gone("G")
++        err = io.StringIO()
++        with mock.patch("pdca_harness.merged.is_merged", return_value=True) as m, \
++                redirect_stderr(err):
++            folded = integrate.fold(self.cfg, [d])
++        m.assert_called_once_with(self.cfg, "G")
++        self.assertIn("issue_G's branch origin/fix/G is gone and its PR is merged",
++                      err.getvalue())
++        self.assertEqual(self._tip(LINE), self._tip("main"))     # pushed: the base, only
++        self.assertFalse((folded[TARGET][1] / "G.txt").exists())   # nothing re-applied
++
++    def test_a_merged_branch_already_on_this_runs_line_does_not_take_in_the_base(
++            self) -> None:
++        # A's PR merges mid-run and its branch is deleted ("delete branch on merge"); then
++        # main gets a c.txt that clashes with C, whose PR is still open. A is already on
++        # this run's line, so the continued fold must not merge main in for it — that
++        # would stop the run on a clash that has nothing to do with A.
++        a = self._publish("A", {"a.txt": "a\n"})
++        c = self._publish("C", {"c.txt": "c\n"})
++        integrate.fold(self.cfg, [a, c], folded_this_run={})
++        t1 = self._tip(LINE)
++        self._merge_pr("A")
++        _git(self.origin, "branch", "-D", "fix/A")
++        self._push_from_human({"c.txt": "someone else's c\n"}, to="main")
++        err = io.StringIO()
++        with mock.patch("pdca_harness.merged.is_merged", return_value=True), \
++                redirect_stderr(err):
++            integrate.fold(self.cfg, [a, c], folded_this_run={TARGET: t1})
++        self.assertIn(f"issue_A's branch origin/fix/A is gone and its PR is merged — {LINE} "
++                      f"already carries it", err.getvalue())
++        self.assertEqual(self._tip(LINE), t1)                # no base merged in
++
++    def test_a_gone_onto_branch_record_is_never_assumed_to_be_in_the_base(self) -> None:
++        # An `Onto branch` record's PR is someone else's PR, which may target another base:
++        # merged does not put its work in THIS base. Already on this run's line, it is
++        # skipped; anywhere else the fold stops, naming it, rather than claim the base
++        # carries it.
++        upstream = self.tmp / "upstream.git"
++        subprocess.run(["git", "init", "--bare", "-q", str(upstream)], check=True)
++        _git(self.primary, "remote", "add", "upstream", str(upstream))
++        self._push_from_human({"feat.txt": "feat\n"}, to="feat", url=str(upstream))
++        d = self.cfg.bundle("S")
++        _brief(d, extra="- **Onto branch:** upstream/feat\n")
++        (d / "patch.diff").write_text("diff --git a/feat.txt b/feat.txt\n", encoding="utf-8")
++        (d / "publish.json").write_text(json.dumps(
++            {"mode": "stacked", "branch": "feat", "base": "upstream/feat",
++             "repo": "org/repo"}), encoding="utf-8")
++        integrate.fold(self.cfg, [d], folded_this_run={})
++        t1 = self._tip(LINE)
++        _git(upstream, "branch", "-D", "feat")               # the other PR merged elsewhere
++        with mock.patch("pdca_harness.merged.is_merged", return_value=True), \
++                redirect_stderr(io.StringIO()):
++            integrate.fold(self.cfg, [d], folded_this_run={TARGET: t1})
++            self.assertEqual(self._tip(LINE), t1)            # carried already: skipped
++            with self.assertRaises(integrate.IntegrationError) as ctx:
++                integrate.fold(self.cfg, [d], folded_this_run={})    # a new run's line
++        for part in ("issue_S", "upstream/feat", "Onto branch"):
++            self.assertIn(part, str(ctx.exception))
++        self.assertEqual(self._tip(LINE), t1)                # nothing pushed
++
++    def test_a_gone_branch_whose_pr_is_open_stops_naming_the_ref(self) -> None:
++        d = self._gone("H")
++        with mock.patch("pdca_harness.merged.is_merged", return_value=False):
++            with self.assertRaises(integrate.IntegrationError) as ctx:
++                integrate.fold(self.cfg, [d])
++        self.assertIn("issue_H", str(ctx.exception))
++        self.assertIn("origin/fix/H", str(ctx.exception))    # the ref actually looked up
++        self.assertFalse(self._has(LINE))                    # nothing pushed
++
++    def test_a_merged_prerequisite_whose_branch_is_gone_still_reaches_the_line(self) -> None:
++        # Between two folds the maintainer merges A's and B's PRs and deletes B's branch. B's
++        # work must still reach the continued line (else the next wave builds without it):
++        # through the base, appended to this run's tip, pushed without force.
++        _git(self.origin, "config", "receive.denyNonFastForwards", "true")
++        a = self._publish("A", {"a.txt": "a\n"})
++        integrate.fold(self.cfg, [a], folded_this_run={})
++        t1 = self._tip(LINE)
++        b = self._publish("B", {"b.txt": "b\n"}, cut_from=f"origin/{LINE}")
++        self._merge_pr("A")
++        self._merge_pr("B")
++        _git(self.origin, "branch", "-D", "fix/B")
++        with mock.patch("pdca_harness.merged.is_merged",
++                        side_effect=lambda _cfg, iid: iid == "B"), \
++                redirect_stderr(io.StringIO()):
++            pushes = self._pushes(
++                lambda: integrate.fold(self.cfg, [a, b], folded_this_run={TARGET: t1}))
++        tip = self._tip(LINE)
++        self.assertEqual(_git(self.origin, "show", f"{tip}:b.txt"), "b\n")   # B's work
++        self.assertTrue(self._ancestor(t1, tip), "the line was rewritten, not appended to")
++        self.assertTrue(self._ancestor(self._tip("main"), tip))    # by taking the base in
++        self.assertEqual([x for p in pushes for x in p if x.startswith("--force")], [], pushes)
++
++    def test_an_unpublished_bundle_stops_the_fold_before_any_git_step(self) -> None:
++        a = self._publish("A", {"a.txt": "a\n"})
++        u = self.cfg.bundle("U")
++        _brief(u)
++        (u / "patch.diff").write_text(a.joinpath("patch.diff").read_text(encoding="utf-8")
++                                      .replace("a.txt", "u.txt"), encoding="utf-8")
++        with mock.patch("pdca_harness.integrate.subprocess.run") as run:
++            with self.assertRaises(integrate.IntegrationError) as ctx:
++                integrate.fold(self.cfg, [a, u])
++        run.assert_not_called()
++        self.assertIn("issue_U", str(ctx.exception))
++        self.assertNotIn("issue_A", str(ctx.exception))
++        # The flow's hold and the fold's refusal read ONE definition of "unpublished".
++        self.assertEqual([d.name for d in integrate.unpublished([a, u])], ["issue_U"])
++
++    def test_a_failing_ancestry_check_is_a_git_step_failure_not_an_overlap(self) -> None:
++        # `git merge-base --is-ancestor` exits 1 for "not an ancestor" and 128 when git
++        # itself fails. Only 1 may lead on to the merge; 128 must stop the fold as a failed
++        # git step, never fall through and be misreported (or merged past) as an overlap.
++        a = self._publish("A", {"a.txt": "a\n"})
++        real = integrate._git
++
++        def broken(repo: Path, *args: str) -> int:
++            if args[:2] == ("merge-base", "--is-ancestor"):
++                return 128                                   # git's fatal exit code
++            return real(repo, *args)
++
++        with mock.patch.object(integrate, "_git", broken):
++            with self.assertRaises(integrate.IntegrationError) as ctx:
++                integrate.fold(self.cfg, [a])
++        msg = str(ctx.exception)
++        self.assertIn("exited 128", msg)
++        self.assertIn("git step failed", msg)
++        self.assertNotIn("does not merge cleanly", msg)
++        self.assertFalse(self._has(LINE))                    # nothing pushed
++
++    def test_a_merge_that_fails_without_a_conflict_is_not_called_an_overlap(self) -> None:
++        # A branch with no history in common with the line: `git merge` refuses, leaving no
++        # conflicting path — a failed git step, not an overlap between two briefs.
++        _git(self.human, "checkout", "-q", "--orphan", "stray")
++        _git(self.human, "rm", "-rqf", "--ignore-unmatch", ".")
++        (self.human / "x.txt").write_text("x\n", encoding="utf-8")
++        _git(self.human, "add", "--all")
++        _git(self.human, "commit", "-q", "-s", "-m", "unrelated history")
++        _git(self.human, "push", "-q", "origin", "HEAD:refs/heads/fix/X")
++        d = self.cfg.bundle("X")
++        _brief(d)
++        (d / "patch.diff").write_text(
++            "diff --git a/x.txt b/x.txt\nnew file mode 100644\n--- /dev/null\n"
++            "+++ b/x.txt\n@@ -0,0 +1 @@\n+x\n", encoding="utf-8")
++        (d / "publish.json").write_text(json.dumps(
++            {"mode": "new-pr", "branch": "fix/X", "base": "main", "repo": "org/repo"}),
++            encoding="utf-8")
++        with self.assertRaises(integrate.IntegrationError) as ctx:
++            integrate.fold(self.cfg, [d])
++        msg = str(ctx.exception)
++        self.assertIn("issue_X", msg)
++        self.assertIn("exited 128", msg)                     # git's own refusal, a die()
++        self.assertIn("not an overlap", msg)
++        self.assertNotIn("does not merge cleanly", msg)
++        self.assertFalse(self._has(LINE))                    # nothing pushed
++
++    def test_a_conflict_names_the_conflicting_paths(self) -> None:
++        a = self._publish("A", {"base.txt": "one\n"})
++        b = self._publish("B", {"base.txt": "two\n"})
++        with self.assertRaises(integrate.IntegrationError) as ctx:
++            integrate.fold(self.cfg, [a, b])
++        msg = str(ctx.exception)
++        self.assertIn("does not merge cleanly", msg)
++        self.assertIn("conflicts in base.txt", msg)
++        self.assertFalse(self._has(LINE))                    # nothing pushed
++
++    # -- (v) the diff a dependent PR shows --------------------------------------------------
++
++    def test_a_chain_dependents_diff_shrinks_once_its_prerequisite_merges(self) -> None:
++        a = self._publish("A", {"a.txt": "a\n"})
++        integrate.fold(self.cfg, [a])
++        self._publish("B", {"b.txt": "b\n"}, cut_from=f"origin/{LINE}")
++        self.assertEqual(self._diff_files("main", "fix/B"), ["a.txt", "b.txt"])  # A rides
++        self._merge_pr("A")
++        self.assertEqual(self._diff_files("main", "fix/B"), ["b.txt"])
++
++    def test_a_dependent_on_two_siblings_shrinks_after_a_base_update(self) -> None:
++        a = self._publish("A", {"a.txt": "a\n"})
++        c = self._publish("C", {"c.txt": "c\n"})
++        integrate.fold(self.cfg, [a, c])
++        self._publish("B", {"b.txt": "b\n"}, cut_from=f"origin/{LINE}")
++        self._merge_pr("A")
++        self._merge_pr("C")
++        # The documented limitation: the fold's merge commit joining A and C never reaches
++        # main, so B has two merge bases with it (A's and C's own tips).
++        bases = _git(self.origin, "merge-base", "--all", "main", "fix/B").split()
++        self.assertEqual(sorted(bases), sorted([self._tip("fix/A"), self._tip("fix/C")]))
++        # The documented remedy: update B's branch from the base.
++        self._update_branch("B")
++        self.assertEqual(self._diff_files("main", "fix/B"), ["b.txt"])
++
++    def test_a_chain_on_a_moved_base_keeps_a_second_merge_base_until_updated(self) -> None:
++        # The base moves between A's publish and the run's first fold, so the fold starts
++        # the line from the NEWER main and merges A (cut from the older one) onto it. That
++        # joining merge commit never reaches main: once A's PR merges, B — a plain chain
++        # on A alone — has two merge bases with main (the moved main and A's tip), and its
++        # diff shows more than its own change. The documented exception, and its remedy.
++        a = self._publish("A", {"a.txt": "a\n"})
++        moved = self._push_from_human({"other.txt": "someone else's change\n"}, to="main")
++        integrate.fold(self.cfg, [a])
++        self._publish("B", {"b.txt": "b\n"}, cut_from=f"origin/{LINE}")
++        self._merge_pr("A")
++        bases = _git(self.origin, "merge-base", "--all", "main", "fix/B").split()
++        self.assertEqual(sorted(bases), sorted([moved, self._tip("fix/A")]))
++        shown = self._diff_files("main", "fix/B")
++        self.assertIn("b.txt", shown)
++        self.assertGreater(len(shown), 1, shown)              # more than B's own change
++        # The documented remedy: update B's branch from the base.
++        self._update_branch("B")
++        self.assertEqual(self._diff_files("main", "fix/B"), ["b.txt"])
++
++    # -- (i) the PR a wave>0 bundle opens ---------------------------------------------------
++
++    def test_a_wave_bundle_publishes_against_the_real_base(self) -> None:
++        a = self._publish("A", {"a.txt": "a\n"})
++        integrate.fold(self.cfg, [a])
++        w = self.cfg.bundle("W")
++        _brief(w)
++        (w / "patch.diff").write_text(
++            "diff --git a/w.txt b/w.txt\nnew file mode 100644\n--- /dev/null\n"
++            "+++ b/w.txt\n@@ -0,0 +1 @@\n+w\n", encoding="utf-8")
++        (w / "check-gates.json").write_text("{}", encoding="utf-8")
++        shutil.copyfile(TEMPLATES / "SUMMARY.md.tpl", w / "SUMMARY.md")
++        signoff.record(w / "SUMMARY.md", action="accept", by="Tester", date="2026-10-02")
++        publish.write_stack_base(w, LINE)                     # a wave>0 bundle
++        with mock.patch.object(publish, "_warn_if_squash_only"), \
++                redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
++            rc = publish.publish(self.cfg, "W", open_pr=False, by="T", today="2026-10-02")
++        self.assertEqual(rc, 0)
++        rec = json.loads((w / "publish.json").read_text(encoding="utf-8"))
++        self.assertEqual((rec["mode"], rec["base"]), ("stacked-pr", "main"))
++        # Still cut from the line, so it carries A — as A's own commit.
++        self.assertTrue(self._ancestor(self._tip("fix/A"), self._tip(rec["branch"])))
++
++
++class StackPublishDryRun(unittest.TestCase):
++    """(i) offline: the `--base` a stacked PR gets, from `publish --dry-run`."""
++
++    _FIX = "- **Slug:** my-fix\n- **Repo + branch target:** example-org/example-repo @ main\n"
++
++    def setUp(self) -> None:
++        self.tmp = Path(tempfile.mkdtemp())
++        self.cfg = _cfg(self.tmp, self.tmp / "example-repo")
++        self.cfg.repo_checkouts = {"example-org/example-repo": str(self.tmp / "example-repo")}
++
++    def tearDown(self) -> None:
++        shutil.rmtree(self.tmp, ignore_errors=True)
++
++    def _plan(self, *, base_remote: str = "origin", stacks_on: bool = False,
++              wave: bool = True) -> str:
++        self.cfg.base_remote = base_remote
++        parent = self.cfg.bundle("PARENT")
++        parent.mkdir(parents=True, exist_ok=True)
++        (parent / "publish.json").write_text(json.dumps({"branch": "fix/PARENT-my-fix"}),
++                                             encoding="utf-8")
++        d = self.cfg.bundle("DEP")
++        d.mkdir(parents=True)
++        (d / "brief.md").write_text(self._FIX + ("- **Stacks on:** PARENT\n" if stacks_on
++                                                 else ""), encoding="utf-8")
++        (d / "patch.diff").write_text("diff --git a/x b/x\n", encoding="utf-8")
++        (d / "check-gates.json").write_text("{}", encoding="utf-8")
++        shutil.copyfile(TEMPLATES / "SUMMARY.md.tpl", d / "SUMMARY.md")
++        signoff.record(d / "SUMMARY.md", action="accept", by="Tester", date="2026-10-02")
++        if wave:
++            publish.write_stack_base(d, LINE)
++        out = io.StringIO()
++        with redirect_stdout(out), redirect_stderr(io.StringIO()):
++            rc = publish.publish(self.cfg, "DEP", dry_run=True, by="T", today="2026-10-02")
++        self.assertEqual(rc, 0)
++        return out.getvalue()
++
++    def test_an_own_repo_wave_pr_targets_the_real_base(self) -> None:
++        out = self._plan()
++        self.assertIn(f"checkout -B fix/DEP-my-fix origin/{LINE}", out)   # cut from the line
++        self.assertIn("--base main", out)
++        self.assertNotIn(f"--base {LINE}", out)
++
++    def test_a_recorded_stack_base_wins_over_a_stacks_on_parent(self) -> None:
++        out = self._plan(stacks_on=True)
++        self.assertIn(f"checkout -B fix/DEP-my-fix origin/{LINE}", out)
++        self.assertIn("--base main", out)
++        self.assertNotIn("--base fix/PARENT-my-fix", out)
++
++    def test_a_legacy_stacks_on_parent_keeps_its_branch_base(self) -> None:
++        out = self._plan(stacks_on=True, wave=False)
++        self.assertIn("--base fix/PARENT-my-fix", out)
++
++    def test_the_fork_path_is_unchanged(self) -> None:
++        out = self._plan(base_remote="upstream")
++        self.assertIn(f"checkout -B fix/DEP-my-fix origin/{LINE}", out)
++        self.assertIn("--base main", out)
++        self.assertIn("fork: cumulative diff vs base", out)
++
++
++class StackFoldDryRun(unittest.TestCase):
++    """(iv)/(vii) offline: a dry-run fold prints the real plan and shells nothing."""
++
++    def setUp(self) -> None:
++        self.tmp = Path(tempfile.mkdtemp())
++        self.cfg = _cfg(self.tmp, self.tmp / "repo")
++
++    def tearDown(self) -> None:
++        shutil.rmtree(self.tmp, ignore_errors=True)
++
++    def _bare(self, iid: str) -> Path:
++        d = self.cfg.bundle(iid)
++        _brief(d)
++        (d / "patch.diff").write_text("diff --git a/f.py b/f.py\n@@ -1 +1 @@\n-x\n+y\n",
++                                      encoding="utf-8")
++        return d
++
++    def _dry(self, bundles: list[Path], **kw) -> tuple[dict, str]:
++        out = io.StringIO()
++        with mock.patch("pdca_harness.integrate.subprocess.run") as run, redirect_stdout(out):
++            folded = integrate.fold(self.cfg, bundles, dry_run=True, **kw)
++        run.assert_not_called()
++        return folded, out.getvalue()
++
++    def test_an_unpublished_bundle_is_planned_as_its_would_be_branch(self) -> None:
++        d = self._bare("D1")
++        folded, out = self._dry([d])
++        self.assertEqual(folded, {TARGET: (LINE, None)})
++        would_be = publish._branch_name(self.cfg, d, publish._resolve_target(d)[2])
++        self.assertIn(f"origin/{would_be}", out)              # the ref it would merge
++        self.assertIn(f"continue {LINE} if origin has it, else start fresh from origin/main",
++                      out)
++
++    def test_a_first_fold_starts_fresh_and_a_later_one_continues(self) -> None:
++        d = self._bare("D2")
++        _f, first = self._dry([d], folded_this_run={})
++        self.assertIn(f"start {LINE} fresh from origin/main", first)
++        self.assertIn(f"git push --force origin {LINE}", first)
++        _f, later = self._dry([d], folded_this_run={TARGET: None})
++        self.assertIn(f"continue {LINE} from this run's tip", later)
++        self.assertIn(f"git push origin {LINE}", later)
++        self.assertNotIn("--force", later)
++
++    def test_a_recorded_branch_is_what_the_plan_merges(self) -> None:
++        d = self._bare("D3")
++        (d / "publish.json").write_text(json.dumps(
++            {"mode": "stacked", "branch": "feat", "base": "upstream/feat"}), encoding="utf-8")
++        _f, out = self._dry([d])
++        self.assertIn("git merge --no-ff --signoff upstream/feat", out)
++        self.assertNotIn("origin/feat", out)
++
++
++class UnpublishedSet(unittest.TestCase):
++    """(iv) offline: which accepted bundles the flow must hold out of the fold. A record on
++    disk is not proof of THIS run's publish (an iterate keeps publish.json), so a bundle
++    the caller reports as failed counts even with one — but only a bundle the fold would
++    carry at all (a patch and a usable target) can be held."""
++
++    def setUp(self) -> None:
++        self.tmp = Path(tempfile.mkdtemp())
++        self.cfg = _cfg(self.tmp, self.tmp / "repo")
++
++    def tearDown(self) -> None:
++        shutil.rmtree(self.tmp, ignore_errors=True)
++
++    def _bundle(self, iid: str, *, record: bool, patch: bool = True,
++                target: bool = True) -> Path:
++        d = self.cfg.bundle(iid)
++        d.mkdir(parents=True)
++        (d / "brief.md").write_text(
++            f"- **Slug:** {iid.lower()}\n"
++            + ("- **Repo + branch target:** org/repo @ main\n" if target else ""),
++            encoding="utf-8")
++        if patch:
++            (d / "patch.diff").write_text("diff --git a/f.py b/f.py\n", encoding="utf-8")
++        if record:
++            (d / "publish.json").write_text(json.dumps(
++                {"mode": "new-pr", "branch": f"fix/{iid}", "base": "main"}), encoding="utf-8")
++        return d
++
++    def test_a_failed_publish_is_held_even_with_an_earlier_record(self) -> None:
++        bundles = [self._bundle("OK", record=True),          # published: folded
++                   self._bundle("OLD", record=True),         # old record, failed this run
++                   self._bundle("NONE", record=False),       # no record at all
++                   self._bundle("NOTGT", record=False, target=False),   # no target
++                   self._bundle("NOPATCH", record=False, patch=False)]  # close / no-fix
++        failed = {"issue_OLD", "issue_NOTGT", "issue_NOPATCH"}
++        held = integrate.unpublished(bundles, failed=failed)
++        self.assertEqual([d.name for d in held], ["issue_OLD", "issue_NONE"])
++        # Without the failure report, the earlier record would pass for a publish.
++        self.assertEqual([d.name for d in integrate.unpublished(bundles)], ["issue_NONE"])
++
++    def test_a_stacked_record_must_name_its_remote_branch(self) -> None:
++        # An `Onto branch` record's `base` is `<remote>/<branch>` (publish._publish_stacked);
++        # any other names no remote to fetch from: no branch on record, never a guess.
++        good = self._bundle("GOOD", record=False)
++        (good / "publish.json").write_text(json.dumps(
++            {"mode": "stacked", "branch": "feat", "base": "upstream/feat"}), encoding="utf-8")
++        bad = self._bundle("BAD", record=False)
++        (bad / "publish.json").write_text(json.dumps(
++            {"mode": "stacked", "branch": "feat", "base": "upstream/other"}), encoding="utf-8")
++        self.assertEqual([d.name for d in integrate.unpublished([good, bad])], ["issue_BAD"])
++
++
++if __name__ == "__main__":
++    unittest.main()

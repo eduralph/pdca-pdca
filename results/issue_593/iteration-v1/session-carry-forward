@@ -1,0 +1,26 @@
+The core direction (real-base PR targets, fold from the published PR commits, append-only
+within a run) was judged sound, but Check surfaced design questions the brief must settle
+before another build:
+1. Sibling waves don't shrink (C5 / adversary): with two independent wave-N PRs A and C and
+   a dependent B, the fold's sibling merge commit never reaches main, so after A and C merge
+   B has two merge bases and its diff still shows C's change. Decide: narrow the docs/criterion
+   to "shrinks for a single-predecessor chain", or change how the fold combines siblings —
+   and add a test that merges the siblings into main and inspects the dependent's diff.
+2. `Onto branch:` regression: the fold always resolves origin/<publish.json branch>, but
+   stacked-mode records push to the brief's <remote> (publish.py:452, :507-511) — a bundle
+   onto upstream/feat now stops the run with a wrong "gone from origin" error (worked before),
+   or merges an unrelated same-named origin branch. The brief must cover `Onto branch` (resolve
+   the record's base ref / fetch that remote) and say whether merging the whole existing PR
+   branch onto the line is acceptable.
+3. Concurrent-run mixing: a continuing fold adopts whatever origin's line is, so a second run's
+   force-push gets silently built on (was a loud break before). Decide whether this fix
+   carries the cheap guard (fold returns the pushed SHA, flow passes it back, refuse on
+   mismatch) or it is deferred to #591.
+4. Test gaps to name in the brief: a >=3-wave non-dry flow test asserting the second fold gets
+   {(repo, base)}; a no-force test that spies on push args (denyNonFastForwards accepts a
+   --force fast-forward).
+5. Dry-run must show the append-only path (integ is only recorded when not dry, flow.py:1853).
+6. Consider whether "PR targets real base" and "append-only fold" should be split into two
+   bundles (pdca-pdca split) — they are near-separate outcomes sharing integrate/publish.
+Live-host validation (reviewer's recipe: A,C in wave 0, B on both; merge A,C; inspect B; and
+a deleted-merged-branch skip via real `gh pr view`) remains owed.

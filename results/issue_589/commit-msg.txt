@@ -1,0 +1,18 @@
+flow: refuse an unschedulable dependency graph with rc 2, no traceback
+
+When `pdca flow <ids>` is given a batch where a brief's `Depends on` names a
+bundle that is neither in the batch nor COMPLETE, or where the briefs form a
+dependency cycle, the run is correctly refused before anything is built. But
+the refusal reached the operator as a raw Python traceback, so a stale
+`Depends on` line or a prerequisite fixed outside the cycle looked like a
+harness crash.
+
+The graph check now raises DependencyGraphError, a ValueError subclass that
+carries a short "ways out" hint. `pdca flow` catches only that type and
+prints the existing message, a "no bundle was built" line and the hint, then
+exits 2, the same code a bad pdca.toml gets. Any other ValueError still
+propagates. Every caller that expects ValueError keeps working, `pdca waves`
+is unchanged, and the tolerant resume sweep added in
+54a35f69a4acc6f29451db7ee8774c4864e5e53b is not touched.
+
+Fixes #589

@@ -1,0 +1,15 @@
+{
+  "band": "oversized",
+  "independent_outcomes": [
+    "Retargeting and fold fix: wave PRs open against real base, fold builds line by merging PR commits with append-only semantics, publish guard refuses orphaned tips (i-a, i-b, ii, iii, ii-b)",
+    "Hold unpublished bundles' dependents: when a publish fails, cascade is prevented by holding dependent bundles (iv)",
+    "Documentation updates: module docstrings, comments, and user docs align with the new behavior (v, vii, viii)"
+  ],
+  "proposed_seams": [
+    "After (i-a, i-b, ii, iii, ii-b): Core retargeting, fold ancestry, append-only tracking, and publish guard could ship as one PR addressing the two main defects.",
+    "Then (iv): Hold-on-failure logic could ship as a second PR for robustness against cascade failures.",
+    "Then (v, vii, viii): Documentation updates could follow."
+  ],
+  "confidence": "high",
+  "brief_sha": "54bca8bc642a22b6"
+}

@@ -1,0 +1,10 @@
+Rejected for the C3 boundary gap found in review: when the remaining merge_wait_secs budget
+is less than one poll_interval, the confirm sleep is shortened via min(poll_interval,
+wait_secs - waited) (merge.py:182), so the confirm read lands 1-14 s after the first green
+(e.g. budget 1: green->green merges after 1 s; budget 20: pending->green->green merges after
+a 5 s confirm). That breaks the brief's "re-read one poll interval later" promise.
+Next attempt: only take the confirm read when a FULL poll interval of budget remains; if it
+does not, return the green as `pending` with the "unconfirmed" detail (same path as the
+no-budget-left case). Add tests through merge.merge_wave for both boundaries (budget 1 with
+green,green and budget 20 with pending,green,green -> both refused, no merge, ready undone).
+Everything else in the patch was accepted as-is; keep it.

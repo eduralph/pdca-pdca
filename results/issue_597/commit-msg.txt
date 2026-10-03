@@ -1,0 +1,26 @@
+flow: never drive a bundle that has no brief.md
+
+`pdca flow` crashed with FileNotFoundError on .../brief.md, before driving
+anything, when one of its bundles was a split parent whose split had been
+accepted before #481 (5ced9bd94826fe4dbf409214614311ebbef3110e). If an
+iterate-to-Plan had archived that parent's brief, the old `split --accept`
+wrote no replacement. The parent then reads as past Do (BUILT), so every
+intake path put it in the run, and the first brief read ended the whole run.
+
+Each intake path (named ids, the --from-csv sweep, split-child adoption) now
+checks for a brief.md once it holds the bundle's claim:
+
+- A bundle that has its own brief.md is let in and its brief is not touched.
+- A split parent left without one gets the brief `split --accept` writes
+  today, rebuilt from its iterate-to-Plan archive by the same split code,
+  byte for byte. One stderr line says so.
+- Anything else without a brief (no usable archive, no children in the
+  lineage record, or not a split parent) is named on stderr with one remedy,
+  its claim is released, and it is not driven. The rest of the batch still
+  runs. A named id that is skipped still appears in the results, so the run
+  exits non-zero.
+
+A bundle another live run holds is never written to, and a terminal split
+parent is never given a brief. state.state, split and publish are unchanged.
+
+Fixes #597

@@ -1,0 +1,14 @@
+The fix itself (intake admission after claim, rebuild via split._parent_plan /
+_split_parent_brief, skip-with-message otherwise) was accepted — keep it. Rebuild only to
+clear the four code-review points:
+1. flow.py:1020 — drop the dead `plan is None or` condition (_parent_plan returns None only
+   when brief.md exists, already handled at the top), so the lineage-blaming message can only
+   fire for a missing/empty lineage.
+2. flow.py:1017 — the skip message pastes SplitError text ("refusing to split", "then
+   re-run: a parent with its own brief.md keeps it") into a flow run, then adds a second
+   remedy. Give it a flow-side lead-in / one clear remedy so it reads right in `pdca flow`.
+3. test_flow_briefless_split_parent.py:266 — `assertIsInstance(rc, int)` can never fail;
+   compare the sweep's rc against a control (as the named-id test does) or remove it.
+4. test_flow_briefless_split_parent.py:237 — claim release on a skipped bundle is tested only
+   via flow_ids; add tests that another run can claim the bundle after the sweep
+   (flow_batch, flow.py:2030) and adoption (flow.py:1397) paths skip it.
