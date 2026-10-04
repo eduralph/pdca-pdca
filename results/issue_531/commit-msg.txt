@@ -1,0 +1,33 @@
+fix(merge): bring a behind PR up to date before merge mode merges it
+
+With wave_mode = "merge", the driver merged a wave's PRs one after another
+and trusted each PR's own green checks. Those checks ran against the base
+as it stood before the wave's earlier PRs merged, so nothing verified the
+combination. What happened next depended on a host setting the harness
+never read: with "require branches to be up to date" off, a stale PR merged
+and two independently green PRs could leave main red for the next wave;
+with it on, the second merge was refused and the run stopped after one PR.
+
+Under merge_requires = "all" (the default), each PR is now handled as:
+ready, check whether its head contains the current base tip (plain git:
+fetch, then git merge-base --is-ancestor), and if not, run
+gh pr update-branch (always a merge-commit update, never a rebase, so the
+reviewed commits stay intact). The driver then polls until the updated head
+appears, waits for that head's checks to go green under the same
+merge_wait_secs budget and confirm rule as before, and merges with
+--match-head-commit pinned to the head it saw green. A failed update, a
+red or late head, a failed git read, or a refused pinned merge stops the
+run with the PR's ready mark undone, as other refusals already do.
+
+merge_requires = "required" is unchanged; its config comment now says it
+keeps the stale-base behaviour. The merge-mode comments in pdca.toml, the
+fork-discipline doc and the crosscutting doc describe the new sequence and
+state that regate_between_waves has no effect in merge mode.
+
+This extends the green-before-merge rules of
+2261b53aba207ba5492ecb9209c0664dc3f76392,
+87c73520ae6805d2c3a3f7d2866991b71e9fd3aa and
+b2740ea030ba3d2fd37abe6d1f5c9b3cf8a56545 to cover which base and which
+head the green result describes.
+
+Fixes #531
