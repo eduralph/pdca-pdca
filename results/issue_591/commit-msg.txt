@@ -1,0 +1,25 @@
+stack mode: give each run its own integration branch
+
+With wave_mode = "stack", every run against the same base folded onto
+one shared branch, pdca-integration/<base>. Two `pdca flow` runs going
+at once on main (two separate milestone tracks) therefore shared a line:
+the second run's first fold force-pushed over the first run's line. The
+first run's next wave was then built and verified on the other run's
+work, without its own earlier waves, and its next fold stopped the run
+(the refusal added in b21f24883b36c10dd70c408905db8c18a5327845).
+
+The branch is now scoped to the batch a run was asked to drive:
+pdca-integration/<base>-r<key>, where the key is a short hash of the
+requested bundle ids (order, repeats and `500` vs `issue_500` do not
+matter). Two runs that drive different batches get different lines. The
+same ids asked for again, including ids now skipped as finished, get the
+same line back. `pdca flow <ids>` keys on the ids as given; the CSV sweep
+keys on the bundles it found at run start. The name stays a single,
+unambiguous ref segment: `-r` never appears in the flattened base.
+
+The integration worktree and lock stay keyed on the base, so folds of two
+runs on one base are still serialised. A resumed run with the same ids
+still starts its line fresh and drops its earlier waves; that is left to
+#616. Docs and the config template now name the per-run branch.
+
+Fixes #591
