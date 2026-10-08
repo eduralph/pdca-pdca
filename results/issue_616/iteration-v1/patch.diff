@@ -1,0 +1,777 @@
+diff --git a/docs/07-crosscutting.md b/docs/07-crosscutting.md
+index 3176a50..c71b94a 100644
+--- a/docs/07-crosscutting.md
++++ b/docs/07-crosscutting.md
+@@ -674,7 +674,15 @@ wave builds on, via `[driver].wave_mode`:
+   (`pdca publish <id>`), its PR branch is cut from the line commit it was built
+   on, so it carries no later wave's work; if a later run has replaced the line
+   by then, publish refuses and pushes nothing — re-drive that bundle in a new
+-  run.
++  run. A run you re-issue after it stopped part-way skips the bundles that
++  already finished, and a finished bundle's PR may still be open — so before its
++  first wave the run re-folds every such prerequisite (`Depends on` a bundle
++  outside the batch, published, PR not merged) onto its line, and the first wave
++  builds on that line like any later wave; its PRs show those prerequisites'
++  changes until they merge. A prerequisite with no published branch holds the
++  bundles that depend on it; if that fold fails, the run stops before its first
++  wave. A merged prerequisite, or one with no patch, needs nothing.
++  `Depends on (merged)` still waits for the merge.
+ - **`"merge"`** (own-repo / continuous-delivery only) — actually `gh pr merge`s
+   each non-final wave's PRs, so the next wave builds on a genuinely merged base.
+   Needs merge rights on the base remote and relaxes STOP discipline for the
+diff --git a/template/src/pdca_harness/flow.py b/template/src/pdca_harness/flow.py
+index 9fe5e1c..ebd4fb4 100644
+--- a/template/src/pdca_harness/flow.py
++++ b/template/src/pdca_harness/flow.py
+@@ -690,12 +690,13 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
+     the push), so the fold has nothing of it to carry — its dependents are held while the
+     rest of the run goes on. A
+     prerequisite **outside this batch** (a prior run's) is gated on its on-disk COMPLETE state
+-    (archived `completed/` too, #171) — **except** an out-of-batch ``Depends on (merged)``
+-    prereq, which keeps its stricter #107 merge-gate (#186): nothing in *this* run carries an
+-    out-of-batch prereq's diff into the base, and COMPLETE means only "a draft PR was opened",
+-    so a dependent built on a COMPLETE-but-unmerged base would miss the prerequisite. It must
+-    wait until the PR is genuinely merged (``merged.is_merged``) — a later ``pdca flow`` run
+-    then picks it up. A skipped bundle never completes, so its own dependents fall out of later
++    (archived `completed/` too, #171). COMPLETE means only "a draft PR was opened": in a
++    stack-mode publishing run the pre-wave fold carries an unmerged one onto the integration
++    line (:func:`_prereqs_to_carry`, #616), and one it has no branch of is named in ``held``
++    too, so its dependents wait. An out-of-batch ``Depends on (merged)``
++    prereq keeps its stricter #107 merge-gate (#186) and is never carried: it must wait until
++    the PR is genuinely merged (``merged.is_merged``) — a later ``pdca flow`` run then picks
++    it up. A skipped bundle never completes, so its own dependents fall out of later
+     waves the same way (the skip cascades)."""
+     runnable: list[Path] = []
+     for d in wave:
+@@ -709,8 +710,10 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
+                     unmet.append(dep)
+             elif state.state(cfg.find_bundle(dep)) != state.COMPLETE:  # archived prereq too (#171)
+                 unmet.append(dep)
+-            elif not out_of_batch and cfg.bundle(dep).name in held:
+-                unmet.append(dep)  # accepted, but no branch pushed this run: nothing to fold (#593)
++            elif cfg.bundle(dep).name in held:
++                # COMPLETE, but no branch of it for the fold to carry: accepted in this run
++                # and not pushed (#593), or an earlier run's never published (#616).
++                unmet.append(dep)
+         if unmet:
+             print(f"flow: {d.name} skipped — prerequisite(s) not ready "
+                   f"({', '.join(unmet)}); not built on a base missing them.", file=sys.stderr)
+@@ -742,6 +745,108 @@ def _point_at_integration(integ: dict[tuple[str, str], str], runnable: list[Path
+             publish.clear_stack_base(d)
+ 
+ 
++def _prereqs_to_carry(cfg: Config, bundles: list[Path], batch_names: set[str], *,
++                      dry: bool) -> tuple[list[Path], dict[str, list[str]]]:
++    """The earlier runs' prerequisites a stack-mode run must carry on its integration line
++    before wave 0, and those it cannot carry (#616).
++
++    A prerequisite outside the batch is COMPLETE, which means only that its draft PR was
++    opened: until that PR merges its work is in no base, and only the line can carry it. So
++    for every bundle of the drive set, each such prerequisite — a ``Depends on`` / ``Stacks
++    on`` edge; a ``Depends on (merged)`` one keeps its #186 gate in :func:`_runnable` and
++    waits for the merge instead — that is COMPLETE, that the fold would carry (a patch and
++    a usable target: :func:`integrate._fold_candidates`, the fold's own definition) and
++    whose PR is not merged (``merged.is_merged``, asked as :func:`_runnable` asks it) is
++    either
++
++    * **carried** (the first value, in name order) — it has a published branch on record,
++      which the pre-wave fold merges onto the line, as the in-run fold does (#593); or
++    * **held** (the second, prerequisite name → the drive-set bundles that depend on it) —
++      it has none (:func:`integrate.unpublished`), so there is nothing of it to fold, and
++      its dependents must not build. Never in a dry-run, which pushes nothing and plans an
++      unpublished bundle as its would-be branch, as the in-run hold does.
++
++    A merged prerequisite, or one with no patch or no target, is neither: its work (or its
++    lack of one) is already the base. Nor is one of another ``(repo, base)`` target than its
++    dependent's: a line is per target (#187), so none could carry it into that base — the
++    dependent builds as it always has. Each prerequisite is judged once, however many
++    bundles depend on it. A prerequisite's own prerequisites need no walk of their own: its
++    branch was cut from the line it was built on, so it carries them."""
++    def target(b: Path) -> tuple[str, str]:
++        # A COMPLETE bundle may have no brief.md left (#481): it names no target then.
++        return publish._resolve_target(b)[:2] if (b / "brief.md").exists() else ("", "")
++
++    verdict: dict[str, str] = {}
++    carried: list[Path] = []
++    held: dict[str, list[str]] = {}
++    for d in bundles:
++        bp = d / "brief.md"
++        own = target(d)
++        if not all(own):
++            continue  # no target: nothing published, nothing to stack
++        merged_deps = set(brief.depends_on_merged(bp))
++        for dep in waves.declared_deps(bp):
++            name = cfg.bundle(dep).name
++            if name in batch_names or dep in merged_deps:
++                continue
++            p = cfg.find_bundle(dep)  # archived to completed/ too (#171)
++            if target(p) != own:
++                continue
++            if name not in verdict:
++                if (state.state(p) != state.COMPLETE or not integrate._fold_candidates([p])
++                        or merged.is_merged(cfg, dep)):
++                    verdict[name] = "base"
++                elif not dry and integrate.unpublished([p]):
++                    verdict[name] = "hold"
++                else:
++                    verdict[name] = "carry"
++                    carried.append(p)
++            if verdict[name] == "hold":
++                held.setdefault(name, []).append(d.name)
++    return sorted(carried, key=lambda p: p.name), held
++
++
++def _fold_onto_line(cfg: Config, to_fold: list[Path], *, dry: bool,
++                    folded_tips: dict[tuple[str, str], str | None], batch: list[str],
++                    what: str, then: str,
++                    ) -> dict[tuple[str, str], tuple[str, Path | None]] | None:
++    """Fold ``to_fold`` onto this run's integration line(s) — the ONE fold step of a
++    stack-mode run, shared by the fold after each wave (#593) and the pre-wave fold of
++    earlier runs' prerequisites (#616), so every fold of a run lands on the same per-batch
++    line (``batch``, #591) and continues it append-only.
++
++    Each target's pushed tip goes into ``folded_tips`` at once, before any re-gate: the
++    next fold continues from exactly that tip and refuses a line another run moved (#593).
++    A dry-run pushes nothing (None). ONE lock scope covers fold AND re-gate (#297 review
++    round 10): the locks stack keeps every target's integ lock held between the two, so no
++    gap exists in which another flow's publish-boundary sweep could remove the tree — or
++    another fold rewrite it — before the re-gate attests it. The optional re-gate
++    (#wave-model) validates EACH folded combination over its tip before a wave builds on
++    it; ``hold_lock=False``, as the stack already holds this tree's lock.
++
++    Returns what :func:`integrate.fold` returned, or None when the run must STOP: the fold
++    raised :class:`integrate.IntegrationError`, or a re-gate is red — each named on stderr
++    as ``what`` and ``then`` (what the stop leaves undone)."""
++    with contextlib.ExitStack() as locks:
++        try:
++            folded = integrate.fold(cfg, to_fold, dry_run=dry, locks=locks,
++                                    folded_this_run=dict(folded_tips), batch=batch)
++            for tgt, (_branch, wt) in folded.items():
++                folded_tips[tgt] = integrate.pushed_tip(wt) if wt is not None else None
++        except integrate.IntegrationError as exc:
++            print(f"flow: {what} did not integrate ({exc}); STOPPING — {then}.",
++                  file=sys.stderr)
++            return None
++        if folded and not dry and cfg.regate_between_waves and any(
++                wt is not None
++                and gates.run_integration(cfg, wt, hold_lock=False).get("overall") == "fail"
++                for _tgt, (_branch, wt) in folded.items()):
++            print(f"flow: {what} integration re-gate FAILED — a combination is red though "
++                  f"each fix was green alone; STOPPING ({then}).", file=sys.stderr)
++            return None
++    return folded
++
++
+ def _audit_wave_overlap(wave: list[Path]) -> None:
+     """Advisory (#wave-model): flag two bundles in one wave whose patches touch a shared
+     file. A wave holds only non-conflicting work by construction, so any overlap is a
+@@ -1838,6 +1943,13 @@ def _drive_and_act(
+     ``--no-publish`` (``do_publish=False``) drives every wave to COMPLETE but sequences
+     nothing — no publish, no fold — so a later wave builds on the unchanged base.
+ 
++    A prerequisite an EARLIER run finished is out of this batch — a re-issued run skips it
++    as terminal — and COMPLETE means only that its draft PR was opened. In stack mode the run
++    folds each such prerequisite that is published and unmerged onto its line BEFORE wave 0
++    (:func:`_prereqs_to_carry`, #616), so wave 0 builds on it like any later wave, and every
++    later fold continues that line. One with no published branch holds its dependents; a
++    pre-wave fold that fails stops the run before wave 0.
++
+     ``claims`` is the CLI run's claim scope (#565). The caller has already claimed
+     ``bundles``; adoption claims each child as it takes it on and skips one this run may not
+     drive (:func:`_adopt_split_children`). An adoption SEED is let go once the pre-pass over
+@@ -1871,6 +1983,11 @@ def _drive_and_act(
+     # Accepted bundles the fold has no branch of to carry (#593): left out of every fold,
+     # their in-batch dependents held by `_runnable`, instead of stopping the run.
+     held_unpushed: set[str] = set()
++    # Earlier runs' prerequisites (#616): those carried on this run's line — the head of
++    # every fold's stack, never driven, never in the results map — and those with no branch
++    # to carry, whose dependents `_runnable` holds.
++    carried: list[Path] = []
++    held_prereqs: set[str] = set()
+     accepted: list[Path] = []        # cumulative COMPLETE bundles, wave then name order
+     integ: dict[tuple[str, str], str] = {}  # per-target (repo, base) → integration branch (#187)
+     # Per-target (repo, base) → the tip this run's last fold pushed (None in a dry-run), so
+@@ -1923,13 +2040,38 @@ def _drive_and_act(
+             # finished bundle has always been. The seeds' own dispositions are `flow_ids`'
+             # `skipped` map, which is what the caller reports.
+             return {}
++    # Earlier runs' prerequisites (#616), folded ONCE, before wave 0, onto the line this
++    # run's own folds then continue: a dependent of one that is COMPLETE but unmerged builds
++    # on a base that has it, and so does every other wave-0 bundle of its target — pointed
++    # at the line by `_point_at_integration`, as every later wave's is. Only when this run
++    # publishes in stack mode: `--no-publish` sequences nothing, and merge mode merges.
++    if do_publish and cfg.wave_mode != "merge":
++        dry = cfg.publisher.mode == "stub"
++        carried, unfolded = _prereqs_to_carry(cfg, bundles, batch_names, dry=dry)
++        for name, dependents in sorted(unfolded.items()):
++            held_prereqs.add(name)
++            print(f"flow: {name} is COMPLETE but has no published branch, so the integration "
++                  f"line cannot carry it — held this run rather than built on a base missing "
++                  f"it: {', '.join(sorted(dependents))}. Publish it (`pdca publish "
++                  f"{name.removeprefix('issue_')}`), then re-run.", file=sys.stderr)
++        if carried:
++            names = ", ".join(p.name for p in carried)
++            print(f"flow: carrying earlier runs' unmerged prerequisite(s) {names} onto the "
++                  f"integration line before wave 0.", file=sys.stderr)
++            folded = _fold_onto_line(cfg, carried, dry=dry, folded_tips=folded_tips,
++                                     batch=run_batch, what=f"the pre-wave fold of {names}",
++                                     then="no wave run, nothing built on a base missing them")
++            if folded is None:
++                wave_list = []   # fail closed: no wave builds on a base missing a prerequisite
++            elif folded and not dry:
++                integ = {tgt: branch for tgt, (branch, _wt) in folded.items()}
+     # `wave_list` is iterated by a LIST iterator on purpose (#469): adoption splices the
+     # recomputed remainder into `wave_list[k+1:]` after wave k drives, and the iterator —
+     # which simply indexes forward — picks the new tail up. So "how many waves are left" is
+     # read live below (never cached in a `last`), and an adopted child's wave is driven,
+     # published and folded by exactly the code every other wave goes through.
+     for k, wave in enumerate(wave_list):
+-        runnable = _runnable(cfg, wave, batch_names, held=held_unpushed)
++        runnable = _runnable(cfg, wave, batch_names, held=held_unpushed | held_prereqs)
+         if not runnable:
+             continue
+         # The pool, read off the schedule as it stands NOW — so a splice below has already
+@@ -2056,45 +2198,18 @@ def _drive_and_act(
+                             print(f"flow: {d.name} pushed no branch this run — left out "
+                                   f"of the integration fold; bundles that depend on it are "
+                                   f"held this run.", file=sys.stderr)
+-                # ONE lock scope covers fold AND re-gate (#297 review round 10): the
+-                # locks stack keeps every target's integ lock held between the two,
+-                # so no gap exists in which another flow's publish-boundary sweep
+-                # could remove the tree — or another fold rewrite it — before the
+-                # re-gate attests it.
+-                stop_wave = False
+-                with contextlib.ExitStack() as locks:
+-                    try:
+-                        folded = integrate.fold(
+-                            cfg, [d for d in accepted if d.name not in held_unpushed],
+-                            dry_run=dry, locks=locks, folded_this_run=dict(folded_tips),
+-                            batch=run_batch)
+-                        # Record each target's pushed tip at once, before any re-gate: the
+-                        # next fold continues from exactly that tip and refuses a line
+-                        # another run moved (#593). A dry-run pushes nothing (None).
+-                        for tgt, (_branch, wt) in folded.items():
+-                            folded_tips[tgt] = integrate.pushed_tip(wt) if wt is not None else None
+-                    except integrate.IntegrationError as exc:
+-                        print(f"flow: wave {k} did not integrate ({exc}); STOPPING — "
+-                              f"later waves not run.", file=sys.stderr)
+-                        break
+-                    if folded and not dry:
+-                        integ = {tgt: branch for tgt, (branch, _wt) in folded.items()}
+-                        # Optional re-gate (#wave-model): validate EACH folded
+-                        # combination over its integration tip before the next wave
+-                        # builds on it; any red ⇒ STOP. hold_lock=False: the locks
+-                        # stack already holds this tree's lock (re-acquiring would
+-                        # deadlock on our own flock).
+-                        if cfg.regate_between_waves and any(
+-                                wt is not None
+-                                and gates.run_integration(cfg, wt, hold_lock=False)
+-                                        .get("overall") == "fail"
+-                                for _tgt, (_branch, wt) in folded.items()):
+-                            print(f"flow: wave {k} integration re-gate FAILED — a "
+-                                  f"combination is red though each fix was green alone; "
+-                                  f"STOPPING (later waves not run).", file=sys.stderr)
+-                            stop_wave = True
+-                if stop_wave:
++                # The carried prerequisites (#616) head the stack. Already on the line, they
++                # are merged again only if their branch moved since (#593) — but listing them
++                # keeps every target the line covers in the fold, and so in `integ`, whether
++                # or not this run accepted a bundle of it.
++                folded = _fold_onto_line(
++                    cfg, carried + [d for d in accepted if d.name not in held_unpushed],
++                    dry=dry, folded_tips=folded_tips, batch=run_batch, what=f"wave {k}",
++                    then="later waves not run")
++                if folded is None:
+                     break
++                if folded and not dry:
++                    integ = {tgt: branch for tgt, (branch, _wt) in folded.items()}
+ 
+     _sweep_quietly(cfg, bundles)  # publish/freeze boundary — reclaim footprint (#297)
+     results = {d.name.replace("issue_", ""): state.state(d) for d in bundles}
+diff --git a/template/tests/test_flow_resume_stack_prereqs.py b/template/tests/test_flow_resume_stack_prereqs.py
+new file mode 100644
+index 0000000..24c7943
+--- /dev/null
++++ b/template/tests/test_flow_resume_stack_prereqs.py
+@@ -0,0 +1,481 @@
++"""A stack-mode run carries its bundles' earlier, unmerged prerequisites (#616).
++
++The recovery for a stack-mode run that stopped part-way is to re-issue `pdca flow <ids>`.
++Before the fix that run built a dependent on a base without its prerequisite: the
++prerequisite finished in the earlier run, so it is skipped as terminal and never enters
++this run's fold; with nothing folded yet the dependent's stack base is cleared, so it is
++cut from the plain target base; and `_runnable` lets it through, since COMPLETE only means
++a draft PR was opened.
++
++These cases pin the fix. Before wave 0 the run folds each out-of-batch prerequisite that is
++COMPLETE, published and unmerged onto the integration line its own in-run folds use (the
++per-batch name, #591), and points every wave-0 bundle of that target at it; the fold after
++wave 0 continues that line without force, and keeps it through a wave that accepts nothing
++of its target. A prerequisite with no published branch holds its dependents; a merged one,
++one with no patch, or one of another target needs nothing; a pre-wave fold that fails
++stops the run before wave 0. `Depends on (merged)` still waits for the merge.
++
++Real git against a bare ``origin`` and a primary checkout (the ``StackFoldGit`` shape of
++``tests/test_integrate_stack_bases.py``). Build and sign-off are stubbed by patching
++``flow._drive_wave``; publishing by patching ``flow._publish_bundle`` with a real push and
++``publish.json``. The publisher is NOT in stub mode, so every fold is a real one (a stub
++publisher makes each fold a dry-run that records no line). ``gh`` is a fake that answers
++``merged``'s own calls, so ``merged.is_merged`` / ``merged.merged_head`` run as shipped.
++
++Only modules are imported (never a symbol the fix adds), so with the production change
++reverted these cases still load and run — and fail.
++    PYTHONPATH=src python -m unittest tests.test_flow_resume_stack_prereqs
++"""
++
++from __future__ import annotations
++
++import io
++import json
++import shutil
++import subprocess
++import tempfile
++import types
++import unittest
++from contextlib import redirect_stderr, redirect_stdout
++from pathlib import Path
++from unittest import mock
++
++from pdca_harness import flow, integrate, merged, publish, signoff, state
++from pdca_harness.config import Config, LeafConfig
++
++TEMPLATES = Path(__file__).resolve().parents[1] / "templates"
++TODAY = "2026-10-04"
++
++
++def _cfg(root: Path, primary: Path) -> Config:
++    return Config(
++        root=root, bundle_root=root / "results", process_dir=root / "process",
++        templates_dir=TEMPLATES, default_branch="main", tracker_system="github",
++        tracker_url="", issue_id_example="#1",
++        builder=LeafConfig(mode="stub"), reviewer=LeafConfig(mode="stub"),
++        # NOT "stub": a stub publisher turns every fold into a dry-run, and a dry-run never
++        # records an integration branch — every assertion below would be vacuous.
++        publisher=LeafConfig(mode="command", interactive=True), gates_checks=[],
++        base_remote="origin", repo_checkouts={"org/repo": str(primary)})
++
++
++def _run(repo: Path, *args: str) -> subprocess.CompletedProcess:
++    return subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True)
++
++
++def _git(repo: Path, *args: str) -> str:
++    r = _run(repo, *args)
++    if r.returncode != 0:
++        raise AssertionError(f"git {' '.join(args)} failed in {repo}: {r.stderr}")
++    return r.stdout
++
++
++def _identity(repo: Path) -> None:
++    _git(repo, "config", "user.email", "t@example.com")
++    _git(repo, "config", "user.name", "Tester")
++    _git(repo, "config", "commit.gpgsign", "false")
++    _git(repo, "config", "fetch.prune", "false")
++
++
++def _brief(d: Path, *, extra: str = "", target: str = "org/repo @ main") -> None:
++    d.mkdir(parents=True, exist_ok=True)
++    (d / "brief.md").write_text(
++        f"- **Slug:** {d.name.removeprefix('issue_').lower()}\n"
++        f"- **Repo + branch target:** {target}\n{extra}", encoding="utf-8")
++
++
++def _patch_text(files: dict[str, str]) -> str:
++    return "".join(f"diff --git a/{n} b/{n}\nnew file mode 100644\n--- /dev/null\n"
++                   f"+++ b/{n}\n@@ -0,0 +1 @@\n+{t.rstrip(chr(10))}\n"
++                   for n, t in files.items())
++
++
++def _accept(d: Path) -> None:
++    """Make bundle ``d`` COMPLETE (accepted at sign-off)."""
++    (d / "check-gates.json").write_text("{}", encoding="utf-8")
++    shutil.copyfile(TEMPLATES / "SUMMARY.md.tpl", d / "SUMMARY.md")
++    signoff.record(d / "SUMMARY.md", action="accept", by="Tester", date=TODAY)
++
++
++def _url(iid: str) -> str:
++    return f"https://example.test/pr/{iid}"
++
++
++class ResumeStackPrereqs(unittest.TestCase):
++
++    def setUp(self) -> None:
++        self.tmp = Path(tempfile.mkdtemp())
++        self.origin = self.tmp / "origin.git"
++        self.primary = self.tmp / "repo"
++        subprocess.run(["git", "init", "--bare", "-q", str(self.origin)], check=True)
++        subprocess.run(["git", "init", "-q", "-b", "main", str(self.primary)], check=True)
++        _identity(self.primary)
++        (self.primary / "base.txt").write_text("base\n", encoding="utf-8")
++        _git(self.primary, "add", "-A")
++        _git(self.primary, "commit", "-q", "-m", "base")
++        _git(self.primary, "remote", "add", "origin", str(self.origin))
++        _git(self.primary, "push", "-q", "origin", "main")
++        self.human = self.tmp / "human"
++        subprocess.run(["git", "clone", "-q", str(self.origin), str(self.human)],
++                       check=True, capture_output=True)
++        _identity(self.human)
++        self.cfg = _cfg(self.tmp, self.primary)
++        self.changes: dict[str, dict[str, str]] = {}   # drive-set bundle → the files it adds
++        self.waves: list[dict[str, dict]] = []          # what each driven wave was built on
++        self.prs: dict[str, tuple[str, str]] = {}        # PR url → (state, head) the host reports
++        self.gh_calls: list[list[str]] = []
++
++    def tearDown(self) -> None:
++        shutil.rmtree(self.tmp, ignore_errors=True)
++
++    # -- origin ----------------------------------------------------------------------------
++
++    def _tip(self, branch: str) -> str:
++        return _git(self.origin, "rev-parse", f"refs/heads/{branch}").strip()
++
++    def _has(self, branch: str) -> bool:
++        return _run(self.origin, "rev-parse", "--verify", "--quiet",
++                    f"refs/heads/{branch}").returncode == 0
++
++    def _ancestor(self, commit: str, of: str) -> bool:
++        return _run(self.origin, "merge-base", "--is-ancestor", commit, of).returncode == 0
++
++    def _line(self, batch: list[str]) -> str:
++        """The integration line a run asked to drive ``batch`` folds onto (#591)."""
++        return integrate.integration_branch(self.cfg, "main", batch)
++
++    # -- bundles ---------------------------------------------------------------------------
++
++    def _push_branch(self, d: Path, files: dict[str, str], *, cut_from: str) -> None:
++        """What publish does: cut ``fix/<iid>`` off ``cut_from``, commit ``files`` signed
++        off, push it to origin and record it in publish.json (with a PR url)."""
++        iid = d.name.removeprefix("issue_")
++        branch = f"fix/{iid}"
++        base = publish._resolve_target(d)[1]
++        _git(self.primary, "fetch", "-q", "origin")
++        _git(self.primary, "checkout", "-q", "-B", branch, cut_from)
++        for name, text in files.items():
++            (self.primary / name).write_text(text, encoding="utf-8")
++        _git(self.primary, "add", "--all")
++        _git(self.primary, "commit", "-q", "-s", "-m", f"fix {iid}")
++        (d / "patch.diff").write_text(_git(self.primary, "diff", "HEAD~1", "HEAD"),
++                                      encoding="utf-8")
++        _git(self.primary, "push", "-q", "origin", branch)
++        _git(self.primary, "checkout", "-q", "main")
++        mode = "new-pr" if cut_from == f"origin/{base}" else "stacked-pr"
++        (d / "publish.json").write_text(json.dumps(
++            {"mode": mode, "branch": branch, "base": base, "repo": "org/repo",
++             "pr_url": _url(iid)}), encoding="utf-8")
++        self.prs.setdefault(_url(iid), ("OPEN", ""))
++
++    def _earlier(self, iid: str, files: dict[str, str], *, published: bool = True,
++                 target: str = "org/repo @ main") -> Path:
++        """A bundle an EARLIER run finished: COMPLETE, and — ``published`` — its PR branch
++        pushed and recorded, the PR left open. Unpublished, it keeps a non-empty patch."""
++        d = self.cfg.bundle(iid)
++        _brief(d, target=target)
++        if published:
++            self._push_branch(d, files, cut_from="origin/main")
++        else:
++            (d / "patch.diff").write_text(_patch_text(files), encoding="utf-8")
++        _accept(d)
++        self.assertEqual(state.state(d), state.COMPLETE)
++        return d
++
++    def _planned(self, iid: str, files: dict[str, str], *, extra: str = "",
++                 target: str = "org/repo @ main") -> Path:
++        """A bundle this run drives: briefed, not built. ``files`` is what its Do adds."""
++        d = self.cfg.bundle(iid)
++        _brief(d, extra=extra, target=target)
++        self.changes[d.name] = files
++        return d
++
++    def _merge_pr(self, iid: str) -> None:
++        """The maintainer merges ``fix/<iid>``'s PR into main; the host reports it merged."""
++        head = self._tip(f"fix/{iid}")
++        _git(self.human, "fetch", "-q", "origin")
++        _git(self.human, "checkout", "-q", "-B", "main", "origin/main")
++        _git(self.human, "merge", "-q", "--no-ff", "--no-edit", f"origin/fix/{iid}")
++        _git(self.human, "push", "-q", "origin", "main")
++        self.prs[_url(iid)] = ("MERGED", head)
++
++    # -- the stubbed leaves ----------------------------------------------------------------
++
++    def _drive_wave(self, cfg: Config, wave: list[Path], *, by: str, today: str,
++                    max_passes: int | None = None) -> int:
++        """Stands in for build → Check → sign-off: records what each bundle of the wave is
++        built on (its stack base — what Do's worktree and $PDCA_VERIFY_BASE read — and
++        that line's commit on origin right now), then makes it COMPLETE."""
++        seen: dict[str, dict] = {}
++        for d in wave:
++            line = publish.read_stack_base(d)
++            seen[d.name] = {"line": line, "tip": publish.read_stack_base_tip(d),
++                            "origin": self._tip(line) if line and self._has(line) else None}
++            (d / "patch.diff").write_text(_patch_text(self.changes[d.name]), encoding="utf-8")
++            _accept(d)
++        self.waves.append(seen)
++        return 1
++
++    def _publish_bundle(self, cfg: Config, d: Path, *, by: str, today: str,
++                        texts_prevalidated: bool = False) -> bool:
++        """Stands in for publish: cuts the PR branch from the recorded line commit (else the
++        line, else the base) as publish does, and pushes it — so the fold has it."""
++        line, tip = publish.read_stack_base(d), publish.read_stack_base_tip(d)
++        base = publish._resolve_target(d)[1]
++        self._push_branch(d, self.changes[d.name],
++                          cut_from=tip or f"origin/{line or base}")
++        return True
++
++    def _gh(self, argv: list[str], **_kw) -> subprocess.CompletedProcess:
++        """``gh pr view <url> --json <fields>``, answered from ``self.prs``."""
++        self.gh_calls.append(list(argv))
++        if argv[:3] != ["gh", "pr", "view"]:
++            raise AssertionError(f"unexpected command through merged: {argv}")
++        st, head = self.prs.get(argv[3], ("OPEN", ""))
++        out = {"state": st, **({"headRefOid": head} if "headRefOid" in argv[-1] else {})}
++        return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(out), stderr="")
++
++    def _drive(self, bundles: list[Path], *, batch: list[str]
++               ) -> tuple[dict[str, str], str, list[list[str]]]:
++        """``flow._drive_and_act`` as a re-issued ``pdca flow <batch>`` calls it, publishing
++        in stack mode. Returns its results map, its stderr, and every push the fold made."""
++        pushes: list[list[str]] = []
++        real_git = integrate._git
++
++        def spy(repo: Path, *args: str) -> int:
++            if args[:1] == ("push",):
++                pushes.append(list(args))
++            return real_git(repo, *args)
++
++        err = io.StringIO()
++        with mock.patch.object(flow, "_drive_wave", self._drive_wave), \
++                mock.patch.object(flow, "_publish_bundle", self._publish_bundle), \
++                mock.patch.object(flow.publish, "draft_texts", return_value=True), \
++                mock.patch.object(merged, "subprocess", types.SimpleNamespace(run=self._gh)), \
++                mock.patch.object(integrate, "_git", spy), \
++                redirect_stdout(io.StringIO()), redirect_stderr(err):
++            results = flow._drive_and_act(self.cfg, bundles, do_publish=True, do_act=False,
++                                          by="Tester", today=TODAY, batch=batch)
++        return results, err.getvalue(), pushes
++
++    def _driven(self) -> list[str]:
++        return [name for wave in self.waves for name in wave]
++
++    # -- the criterion ---------------------------------------------------------------------
++
++    def test_an_earlier_runs_unmerged_prerequisite_is_on_the_line_wave_0_builds_on(
++            self) -> None:
++        # The earlier run `pdca flow P D E U` stopped once P was COMPLETE and published; its
++        # PR is still open. Re-issued, P is skipped as terminal, so the drive set is D (on
++        # P), E (on D) and U (on nothing) — all org/repo @ main.
++        self._earlier("P", {"p.txt": "p\n"})
++        p_head = self._tip("fix/P")
++        d = self._planned("D", {"d.txt": "d\n"}, extra="- **Depends on:** P\n")
++        e = self._planned("E", {"e.txt": "e\n"}, extra="- **Depends on:** D\n")
++        u = self._planned("U", {"u.txt": "u\n"})
++        batch = ["P", "D", "E", "U"]
++        line = self._line(batch)
++
++        results, err, pushes = self._drive([d, e, u], batch=batch)
++
++        self.assertNotIn("did not integrate", err)
++        self.assertNotIn("Traceback", err)
++        # P is carried, not driven: it stays out of the run's results map.
++        self.assertEqual(results, {"D": state.COMPLETE, "E": state.COMPLETE,
++                                   "U": state.COMPLETE})
++        self.assertEqual([sorted(w) for w in self.waves],
++                         [["issue_D", "issue_U"], ["issue_E"]])
++        wave0, wave1 = self.waves
++        # Before D's wave is driven, the run's line on origin holds P's branch head, and D's
++        # recorded stack base names that line — and so does U's, which does not depend on P
++        # but shares the target (as every later-wave bundle already is).
++        for name in ("issue_D", "issue_U"):
++            seen = wave0[name]
++            self.assertEqual(seen["line"], line, f"{name} was not pointed at the line")
++            self.assertIsNotNone(seen["origin"], f"no {line} on origin when {name} built")
++            self.assertTrue(self._ancestor(p_head, seen["origin"]),
++                            f"{line} did not hold P when {name} built")
++            self.assertEqual(seen["tip"], seen["origin"])   # the line commit it builds on
++        # D's PR branch is cut from that commit, so it carries P.
++        self.assertTrue(self._ancestor(p_head, self._tip("fix/D")))
++        # The fold after wave 0 continues the same line: P and D on it, E pointed at it.
++        seen = wave1["issue_E"]
++        self.assertEqual(seen["line"], line)
++        self.assertIsNotNone(seen["origin"])
++        self.assertTrue(self._ancestor(p_head, seen["origin"]))
++        self.assertTrue(self._ancestor(self._tip("fix/D"), seen["origin"]))
++        self.assertTrue(self._ancestor(wave0["issue_D"]["origin"], seen["origin"]),
++                        "the line was rewritten, not appended to")
++        # Two folds: the run's first (pre-wave) starts the line fresh with a force-push; the
++        # one after wave 0 continues it WITHOUT force.
++        self.assertEqual(len(pushes), 2, pushes)
++        self.assertIn("--force", pushes[0])
++        self.assertEqual([a for a in pushes[1] if a.startswith("--force")], [], pushes[1])
++        self.assertEqual(pushes[0][-1], line)
++        self.assertEqual(pushes[1][-1], line)
++
++    def test_the_line_outlives_a_wave_that_accepts_nothing_of_its_target(self) -> None:
++        # Waves {U} → {D}. D (org/repo @ main) depends on an earlier run's P (main, PR
++        # open) and on U, which targets another base (dev). Wave 0 accepts nothing of main,
++        # yet the fold after it must keep main's line — else D, in wave 1, has its stack
++        # base cleared and builds without P after all.
++        _git(self.origin, "branch", "dev", "main")
++        self._earlier("P", {"p.txt": "p\n"})
++        p_head = self._tip("fix/P")
++        u = self._planned("U", {"u.txt": "u\n"}, target="org/repo @ dev")
++        d = self._planned("D", {"d.txt": "d\n"}, extra="- **Depends on:** P, U\n")
++        batch = ["P", "U", "D"]
++        line = self._line(batch)
++
++        results, err, pushes = self._drive([d, u], batch=batch)
++
++        self.assertNotIn("did not integrate", err)
++        self.assertEqual(results, {"D": state.COMPLETE, "U": state.COMPLETE})
++        self.assertEqual([sorted(w) for w in self.waves], [["issue_U"], ["issue_D"]])
++        self.assertEqual(self.waves[0]["issue_U"]["line"], "")   # dev: nothing to stack on
++        seen = self.waves[1]["issue_D"]
++        self.assertEqual(seen["line"], line)
++        self.assertIsNotNone(seen["origin"])
++        self.assertTrue(self._ancestor(p_head, seen["origin"]))
++        # main's line was continued (no force) by the fold after wave 0, never replaced.
++        self.assertEqual([p for p in pushes if p[-1] == line and "--force" not in p],
++                         [["push", "origin", line]])
++
++    # -- companion cases -------------------------------------------------------------------
++
++    def test_a_prerequisite_with_no_published_branch_holds_its_dependents(self) -> None:
++        # (a) P is COMPLETE, patched and targeted, but no branch was ever published: there
++        # is nothing of it to fold, so D must not build — and the rest of the run goes on.
++        self._earlier("P", {"p.txt": "p\n"}, published=False)
++        d = self._planned("D", {"d.txt": "d\n"}, extra="- **Depends on:** P\n")
++        u = self._planned("U", {"u.txt": "u\n"})
++        batch = ["P", "D", "U"]
++
++        results, err, pushes = self._drive([d, u], batch=batch)
++
++        self.assertNotIn("issue_D", self._driven())          # held, not built
++        self.assertEqual(results["D"], state.PLANNED)
++        self.assertEqual(results["U"], state.COMPLETE)       # the rest of the run went on
++        named = [ln for ln in err.splitlines()
++                 if "issue_P" in ln and "issue_D" in ln and "no published branch" in ln]
++        self.assertTrue(named, f"D's hold and its reason are not on stderr:\n{err}")
++        self.assertEqual(pushes, [])                         # nothing folded
++        self.assertFalse(self._has(self._line(batch)))
++
++    def test_a_merged_prerequisite_is_not_folded(self) -> None:
++        # (b) P's PR has merged: its work is in the base, so nothing is folded for it and D
++        # builds on the base as it always has.
++        self._earlier("P", {"p.txt": "p\n"})
++        self._merge_pr("P")
++        d = self._planned("D", {"d.txt": "d\n"}, extra="- **Depends on:** P\n")
++        batch = ["P", "D"]
++
++        results, err, pushes = self._drive([d], batch=batch)
++
++        self.assertEqual(results, {"D": state.COMPLETE})
++        self.assertEqual(self.waves, [{"issue_D": {"line": "", "tip": "", "origin": None}}])
++        self.assertEqual(pushes, [])
++        self.assertFalse(self._has(self._line(batch)))
++        self.assertTrue(self._ancestor(self._tip("main"), self._tip("fix/D")))
++
++    def test_a_prerequisite_with_no_patch_is_not_folded_and_holds_nothing(self) -> None:
++        # (c) A close / no-fix prerequisite ships nothing: an empty patch.diff, or none at
++        # all behind a close disposition. Nothing to fold, nothing to wait for, no `gh`.
++        empty = self._earlier("P0", {}, published=False)
++        self.assertEqual((empty / "patch.diff").read_text(encoding="utf-8"), "")
++        closed = self.cfg.bundle("P1")
++        _brief(closed)
++        (closed / state.CLOSE_MARKER).write_text("no-fix\n", encoding="utf-8")
++        _accept(closed)
++        self.assertEqual(state.state(closed), state.COMPLETE)
++        d = self._planned("D", {"d.txt": "d\n"}, extra="- **Depends on:** P0, P1\n")
++        batch = ["P0", "P1", "D"]
++
++        results, err, pushes = self._drive([d], batch=batch)
++
++        self.assertEqual(results, {"D": state.COMPLETE})     # not held
++        self.assertEqual(self.waves, [{"issue_D": {"line": "", "tip": "", "origin": None}}])
++        self.assertEqual(pushes, [])
++        self.assertFalse(self._has(self._line(batch)))
++        self.assertEqual(self.gh_calls, [])
++        self.assertNotIn("skipped", err)
++        self.assertNotIn("no published branch", err)
++
++    def test_a_failing_pre_wave_fold_stops_the_run_before_wave_0(self) -> None:
++        # (d) P's branch was deleted and the host does not report its PR merged: the fold
++        # cannot carry P. The run stops before wave 0 — nothing is driven, nothing is built
++        # on a base known to be missing a prerequisite — and says so without a traceback.
++        self._earlier("P", {"p.txt": "p\n"})
++        _git(self.primary, "fetch", "-q", "origin")          # a stale tracking ref to prune
++        _git(self.origin, "branch", "-D", "fix/P")
++        d = self._planned("D", {"d.txt": "d\n"}, extra="- **Depends on:** P\n")
++        u = self._planned("U", {"u.txt": "u\n"})
++        batch = ["P", "D", "U"]
++
++        results, err, pushes = self._drive([d, u], batch=batch)
++
++        self.assertEqual(self.waves, [])                     # no wave driven
++        self.assertEqual(results, {"D": state.PLANNED, "U": state.PLANNED})
++        stop = [ln for ln in err.splitlines() if "did not integrate" in ln]
++        self.assertEqual(len(stop), 1, err)
++        for part in ("flow: ", "issue_P", "origin/fix/P", "STOPPING"):
++            self.assertIn(part, stop[0])
++        self.assertNotIn("Traceback", err)
++        self.assertEqual(pushes, [])
++        self.assertFalse(self._has(self._line(batch)))
++
++    def test_depends_on_merged_still_waits_for_the_merge(self) -> None:
++        # #186, unchanged: an out-of-batch `Depends on (merged)` prerequisite is never
++        # folded — its dependent waits until the PR genuinely merges.
++        self._earlier("P", {"p.txt": "p\n"})
++        d = self._planned("D", {"d.txt": "d\n"}, extra="- **Depends on (merged):** P\n")
++        u = self._planned("U", {"u.txt": "u\n"})
++        batch = ["P", "D", "U"]
++
++        results, err, pushes = self._drive([d, u], batch=batch)
++
++        self.assertEqual(results["D"], state.PLANNED)
++        self.assertNotIn("issue_D", self._driven())
++        self.assertIn("issue_D skipped — prerequisite(s) not ready (P)", err)
++        self.assertEqual(self.waves, [{"issue_U": {"line": "", "tip": "", "origin": None}}])
++        self.assertEqual(pushes, [])
++        self.assertFalse(self._has(self._line(batch)))
++
++    def test_a_prerequisite_no_line_of_the_dependents_target_could_carry_is_left_alone(
++            self) -> None:
++        # A line is per (repo, base): a prerequisite of another target — here another base
++        # of the same repo — can never be carried into D's base, so nothing is folded for it
++        # and D builds as it always has. Nor can one whose brief.md is gone (a COMPLETE
++        # bundle may have none left, #481): it names no target, and reading one must not
++        # raise out of the run.
++        self._earlier("R", {"r.txt": "r\n"}, target="org/repo @ release")
++        gone = self._earlier("G", {"g.txt": "g\n"})
++        (gone / "brief.md").unlink()
++        self.assertEqual(state.state(gone), state.COMPLETE)
++        d = self._planned("D", {"d.txt": "d\n"}, extra="- **Depends on:** R, G\n")
++        batch = ["R", "G", "D"]
++
++        results, err, pushes = self._drive([d], batch=batch)
++
++        self.assertNotIn("Traceback", err)
++        self.assertEqual(results, {"D": state.COMPLETE})
++        self.assertEqual(self.waves, [{"issue_D": {"line": "", "tip": "", "origin": None}}])
++        self.assertEqual(pushes, [])
++        self.assertEqual(self.gh_calls, [])
++        self.assertFalse(self._has(self._line(batch)))
++
++    def test_a_run_with_no_out_of_batch_prerequisite_is_unchanged(self) -> None:
++        # Nothing outside the batch is depended on: no host call, no fold, no stack base.
++        u = self._planned("U", {"u.txt": "u\n"})
++        v = self._planned("V", {"v.txt": "v\n"})
++
++        results, err, pushes = self._drive([u, v], batch=["U", "V"])
++
++        self.assertEqual(results, {"U": state.COMPLETE, "V": state.COMPLETE})
++        self.assertEqual(self.gh_calls, [])
++        self.assertEqual(pushes, [])
++        self.assertEqual([w["line"] for w in self.waves[0].values()], ["", ""])
++
++
++if __name__ == "__main__":
++    unittest.main()

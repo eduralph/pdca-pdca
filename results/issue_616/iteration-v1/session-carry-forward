@@ -1,0 +1,6 @@
+The core fix (pre-wave fold of out-of-batch, published, unmerged prerequisites) is sound; keep it. Fix these before resubmitting:
+- `Stacks on` edges must keep their pre-fix behaviour (PR against the parent branch, no re-pointing of wave-0 bundles). Only `Depends on` triggers the pre-wave carry. Add a test.
+- Hold per (prerequisite, dependent) pair: a cross-target dependent of an unpublished prerequisite must build as the docstring says, and the hold message must name exactly the held dependents. Add a cross-target test.
+- Guard `merged.is_merged` against a missing `gh` (OSError → "not merged", as `merged_head` does) so a plain `Depends on` never crashes the run with a traceback.
+- Do not silently carry a possibly stale `publish.json` (e.g. one older than the bundle's latest sign-off, left from a rejected attempt): hold its dependents and name it on stderr instead of building on it.
+- Mid-run split children are still out of scope; note the gap in the `_prereqs_to_carry` docstring.

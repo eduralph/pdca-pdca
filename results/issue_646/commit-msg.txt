@@ -1,0 +1,31 @@
+flow: a re-issued stack run builds on its finished prerequisites
+
+In stack mode, the way to recover a run that stopped part-way (an
+integrity stop, the pass budget, a crash, Ctrl-C) is to re-issue the same
+`pdca flow <ids>`. When a prerequisite had already finished in the earlier
+run, the re-issued run skipped it as done, never put it on the integration
+line, and built its dependent on the plain base without it. The dependent
+was verified and published without the code it depends on, and nothing
+said so. The run's first fold then force-replaced the earlier run's line,
+which still held the prerequisite.
+
+Now, before the first wave, a re-issued run puts each finished requested
+id that a driven bundle names in its `Depends on` onto the batch's
+integration line, when it is clean: its PR is open (or merged with its
+head already on the base or the line), its head commit resolves, it merges
+without error, and the line's re-gate is not red. If origin already has
+the line and holds nothing unexpected, the run continues it without a
+force-push; otherwise it starts the line. Dependents are then pointed at
+that line, the same way later waves already are.
+
+A finished prerequisite that is not clean, for any reason, holds only its
+own `Depends on` dependents and gets one stderr line with the reason and
+what to do. An earlier line holding commits the run cannot account for is
+not built on and not touched by this step. In every case the rest of the
+run goes on.
+
+`integrate.fold` gains an optional `skipped=` keyword so one bundle that
+fails to merge is recorded and passed over; without it, fold behaves as
+before. The known limits are listed in docs/07-crosscutting.md.
+
+Fixes #646
