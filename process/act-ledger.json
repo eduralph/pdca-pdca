@@ -173,7 +173,7 @@
     "first_seen": "2026-09-19",
     "status": "applied",
     "applied_date": "2026-09-19",
-    "location": "Act 2026-09-19: same class under two keys, 8 of 8 patch bundles. Briefs now cite the by-path closed-PR search (PR #64 worked on the brief side); the reviewer still raises it because docs/INTEGRATION.md:132-134 wrongly says it cannot rerun the commands - the gh -R commands need network only (issue_534's reviewer ran them, T5 PASS). APPLIED 2026-09-19: docs/INTEGRATION.md section 5 now has a 'Reviewer re-check (T5)' bullet telling the reviewer to rerun them; see process/act-log.md entry 2026-09-19. Act 2026-09-28: APPLIED BUT MISLOCATED - the class recurred on issue_541 (reviewed 2026-09-28, a week after PR #68 merged) under a third ledger key. The reviewer sandbox never receives this instance's docs/INTEGRATION.md (REVIEWER_INPUTS, src/pdca_harness/leaves.py:70); issue_541's reviewer read target/template/docs/INTEGRATION.md.jinja instead. No instance-docs fix can reach the reviewer. Root cause upstream https://github.com/eduralph/pdca-harness/issues/575 (evidence added: https://github.com/eduralph/pdca-harness/issues/575#issuecomment-5878229756); unseeded pointer filed https://github.com/eduralph/pdca-harness/issues/586. Until #575 lands, the human clears this item at sign-off. Act 2026-09-30: 'ineffective' flag again (recurred in 371, 477) - expected, the delta is mislocated; still pending #575. Act 2026-10-02: recurred in 582, 589, 593, 597 as expected; still pending #575."
+    "location": "Act 2026-09-19: same class under two keys, 8 of 8 patch bundles. Briefs now cite the by-path closed-PR search (PR #64 worked on the brief side); the reviewer still raises it because docs/INTEGRATION.md:132-134 wrongly says it cannot rerun the commands - the gh -R commands need network only (issue_534's reviewer ran them, T5 PASS). APPLIED 2026-09-19: docs/INTEGRATION.md section 5 now has a 'Reviewer re-check (T5)' bullet telling the reviewer to rerun them; see process/act-log.md entry 2026-09-19. Act 2026-09-28: APPLIED BUT MISLOCATED - the class recurred on issue_541 (reviewed 2026-09-28, a week after PR #68 merged) under a third ledger key. The reviewer sandbox never receives this instance's docs/INTEGRATION.md (REVIEWER_INPUTS, src/pdca_harness/leaves.py:70); issue_541's reviewer read target/template/docs/INTEGRATION.md.jinja instead. No instance-docs fix can reach the reviewer. Root cause upstream https://github.com/eduralph/pdca-harness/issues/575 (evidence added: https://github.com/eduralph/pdca-harness/issues/575#issuecomment-5878229756); unseeded pointer filed https://github.com/eduralph/pdca-harness/issues/586. Until #575 lands, the human clears this item at sign-off. Act 2026-09-30: 'ineffective' flag again (recurred in 371, 477) - expected, the delta is mislocated; still pending #575. Act 2026-10-02: recurred in 582, 589, 593, 597 as expected; still pending #575. Act 2026-10-04: recurred in 531, 590, 591, 646, 647 as expected; still pending #575."
   },
   {
     "signal": "t5 judgment \u2014 confirm the affected-path merged and",
@@ -181,7 +181,7 @@
     "first_seen": "2026-09-19",
     "status": "applied",
     "applied_date": "2026-09-19",
-    "location": "Act 2026-09-19: same class under two keys, 8 of 8 patch bundles. Briefs now cite the by-path closed-PR search (PR #64 worked on the brief side); the reviewer still raises it because docs/INTEGRATION.md:132-134 wrongly says it cannot rerun the commands - the gh -R commands need network only (issue_534's reviewer ran them, T5 PASS). APPLIED 2026-09-19: docs/INTEGRATION.md section 5 now has a 'Reviewer re-check (T5)' bullet telling the reviewer to rerun them; see process/act-log.md entry 2026-09-19. Act 2026-09-28: APPLIED BUT MISLOCATED - the class recurred on issue_541 (reviewed 2026-09-28, a week after PR #68 merged) under a third ledger key. The reviewer sandbox never receives this instance's docs/INTEGRATION.md (REVIEWER_INPUTS, src/pdca_harness/leaves.py:70); issue_541's reviewer read target/template/docs/INTEGRATION.md.jinja instead. No instance-docs fix can reach the reviewer. Root cause upstream https://github.com/eduralph/pdca-harness/issues/575 (evidence added: https://github.com/eduralph/pdca-harness/issues/575#issuecomment-5878229756); unseeded pointer filed https://github.com/eduralph/pdca-harness/issues/586. Until #575 lands, the human clears this item at sign-off. Act 2026-09-30: 'ineffective' flag again (recurred in 371, 477) - expected, the delta is mislocated; still pending #575. Act 2026-10-02: recurred in 582, 589, 593, 597 as expected; still pending #575."
+    "location": "Act 2026-09-19: same class under two keys, 8 of 8 patch bundles. Briefs now cite the by-path closed-PR search (PR #64 worked on the brief side); the reviewer still raises it because docs/INTEGRATION.md:132-134 wrongly says it cannot rerun the commands - the gh -R commands need network only (issue_534's reviewer ran them, T5 PASS). APPLIED 2026-09-19: docs/INTEGRATION.md section 5 now has a 'Reviewer re-check (T5)' bullet telling the reviewer to rerun them; see process/act-log.md entry 2026-09-19. Act 2026-09-28: APPLIED BUT MISLOCATED - the class recurred on issue_541 (reviewed 2026-09-28, a week after PR #68 merged) under a third ledger key. The reviewer sandbox never receives this instance's docs/INTEGRATION.md (REVIEWER_INPUTS, src/pdca_harness/leaves.py:70); issue_541's reviewer read target/template/docs/INTEGRATION.md.jinja instead. No instance-docs fix can reach the reviewer. Root cause upstream https://github.com/eduralph/pdca-harness/issues/575 (evidence added: https://github.com/eduralph/pdca-harness/issues/575#issuecomment-5878229756); unseeded pointer filed https://github.com/eduralph/pdca-harness/issues/586. Until #575 lands, the human clears this item at sign-off. Act 2026-09-30: 'ineffective' flag again (recurred in 371, 477) - expected, the delta is mislocated; still pending #575. Act 2026-10-02: recurred in 582, 589, 593, 597 as expected; still pending #575. Act 2026-10-04: recurred in 531, 590, 591, 646, 647 as expected; still pending #575."
   },
   {
     "signal": "validation \u2014 fitness-to-purpose \u2014 decide whether a real",
@@ -197,7 +197,7 @@
     "first_seen": "2026-09-28",
     "status": "open",
     "applied_date": null,
-    "location": "Act 2026-09-28: same class as rows 21-22 under a third key (#501). Pending upstream https://github.com/eduralph/pdca-harness/issues/575 and https://github.com/eduralph/pdca-harness/issues/586; see process/act-log.md entry 2026-09-28. Act 2026-10-02: recurred in 582, 589, 593, 597 as expected; still pending #575."
+    "location": "Act 2026-09-28: same class as rows 21-22 under a third key (#501). Pending upstream https://github.com/eduralph/pdca-harness/issues/575 and https://github.com/eduralph/pdca-harness/issues/586; see process/act-log.md entry 2026-09-28. Act 2026-10-02: recurred in 582, 589, 593, 597 as expected; still pending #575. Act 2026-10-04: recurred in 531, 590, 591, 646, 647 as expected; still pending #575."
   },
   {
     "signal": "plan advisory: 5 finding(s); brief revised: yes (plan-advisory-*.md)",
@@ -213,7 +213,7 @@
     "first_seen": "2026-09-30",
     "status": "open",
     "applied_date": null,
-    "location": "Act 2026-09-30: same T5 prior-art class as rows 21, 22, 24 under a fourth key (#501); recurs in 371, 408, 409, 477, 537, 539 as expected. Pending upstream https://github.com/eduralph/pdca-harness/issues/575 (milestone 0.61.0) and #586; the human clears it at sign-off until then. Act 2026-10-02: recurred in 582, 589, 593, 597 as expected; still pending #575."
+    "location": "Act 2026-09-30: same T5 prior-art class as rows 21, 22, 24 under a fourth key (#501); recurs in 371, 408, 409, 477, 537, 539 as expected. Pending upstream https://github.com/eduralph/pdca-harness/issues/575 (milestone 0.61.0) and #586; the human clears it at sign-off until then. Act 2026-10-02: recurred in 582, 589, 593, 597 as expected; still pending #575. Act 2026-10-04: recurred in 531, 590, 591, 646, 647 as expected; still pending #575."
   },
   {
     "signal": "plan advisory: 6 finding(s); brief revised: yes (plan-advisory-*.md)",
@@ -222,5 +222,13 @@
     "status": "structural",
     "applied_date": null,
     "location": "Act 2026-10-02: benefit telemetry from assemble._plan_advisory_act_lines, same as row 25 (582: 6 findings; 593 rounds v2-v5: 6). Not a defect; no delta."
+  },
+  {
+    "signal": "t5 judgment \u2014 confirm the affected-path merged-history and",
+    "raw": "T5 Judgment \u2014 Confirm the affected-path merged-history and closed/rejected-work search excludes an already accepted or rejected equivalent \u2014 the brief reports a search, but the supplied snapshot has one synthetic base commit, no remotes and no closed-PR evidence; `brief.md:127`, `review-grounding.log:1`.",
+    "first_seen": "2026-10-04",
+    "status": "open",
+    "applied_date": null,
+    "location": "Act 2026-10-04: same T5 prior-art class as rows 21, 22, 24, 26 under a fifth key (#501). Pending upstream https://github.com/eduralph/pdca-harness/issues/575 and #586; the human clears it at sign-off until then."
   }
 ]

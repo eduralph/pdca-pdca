@@ -1628,3 +1628,93 @@ Found by this review:
   would find.
 - #634: the next index shows multi-line §10 bullets whole.
 - #621: #582 may close with #617; #621 stays open until the check-name gap is closed.
+
+# Act review — 2026-10-04 — cycles considered: issue_531, issue_590, issue_591, issue_616, issue_646, issue_647
+
+Fourteenth Act review. Six bundles were signed off on 2026-10-04. Five were published as
+draft PRs on eduralph/pdca-harness: 531 → #637, 590 → #638, 591 → #639, 646 → #648 and
+647 → #649. issue_616 closed as a split; its children are 646 and 647. The index lists 90
+bundles; the other 84 were handled at earlier reviews. No instance delta. Seven items were
+filed upstream after a prior-art check, as agreed with the human.
+
+## What the cycles' records exposed
+
+- **Untracked deferrals: fewer than last time.** Swept as the 2026-10-02 practice requires:
+  every `iteration-v*/session-carry-forward`, every `check-advisory-*.md`, the PR "Known
+  limits" and §10. Found 7 deferrals in 6 bundles with no issue: 1 in 531, 1 in 590, 3 in
+  646, 1 in 647, plus the 646 known-limit wording. The previous baseline was 13 in 4
+  bundles. 5 of the 7 were written into §10 at sign-off, so the habit is helping, but §10
+  is not a tracker. 591's deferral (branches piling up on origin) is already tracked as
+  #454. 647's cross-target hold is the behaviour #647 asked for, not a deferral.
+- **Recurring: briefs with an open failure policy spin in Do.** 593 (2026-10-02 review: 7
+  build iterations, 2 re-plans), 616 (3 rounds, then a split) and 646 (4 rounds, 149 KB, over
+  the size backstop). Each round closed the last fix list, then the adversary found the next
+  PR-state × branch-state × line-content combination. 646's v4 carry-forward names the cause:
+  "the brief never fixed a policy for the non-clean case, so Do invents one per scenario".
+  The re-plan that converged wrote one rule into the brief (carry only in the clean case;
+  anything else holds only that prerequisite's dependents). This is planner-prompt
+  machinery, so it was filed upstream.
+- **Already filed during these sign-offs:** #640–#645 (planner scope fence, settled-decision
+  citations, auto-iterate carrying deferred items, carry-to-#N items lost, plan-advisory
+  false base, C5-mutants as an oversize signal). No new filing for these.
+- **Expected repeats, no action:** T5 prior art in all 5 patch bundles (pending #575; the new
+  ledger key from 2026-10-04 is the same class, #501). Fitness-to-purpose items are
+  human-only by design. 616's split close is confirmed by the human by design. Plan-advisory
+  finding counts (5-7, every brief revised) are telemetry. The size backstop fired on 646,
+  which is its job.
+- **#634:** every §10 bullet in this batch is a single line, so this index can't show whether
+  multi-line bullets now come through whole. Still open.
+
+## Process deltas
+
+- **No instance delta warranted.** Everything above is harness machinery (planner prompt,
+  sign-off/publish deferral capture, stack/merge mode code). A local edit would be
+  overwritten by `copier update`.
+- **Review practice (unchanged, until upstream #636 lands):** keep the deferral sweep from
+  the 2026-10-02 entry.
+- **Ledger** (`process/act-ledger.json`): the new T5 row (first seen 2026-10-04) has its
+  location set to the #575/#586 class. T5 rows 21, 22, 24 and 26 are noted as recurring in
+  531, 590, 591, 646 and 647, still pending #575.
+
+## Follow-ups routed (not process deltas — work handed to an owner)
+
+All filed on eduralph/pdca-harness with no milestone (the human sets milestones). Each was
+checked for prior art first: open and closed issues and PRs by keyword, and the code on
+`origin/main` and on the PR branches. No duplicates found.
+
+Deferrals set aside at Check and not tracked until now:
+
+- 531: merge mode `_fetch` reads only `base_remote` + `origin`, so a PR on a third remote
+  can't merge once behind, and the message says "git failed"
+  → https://github.com/eduralph/pdca-harness/issues/650
+- 590: stale comment at `flow.py:1868-1871` ("adoption never relaxes it")
+  → https://github.com/eduralph/pdca-harness/issues/651
+- 646: "not clean" does not cascade across finished ids (closed P rides in via clean Q;
+  relates to #624) → https://github.com/eduralph/pdca-harness/issues/652
+- 646: the carry judges the PR's approved `headRefOid` but folds the branch's current tip
+  → https://github.com/eduralph/pdca-harness/issues/653
+- 646: a continued line keeps the earlier run's base (refresh it, or document it as a known
+  limit; filed as a decision) → https://github.com/eduralph/pdca-harness/issues/654
+- 647: a `Depends on (merged)` prerequisite that merges mid-run lets a later-wave dependent
+  through on a line cut before the merge (gap inherited from #186)
+  → https://github.com/eduralph/pdca-harness/issues/655
+
+Found by this review:
+
+- Planner/brief rule: a brief that adds hold/recover/refuse behaviour must state one
+  fail-closed rule for every non-clean case before Do (evidence 593, 616, 646)
+  → https://github.com/eduralph/pdca-harness/issues/656
+- Carried, open upstream, no new filing: #556, #573, #575, #586, #603, #606, #607, #608,
+  #634, #636.
+- Open Act item (carried, unchanged): the triage rubric should state five buckets
+  explicitly (issue_316 §10). No triage brief ran.
+
+## How effectiveness will be judged
+
+- Deferral sweep: the count of untracked deferrals per review should keep falling (13 in 4
+  bundles on 2026-10-02; 7 in 6 on 2026-10-04). After #636 lands, a review that reads only
+  §10 should find every deferral the sweep finds.
+- #656: the next brief that adds hold/recover behaviour for external state converges in two
+  Do rounds or fewer, with no "new combination" findings after the first round. If it spins
+  like 616/646 again, raise #656's priority with the human.
+- #634: check at the first review whose batch has a multi-line §10 bullet.
