@@ -1,0 +1,4 @@
+Design is sound and in scope; two confirmed implementation bugs from the code review must be fixed, each with a test:
+1. Empty-target regression: when the dependent's resolved target is ("", "") (no `Repo + branch target`, or no `@ branch`), skip the #647 hold and keep the old `merged.is_merged` answer for `Depends on (merged)` — today merged_into rejects every record (merged.py:98) so the dependent is held forever and the message reads "not merged into  ()".
+2. Wrong reason/advice: an out-of-batch `Depends on (merged)` prerequisite that is not COMPLETE (PLANNED/DISCONTINUED) must go to `unmet` ("prerequisite(s) not ready"), not `unmerged` ("wait until their PR merges") — check state != COMPLETE first (flow.py:725-733), as the plain-dependency branch already does.
+Also: C4 (worktree mismatch) never ran — lane was busy — so it must produce a real red→green result on the rebuild.

@@ -1,0 +1,32 @@
+flow: hold a stack dependent until its outside prerequisite merges
+
+In stack mode, a bundle whose `Depends on` prerequisite was not one of the
+ids the run was asked to drive was built as soon as that prerequisite was
+COMPLETE. COMPLETE only means a draft PR was opened, and nothing in the run
+puts that prerequisite's work on the run's line. So the dependent was built
+on a base without the code it depends on. This hits every `--from-csv`
+sweep (a finished bundle never re-enters the sweep) and any dependent driven
+in a different command from its prerequisite.
+
+Now such a dependent waits. It builds once the prerequisite's PR has merged
+into the dependent's own target (the repo and branch of its `Repo + branch
+target`). Until then the run prints one line naming the dependent, the
+prerequisite and "not merged into <base>", says what to do (name the
+prerequisite in the same `pdca flow <ids>` command, or wait for the merge),
+and goes on with the rest of the batch.
+
+`Depends on (merged)` now uses the same rule. A PR that merged into an
+integration branch, an `Onto branch` commit, or a PR in another repo no
+longer counts as merged for it. A missing or failing `gh` now reads as "not
+merged" with a message, instead of crashing the run with a traceback.
+
+Nothing changes for a prerequisite the run was asked to drive, for `Stacks
+on` edges, `--no-publish`, merge mode or a dry-run, for a prerequisite with
+no patch, or for a dependent with no usable target. `merged.is_merged` and
+its callers (merge mode's resume check and `status`) keep their answer; the
+new check is a separate function, `merged.merged_into`.
+
+Builds on #646 (PR #648): it uses that change's "ids the run was asked for"
+and its guarded PR-state reader, `merged.pr_state`.
+
+Fixes #647

@@ -1,0 +1,12 @@
+{
+  "mode": "stacked-pr",
+  "branch": "fix/647-stack-holds-dependent-of-out-of-batch-unmerged-prereq",
+  "pr_url": "https://github.com/eduralph/pdca-harness/pull/649",
+  "base": "pdca-integration/main",
+  "repo": "eduralph/pdca-harness",
+  "by": "Eduard Ralph",
+  "date": "2026-10-04",
+  "id_pending": false,
+  "host_ci_base": "c1f2306984bb9b95469b08de3cea83598d48820f",
+  "stacks_on": []
+}
