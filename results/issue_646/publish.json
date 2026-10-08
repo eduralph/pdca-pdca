@@ -1,0 +1,12 @@
+{
+  "mode": "stacked-pr",
+  "branch": "fix/646-stack-reissue-carries-clean-finished-prereqs",
+  "pr_url": "https://github.com/eduralph/pdca-harness/pull/648",
+  "base": "pdca-integration/main",
+  "repo": "eduralph/pdca-harness",
+  "by": "Eduard Ralph",
+  "date": "2026-10-04",
+  "id_pending": false,
+  "host_ci_base": "12405dc952a556b710993014cc55d374a74c60f8",
+  "stacks_on": []
+}

@@ -1,0 +1,12 @@
+{
+  "mode": "stacked-pr",
+  "branch": "fix/591-stack-integration-line-per-run",
+  "pr_url": "https://github.com/eduralph/pdca-harness/pull/639",
+  "base": "pdca-integration/main",
+  "repo": "eduralph/pdca-harness",
+  "by": "Eduard Ralph",
+  "date": "2026-10-04",
+  "id_pending": false,
+  "host_ci_base": "9d2c539dabaae7da04fd908b786c421b0eb65ff0",
+  "stacks_on": []
+}

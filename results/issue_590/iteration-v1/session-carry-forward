@@ -1,0 +1,5 @@
+The fix is sound (no defect found, all gates green), but three behaviours it touches have no test in the patch. Keep the production change as is and add these cases to template/tests/test_flow_adopt_recovery.py (AdoptRecovery, through cli._flow, --no-publish):
+1. Dependency loop through an offered seed child (e.g. 810 Depends on: 602, 602 Depends on: 810, with 500 split into 601/602). Pre-patch this was refused up front with rc 2; post-patch it passes the strict check and the tolerant re-level holds both. Pin the current behaviour: no traceback, neither 602 nor 810 driven, both still PLANNED, stderr names the held ids. This is a deliberate behaviour change and needs a test.
+2. `Stacks on: <seed child>` stays refused up front: rc 2, nothing driven (include a mixed Depends on + Stacks on declaration).
+3. `Depends on (merged): <seed child>` resolves like `Depends on`: waves_driven == [["issue_601"], ["issue_602"], ["issue_810"]].
+The reviewer already confirmed 2 and 3 by hand (reviewer-boundaries.log); they only need to be committed as tests.

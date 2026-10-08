@@ -1,0 +1,13 @@
+{
+  "band": "watch",
+  "independent_outcomes": [
+    "Base-aware merged check: a new merged.merged_into(cfg, dep_id, repo, base) counts a prerequisite as merged only if its record's repo+base equal the dependent's target and mode is not \"stacked\", with an OSError/gh-failure guard. _runnable uses it for out-of-batch `Depends on (merged)`, which fixes #186 being satisfied by a merge into an integration branch (criterion 3's `Depends on (merged)` half, criterion 5, the is_merged-unchanged pin, and the empty-target fallback from the iteration-1 carry-forward).",
+    "Stack-mode hold for a plain out-of-batch `Depends on`: in stack mode with publishing, _runnable holds D (stays PLANNED, stderr names D/P and says 'not merged into <base>') when P is COMPLETE with a non-empty patch but not merged into D's base, for both flow_ids and flow_batch, plus the docstring and docs/07 paragraph (criteria 1, 2, 4, 6 and the plain-`Depends on` half of 3)."
+  ],
+  "proposed_seams": [
+    "Cut between the merged-ness rule and the new hold. The merged_into function plus its use for `Depends on (merged)` fixes a real defect on its own (a Depends-on-(merged) dependent of #591 builds today because #591's stacked-pr record is MERGED into pdca-integration/main) and has its own test. The plain-`Depends on` hold would then ship second, stacked on the first, reusing merged_into. The OSError guard goes with the first piece, since it lives in the new function.",
+    "Reason not to cut: the plan-review response (4) argues, correctly, that the hold is unsound without the base-aware check, so the second piece can't ship before the first. Both touch the same few lines of _runnable, the brief is already a child of a split (#616), and this is an iteration-2 rebuild whose sign-off rated the design sound and asked only for two small fixes. Splitting now would add a wave and a fold for a medium-sized change. Keeping it as one PR is a fair call. I'm flagging the seam, not pushing for it."
+  ],
+  "confidence": "medium",
+  "brief_sha": "fe2d6fbc91163b18"
+}

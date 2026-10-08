@@ -1,0 +1,9 @@
+{
+  "band": "ok",
+  "independent_outcomes": [
+    "Make integration branch names include batch identity so different batches on the same base get different branches, while resumed runs with the same ids get the same branch"
+  ],
+  "proposed_seams": [],
+  "confidence": "high",
+  "brief_sha": "522e6a7c655b3853"
+}

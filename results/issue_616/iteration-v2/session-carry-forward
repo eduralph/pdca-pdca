@@ -1,0 +1,6 @@
+The pre-wave carry of out-of-batch, published, unmerged prerequisites is sound; keep it and the attempt-1 fixes. Fix these before resubmitting:
+- A prerequisite whose PR is CLOSED (not merged) must hold its dependents, never be carried — otherwise unrelated same-target PRs carry rejected work. Add a test.
+- A missing `pr_url`, or a `gh` failure, must not stop the whole run: hold only that prerequisite's dependents (named on stderr), and let unrelated bundles build. Covers a merged P with an empty `pr_url` and a deleted branch, which built correctly pre-fix. Add a test.
+- Work out the holds first; start a line for a prerequisite only if some dependent that needs it is not held. Add a test (D depends on carryable P and unpublished P2 ⇒ no line, U stays on the plain base).
+- Ask whether P is merged BEFORE the stale-record (timestamp) check, so a merged prerequisite never holds its dependents.
+- Narrow the `Stacks on` sentence in `flow.py` and `docs/07-crosscutting.md`: it holds only for a line the pre-wave fold starts, not for a line first folded after a later wave.

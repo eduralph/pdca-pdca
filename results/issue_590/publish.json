@@ -1,0 +1,11 @@
+{
+  "mode": "new-pr",
+  "branch": "fix/590-flow-dep-on-seed-child-refused",
+  "pr_url": "https://github.com/eduralph/pdca-harness/pull/638",
+  "base": "main",
+  "repo": "eduralph/pdca-harness",
+  "by": "Eduard Ralph",
+  "date": "2026-10-04",
+  "id_pending": false,
+  "host_ci_base": "c67a14d77537fcf7208bfc0785e4c60a5f11eda0"
+}

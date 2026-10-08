@@ -1,0 +1,15 @@
+{
+  "band": "oversized",
+  "independent_outcomes": [
+    "Stop silent wrong-base builds: in a re-issued stack run, a dependent whose finished prerequisite is not on the line is held (not built on the plain base), with one stderr line naming the prerequisite and the reason. This alone closes the reported defect and has its own red test (the (4) cases, with no earlier line on origin).",
+    "Carry clean finished prerequisites onto the batch line: a clean finished id is folded onto the line before wave 0, the line is continued (append-only, no force) when origin already has a trusted one, and dependents build on it. This is the feature. It has its own success criterion and tests (1), (2), (3), (6), and it needs the hold path from the first outcome to be safe."
+  ],
+  "proposed_seams": [
+    "Cut 1 (safety first): ship the hold path alone. Add the readiness check in _runnable (flow.py:681-720) so a dependent of any finished named id that is not on the line is held, with a stderr line. No carry, no fold changes, no integrate.fold(skipped=). A run that re-issues after a stop then builds nothing silently on a missing base. Its test is the (4) family with no earlier line, plus (7) for the no-trigger case. This fits in a small patch and does not touch the lock or the fold start modes.",
+    "Cut 2 (the carry): ship the pre-wave carry on top of Cut 1. This adds the trust check on the existing line (criterion 5), the fold(skipped=) keyword, the shared lock-fold-tip-regate helper, folded_this_run seeding, and tests (1), (2), (3), (5), (6), (8). Cut 2 depends on Cut 1 because the carry's not-clean case falls back to the hold path.",
+    "Not a seam, but a split inside Cut 2 that the brief already rules out: the untrusted-line hold (5) and the red re-gate hold (8) could be separate, but both reuse the same single hold path, so splitting them adds churn without a new outcome. Keep them with the carry.",
+    "Doc and wording changes (docs/07-crosscutting.md:658-677, publish.py:345/696/726, drift.py:58-61, and the two test assertions at test_integrate_stack_bases.py:834-852 and :1012) should follow whichever cut they describe. They should not be a third outcome."
+  ],
+  "confidence": "medium",
+  "brief_sha": "39d909b4d873803f"
+}

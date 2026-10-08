@@ -1,0 +1,7 @@
+Rejected at sign-off (attempt 4): four rounds have each added special cases for another combination of PR state (open/closed/merged/replaced/no pr_url) x branch state (deleted/force-pushed/squash-merged) x what the earlier run's line holds (rejected commits, conflicting finished ids). The adversary finds the next combination every round; patch is 149 KB, over the size backstop. Root cause: the brief never fixed a policy for the non-clean case, so Do invents one per scenario.
+Re-plan #646 around ONE rule written into the brief:
+- Carry a finished prerequisite only in the clean case: PR OPEN (or MERGED and already reachable), branch head resolvable, and it merges cleanly onto the line.
+- Anything else, for any reason, holds only that prerequisite's plain-`Depends on` dependents, names the id + reason on stderr, and the rest of the run goes on. Never stop the whole run because of an earlier run's leftovers.
+- The carry triggers only on a finished id that is itself carryable (patched + targeted), not merely COMPLETE (adversary finding 1).
+- Two finished ids that do not merge together: the one that fails is held with its dependents, not a run-wide stop (adversary finding 2).
+Optionally split the per-case recovery advice (how to get unstuck for each hold reason) into its own child. Keep the criteria to the rule, not an enumeration of host scenarios. Note: #639 (#591) is still OPEN, not merged to main.

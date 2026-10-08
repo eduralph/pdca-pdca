@@ -1,0 +1,32 @@
+flow: let a named id depend on a child its recovery seed adopts
+
+`pdca flow 500 810` was refused before doing any work when 500 is already
+split (its children still planned) and 810 depends on one of those
+children. The run would have adopted that child and scheduled it ahead
+of 810, but the up-front dependency check ran before the children were
+added and only knew about the ids typed on the command line, so it
+reported the dependency as missing. Running the children by hand, or the
+seed on its own, worked; naming both did not.
+
+The up-front check now also accepts a `Depends on` / `Depends on
+(merged)` edge to a child the named seed will adopt: a planned, briefed
+child of the seed, found through children that are themselves split.
+The names are collected by a silent walk over the same lineage reader
+adoption uses, so no adoption message is printed twice. Everything else
+is refused up front as before: a dependency outside the seed's children,
+a child that is already discontinued, resolved or has no brief, and a
+`Stacks on` edge to any seed child. Only the strict call in the flow
+driver passes the new names; `pdca waves` and the tolerant re-level are
+unchanged.
+
+If adoption then does not take the child (another run holds it), the
+dependent is held and reported, not raised. One deliberate change: a
+dependency loop that runs through an adopted child used to be refused up
+front with rc 2; it is now held by the re-level instead, both ends are
+named on stderr, the rest of the request still runs, and the run exits 1.
+
+The refusal message itself was fixed in
+bad66f203ca38d1e463a004560c3f8ec38c7e08c; this removes the refusal for
+the case where the dependency is part of the request.
+
+Fixes #590

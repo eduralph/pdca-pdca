@@ -1,0 +1,1946 @@
+diff --git a/docs/07-crosscutting.md b/docs/07-crosscutting.md
+index 3176a50..2c23849 100644
+--- a/docs/07-crosscutting.md
++++ b/docs/07-crosscutting.md
+@@ -662,19 +662,45 @@ wave builds on, via `[driver].wave_mode`:
+   from the base with a force-push (if your origin refuses force-pushes, delete
+   the old `pdca-integration/<base>-r<key>` first, or allow force-pushes on
+   `pdca-integration/*`), and later folds continue it without force — and stop
+-  the run if something else moved it. Commits pushed onto a stack PR's branch after
+-  a fold carried it reach the line at the next fold. If a PR merges and its
+-  branch is deleted, the fold looks up the commit the PR merged with: a line
+-  that has it already carries the PR; one that does not (say a fixup was pushed
+-  after the fold) merges your base in, after checking that your base has that
+-  commit. If it does not (the PR merged into another branch, or was squashed or
+-  rebased), the run stops rather than build the next wave without that work. An
+-  accepted bundle whose publish pushed no branch holds only the bundles that
+-  depend on it; the rest of the run goes on. When you publish it later
+-  (`pdca publish <id>`), its PR branch is cut from the line commit it was built
+-  on, so it carries no later wave's work; if a later run has replaced the line
+-  by then, publish refuses and pushes nothing — re-drive that bundle in a new
+-  run.
++  the run if something else moved it. Running the same ids again after a run
++  stopped part-way (a STOP, the pass budget, a crash, Ctrl-C) keeps the line:
++  the ids that already finished are skipped, so when a bundle the new run
++  drives names one of them in its `Depends on`, the run first folds every
++  finished id it can carry onto the line — continuing the line origin has,
++  without force, or starting it when origin has none — and builds all of
++  wave 0 on it, as a later wave would; every later fold carries those ids
++  again. With `[driver].regate_between_waves` on, that line is re-gated
++  first. A finished id it cannot carry (no published branch, a closed PR, no
++  PR at all, or a PR whose state it cannot read) holds only the bundles that
++  depend on it; the run names it, says what to do, and goes on. If publish
++  pushed a branch but could not open its PR (`publish.json` has no
++  `pr_url`), the run looks the PR up by that branch, so one you opened by hand
++  counts; with none, it prints the `gh pr create` command that opens it. The
++  run continues origin's line only if everything on it is a fold's own merge
++  commit or the current work of a bundle it carries, checked by commit. If the
++  line holds anything else — a closed PR's work, work of a PR whose state it
++  cannot read, an earlier version of a bundle (one this run rebuilds, or one
++  re-pushed since), or work it cannot place (say a PR closed and its branch
++  deleted after a fixup your clone never fetched) — the run does not continue
++  that line and builds nothing of that target; it names the line, what it
++  holds and how to go on: re-open the PR, open it, or fix what kept its state
++  from being read, where that clears it — or delete the line. If a fold or
++  its re-gate fails, the run stops before it builds anything. `Stacks on` and
++  `Depends on (merged)` do not start this, and a run that carries nothing
++  still starts the line fresh at its first fold. Commits pushed onto a stack
++  PR's branch after a fold carried it reach the line at the next fold. If a PR
++  merges and its branch is deleted, the fold looks up the commit the PR merged
++  with: a line that has it already carries the PR; one that does not (say a
++  fixup was pushed after the fold) merges your base in, after checking that
++  your base has that commit. If it does not (the PR merged into another
++  branch, or was squashed or rebased), the run stops rather than build the
++  next wave without that work. An accepted bundle whose publish pushed no
++  branch holds only the bundles that depend on it; the rest of the run goes
++  on. When you publish it later (`pdca publish <id>`), its PR branch is cut
++  from the line commit it was built on, so it carries no later wave's work; if
++  the line no longer holds that commit by then (deleted, rewritten, or started
++  fresh by a run that carried nothing), publish refuses and pushes nothing —
++  re-drive that bundle in a new run.
+ - **`"merge"`** (own-repo / continuous-delivery only) — actually `gh pr merge`s
+   each non-final wave's PRs, so the next wave builds on a genuinely merged base.
+   Needs merge rights on the base remote and relaxes STOP discipline for the
+diff --git a/template/PCDA/quality-cycle/09-parallel-lanes.md b/template/PCDA/quality-cycle/09-parallel-lanes.md
+index 3af3c0a..11c9bec 100644
+--- a/template/PCDA/quality-cycle/09-parallel-lanes.md
++++ b/template/PCDA/quality-cycle/09-parallel-lanes.md
+@@ -66,7 +66,7 @@ With no fields declared the batch is a **single wave**, dispatched byte-for-byte
+ 
+ How a wave's accepted work reaches the next wave's base is `[driver].wave_mode`:
+ 
+-- **`stack`** (default) — merge each accepted bundle's **published PR branch** onto a run-scoped integration branch on `origin` (push-only, so a **fork** contributor can do it), and cut each later wave's branches off it so they carry the earlier waves' work: those bundles' own PR commits, joined by signed-off merge commits, never re-applied copies. **Every PR targets the real base**, own-repo and fork alike — the integration branch is a staging line nothing merges into the target, so no PR is opened against it. The fold puts every published branch of a target on its line, so a later wave's PR carries **every earlier-wave branch on the line**, not only its prerequisites', and shows their changes until they merge (merging it first would land their commits with it). Once they have all merged with merge commits, its diff against the base is its own change when the line is a plain chain: each earlier wave put one branch on it, and it never took in a base newer than a branch on it (the base did not move between the wave-0 publishes and the run's first fold, and no fold merged the base in — a fold does that only for a merged prerequisite whose branch was deleted and whose PR merged with a commit the line does not have, such as a fixup pushed after the fold). Otherwise a fold merge commit joined histories the base got separately; that commit never reaches the base, so the PR has several merge bases with it and can keep showing an already-merged change. Updating its branch from the base (GitHub's "Update branch") then leaves only its own change. Each run has its own line, `pdca-integration/<base>-r<key>`, keyed on the ids it was asked to drive: two runs on one base that drive different batches never share a line, and the same ids asked for again get the same line back. Within one run the line only grows: the run's first fold of a target starts it fresh from the base (a force-push that replaces only an earlier run of the same batch's line — on an origin that refuses force-pushes, delete the old `pdca-integration/<base>-r<key>` or allow force-pushes on `pdca-integration/*`), and every later fold continues the tip that run pushed, without force, so no fold rewrites a commit an open PR depends on. Each fold merges a published branch's **current** tip, so commits pushed onto a stack PR's branch after a fold reach the line at the next one; a branch deleted after its PR merged is judged by the commit the PR merged with (the host's record of it, never a commit message) — already on the line, it is skipped; not on it, the fold checks that the base has that commit and then merges the base in, and if the base does not have it (the PR merged into another branch, or was squashed or rebased), the fold STOPs the run rather than build the next wave without that work. The harness never merges; you merge the PR stack bottom-up with a **merge commit** — not squash or rebase, which put a prerequisite's change on the base as new commits rather than the ones its dependents carry. A branch that does not merge cleanly onto the line (an undeclared overlap), or a line something else moved meanwhile, STOPs the run; an accepted bundle whose publish pushed no branch holds only the bundles that depend on it, and the rest of the run goes on — published later, its PR branch is cut from the line commit it was built on, so it carries no later wave's work, and if a later run has replaced the line by then, publish refuses and pushes nothing (re-drive it in a new run). STOP discipline holds throughout.
++- **`stack`** (default) — merge each accepted bundle's **published PR branch** onto a run-scoped integration branch on `origin` (push-only, so a **fork** contributor can do it), and cut each later wave's branches off it so they carry the earlier waves' work: those bundles' own PR commits, joined by signed-off merge commits, never re-applied copies. **Every PR targets the real base**, own-repo and fork alike — the integration branch is a staging line nothing merges into the target, so no PR is opened against it. The fold puts every published branch of a target on its line, so a later wave's PR carries **every earlier-wave branch on the line**, not only its prerequisites', and shows their changes until they merge (merging it first would land their commits with it). Once they have all merged with merge commits, its diff against the base is its own change when the line is a plain chain: each earlier wave put one branch on it, and it never took in a base newer than a branch on it (the base did not move between the wave-0 publishes and the run's first fold, and no fold merged the base in — a fold does that only for a merged prerequisite whose branch was deleted and whose PR merged with a commit the line does not have, such as a fixup pushed after the fold). Otherwise a fold merge commit joined histories the base got separately; that commit never reaches the base, so the PR has several merge bases with it and can keep showing an already-merged change. Updating its branch from the base (GitHub's "Update branch") then leaves only its own change. Each run has its own line, `pdca-integration/<base>-r<key>`, keyed on the ids it was asked to drive: two runs on one base that drive different batches never share a line, and the same ids asked for again get the same line back. Within one run the line only grows: the run's first fold of a target starts it fresh from the base (a force-push that replaces only an earlier run of the same batch's line — on an origin that refuses force-pushes, delete the old `pdca-integration/<base>-r<key>` or allow force-pushes on `pdca-integration/*`), and every later fold continues the tip that run pushed, without force, so no fold rewrites a commit an open PR depends on. The same ids asked for again after a run stopped part-way keep the line too: when a bundle the new run drives depends on an id the earlier run finished, the run first carries the finished ids onto the line — continuing it without force — and builds wave 0 on it; a finished id whose PR is closed, missing or unreadable is not carried, and a line holding anything the run cannot vouch for by commit (such a PR's work, an earlier version of a bundle, work it cannot place) is not built on. Each fold merges a published branch's **current** tip, so commits pushed onto a stack PR's branch after a fold reach the line at the next one; a branch deleted after its PR merged is judged by the commit the PR merged with (the host's record of it, never a commit message) — already on the line, it is skipped; not on it, the fold checks that the base has that commit and then merges the base in, and if the base does not have it (the PR merged into another branch, or was squashed or rebased), the fold STOPs the run rather than build the next wave without that work. The harness never merges; you merge the PR stack bottom-up with a **merge commit** — not squash or rebase, which put a prerequisite's change on the base as new commits rather than the ones its dependents carry. A branch that does not merge cleanly onto the line (an undeclared overlap), or a line something else moved meanwhile, STOPs the run; an accepted bundle whose publish pushed no branch holds only the bundles that depend on it, and the rest of the run goes on — published later, its PR branch is cut from the line commit it was built on, so it carries no later wave's work, and if a later run has replaced the line by then, publish refuses and pushes nothing (re-drive it in a new run). STOP discipline holds throughout.
+ - **`merge`** (own-repo / continuous-delivery only) — `gh pr merge` each non-final wave's PRs so the next wave builds on the genuinely-merged base. Needs **merge rights** on the base remote (a fork lacks them upstream — keep `stack` there) and relaxes STOP discipline; fail-closed (a non-mergeable PR STOPs the run).
+ 
+ Optionally (`[driver].regate_between_waves`), the repo-scoped gates re-run over the folded integration tip before the next wave builds on it, so a combination that is red though each fix was green *alone* STOPs the run.
+diff --git a/template/src/pdca_harness/drift.py b/template/src/pdca_harness/drift.py
+index 6051c7f..dc50966 100644
+--- a/template/src/pdca_harness/drift.py
++++ b/template/src/pdca_harness/drift.py
+@@ -57,8 +57,11 @@ def _resolve_base(cfg: Config, d: Path, base: str) -> tuple[str, str, str]:
+ 
+     Not quite the same commit, though: publish cuts a wave>0 bundle's PR branch from the
+     line commit the run recorded for it (``stack-base-tip``, #593), while drift checks the
+-    integration line as it is NOW — grown by later waves, or replaced by a later run's
+-    first fold. A known cross-run limit (#616)."""
++    integration line as it is NOW. A line that only grew — by later waves, or by a re-issued
++    run of the same batch that carried the bundles an earlier run finished, which continues
++    the line rather than replacing it (#646) — still holds that commit, so the check reads
++    its descendant. A line started fresh by a run that carried nothing, rewritten outside
++    the harness, or deleted, leaves drift checking a line the PR branch was not cut from."""
+     onto = brief.onto_branch(d / "brief.md")
+     if onto is not None:
+         remote, branch = onto
+diff --git a/template/src/pdca_harness/flow.py b/template/src/pdca_harness/flow.py
+index 9fe5e1c..ee018cd 100644
+--- a/template/src/pdca_harness/flow.py
++++ b/template/src/pdca_harness/flow.py
+@@ -688,7 +688,13 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
+     in-batch prerequisite named in ``held`` (bundle dir names, #593) is not ready either: it
+     is COMPLETE, but this run pushed no branch of it (its texts or its publish failed before
+     the push), so the fold has nothing of it to carry — its dependents are held while the
+-    rest of the run goes on. A
++    rest of the run goes on.
++    An id the run was **asked for** that already finished in an earlier run (#646) is in
++    the batch too, through its plain ``Depends on`` edges: :func:`_carry_finished` has put
++    it on the batch's line before wave 0, so COMPLETE is the bar for it as well — unless it
++    was not carried, which put it in ``held`` and holds its plain ``Depends on``
++    dependents. Its ``Depends on (merged)`` and ``Stacks on`` edges are not widened: they
++    keep the out-of-batch rules below. A
+     prerequisite **outside this batch** (a prior run's) is gated on its on-disk COMPLETE state
+     (archived `completed/` too, #171) — **except** an out-of-batch ``Depends on (merged)``
+     prereq, which keeps its stricter #107 merge-gate (#186): nothing in *this* run carries an
+@@ -701,6 +707,7 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
+     for d in wave:
+         bp = d / "brief.md"
+         merged_deps = set(brief.depends_on_merged(bp)) if bp.exists() else set()
++        plain_deps = set(brief.depends_on(bp)) if bp.exists() else set()
+         unmet: list[str] = []
+         for dep in (waves.declared_deps(bp) if bp.exists() else []):
+             out_of_batch = cfg.bundle(dep).name not in batch_names
+@@ -709,8 +716,10 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
+                     unmet.append(dep)
+             elif state.state(cfg.find_bundle(dep)) != state.COMPLETE:  # archived prereq too (#171)
+                 unmet.append(dep)
+-            elif not out_of_batch and cfg.bundle(dep).name in held:
+-                unmet.append(dep)  # accepted, but no branch pushed this run: nothing to fold (#593)
++            elif cfg.bundle(dep).name in held and (not out_of_batch or dep in plain_deps):
++                # Accepted, but no branch pushed this run: nothing to fold (#593). Or a
++                # finished id the run was asked for that it did not carry (#646).
++                unmet.append(dep)
+         if unmet:
+             print(f"flow: {d.name} skipped — prerequisite(s) not ready "
+                   f"({', '.join(unmet)}); not built on a base missing them.", file=sys.stderr)
+@@ -742,6 +751,256 @@ def _point_at_integration(integ: dict[tuple[str, str], str], runnable: list[Path
+             publish.clear_stack_base(d)
+ 
+ 
++def _fold_and_regate(cfg: Config, bundles: list[Path], *, dry: bool,
++                     folded_this_run: Mapping[tuple[str, str], str | None] | None,
++                     batch: list[str], integ: dict[tuple[str, str], str],
++                     folded_tips: dict[tuple[str, str], str | None],
++                     vouch: Mapping[tuple[str, str], Mapping[str, str | None]] | None = None,
++                     ) -> tuple[str, str] | None:
++    """Fold ``bundles`` onto their integration lines (:func:`integrate.fold`), record each
++    folded target's pushed tip in ``folded_tips`` and its branch in ``integ``, then — with
++    ``[driver].regate_between_waves`` — re-gate each folded line, all in ONE lock scope
++    (#297 review round 10): no other fold, and no sweep, can move or remove the worktree
++    between the fold, the read of its tip and the re-gate. The fold after every wave and
++    the carry before wave 0 (#646) both go through here, so the two cannot drift apart.
++
++    None when it all went through; ``("fold", why)`` when the fold raised, ``("regate",
++    "")`` when a re-gate is red — the caller stops the run. :class:`integrate.LineRefused`
++    (``vouch``) is not a failure of the fold, so it propagates for the caller to decide."""
++    with contextlib.ExitStack() as locks:
++        try:
++            folded = integrate.fold(cfg, bundles, dry_run=dry, locks=locks,
++                                    folded_this_run=folded_this_run, batch=batch, vouch=vouch)
++            # Record each target's pushed tip at once, before any re-gate: the next fold
++            # continues from exactly that tip and refuses a line another run moved (#593).
++            # A dry-run pushes nothing (None).
++            for tgt, (_branch, wt) in folded.items():
++                folded_tips[tgt] = integrate.pushed_tip(wt) if wt is not None else None
++        except integrate.LineRefused:
++            raise
++        except integrate.IntegrationError as exc:
++            return "fold", str(exc)
++        if folded and not dry:
++            # Added to, not replaced: a target only the carry folded keeps its line (#646).
++            integ.update({tgt: branch for tgt, (branch, _wt) in folded.items()})
++            # Optional re-gate (#wave-model): validate EACH folded combination over its
++            # integration tip before the next wave builds on it; any red ⇒ STOP.
++            # hold_lock=False: the locks stack already holds this tree's lock
++            # (re-acquiring would deadlock on our own flock).
++            if cfg.regate_between_waves and any(
++                    wt is not None
++                    and gates.run_integration(cfg, wt, hold_lock=False).get("overall") == "fail"
++                    for _tgt, (_branch, wt) in folded.items()):
++                return "regate", ""
++    return None
++
++
++def _carry_finished(cfg: Config, bundles: list[Path], run_batch: list[str],
++                    batch_names: set[str], *, dry: bool, held: set[str],
++                    blocked: set[tuple[str, str]], integ: dict[tuple[str, str], str],
++                    folded_tips: dict[tuple[str, str], str | None],
++                    carried: list[Path]) -> bool:
++    """Before wave 0, put the ids the run was asked for that ALREADY finished on the batch's
++    integration line (#646). False means the run stops before any wave is driven: a fold
++    failed, or the re-gate of a carried line is red.
++
++    A re-issued ``pdca flow <ids>`` — the recovery for a run that stopped part-way — skips
++    an id an earlier run finished (COMPLETE), so the in-run fold never sees it, and a
++    dependent of it would build on the plain base, without it. So when a bundle in the
++    drive set names such an id in its plain ``Depends on`` (``Stacks on`` and ``Depends on
++    (merged)`` edges never trigger this, #123 / #186), every finished id of the request the
++    fold can carry — a non-empty ``patch.diff``, a usable target, a branch on record and a
++    PR open or merged (:func:`merged.pr_state`) — is folded onto the batch's line, as the
++    in-run fold carries every accepted bundle. The fold CONTINUES origin's line, without
++    force — the earlier run's, under the same batch-scoped name (#591), so every commit an
++    earlier run recorded as a build base (``stack-base-tip``) stays on it — and starts it
++    fresh only when origin has none. It continues it only when it can vouch for all of it
++    (``integrate.fold``'s ``vouch``, by commit, under the fold's lock): every commit beyond
++    the base must be a fold's own merge or the work of a bundle carried now, at the head it
++    has now. The fold, the read of its pushed tip and the optional re-gate share one lock
++    scope (:func:`_fold_and_regate`, the same as after every wave). Its tip goes into
++    ``folded_tips``, its branch into ``integ`` and its bundles into ``carried``: the wave loop
++    points every same-target wave-0 bundle at the line (an unrelated one too — its PR shows
++    the carried changes until they merge, as any later-wave PR does), and every later fold
++    continues it and carries them again, so a fixup pushed onto a carried PR's branch
++    reaches the line at the next fold.
++
++    A finished id the fold does not carry goes into ``held`` — its plain dependents are held
++    (:func:`_runnable`) — and is named on stderr with them, the reason and what to do: no
++    branch on record (its publish pushed none), a PR that is CLOSED, no PR at all, or a PR
++    state that cannot be read; a closed PR's branch must not ride the shared line. A merged
++    PR is carried (the fold decides one whose branch is gone, ``integrate._gone_branch``). An
++    id with nothing to carry (no patch, no target) is neither carried nor held. Each target
++    of a finished id is checked this way, even one with nothing to carry (origin's line is
++    then kept as it is). A line it cannot vouch for — it holds a closed or unreadable PR's
++    work, an earlier version of a bundle (one this run rebuilds, or one re-pushed since),
++    work of a bundle whose head this clone lacks, a commit made outside the harness — is
++    neither continued nor built on: its target goes into ``blocked`` and no bundle of that
++    target is built this run (a later-wave one would start the line fresh over it). One
++    stderr line names the line, what it holds — which bundle, by commit, or that the run
++    cannot tell — and how to go on. A dry-run (stub publisher) reads no PR state and no
++    line, holds nothing, and only prints the plan.
++
++    Not covered: a split child an earlier run ADOPTED is not one of the ids asked for, so it
++    is never carried here — a dependent of it is gated as out-of-batch (COMPLETE), as before,
++    and a line holding its work is refused; and a prerequisite that is not one of the
++    requested ids is not carried."""
++    requested = [cfg.find_bundle(i)
++                 for i in dict.fromkeys(str(i).removeprefix("issue_") for i in run_batch)]
++    finished = [d for d in requested
++                if d.name not in batch_names and state.state(d) == state.COMPLETE]
++    dependents: dict[str, set[str]] = {}
++    for b in bundles:
++        bp = b / "brief.md"
++        for dep in (brief.depends_on(bp) if bp.exists() else []):
++            dependents.setdefault(cfg.bundle(dep).name, set()).add(b.name)
++    if not any(dependents.get(d.name) for d in finished):
++        return True   # nothing this run drives depends on a finished id: nothing to carry
++    candidates = integrate._fold_candidates(finished)   # a patch and a target
++    if dry:   # rehearse: ask no host, hold nothing, print the plan
++        carry = [d for d, *_rest in candidates]
++        names = ", ".join(d.name for d in carry)
++        if carry:
++            print(f"flow: dry-run — would carry {names} (finished in an earlier run) onto "
++                  f"the batch's integration line before wave 0, continuing origin's line "
++                  f"only if all it holds beyond the base is their work or the folds' own "
++                  f"merges.", file=sys.stderr)
++            stop = _fold_and_regate(cfg, carry, dry=True, folded_this_run=None,
++                                    batch=run_batch, integ=integ, folded_tips=folded_tips)
++            if stop is not None:
++                print(f"flow: the finished prerequisite(s) {names} did not integrate "
++                      f"({stop[1]}); STOPPING — no wave run.", file=sys.stderr)
++                return False
++            carried += carry
++        return True
++    target = {d.name: (repo, base) for d, repo, base, _slug, _ref in candidates}
++    why: dict[str, tuple[str, str]] = {}     # not carried: name → (why, what to do)
++    # Every finished id with a branch on record: name → (its state, what to do when
++    # origin's line holds work of it the carry cannot vouch for).
++    about: dict[str, tuple[str, str]] = {}
++    host: dict[str, str | None] = {}         # name → its PR's head, as the host reports it
++    carry: list[Path] = []
++    for d, repo_spec, base, _slug, ref in candidates:
++        iid = d.name.removeprefix("issue_")
++        if ref is None:
++            why[d.name] = ("it has no published branch on record",
++                           f"publish it with `pdca publish {iid}`, then re-issue the same "
++                           f"command")
++            continue
++        pr, host[d.name], note = merged.pr_state(cfg, d)
++        if pr in ("OPEN", "MERGED"):
++            carry.append(d)
++            about[d.name] = (f"its PR is {pr}", f"restore {d.name}'s branch")
++        elif pr == "CLOSED":
++            why[d.name] = ("its PR is CLOSED (not merged)",
++                           f"re-open its PR or re-drive {iid}, then re-issue the same command")
++            about[d.name] = (why[d.name][0],
++                             f"re-open {d.name}'s PR (restoring its branch if it was deleted)")
++        elif pr == "NONE":   # its branch is pushed, but `gh pr create` failed back then
++            rec = publish._publish_record(d) or {}
++            on = str(rec.get("repo") or repo_spec)
++            head = publish._pr_head(publish._checkout_path(cfg, on), on, str(rec.get("branch")))
++            create = (f"`gh pr create --draft --repo {on} --base {rec.get('base') or base} "
++                      f"--head {head}`")
++            why[d.name] = (f"it has no PR: {note}",
++                           f"open its PR by hand ({create}), then re-issue the same command")
++            about[d.name] = (why[d.name][0], f"open {d.name}'s PR by hand ({create})")
++        else:
++            why[d.name] = (f"its PR state could not be read: {note}",
++                           "fix what kept it from being read, then re-issue the same command")
++            about[d.name] = (why[d.name][0],
++                             f"fix what kept {d.name}'s PR state from being read")
++    held.update(why)
++    named: set[str] = set()   # held ids a refusal below names: no "not carried" line for them
++    for tgt in sorted(set(target.values())):   # each target of a finished id: fold's order
++        mine = [d for d in carry if target[d.name] == tgt]
++        try:
++            stop = _fold_and_regate(cfg, mine, dry=False, folded_this_run=None,
++                                    batch=run_batch, integ=integ, folded_tips=folded_tips,
++                                    vouch={tgt: {d.name: host.get(d.name) for d in mine}})
++        except integrate.LineRefused as refusal:
++            blocked.add(tgt)
++            suspects = [d for d in requested if (d / "brief.md").exists()
++                        and publish._resolve_target(d)[:2] == tgt]
++            named |= _say_refused(refusal, suspects, about=about, host=host,
++                                  batch_names=batch_names, bundles=bundles)
++            continue
++        names = ", ".join(d.name for d in mine)
++        if stop is not None:
++            what = (f"the finished prerequisite(s) {names}" if mine
++                    else f"origin's integration line for {tgt[0]} @ {tgt[1]}")
++            print(f"flow: {what} did not integrate ({stop[1]}); STOPPING — no wave run."
++                  if stop[0] == "fold" else
++                  f"flow: the integration re-gate FAILED on {what} — a combination is red "
++                  f"though each fix was green alone; STOPPING — no wave run.",
++                  file=sys.stderr)
++            return False
++        if mine:
++            print(f"flow: carried {names} (finished in an earlier run) onto "
++                  f"{integ.get(tgt, 'the integration line')} before wave 0, so what depends "
++                  f"on them builds on them.", file=sys.stderr)
++        carried += mine
++    for name, (reason, advice) in why.items():
++        if name not in named:
++            waiting = ", ".join(sorted(dependents.get(name, ())))
++            print(f"flow: {name} finished in an earlier run but is not carried onto the "
++                  f"integration line — {reason}; holding "
++                  f"{waiting or 'nothing (no bundle here depends on it)'} this run. To go on: "
++                  f"{advice}.", file=sys.stderr)
++    return True
++
++
++def _say_refused(refusal: integrate.LineRefused, suspects: list[Path], *,
++                 about: Mapping[str, tuple[str, str]], host: Mapping[str, str | None],
++                 batch_names: set[str], bundles: list[Path]) -> set[str]:
++    """Name, on ONE stderr line, the line the carry refused (#646): the commits that brought
++    in what it cannot vouch for; which of ``suspects`` — the target's requested bundles —
++    the line holds work of (by commit, :func:`integrate.holds`) or may (no head of it in
++    this clone, so the run cannot tell — a carried one too); the bundles held with the
++    target; and how to go on. Deleting the line always works; the per-bundle fixes
++    (``about``: a finished id's state and its fix) are offered too when doing all of them
++    would let the line be vouched for — every named bundle has one, and the named bundles
++    explain every stray commit (or one may hold the rest). Returns the names it named."""
++    tgt, said, fixes, named = refusal.target, [], [], set()
++    explained: set[str] = set()
++    unknown = False
++    for d in suspects:
++        mine = integrate.holds(refusal, d, host.get(d.name))
++        if mine is not None and not mine:
++            continue
++        named.add(d.name)
++        st = state.state(d)
++        if d.name in about:
++            reason, fix = about[d.name]
++        elif d.name in batch_names:
++            reason, fix = "it is rebuilt this run, and its earlier version must not ride on", ""
++        elif st == state.COMPLETE:
++            reason, fix = "it has nothing to carry now (no patch, or no target)", ""
++        else:
++            reason, fix = f"it is {st} now", ""
++        if mine is None:
++            unknown = True
++            said.append(f"it may hold {d.name} — {reason}; the run cannot tell: its branch "
++                        f"is gone, and no head commit the host reports for it is in this "
++                        f"clone")
++        else:
++            explained |= mine
++            said.append(f"it holds {d.name} — {reason}")
++        fixes.append(fix)
++    fixable = bool(fixes) and all(fixes) and (unknown or explained >= refusal.stray)
++    stuck = sorted(b.name for b in bundles if publish._resolve_target(b)[:2] == tgt)
++    brought = ", ".join(f'{sha[:12]} "{subject}"' for sha, subject in refusal.entries)
++    print(f"flow: not continuing origin's {refusal.branch}, and building nothing of "
++          f"{tgt[0]} @ {tgt[1]} on it this run — it holds commits that are not the current "
++          f"work of any bundle this run carries (brought in by {brought})"
++          f"{': ' if said else ''}{'; '.join(said)}. Holding {', '.join(stuck) or 'nothing'} "
++          f"this run. To go on: "
++          f"{' and '.join(fixes) + ', then re-issue the same command; or ' if fixable else ''}"
++          f"delete {refusal.branch} on origin and re-issue the same command (the line then "
++          f"starts fresh — re-drive any bundle built on the old one).", file=sys.stderr)
++    return named
++
++
+ def _audit_wave_overlap(wave: list[Path]) -> None:
+     """Advisory (#wave-model): flag two bundles in one wave whose patches touch a shared
+     file. A wave holds only non-conflicting work by construction, so any overlap is a
+@@ -1851,6 +2110,14 @@ def _drive_and_act(
+     never replaces — this run's line, while the same batch re-issued (its finished bundles
+     now skipped) lands on the same line. ``None`` — a library call — scopes by the drive set
+     as passed.
++
++    A re-issued run keeps that line (#646): when a bundle it drives plainly ``Depends on``
++    an id of ``batch`` that an earlier run finished, :func:`_carry_finished` folds the
++    finished ids onto the line before wave 0 — continuing origin's line, never replacing it
++    — and the run builds on it like any later wave; one it cannot carry holds only its own
++    dependents, and a line holding work the carry cannot vouch for (a closed PR's, an
++    earlier version of a bundle, one the run cannot tell) is not built on at all. Without
++    such a dependency the run behaves as before.
+     """
+     bundles = list(bundles)          # the drive set — split adoption extends it (#469)
+     allowance = cfg.max_passes if max_passes is None else max_passes
+@@ -1869,8 +2136,15 @@ def _drive_and_act(
+     # iterate keeps an earlier attempt's publish.json, so a record on disk cannot tell.
+     pushed: set[str] = set()
+     # Accepted bundles the fold has no branch of to carry (#593): left out of every fold,
+-    # their in-batch dependents held by `_runnable`, instead of stopping the run.
++    # their in-batch dependents held by `_runnable`, instead of stopping the run. Finished
++    # ids a re-issued run does not carry are held the same way (#646).
+     held_unpushed: set[str] = set()
++    # Targets (repo, base) none of whose bundles this run builds: origin's line holds work the
++    # carry cannot vouch for (#646, `_carry_finished`).
++    blocked: set[tuple[str, str]] = set()
++    # Finished ids the carry put on the line before wave 0 (#646): not `accepted` (this run
++    # did not accept or push them), but every later fold carries them again, as it does them.
++    carried: list[Path] = []
+     accepted: list[Path] = []        # cumulative COMPLETE bundles, wave then name order
+     integ: dict[tuple[str, str], str] = {}  # per-target (repo, base) → integration branch (#187)
+     # Per-target (repo, base) → the tip this run's last fold pushed (None in a dry-run), so
+@@ -1923,12 +2197,26 @@ def _drive_and_act(
+             # finished bundle has always been. The seeds' own dispositions are `flow_ids`'
+             # `skipped` map, which is what the caller reports.
+             return {}
++    # A re-issued run (#646): the ids it was asked for that an earlier run finished are
++    # skipped above the drive set, so before wave 0 they are carried onto the batch's line —
++    # continuing origin's line, never replacing it — when a bundle here depends on one; one
++    # that is not carried holds its dependents, and a line the carry cannot vouch for blocks
++    # its target. Stack mode with publishing only: merge mode and --no-publish carry nothing
++    # between waves either. A failed fold or re-gate stops the run before anything is
++    # driven, as a failed in-run fold stops the next wave.
++    go = (not do_publish or cfg.wave_mode == "merge"
++          or _carry_finished(cfg, bundles, run_batch, batch_names,
++                             dry=cfg.publisher.mode == "stub", held=held_unpushed,
++                             blocked=blocked, integ=integ, folded_tips=folded_tips,
++                             carried=carried))
+     # `wave_list` is iterated by a LIST iterator on purpose (#469): adoption splices the
+     # recomputed remainder into `wave_list[k+1:]` after wave k drives, and the iterator —
+     # which simply indexes forward — picks the new tail up. So "how many waves are left" is
+     # read live below (never cached in a `last`), and an adopted child's wave is driven,
+     # published and folded by exactly the code every other wave goes through.
+-    for k, wave in enumerate(wave_list):
++    for k, wave in enumerate(wave_list if go else []):
++        if blocked:   # named with what to do by `_carry_finished` (#646)
++            wave = [d for d in wave if publish._resolve_target(d)[:2] not in blocked]
+         runnable = _runnable(cfg, wave, batch_names, held=held_unpushed)
+         if not runnable:
+             continue
+@@ -2056,44 +2344,21 @@ def _drive_and_act(
+                             print(f"flow: {d.name} pushed no branch this run — left out "
+                                   f"of the integration fold; bundles that depend on it are "
+                                   f"held this run.", file=sys.stderr)
+-                # ONE lock scope covers fold AND re-gate (#297 review round 10): the
+-                # locks stack keeps every target's integ lock held between the two,
+-                # so no gap exists in which another flow's publish-boundary sweep
+-                # could remove the tree — or another fold rewrite it — before the
+-                # re-gate attests it.
+-                stop_wave = False
+-                with contextlib.ExitStack() as locks:
+-                    try:
+-                        folded = integrate.fold(
+-                            cfg, [d for d in accepted if d.name not in held_unpushed],
+-                            dry_run=dry, locks=locks, folded_this_run=dict(folded_tips),
+-                            batch=run_batch)
+-                        # Record each target's pushed tip at once, before any re-gate: the
+-                        # next fold continues from exactly that tip and refuses a line
+-                        # another run moved (#593). A dry-run pushes nothing (None).
+-                        for tgt, (_branch, wt) in folded.items():
+-                            folded_tips[tgt] = integrate.pushed_tip(wt) if wt is not None else None
+-                    except integrate.IntegrationError as exc:
+-                        print(f"flow: wave {k} did not integrate ({exc}); STOPPING — "
+-                              f"later waves not run.", file=sys.stderr)
+-                        break
+-                    if folded and not dry:
+-                        integ = {tgt: branch for tgt, (branch, _wt) in folded.items()}
+-                        # Optional re-gate (#wave-model): validate EACH folded
+-                        # combination over its integration tip before the next wave
+-                        # builds on it; any red ⇒ STOP. hold_lock=False: the locks
+-                        # stack already holds this tree's lock (re-acquiring would
+-                        # deadlock on our own flock).
+-                        if cfg.regate_between_waves and any(
+-                                wt is not None
+-                                and gates.run_integration(cfg, wt, hold_lock=False)
+-                                        .get("overall") == "fail"
+-                                for _tgt, (_branch, wt) in folded.items()):
+-                            print(f"flow: wave {k} integration re-gate FAILED — a "
+-                                  f"combination is red though each fix was green alone; "
+-                                  f"STOPPING (later waves not run).", file=sys.stderr)
+-                            stop_wave = True
+-                if stop_wave:
++                # ONE lock scope covers fold AND re-gate (#297 review round 10): no gap
++                # exists in which another flow's publish-boundary sweep could remove the
++                # tree — or another fold rewrite it — before the re-gate attests it. The
++                # finished ids the carry put on the line ride every fold too (#646), so a
++                # fixup pushed onto one of their branches reaches the line.
++                stop = _fold_and_regate(
++                    cfg, carried + [d for d in accepted if d.name not in held_unpushed],
++                    dry=dry, folded_this_run=dict(folded_tips), batch=run_batch,
++                    integ=integ, folded_tips=folded_tips)
++                if stop is not None:
++                    print(f"flow: wave {k} did not integrate ({stop[1]}); STOPPING — later "
++                          f"waves not run." if stop[0] == "fold" else
++                          f"flow: wave {k} integration re-gate FAILED — a combination is red "
++                          f"though each fix was green alone; STOPPING (later waves not run).",
++                          file=sys.stderr)
+                     break
+ 
+     _sweep_quietly(cfg, bundles)  # publish/freeze boundary — reclaim footprint (#297)
+diff --git a/template/src/pdca_harness/integrate.py b/template/src/pdca_harness/integrate.py
+index 3da3f96..b5103ee 100644
+--- a/template/src/pdca_harness/integrate.py
++++ b/template/src/pdca_harness/integrate.py
+@@ -31,7 +31,14 @@ branch") then leaves only its own change. Within one run the line is **append-on
+ run's first fold of a target starts fresh from the base (a force-push that replaces only
+ an earlier run of the SAME batch's line — a different batch has a line of its own); every
+ later fold continues from the tip this run pushed, pushed without force, and refuses a
+-line another run moved (``folded_this_run``, #591).
++line another run moved (``folded_this_run``, #591). A re-issued run that first carries the
++bundles an earlier run of its batch finished continues origin's line instead, without
++force (``vouch``, ``flow._carry_finished``, #646) — so across those runs it only grows
++too. It continues a line only when it can vouch for everything on it, by commit: each
++commit beyond the base must be one of the line's own merge commits or the work of a bundle
++the fold carries now, at the head it has now. If the line holds anything else — a closed
++PR's work, an earlier version of a bundle, a commit nobody can account for — it is refused
++(:class:`LineRefused`).
+ 
+ Commits pushed straight onto a stack PR branch after a fold carried it reach the line: the
+ next fold merges the branch's new tip. A branch deleted after its PR merged is judged by
+@@ -64,6 +71,30 @@ class IntegrationError(RuntimeError):
+     incomplete base."""
+ 
+ 
++class LineRefused(IntegrationError):
++    """``fold(vouch=…)`` would continue origin's line for ``target``, but the line holds
++    commits it cannot vouch for (#646): beyond the base, neither one of the line's own
++    merge commits nor the work of a bundle this fold carries, at the head it has now. So
++    nothing was merged onto it and nothing was pushed.
++
++    ``stray`` is those commits; ``entries`` is ``(sha, subject)`` of each commit of the
++    line's first-parent chain that brought one of them in — the subject is for the human
++    to read, nothing decides on it. ``repo``, ``spine`` and ``base_ref`` let :func:`holds`
++    tell, by commit, which bundle a stray commit belongs to."""
++
++    def __init__(self, target: tuple[str, str], branch: str, tip: str, *, repo: Path,
++                 base_ref: str, spine: list[str], stray: frozenset[str],
++                 entries: list[tuple[str, str]]) -> None:
++        self.target, self.branch, self.tip = target, branch, tip
++        self.repo, self.base_ref, self.spine = repo, base_ref, spine
++        self.stray, self.entries = stray, entries
++        super().__init__(
++            f"origin's {branch} holds {len(stray)} commit(s) beyond {base_ref} that no "
++            f"bundle this fold carries accounts for (brought in by "
++            f"{', '.join(f'{sha[:12]} {subject!r}' for sha, subject in entries)}) — not "
++            f"continuing it")
++
++
+ def integration_branch(cfg: Config, base: str, batch: Iterable[str] | None = None) -> str:
+     """The run-scoped integration branch for a target ``base`` — deterministic (a resumed run
+     rebuilds the same branch) and **injective in the base** (#187): the base is flattened to a
+@@ -244,6 +275,7 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
+          locks: contextlib.ExitStack | None = None,
+          folded_this_run: Mapping[tuple[str, str], str | None] | None = None,
+          batch: Collection[str] | None = None,
++         vouch: Mapping[tuple[str, str], Mapping[str, str | None]] | None = None,
+          ) -> dict[tuple[str, str], tuple[str, Path | None]]:
+     """Fold the cumulative accepted bundles' published branches onto a per-target
+     integration branch.
+@@ -268,8 +300,27 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
+     commit an open PR's base or head depends on), and refuses when origin's line is not that
+     SHA — something else moved it (#591). A target **not listed** is the run's first fold
+     of it: it starts fresh from ``<base_remote>/<base>`` and force-pushes, replacing an
+-    earlier run's line of the same name. ``None`` (a direct caller) continues the line if
+-    origin has it, else starts fresh.
++    earlier run's line of the same name. ``None`` (a direct caller, and a re-issued run's
++    carry, #646) continues the line if origin has it, else starts fresh.
++
++    ``vouch`` (#646, ``flow._carry_finished``) names the targets whose line on origin the
++    fold may continue only if it can vouch for everything on it, each mapped to the head
++    commit the host reports for each of the target's bundles (their PR's ``headRefOid``;
++    used when a bundle's branch is gone). A named target is processed even with no bundle
++    of it to fold — origin's line, if there is one, is then checked and kept as it is; with
++    no line there is nothing to do. When the fold would continue origin's line for a named
++    target (``folded_this_run`` None), every commit the line holds beyond the base must be
++    one of the merge commits of its first-parent chain (the folds' own) or the work of a
++    bundle folded now — what the head it has now (its branch as fetched, else the host's
++    head) adds on top of the line commits it was cut from, so a wave>0 branch does not
++    vouch for the earlier waves under it. Anything else — a closed PR's work, an earlier
++    version of a re-pushed or rebuilt bundle, a commit made outside the harness, a commit of
++    a bundle whose head this clone does not have — raises :class:`LineRefused` before
++    anything is merged or pushed. By commit, never by message; under the target's lock,
++    after the fold's own fetch, so nothing moves the line between the check and the fold.
++    The check trusts a merge commit on the line's first-parent chain as the fold's own,
++    which an outside party could imitate (a line rewritten outside the harness is out of
++    reach here).
+ 
+     ``batch`` (#591) is the bundles the run was asked to drive; each target's line is
+     :func:`integration_branch` scoped to it, so a run's fresh first fold replaces only an
+@@ -303,7 +354,7 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
+     the group's build finishes).
+     """
+     candidates = _fold_candidates(accepted)
+-    if not candidates:
++    if not candidates and not vouch:
+         return {}  # nothing to integrate — the next wave builds on the base
+ 
+     # What each bundle merges — resolved for EVERY bundle before any git step, so a fold
+@@ -329,6 +380,8 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
+     groups: dict[tuple[str, str], list[Path]] = {}
+     for d, repo_spec, base, _slug, _ref in candidates:
+         groups.setdefault((repo_spec, base), []).append(d)
++    for target in vouch or {}:
++        groups.setdefault(target, [])   # checked and kept even with nothing to fold (#646)
+ 
+     base_remote = cfg.base_remote
+     result: dict[tuple[str, str], tuple[str, Path | None]] = {}
+@@ -343,6 +396,8 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
+         repo = publish._checkout_path(cfg, repo_spec)
+         start = ("auto" if folded_this_run is None
+                  else "continue" if (repo_spec, base) in folded_this_run else "fresh")
++        if dry_run and not bundles:
++            continue   # a `vouch` target with nothing to fold: no plan to print (#646)
+         if dry_run:
+             print(f"integrate --dry-run — fold {len(bundles)} patch(es) onto {branch} "
+                   f"(off {base_remote}/{base} on {repo_spec}):")
+@@ -387,6 +442,13 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
+                         f"pushed — another run of the same batch, or someone outside the "
+                         f"harness, has moved it (#591). Not building on a line this run did "
+                         f"not push; let the other run finish, then re-run")
++            if vouch is not None and (repo_spec, base) in vouch and start == "auto":
++                if line is None and not bundles:
++                    continue      # no line to keep and nothing to fold onto a new one
++                if line is not None:
++                    _vouch(wt, (repo_spec, base), branch, line, f"{base_remote}/{base}",
++                           repo, [(d, refs[d.name]) for d in bundles],
++                           vouch[(repo_spec, base)])
+             fresh = start == "fresh" or (start == "auto" and line is None)
+             start_ref = f"{base_remote}/{base}" if fresh else line
+             if _git(wt, "checkout", "-B", branch, start_ref) != 0:
+@@ -499,6 +561,84 @@ def _carries(wt: Path, commit: str, what: str, branch: str, *, of: str = "HEAD")
+     return _in_line(wt, commit, what, branch, of=of)
+ 
+ 
++def _vouch(wt: Path, target: tuple[str, str], branch: str, line: str, base_ref: str,
++           repo: Path, members: list[tuple[Path, tuple[str, str, bool]]],
++           heads: Mapping[str, str | None]) -> None:
++    """Refuse to continue origin's ``line`` (#646) unless every commit it holds beyond
++    ``base_ref`` is a merge commit of its first-parent chain — a fold's own — or the work
++    (:func:`_own`) of a bundle in ``members`` at the head it has now: its published branch
++    as fetched, else the head ``heads`` maps its name to (its PR's head, as the host
++    reports it), when this clone has that commit. A bundle neither resolves accounts for
++    nothing, so what it put on the line is stray — unknown is not absent. Raises
++    :class:`LineRefused` naming the stray commits; a failing git step raises
++    :class:`IntegrationError` (never read as "nothing stray")."""
++    spine = _revs(wt, "--first-parent", line, f"^{base_ref}")
++    stray = (set(_revs(wt, line, f"^{base_ref}"))
++             - set(_revs(wt, "--first-parent", "--merges", line, f"^{base_ref}")))
++    for d, (_remote, ref, _onto) in members:
++        head = _rev(wt, ref) or _have(wt, heads.get(d.name))
++        if stray and head:
++            stray -= _own(wt, head, spine, base_ref)
++    if stray:
++        entries = [(c, _subject(wt, c)) for c in spine
++                   if stray & set(_revs(wt, c, f"^{c}^1", f"^{base_ref}"))]
++        raise LineRefused(target, branch, line, repo=repo, base_ref=base_ref, spine=spine,
++                          stray=frozenset(stray), entries=entries)
++
++
++def _own(repo: Path, head: str, spine: list[str], base_ref: str) -> set[str]:
++    """The commits ``head`` adds beyond ``base_ref`` on top of the newest commit of the
++    line's first-parent chain ``spine`` (newest first) it was cut from, if any (#646). A
++    wave>0 PR branch is cut from the line, so the line commits under it — earlier waves'
++    work — are not its own; a fixup pushed onto the branch after a fold is."""
++    mine = set(_revs(repo, head, f"^{base_ref}"))
++    cut = next((c for c in spine if c in mine), None)
++    return mine - set(_revs(repo, cut, f"^{base_ref}")) if cut else mine
++
++
++def holds(refusal: LineRefused, d: Path, host_head: str | None = None) -> frozenset[str] | None:
++    """Which of the commits the line ``refusal`` refused cannot vouch for are bundle ``d``'s
++    work (#646), by commit (:func:`_own`), to say WHAT the line holds — empty when none
++    are; None when the run cannot tell: ``d`` has a branch on record (or ``host_head``, its
++    PR's head as the host reports it), but no head of it is a commit this clone has (its
++    branch is gone, say, and its last commit was pushed after this clone last fetched), or
++    a git step failed. A bundle that never published a branch cannot be on the line."""
++    ref = _published_ref(d)
++    try:
++        heads = [h for h in (_rev(refusal.repo, ref[1]) if ref else None,
++                             _have(refusal.repo, host_head)) if h]
++        if not heads:
++            return None if ref or host_head else frozenset()
++        return frozenset().union(*(_own(refusal.repo, h, refusal.spine, refusal.base_ref)
++                                   & refusal.stray for h in heads))
++    except IntegrationError:
++        return None
++
++
++def _have(repo: Path, sha: str | None) -> str | None:
++    """``sha`` when this clone has that commit, else None (None in, None out)."""
++    return _rev(repo, sha) if sha else None
++
++
++def _revs(repo: Path, *args: str) -> list[str]:
++    """``git rev-list <args>`` in ``repo``, newest first. A failing git step raises — it
++    is never read as "no commits"."""
++    r = subprocess.run(["git", "-C", str(repo), "rev-list", *args],
++                       capture_output=True, text=True)
++    if r.returncode != 0:
++        raise IntegrationError(
++            f"could not list the commits of {' '.join(args)} in {repo} — `git rev-list` "
++            f"exited {r.returncode}; a git step failed: check that checkout, then re-run")
++    return r.stdout.split()
++
++
++def _subject(repo: Path, sha: str) -> str:
++    """The subject line of commit ``sha`` — for a human to read, never to decide on."""
++    r = subprocess.run(["git", "-C", str(repo), "log", "-1", "--format=%s", sha],
++                       capture_output=True, text=True)
++    return r.stdout.strip() if r.returncode == 0 else ""
++
++
+ def _take_in_base(wt: Path, d: Path, ref: str, branch: str, base_ref: str, head: str) -> None:
+     """``d``'s branch ``ref`` is gone and its PR merged at ``head``, a commit the line does
+     not have but the base does (the caller checked), so the base carries the merged work.
+diff --git a/template/src/pdca_harness/merged.py b/template/src/pdca_harness/merged.py
+index 062dffc..770fe3e 100644
+--- a/template/src/pdca_harness/merged.py
++++ b/template/src/pdca_harness/merged.py
+@@ -16,6 +16,10 @@ picked up by a later ``pdca flow`` run, after the prereq's PR is merged.
+ :func:`merged_head` answers the integration fold's narrower question (#593): which commit
+ did a merged PR's branch end at? The fold compares that SHA with its line when the branch
+ itself is gone (deleted on merge), so the answer is a commit, never a commit message.
++
++:func:`pr_state` answers the re-issued flow's question (#646): may a prerequisite that
++finished in an earlier run be carried onto the batch's line? An open or merged PR may; a
++closed one, a branch with no PR at all, or one whose state cannot be read, may not.
+ """
+ 
+ from __future__ import annotations
+@@ -91,6 +95,87 @@ def merged_head(cfg: Config, dep_id: str) -> str | None:
+     return head if isinstance(head, str) and head else None
+ 
+ 
++def pr_state(cfg: Config, d: Path) -> tuple[str | None, str | None, str]:
++    """``(state, head, why)`` for bundle ``d``'s PR (#646). ``state`` is ``"OPEN"`` /
++    ``"CLOSED"`` / ``"MERGED"``; ``"NONE"`` — there is no PR for its branch; or ``None`` —
++    the state cannot be read. ``head`` is the commit its branch was at (``headRefOid``;
++    None when the host gave none). ``why`` says what was found for ``"NONE"`` and what went
++    wrong for ``None``; it is "" otherwise.
++
++    The PR is the one ``publish.json`` records, asked with ``gh pr view <pr_url> --json
++    state,headRefOid`` as :func:`merged_head` asks. A record with no ``pr_url`` — publish
++    pushed the branch, then ``gh pr create`` failed, and the human may have opened the PR
++    by hand since, as publish told them to — is looked up by its branch: ``gh pr list
++    --head <branch> --state all`` on the recorded repo (else the brief's), matched on the
++    branch and its owner as ``publish._existing_pr`` matches (a same-named branch of another
++    fork never counts), an open PR first, then a merged one, then a closed one; none at all is
++    ``"NONE"``. Copies :func:`merged_head`'s missing-``gh`` guard: a ``gh`` failure,
++    ``gh`` missing (an ``OSError``) or output it cannot parse give ``None``; nothing
++    raises."""
++    rec = _publish_record(d)
++    rec = rec if isinstance(rec, dict) else {}
++    pr_url = rec.get("pr_url")
++    if pr_url:
++        out, why = _gh(["gh", "pr", "view", str(pr_url), "--json", "state,headRefOid"],
++                       f"gh pr view {pr_url}")
++        info = _json(out)
++        if out is None or not isinstance(info, dict) or info.get("state") not in (
++                "OPEN", "CLOSED", "MERGED"):
++            return None, None, why or f"`gh pr view {pr_url}` reported no PR state"
++        return info["state"], _head(info), ""
++    from . import publish   # lazy: publish's imports must not run when merged is imported
++    branch = rec.get("branch")
++    # A record older than its `repo` field is the brief's target's (as publish reads it).
++    repo_spec = rec.get("repo") or publish._resolve_target(d)[0]
++    if not (isinstance(branch, str) and branch and isinstance(repo_spec, str) and repo_spec):
++        return None, None, ("no PR on record (its publish.json names no pr_url, and no branch "
++                            "and repo to look one up by)")
++    head_spec = publish._pr_head(publish._checkout_path(cfg, repo_spec), repo_spec, branch)
++    owner = head_spec.split(":", 1)[0]
++    out, why = _gh(["gh", "pr", "list", "--repo", repo_spec, "--head", branch, "--state",
++                    "all", "--json", "url,state,headRefOid,headRefName,headRepositoryOwner"],
++                   f"gh pr list --repo {repo_spec} --head {branch}")
++    prs = _json(out)
++    if out is None or not isinstance(prs, list):
++        return None, None, why or f"`gh pr list --head {branch}` gave no list of PRs"
++    mine = [p for p in prs if isinstance(p, dict) and p.get("headRefName") == branch
++            and isinstance(p.get("headRepositoryOwner"), dict)
++            and p["headRepositoryOwner"].get("login") == owner]
++    for want in ("OPEN", "MERGED", "CLOSED"):
++        for p in mine:
++            if p.get("state") == want:
++                return want, _head(p), ""
++    return "NONE", None, (f"its publish.json names no pr_url, and {repo_spec} has no PR for "
++                          f"its branch {head_spec}")
++
++
++def _gh(cmd: list[str], what: str) -> tuple[str | None, str]:
++    """Run ``gh`` command ``cmd``: ``(stdout, "")``, or ``(None, why)`` when it could not
++    run (an ``OSError``: ``gh`` missing) or exited non-zero — ``what`` names it in ``why``."""
++    try:
++        r = subprocess.run(cmd, capture_output=True, text=True)
++    except OSError as exc:
++        return None, f"`gh` could not be run ({exc})"
++    if r.returncode != 0:
++        tail = (r.stderr or "").strip().splitlines()
++        return None, f"`{what}` exited {r.returncode}" + (f": {tail[-1]}" if tail else "")
++    return r.stdout or "", ""
++
++
++def _json(out: str | None):
++    """``out`` parsed as JSON, or None (no output, or not JSON)."""
++    try:
++        return json.loads(out) if out else None
++    except ValueError:
++        return None
++
++
++def _head(info: dict) -> str | None:
++    """A PR's ``headRefOid``, or None when the host gave none."""
++    head = info.get("headRefOid")
++    return head if isinstance(head, str) and head else None
++
++
+ def _publish_record(d: Path) -> dict | None:
+     """The bundle's ``publish.json`` (the recorded PR), or ``None`` if absent/unreadable."""
+     pj = d / "publish.json"
+diff --git a/template/src/pdca_harness/publish.py b/template/src/pdca_harness/publish.py
+index a7062b5..844cf4f 100644
+--- a/template/src/pdca_harness/publish.py
++++ b/template/src/pdca_harness/publish.py
+@@ -321,7 +321,7 @@ def publish(
+     # A fork-based PR's --head must be OWNER:BRANCH — `gh` resolves a bare branch name
+     # against the *base* repo (where the fork branch doesn't exist) and fails with
+     # "Head ref must be a branch". The branch lives on origin (the fork).
+-    head = f"{_fork_owner(repo) or repo_spec.split('/')[0]}:{branch}"
++    head = _pr_head(repo, repo_spec, branch)
+     # Normalize the PR body's tracker refs (#233 + #238 review): bare the closing-keyword
+     # trailer so GitHub auto-closes on merge, and deterministically ensure a clickable
+     # `[#id](url)` reference off that trailer when a URL pattern is configured. Done AFTER
+@@ -342,7 +342,10 @@ def publish(
+         if cut_from_tip:
+             print(f"  # line-tip guard (#593): fetch --prune origin and refuse, pushing "
+                   f"nothing, unless the recorded tip {wave_tip} is still on "
+-                  f"origin/{stack_branch} (else re-drive it in a new run, #616)")
++                  f"origin/{stack_branch} (a re-issued run of the batch that carries its "
++                  f"finished bundles keeps it there, one that carried nothing starts the "
++                  f"line fresh at its first fold; if the line lost it, re-drive it in a new "
++                  f"run)")
+         if cfg.host_ci_checks:
+             print(f"  # host CI gate (#311): fetch, pin the exact {checkout_base} commit the "
+                   f"push will build on, and run {len(cfg.host_ci_checks)} declared command(s) "
+@@ -692,10 +695,13 @@ def _line_tip_refusal(d: Path, repo: Path, tip: str, line: str) -> str:
+     """Why publish must not cut ``d``'s PR branch from its recorded line tip, or "" (#593).
+ 
+     The tip is the line commit the bundle was built on (:func:`read_stack_base_tip`). It
+-    is safe to cut from only while ``origin/<line>`` still holds it: a later run's first
+-    fold starts a fresh line with a force-push (resuming across runs is #616), and a
+-    deleted line holds nothing. So fetch ``origin`` (pruned, so a deleted line stops
+-    resolving here rather than leaving a stale ref) and ask ``git merge-base
++    is safe to cut from only while ``origin/<line>`` still holds it. A re-issued run of the
++    same batch that carries the bundles an earlier run finished keeps it: it continues the
++    line without force, or leaves it alone when it cannot vouch for it
++    (``flow._carry_finished``, #646). But a run whose first fold starts the line fresh (one
++    that carried nothing) force-pushes over it, a line rewritten outside the harness may
++    drop it, and a deleted line holds nothing. So fetch ``origin`` (pruned, so a deleted
++    line stops resolving here rather than leaving a stale ref) and ask ``git merge-base
+     --is-ancestor <tip> origin/<line>``: exit 0 is on the line; exit 1, a tip commit this
+     clone does not have, or a line that does not resolve is not. Any other exit, or a
+     failed fetch, is git failing, and is refused too, saying so. Nothing has been pushed
+@@ -721,9 +727,11 @@ def _line_tip_refusal(d: Path, repo: Path, tip: str, line: str) -> str:
+                     f"is still on {line}: `git merge-base --is-ancestor` exited {rc}, a git "
+                     "step failed; nothing was pushed — check the checkout, then retry")
+     return (f"publish: {d.name} was built on {tip}, a commit origin's {line} no longer holds "
+-            f"(a later run's first fold replaced the line, or the branch is gone) — refusing "
+-            f"to cut its PR branch from it; nothing was pushed. Re-drive it in a new run "
+-            f"(#616).")
++            f"(the line was started fresh by a run that carried nothing, rewritten outside "
++            f"the harness, or deleted — a re-issued run that carries the batch's finished "
++            f"bundles continues the line and keeps it) — refusing to cut its PR branch from "
++            f"it; nothing was pushed. Rebuild it on the line as it is now: re-drive it in a "
++            f"new run.")
+ 
+ 
+ def _stack_base_branch(cfg: Config, d: Path) -> str | None:
+@@ -823,6 +831,14 @@ def _warn_if_squash_only(repo_spec: str) -> None:
+               "parent's diff until rebased (#123).", file=sys.stderr)
+ 
+ 
++def _pr_head(repo: Path, repo_spec: str, branch: str) -> str:
++    """``OWNER:BRANCH``, the ``--head`` of the PR for ``branch`` once it is pushed to
++    ``origin``: the owner of checkout ``repo``'s origin (a fork), else ``repo_spec``'s
++    owner. Also how a re-issued flow finds a PR that ``gh pr create`` failed to record, and
++    tells the human how to open it (``merged.pr_state``, #646)."""
++    return f"{_fork_owner(repo) or repo_spec.split('/')[0]}:{branch}"
++
++
+ def _fork_owner(repo: Path, remote: str = "origin") -> str:
+     """The GitHub owner of ``remote`` (the fork the branch is pushed to), e.g.
+     ``"example-user"`` from ``git@github.com:example-user/repo.git`` or the https form.
+diff --git a/template/tests/test_flow_resume_stack_prereqs.py b/template/tests/test_flow_resume_stack_prereqs.py
+new file mode 100644
+index 0000000..52adcdf
+--- /dev/null
++++ b/template/tests/test_flow_resume_stack_prereqs.py
+@@ -0,0 +1,992 @@
++"""A re-issued stack-mode `pdca flow <ids>` continues its batch's integration line (#646).
++
++The recovery for a run that stopped part-way is to issue the same command again. That run
++skips the ids an earlier run finished (COMPLETE) — before the fix it then built a dependent
++of one of them on the plain base, without its prerequisite: the finished id was never in the
++fold, `_runnable` let the dependent through on COMPLETE alone, and its stack base was
++cleared. The run's first in-run fold then force-pushed a fresh line over the earlier run's,
++stranding any bundle whose recorded line tip was on it.
++
++These cases drive the real `flow._drive_and_act` the way `flow_ids` calls it for a
++re-issued run (`[D]` driven, `batch=["P", "D"]`), with the real fold against real git — a
++bare ``origin`` and a primary checkout, the ``StackFoldGit`` shape of
++``tests/test_integrate_stack_bases.py`` — and the real ``publish.publish`` (no PR opened).
++Only the build/sign-off step (``flow._drive_wave``: accept each bundle with the patch its
++build "produced", recording the stack base it was pointed at) and ``gh`` (``merged``'s
++``subprocess``: answered from a table) are stubbed. The re-gate cases run a real
++repo-scoped gate command through the real ``gates.run_integration``; a pass-through spy
++only records the call.
++
++Beyond the brief's criteria they pin what sign-off asked of the rebuilds: the carry holds
++the integration lock through its fold, the read of the tip it pushed and its re-gate; a red
++re-gate stops the run before wave 0; a line holding work the run cannot vouch for is neither
++continued nor built on — a closed or unreadable PR's (also when the PR's head is a commit
++this clone never fetched: unknown, not absent), an earlier version of a bundle this run
++rebuilds or one re-pushed since; a recorded empty ``pr_url`` is looked up by its branch, and
++with no PR at all the advice printed gets the run going again; and a fixup pushed onto a
++carried branch reaches the line at the next fold.
++
++Only modules are imported, never a symbol the fix adds, so with the production change
++reverted these cases still load and run — and fail.
++    PYTHONPATH=src python -m unittest tests.test_flow_resume_stack_prereqs
++"""
++
++from __future__ import annotations
++
++import contextlib
++import io
++import json
++import shutil
++import subprocess
++import tempfile
++import unittest
++from contextlib import redirect_stderr, redirect_stdout
++from pathlib import Path
++from unittest import mock
++
++from pdca_harness import flow, gates, integrate, merged, publish, signoff, state
++from pdca_harness.config import Config, LeafConfig
++
++TEMPLATES = Path(__file__).resolve().parents[1] / "templates"
++# A well-formed commit id no test repository ever holds.
++ABSENT = "0123456789abcdef0123456789abcdef01234567"
++
++
++def _cfg(root: Path, primary: Path) -> Config:
++    """A config whose publisher is NOT a stub: a stub turns every fold into a dry-run."""
++    return Config(
++        root=root, bundle_root=root / "results", process_dir=root / "process",
++        templates_dir=TEMPLATES, default_branch="main", tracker_system="github",
++        tracker_url="", issue_id_example="#1",
++        builder=LeafConfig(mode="stub"), reviewer=LeafConfig(mode="stub"),
++        publisher=LeafConfig(mode="command", family="claude", interactive=True),
++        gates_checks=[], base_remote="origin", repo_checkouts={"org/repo": str(primary)})
++
++
++def _run(repo: Path, *args: str) -> subprocess.CompletedProcess:
++    return subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True)
++
++
++def _git(repo: Path, *args: str) -> str:
++    r = _run(repo, *args)
++    if r.returncode != 0:
++        raise AssertionError(f"git {' '.join(args)} failed in {repo}: {r.stderr}")
++    return r.stdout
++
++
++def _identity(repo: Path) -> None:
++    _git(repo, "config", "user.email", "t@example.com")
++    _git(repo, "config", "user.name", "Tester")
++    _git(repo, "config", "commit.gpgsign", "false")
++    _git(repo, "config", "fetch.prune", "false")
++
++
++def _brief(d: Path, *, extra: str = "") -> None:
++    d.mkdir(parents=True, exist_ok=True)
++    (d / "brief.md").write_text(
++        f"- **Slug:** {d.name.removeprefix('issue_').lower()}\n"
++        f"- **Repo + branch target:** org/repo @ main\n{extra}", encoding="utf-8")
++
++
++def _accept(d: Path) -> None:
++    """Make bundle ``d`` COMPLETE (accepted at sign-off)."""
++    (d / "check-gates.json").write_text("{}", encoding="utf-8")
++    shutil.copyfile(TEMPLATES / "SUMMARY.md.tpl", d / "SUMMARY.md")
++    signoff.record(d / "SUMMARY.md", action="accept", by="Tester", date="2026-10-05")
++
++
++def _new_file(name: str, text: str) -> str:
++    return (f"diff --git a/{name} b/{name}\nnew file mode 100644\n--- /dev/null\n"
++            f"+++ b/{name}\n@@ -0,0 +1 @@\n+{text}\n")
++
++
++def _edit_p() -> str:
++    """A patch that only applies on a tree holding P's ``p.txt``."""
++    return ("diff --git a/p.txt b/p.txt\n--- a/p.txt\n+++ b/p.txt\n"
++            "@@ -1 +1 @@\n-p\n+p and d\n")
++
++
++def _line_gate(cmd: str) -> dict:
++    """A repo-scoped gating check, as ``[[gates.checks]]`` declares one: the re-gate runs
++    ``cmd`` in the integration worktree, the folded line."""
++    return {"id": "line", "tier": "T3", "label": "the folded line", "cmd": cmd,
++            "gating": True, "scope": "repo"}
++
++
++class _GhTable:
++    """``merged``'s view of ``subprocess``: ``gh pr view <url>`` is answered from ``prs``
++    (PR url → the JSON it prints; a url not in it fails as ``gh`` does), ``gh pr list …
++    --head <branch>`` from ``lists`` (branch → the PRs it lists; none by default), and
++    every ``gh`` call raises ``FileNotFoundError`` when ``missing``; anything else runs for
++    real."""
++
++    def __init__(self, prs: dict[str, dict], lists: dict[str, list[dict]] | None = None, *,
++                 missing: bool = False) -> None:
++        self.prs, self.lists, self.missing, self.calls = prs, lists or {}, missing, []
++
++    def run(self, args, *a, **kw):
++        if args and args[0] == "gh":
++            self.calls.append(list(args))
++            if self.missing:
++                raise FileNotFoundError(2, "No such file or directory", "gh")
++            if args[1:3] == ["pr", "list"]:
++                branch = args[args.index("--head") + 1]
++                return subprocess.CompletedProcess(
++                    args, 0, json.dumps(self.lists.get(branch, [])), "")
++            answer = self.prs.get(args[3])
++            if answer is None:
++                return subprocess.CompletedProcess(
++                    args, 1, "", "GraphQL: Could not resolve to a PullRequest\n")
++            return subprocess.CompletedProcess(args, 0, json.dumps(answer), "")
++        return subprocess.run(args, *a, **kw)
++
++    def __getattr__(self, name: str):
++        return getattr(subprocess, name)
++
++
++class ResumedStackRun(unittest.TestCase):
++
++    def setUp(self) -> None:
++        self.tmp = Path(tempfile.mkdtemp())
++        self.origin = self.tmp / "origin.git"
++        self.primary = self.tmp / "repo"
++        subprocess.run(["git", "init", "--bare", "-q", str(self.origin)], check=True)
++        subprocess.run(["git", "init", "-q", "-b", "main", str(self.primary)], check=True)
++        _identity(self.primary)
++        (self.primary / "base.txt").write_text("base\n", encoding="utf-8")
++        _git(self.primary, "add", "-A")
++        _git(self.primary, "commit", "-q", "-m", "base")
++        _git(self.primary, "remote", "add", "origin", str(self.origin))
++        _git(self.primary, "push", "-q", "origin", "main")
++        self.human = self.tmp / "human"
++        subprocess.run(["git", "clone", "-q", str(self.origin), str(self.human)],
++                       check=True, capture_output=True)
++        _identity(self.human)
++        self.cfg = _cfg(self.tmp, self.primary)
++        # The owner a PR of a branch pushed from the primary checkout has (`gh pr list`).
++        self.owner = publish._fork_owner(self.primary) or "org"
++        self.patches: dict[str, str] = {}     # bundle → the patch its build produces
++        self.seen: dict[str, tuple[str, str]] = {}   # bundle → (stack base, tip) at its wave
++        self.line_at: dict[str, str | None] = {}     # bundle → origin's line tip at its wave
++        self.during: dict[str, object] = {}   # bundle → called while its wave is driven
++        self.driven: list[str] = []
++        self.events: list[str] = []           # lock / tip / re-gate / wave, in order
++        self.line = ""
++
++    def tearDown(self) -> None:
++        shutil.rmtree(self.tmp, ignore_errors=True)
++
++    # -- origin ---------------------------------------------------------------------------
++
++    def _tip(self, branch: str) -> str | None:
++        r = _run(self.origin, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}")
++        return r.stdout.strip() if r.returncode == 0 else None
++
++    def _ancestor(self, commit: str | None, of: str | None) -> bool:
++        if not commit or not of:
++            return False
++        return _run(self.origin, "merge-base", "--is-ancestor", commit, of).returncode == 0
++
++    def _push_from_human(self, files: dict[str, str], *, to: str, off: str = "origin/main",
++                         force: bool = False) -> str:
++        """Someone outside the harness commits ``files`` off ``off`` in a scratch clone and
++        pushes it to branch ``to`` on origin; returns the pushed commit."""
++        _git(self.human, "fetch", "-q", "origin")
++        _git(self.human, "checkout", "-q", "-B", "scratch", off)
++        for name, text in files.items():
++            (self.human / name).write_text(text, encoding="utf-8")
++        _git(self.human, "add", "--all")
++        _git(self.human, "commit", "-q", "-s", "-m", f"commit for {to}")
++        _git(self.human, "push", "-q", *(["--force"] if force else []), "origin",
++             f"HEAD:refs/heads/{to}")
++        return _git(self.human, "rev-parse", "HEAD").strip()
++
++    # -- bundles --------------------------------------------------------------------------
++
++    def _finished(self, iid: str, files: dict[str, str], *, record: bool = True,
++                  pr_url: bool = True) -> Path:
++        """A bundle an earlier run finished: its branch ``fix/<iid>`` cut off main, committed
++        and pushed, its patch.diff that commit's diff, accepted (COMPLETE), and — with
++        ``record`` — its publish.json naming the branch and its PR (with ``pr_url`` False,
++        ``"pr_url": ""``: the branch was pushed, then `gh pr create` failed)."""
++        d = self.cfg.bundle(iid)
++        _brief(d)
++        branch = f"fix/{iid}"
++        _git(self.primary, "fetch", "-q", "origin")
++        _git(self.primary, "checkout", "-q", "-B", branch, "origin/main")
++        for name, text in files.items():
++            (self.primary / name).write_text(text, encoding="utf-8")
++        _git(self.primary, "add", "--all")
++        _git(self.primary, "commit", "-q", "-s", "-m", f"fix {iid}")
++        (d / "patch.diff").write_text(_git(self.primary, "diff", "HEAD~1", "HEAD"),
++                                      encoding="utf-8")
++        _git(self.primary, "push", "-q", "origin", branch)
++        _git(self.primary, "checkout", "-q", "main")
++        _accept(d)
++        if record:
++            rec = {"mode": "new-pr", "branch": branch, "base": "main", "repo": "org/repo",
++                   "pr_url": self._url(iid) if pr_url else ""}
++            (d / "publish.json").write_text(json.dumps(rec), encoding="utf-8")
++        return d
++
++    @staticmethod
++    def _url(iid: str) -> str:
++        return f"https://example.test/pr/{iid}"
++
++    def _listed(self, iid: str, st: str, *, owner: str = "") -> dict:
++        """One PR as `gh pr list --json …` prints it: ``fix/<iid>``'s, in state ``st``."""
++        return {"url": self._url(iid), "state": st, "headRefOid": self._tip(f"fix/{iid}"),
++                "headRefName": f"fix/{iid}",
++                "headRepositoryOwner": {"login": owner or self.owner}}
++
++    def _planned(self, iid: str, patch: str, *, extra: str = "") -> Path:
++        """A PLANNED bundle whose build will produce ``patch``."""
++        d = self.cfg.bundle(iid)
++        _brief(d, extra=extra)
++        self.patches[d.name] = patch
++        return d
++
++    def _reopened(self, d: Path, patch: str) -> None:
++        """Bundle ``d`` was rejected at a later sign-off and iterated: its patch, gates and
++        SUMMARY are archived (it is PLANNED again, and this run rebuilds it with ``patch``),
++        while its publish.json — and the branch it names — stay."""
++        old = d / "iteration-v1"
++        old.mkdir()
++        for name in ("patch.diff", "check-gates.json", "SUMMARY.md"):
++            (d / name).rename(old / name)
++        self.assertEqual(state.state(d), state.PLANNED)
++        self.patches[d.name] = patch
++
++    def _earlier_run_folded(self, batch: list[str], *finished: Path) -> str:
++        """The earlier run of ``batch``: its fold put ``finished`` on the batch's line (the
++        real fold, as that run's first fold). Returns the line's tip."""
++        line = self._line_of(*batch)
++        integrate.fold(self.cfg, list(finished), folded_this_run={}, batch=batch)
++        tip = self._tip(line)
++        self.assertIsNotNone(tip)
++        return tip
++
++    # -- the run --------------------------------------------------------------------------
++
++    def _accept_wave(self, cfg: Config, wave: list, **_kw) -> int:
++        """Stands in for build + gates + sign-off: record what the bundle was pointed at,
++        then accept it with the patch its build produced and the texts publish needs."""
++        for d in wave:
++            self.driven.append(d.name)
++            self.events.append(f"wave {d.name}")
++            self.seen[d.name] = (publish.read_stack_base(d), publish.read_stack_base_tip(d))
++            self.line_at[d.name] = self._tip(self.line) if self.line else None
++            if d.name in self.during:
++                self.during[d.name]()
++            (d / "patch.diff").write_text(self.patches[d.name], encoding="utf-8")
++            (d / publish.COMMIT_MSG).write_text(f"fix {d.name}\n", encoding="utf-8")
++            (d / publish.PR_BODY).write_text(f"Fixes {d.name}\n", encoding="utf-8")
++            _accept(d)
++        return 1
++
++    def _drive(self, drive: list[Path], batch: list[str], *, prs: dict[str, dict] | None = None,
++               lists: dict[str, list[dict]] | None = None, gh_missing: bool = False,
++               do_publish: bool = True, regate=None):
++        """``flow._drive_and_act(drive, batch=batch)`` as ``flow_ids`` calls it on a
++        re-issued run. ``regate`` is put in place of ``gates.run_integration`` (the cases
++        pass :meth:`_regate_spy`, which calls the real one). Returns (results, stderr,
++        stdout, the git pushes the fold made, gh)."""
++        gh = _GhTable(prs or {}, lists, missing=gh_missing)
++        pushes: list[list[str]] = []
++        real_git, real_publish = integrate._git, publish.publish
++
++        def spy_git(repo: Path, *args: str) -> int:
++            if args[:1] == ("push",):
++                pushes.append(list(args))
++            return real_git(repo, *args)
++
++        def no_pr(cfg: Config, issue_id: str, **kw) -> int:
++            return real_publish(cfg, issue_id, open_pr=False, **kw)
++
++        err, out = io.StringIO(), io.StringIO()
++        with contextlib.ExitStack() as stack:
++            stack.enter_context(mock.patch.object(merged, "subprocess", gh))
++            stack.enter_context(mock.patch.object(integrate, "_git", spy_git))
++            stack.enter_context(mock.patch.object(flow, "_drive_wave", self._accept_wave))
++            stack.enter_context(mock.patch.object(publish, "draft_texts",
++                                                  lambda cfg, d, **kw: True))
++            stack.enter_context(mock.patch.object(publish, "publish", no_pr))
++            stack.enter_context(mock.patch.object(publish, "_warn_if_squash_only"))
++            if regate is not None:
++                stack.enter_context(mock.patch.object(gates, "run_integration", regate))
++            stack.enter_context(redirect_stdout(out))
++            stack.enter_context(redirect_stderr(err))
++            results = flow._drive_and_act(self.cfg, drive, do_publish=do_publish,
++                                          do_act=False, by="T", today="2026-10-05",
++                                          batch=batch)
++        return results, err.getvalue(), out.getvalue(), pushes, gh
++
++    def _line_of(self, *ids: str) -> str:
++        self.line = integrate.integration_branch(self.cfg, "main", list(ids))
++        return self.line
++
++    @staticmethod
++    def _forced(pushes: list[list[str]]) -> list[list[str]]:
++        return [p for p in pushes if any(x.startswith("--force") for x in p)]
++
++    def _hold_lines(self, err: str, name: str) -> list[str]:
++        return [ln for ln in err.splitlines()
++                if ln.startswith(f"flow: {name} finished in an earlier run")]
++
++    @staticmethod
++    def _block_lines(err: str) -> list[str]:
++        return [ln for ln in err.splitlines() if ln.startswith("flow: not continuing origin's")]
++
++    def _regate_spy(self, gated: list):
++        """The real ``gates.run_integration``, recording each call in ``gated`` — the tree's
++        HEAD, whether it was asked to take the lock, the verdict — and in ``self.events``.
++        Asked to take the lock the carry already holds, it fails the test rather than
++        deadlock on that lock."""
++        real = gates.run_integration
++
++        def spy(cfg: Config, wt: Path, *, hold_lock: bool = True) -> dict:
++            self.events.append(f"regate hold_lock={hold_lock}")
++            if hold_lock:
++                raise AssertionError("the re-gate would take the lock the carry holds")
++            result = real(cfg, wt, hold_lock=hold_lock)
++            gated.append((_git(wt, "rev-parse", "HEAD").strip(), hold_lock,
++                          result.get("overall")))
++            return result
++
++        return spy
++
++    # -- (1) the dependent builds on a line holding its finished prerequisite --------------
++
++    def test_1_a_dependent_builds_on_the_line_holding_its_finished_prerequisite(self) -> None:
++        self._finished("P", {"p.txt": "p\n"})
++        d = self._planned("D", _edit_p(), extra="- **Depends on:** P\n")
++        line = self._line_of("P", "D")
++        results, err, _out, _pushes, _gh = self._drive(
++            [d], ["P", "D"], prs={self._url("P"): {"state": "OPEN"}})
++        self.assertEqual(self.driven, ["issue_D"], err)
++        tip = self.line_at["issue_D"]
++        self.assertIsNotNone(tip, f"no {line} on origin before D's wave\n{err}")
++        self.assertTrue(self._ancestor(self._tip("fix/P"), tip), "the line lacks P")
++        self.assertEqual(self.seen["issue_D"], (line, tip))
++        # The real publish cut D's branch from that tip, so its patch (which needs P's
++        # file) applied, and its PR branch carries P.
++        self.assertEqual(results.get("D"), state.COMPLETE)
++        rec = json.loads((d / "publish.json").read_text(encoding="utf-8"))
++        self.assertTrue(self._ancestor(self._tip("fix/P"), self._tip(rec["branch"])))
++        self.assertNotIn("Traceback", err)
++
++    def test_1_the_carry_reads_its_tip_and_re_gates_under_the_integration_lock(self) -> None:
++        # Sign-off: the lock must cover the carry fold, the read of the tip it pushed and
++        # the re-gate, as for the in-run fold — the integration worktree is per base, so a
++        # run of another batch could move it in a gap and the run would record its commit.
++        # The re-gate is a real repo-scoped gate, green only on a tree that carries P.
++        self.cfg.regate_between_waves = True
++        self.cfg.gates_checks = [_line_gate("test -e p.txt")]
++        self._finished("P", {"p.txt": "p\n"})
++        d = self._planned("D", _edit_p(), extra="- **Depends on:** P\n")
++        line = self._line_of("P", "D")
++        real_lock, real_tip = integrate.integ_lock, integrate.pushed_tip
++
++        @contextlib.contextmanager
++        def lock(wt: Path, *, wait: bool = True):
++            with real_lock(wt, wait=wait) as held:
++                self.events.append("lock+")
++                try:
++                    yield held
++                finally:
++                    self.events.append("lock-")
++
++        def tip(wt: Path) -> str:
++            self.events.append("tip")
++            return real_tip(wt)
++
++        gated: list[tuple] = []
++        with mock.patch.object(integrate, "integ_lock", lock), \
++                mock.patch.object(integrate, "pushed_tip", tip):
++            results, err, _out, _pushes, _gh = self._drive(
++                [d], ["P", "D"], prs={self._url("P"): {"state": "OPEN"}},
++                regate=self._regate_spy(gated))
++        self.assertIn("wave issue_D", self.events, err)
++        before = self.events[:self.events.index("wave issue_D")]
++        self.assertIn("tip", before, f"no tip read before D's wave: {self.events}")
++        depth = 0
++        for ev in before:
++            depth += {"lock+": 1, "lock-": -1}.get(ev, 0)
++            if ev == "tip" or ev.startswith("regate"):
++                self.assertGreater(depth, 0, f"{ev} outside the lock: {before}")
++        self.assertIn("regate hold_lock=False", before, self.events)
++        self.assertEqual(gated, [(self.line_at["issue_D"], False, "pass")])
++        self.assertEqual(self.seen["issue_D"], (line, self.line_at["issue_D"]))
++        self.assertEqual(results.get("D"), state.COMPLETE, err)
++
++    # -- (2) continue the earlier run's line, never replace it -----------------------------
++
++    def test_2_the_earlier_runs_line_is_continued_never_replaced(self) -> None:
++        p = self._finished("P", {"p.txt": "p\n"})
++        line = self._line_of("P", "D", "E")
++        # The earlier run of the same batch: its fold put P on the line, and H was built on
++        # that line commit (accepted, never published — its tip is all it has to publish by).
++        old = self._earlier_run_folded(["P", "D", "E"], p)
++        h = self.cfg.bundle("H")
++        _brief(h)
++        publish.write_stack_base(h, line, old)
++        d = self._planned("D", _new_file("d.txt", "d"), extra="- **Depends on:** P\n")
++        e = self._planned("E", _new_file("e.txt", "e"), extra="- **Depends on:** D\n")
++        _results, err, _out, pushes, _gh = self._drive(
++            [d, e], ["P", "D", "E"], prs={self._url("P"): {"state": "OPEN"}})
++        self.assertNotIn("STOPPING", err)
++        self.assertEqual(self._forced(pushes), [], pushes)
++        self.assertEqual(self.seen["issue_D"], (line, old))   # built on the earlier line
++        self.assertTrue(self._ancestor(old, self._tip(line)), "the line was replaced")
++        with redirect_stderr(io.StringIO()):
++            refusal = publish._line_tip_refusal(h, self.primary, old, line)
++        self.assertEqual(refusal, "")
++
++    # -- sign-off: an earlier version of a bundle on the line is not built on ---------------
++
++    def test_2_a_line_holding_a_rebuilt_bundles_earlier_version_is_not_built_on(self) -> None:
++        # The earlier run of [P, X, D] folded P and X; X was then rejected and iterated, so
++        # this run rebuilds it. Continuing that line would build X's new version on its old
++        # one, and the old commit would ride into X's new PR. Before the fix X was cut from
++        # main; with the line kept, the run must refuse it instead.
++        p = self._finished("P", {"p.txt": "p\n"})
++        x = self._finished("X", {"x.txt": "x\n"})
++        batch = ["P", "X", "D"]
++        old = self._earlier_run_folded(batch, p, x)
++        self._reopened(x, _new_file("x2.txt", "x, rebuilt"))
++        d = self._planned("D", _edit_p(), extra="- **Depends on:** P\n")
++        results, err, _out, pushes, _gh = self._drive(
++            [d, x], batch, prs={self._url("P"): {"state": "OPEN"},
++                                self._url("X"): {"state": "CLOSED"}})
++        self.assertEqual(self.driven, [], err)
++        self.assertEqual(results.get("X"), state.PLANNED)
++        self.assertEqual(results.get("D"), state.PLANNED)
++        self.assertEqual(pushes, [])
++        self.assertEqual(self._tip(self.line), old)
++        blocks = self._block_lines(err)
++        self.assertEqual(len(blocks), 1, err)
++        for part in (self.line, "it holds issue_X", "rebuilt this run", "issue_D",
++                     f"delete {self.line} on origin"):
++            self.assertIn(part, blocks[0])
++        self.assertNotIn("Traceback", err)
++
++    def test_2_a_line_holding_an_earlier_version_of_a_re_pushed_bundle_is_not_built_on(
++            self) -> None:
++        # P was folded by the earlier run; since then it was rebuilt and re-published: its
++        # branch was force-pushed with a new commit that is not on top of the folded one.
++        # Its PR is open on the new head, so looking only at that head finds nothing of P
++        # on the line — but the line holds P's earlier commit, which must not ride on.
++        p = self._finished("P", {"p.txt": "p\n"})
++        batch = ["P", "D", "U"]
++        old = self._earlier_run_folded(batch, p)
++        first = self._tip("fix/P")
++        rebuilt = self._push_from_human({"p2.txt": "p, rebuilt\n"}, to="fix/P", force=True)
++        self.assertFalse(self._ancestor(first, rebuilt))
++        (p / "patch.diff").write_text(_git(self.human, "diff", "HEAD~1", "HEAD"),
++                                      encoding="utf-8")
++        d = self._planned("D", _new_file("d.txt", "d"), extra="- **Depends on:** P\n")
++        u = self._planned("U", _new_file("u.txt", "u"))
++        results, err, _out, pushes, _gh = self._drive(
++            [d, u], batch, prs={self._url("P"): {"state": "OPEN", "headRefOid": rebuilt}})
++        self.assertEqual(self.driven, [], err)
++        self.assertEqual(results.get("D"), state.PLANNED)
++        self.assertEqual(results.get("U"), state.PLANNED)
++        self.assertEqual(pushes, [])
++        self.assertEqual(self._tip(self.line), old)
++        blocks = self._block_lines(err)
++        self.assertEqual(len(blocks), 1, err)
++        for part in (self.line, '"pdca-integrate: issue_P"', "issue_D", "issue_U",
++                     f"delete {self.line} on origin"):
++            self.assertIn(part, blocks[0])
++        self.assertNotIn("Traceback", err)
++
++    # -- (3) append-only across waves -----------------------------------------------------
++
++    def test_3_the_fold_after_wave_0_continues_the_carried_line(self) -> None:
++        self._finished("P", {"p.txt": "p\n"})
++        d = self._planned("D", _new_file("d.txt", "d"), extra="- **Depends on:** P\n")
++        e = self._planned("E", _new_file("e.txt", "e"), extra="- **Depends on:** D\n")
++        line = self._line_of("P", "D", "E")
++        results, err, _out, pushes, _gh = self._drive(
++            [d, e], ["P", "D", "E"], prs={self._url("P"): {"state": "OPEN"}})
++        self.assertNotIn("STOPPING", err)
++        self.assertNotIn("did not integrate", err)
++        self.assertEqual(len(pushes), 2, pushes)              # the carry, then after wave 0
++        self.assertEqual(self._forced(pushes[1:]), [], pushes)
++        tip = self._tip(line)
++        self.assertTrue(self._ancestor(self._tip("fix/P"), tip), "the line lacks P")
++        d_rec = json.loads((d / "publish.json").read_text(encoding="utf-8"))
++        self.assertTrue(self._ancestor(self._tip(d_rec["branch"]), tip), "the line lacks D")
++        self.assertEqual(self.seen["issue_E"][0], line)
++        self.assertTrue(self._ancestor(self.line_at["issue_D"], self.seen["issue_E"][1]))
++        self.assertEqual(results.get("E"), state.COMPLETE, err)
++
++    def test_3_a_fixup_pushed_onto_a_carried_branch_reaches_the_line_at_the_next_fold(
++            self) -> None:
++        # Commits pushed onto a stack PR's branch after a fold carried it reach the line at
++        # the next fold — for a carried bundle too: while wave 0 runs, a reviewer pushes a
++        # fixup onto P's PR branch, and E (wave 1) must build on a line that has it.
++        self._finished("P", {"p.txt": "p\n"})
++        d = self._planned("D", _new_file("d.txt", "d"), extra="- **Depends on:** P\n")
++        e = self._planned("E", _new_file("e.txt", "e"), extra="- **Depends on:** D\n")
++        line = self._line_of("P", "D", "E")
++        fixups: list[str] = []
++        self.during["issue_D"] = lambda: fixups.append(self._push_from_human(
++            {"p-fix.txt": "a fixup\n"}, to="fix/P", off="origin/fix/P"))
++        results, err, _out, pushes, _gh = self._drive(
++            [d, e], ["P", "D", "E"], prs={self._url("P"): {"state": "OPEN"}})
++        self.assertEqual(len(fixups), 1, err)
++        self.assertFalse(self._ancestor(fixups[0], self.line_at["issue_D"]))
++        self.assertTrue(self._ancestor(fixups[0], self.seen["issue_E"][1]),
++                        f"E was built on a line without P's fixup\n{err}")
++        self.assertTrue(self._ancestor(fixups[0], self._tip(line)))
++        self.assertEqual(self._forced(pushes[1:]), [], pushes)
++        self.assertEqual(results.get("E"), state.COMPLETE, err)
++
++    # -- (4) a finished prerequisite that cannot be carried holds only its dependents -------
++
++    def _assert_held(self, results: dict, err: str, *parts: str) -> None:
++        self.assertNotIn("issue_D", self.driven, err)
++        self.assertIn("issue_U", self.driven, err)
++        self.assertEqual(results.get("D"), state.PLANNED)
++        self.assertEqual(results.get("U"), state.COMPLETE, err)
++        lines = self._hold_lines(err, "issue_P")
++        self.assertEqual(len(lines), 1, err)
++        for part in ("issue_D", "re-issue the same command", *parts):
++            self.assertIn(part, lines[0])
++        self.assertNotIn("issue_U", lines[0])
++        self.assertEqual(self._block_lines(err), [], err)
++        self.assertNotIn("Traceback", err)
++        self.assertIsNone(self._tip(self.line))               # P is in no fold
++
++    def _held_case(self, *, prs: dict | None = None, lists: dict | None = None,
++                   gh_missing: bool = False, **finished):
++        self._finished("P", {"p.txt": "p\n"}, **finished)
++        d = self._planned("D", _edit_p(), extra="- **Depends on:** P\n")
++        u = self._planned("U", _new_file("u.txt", "u"))
++        self._line_of("P", "D", "U")
++        results, err, _out, _pushes, gh = self._drive(
++            [d, u], ["P", "D", "U"], prs=prs, lists=lists, gh_missing=gh_missing)
++        return results, err, gh
++
++    def test_4a_no_branch_on_record_holds_its_dependents(self) -> None:
++        results, err, _gh = self._held_case(record=False)
++        self._assert_held(results, err, "no published branch", "`pdca publish P`")
++
++    def test_4c_a_closed_pr_holds_its_dependents(self) -> None:
++        results, err, _gh = self._held_case(prs={self._url("P"): {"state": "CLOSED"}})
++        self._assert_held(results, err, "CLOSED", "re-open", "re-drive P")
++
++    def test_4d_no_pr_for_its_branch_holds_its_dependents_and_says_how_to_open_one(
++            self) -> None:
++        # Publish pushed P's branch, then `gh pr create` failed (`"pr_url": ""`). Looked up
++        # by its branch, there is no PR — only another fork's same-named branch has one,
++        # which never counts. The advice is the command that opens it.
++        other = self._listed("P", "OPEN", owner="someone-else")
++        results, err, gh = self._held_case(pr_url=False, lists={"fix/P": [other]})
++        self._assert_held(results, err, "no PR", "fix/P",
++                          f"gh pr create --draft --repo org/repo --base main "
++                          f"--head {self.owner}:fix/P")
++        self.assertIn(["pr", "list"], [c[1:3] for c in gh.calls])
++
++    def test_4d_a_gh_failure_holds_its_dependents(self) -> None:
++        results, err, _gh = self._held_case(prs={})
++        self._assert_held(results, err, "could not be read", self._url("P"))
++
++    def test_4d_gh_missing_holds_its_dependents_without_a_traceback(self) -> None:
++        results, err, _gh = self._held_case(gh_missing=True)
++        self._assert_held(results, err, "could not be read", "`gh` could not be run")
++
++    # -- sign-off item 3: an empty pr_url is no dead end ------------------------------------
++
++    def test_4d_an_empty_pr_url_is_looked_up_by_its_branch(self) -> None:
++        # The earlier run pushed P's branch, `gh pr create` failed (`"pr_url": ""`), and its
++        # fold carried P all the same. The human then opened the PR by hand, as publish told
++        # them to. Found by its branch — the open PR before an older closed one — P is
++        # carried and the line is continued.
++        p = self._finished("P", {"p.txt": "p\n"}, pr_url=False)
++        batch = ["P", "D"]
++        old = self._earlier_run_folded(batch, p)
++        d = self._planned("D", _edit_p(), extra="- **Depends on:** P\n")
++        results, err, _out, pushes, gh = self._drive(
++            [d], batch, lists={"fix/P": [self._listed("P", "CLOSED"),
++                                         self._listed("P", "OPEN")]})
++        self.assertEqual(self.driven, ["issue_D"], err)
++        self.assertEqual(self.seen["issue_D"], (self.line, old))
++        self.assertEqual(self._forced(pushes), [], pushes)
++        self.assertEqual(results.get("D"), state.COMPLETE, err)
++        self.assertIn(["pr", "list"], [c[1:3] for c in gh.calls])
++        self.assertEqual(self._block_lines(err), [], err)
++
++    def test_4d_a_line_holding_a_bundle_with_no_pr_says_how_to_open_one_and_that_works(
++            self) -> None:
++        # The same, but nobody opened the PR: P cannot be carried, and the line the earlier
++        # run left holds it, so that target is not built on. The advice must get the run
++        # going: open the PR with the command printed, issue the same command again — and
++        # the run carries P and builds.
++        p = self._finished("P", {"p.txt": "p\n"}, pr_url=False)
++        batch = ["P", "D", "U"]
++        old = self._earlier_run_folded(batch, p)
++        d = self._planned("D", _edit_p(), extra="- **Depends on:** P\n")
++        u = self._planned("U", _new_file("u.txt", "u"))
++        other = self._listed("P", "OPEN", owner="someone-else")
++        results, err, _out, pushes, _gh = self._drive([d, u], batch, lists={"fix/P": [other]})
++        self.assertEqual(self.driven, [], err)
++        self.assertEqual(pushes, [])
++        self.assertEqual(self._tip(self.line), old)
++        blocks = self._block_lines(err)
++        self.assertEqual(len(blocks), 1, err)
++        for part in ("it holds issue_P", "no PR", f"gh pr create --draft --repo org/repo "
++                     f"--base main --head {self.owner}:fix/P", "re-issue the same command",
++                     f"delete {self.line} on origin"):
++            self.assertIn(part, blocks[0])
++        self.assertEqual(self._hold_lines(err, "issue_P"), [], err)
++        self.assertNotIn("is not carried", err)
++        # Follow the advice: the PR is opened, the same command issued again.
++        results, err, _out, pushes, _gh = self._drive(
++            [d, u], batch, lists={"fix/P": [other, self._listed("P", "OPEN")]})
++        self.assertEqual(sorted(self.driven), ["issue_D", "issue_U"], err)
++        self.assertEqual(results.get("D"), state.COMPLETE, err)
++        self.assertEqual(self.seen["issue_D"], (self.line, old))
++        self.assertEqual(self._forced(pushes), [], pushes)
++        self.assertTrue(self._ancestor(old, self._tip(self.line)))
++
++    # -- (4) sign-off: a line that ALREADY holds a closed (or unreadable) PR ----------------
++
++    def _on_line_case(self, p_state: str | None, *, gone: bool = False,
++                      gh_missing: bool = False):
++        """The earlier run of [P, Q, D, E, U] folded P and Q. Now the host reports P's PR
++        as ``p_state``, with the head commit its branch was at (None: ``gh`` fails for P),
++        and Q's as OPEN. Re-issued: D (on P), E (on Q) and U (on nothing) are driven. With
++        ``gone``, P's branch has also been deleted on origin."""
++        p = self._finished("P", {"p.txt": "p\n"})
++        q = self._finished("Q", {"q.txt": "q\n"})
++        batch = ["P", "Q", "D", "E", "U"]
++        old = self._earlier_run_folded(batch, p, q)
++        head = self._tip("fix/P")
++        self.assertTrue(self._ancestor(head, old))
++        if gone:
++            _git(self.origin, "branch", "-D", "fix/P")
++        prs = {self._url("Q"): {"state": "OPEN", "headRefOid": self._tip("fix/Q")}}
++        if p_state is not None:
++            prs[self._url("P")] = {"state": p_state, "headRefOid": head}
++        d = self._planned("D", _edit_p(), extra="- **Depends on:** P\n")
++        e = self._planned("E", _new_file("e.txt", "e"), extra="- **Depends on:** Q\n")
++        u = self._planned("U", _new_file("u.txt", "u"))
++        results, err, _out, pushes, _gh = self._drive(
++            [d, e, u], batch, prs=prs, gh_missing=gh_missing)
++        return results, err, pushes, old, head
++
++    def _assert_blocked(self, results: dict, err: str, pushes: list, old: str,
++                        *parts: str) -> None:
++        self.assertEqual(self.driven, [], err)                # built nothing on that line
++        for iid in ("D", "E", "U"):
++            self.assertEqual(results.get(iid), state.PLANNED, err)
++        self.assertEqual(pushes, [])                          # the line was not continued
++        self.assertEqual(self._tip(self.line), old)
++        blocks = self._block_lines(err)
++        self.assertEqual(len(blocks), 1, err)
++        for part in (self.line, "org/repo @ main", "issue_D", "issue_E", "issue_U",
++                     "re-issue the same command", f"delete {self.line} on origin", *parts):
++            self.assertIn(part, blocks[0])
++        self.assertEqual(self._hold_lines(err, "issue_P"), [], err)   # never "not carried"
++        self.assertNotIn("is not carried", err)
++        self.assertNotIn("Traceback", err)
++
++    def test_4c_a_line_already_holding_the_closed_pr_is_not_built_on(self) -> None:
++        # Sign-off: the earlier run folded P, and P's PR was closed since. Continuing that
++        # line would build D, E and U on a closed PR's change; the run fails closed and
++        # says the line holds it — not that P "is not carried".
++        results, err, pushes, old, _head = self._on_line_case("CLOSED")
++        self._assert_blocked(results, err, pushes, old, "it holds issue_P", "CLOSED",
++                             "re-open issue_P's PR")
++
++    def test_4c_a_closed_pr_whose_branch_is_gone_is_found_by_its_pr_head(self) -> None:
++        # Closed and its branch deleted: the commit to look for is the head the host
++        # reports for the PR.
++        results, err, pushes, old, head = self._on_line_case("CLOSED", gone=True)
++        self._assert_blocked(results, err, pushes, old, "it holds issue_P", "CLOSED")
++        self.assertIsNone(self._tip("fix/P"))
++        self.assertTrue(self._ancestor(head, old))
++
++    def test_4c_a_closed_pr_whose_head_this_clone_lacks_is_unknown_not_absent(self) -> None:
++        # Sign-off item 1 (the review's C3 case): the earlier run folded P and Q. Then,
++        # from another checkout, a fixup was pushed onto P's branch, P's PR was closed and
++        # its branch deleted — all before this clone fetched again. The host reports the
++        # fixup as P's head, a commit this clone does not have. That proves nothing about
++        # the commits of P the line holds: the run must not read it as "not on the line".
++        p = self._finished("P", {"p.txt": "p\n"})
++        q = self._finished("Q", {"q.txt": "q\n"})
++        batch = ["P", "Q", "D", "E", "U"]
++        old = self._earlier_run_folded(batch, p, q)
++        fixup = self._push_from_human({"p.txt": "p, fixed\n"}, to="fix/P", off="origin/fix/P")
++        _git(self.origin, "branch", "-D", "fix/P")
++        prs = {self._url("P"): {"state": "CLOSED", "headRefOid": fixup},
++               self._url("Q"): {"state": "OPEN", "headRefOid": self._tip("fix/Q")}}
++        d = self._planned("D", _edit_p(), extra="- **Depends on:** P\n")
++        e = self._planned("E", _new_file("e.txt", "e"), extra="- **Depends on:** Q\n")
++        u = self._planned("U", _new_file("u.txt", "u"))
++        results, err, _out, pushes, _gh = self._drive([d, e, u], batch, prs=prs)
++        self.assertNotEqual(_run(self.primary, "cat-file", "-e", f"{fixup}^{{commit}}")
++                            .returncode, 0, "the clone has the fixup after all")
++        self._assert_blocked(results, err, pushes, old, "it may hold issue_P", "CLOSED",
++                             "cannot tell", '"pdca-integrate: issue_P"',
++                             "re-open issue_P's PR")
++
++    def test_4c_a_carried_pr_whose_head_this_clone_lacks_is_not_vouched_for(self) -> None:
++        # The same "unknown, not absent" rule for an id the run DOES carry: after the
++        # earlier run folded P, a fixup was pushed onto its branch from another checkout,
++        # the PR was squash-merged (so main has neither of P's commits) and the branch
++        # deleted. The host reports P MERGED at the fixup, which this clone lacks, so
++        # nothing vouches for the P commit on the line: the run refuses it and names P.
++        p = self._finished("P", {"p.txt": "p\n"})
++        batch = ["P", "D"]
++        old = self._earlier_run_folded(batch, p)
++        fixup = self._push_from_human({"p.txt": "p, fixed\n"}, to="fix/P", off="origin/fix/P")
++        _git(self.human, "checkout", "-q", "-B", "main", "origin/main")
++        _git(self.human, "merge", "-q", "--squash", "origin/fix/P")
++        _git(self.human, "commit", "-q", "-s", "-m", "P, squashed")
++        _git(self.human, "push", "-q", "origin", "main")
++        _git(self.origin, "branch", "-D", "fix/P")
++        d = self._planned("D", _new_file("d.txt", "d"), extra="- **Depends on:** P\n")
++        results, err, _out, pushes, _gh = self._drive(
++            [d], batch, prs={self._url("P"): {"state": "MERGED", "headRefOid": fixup}})
++        self.assertEqual(self.driven, [], err)
++        self.assertEqual(results.get("D"), state.PLANNED)
++        self.assertEqual(pushes, [])
++        self.assertEqual(self._tip(self.line), old)
++        blocks = self._block_lines(err)
++        self.assertEqual(len(blocks), 1, err)
++        for part in ("it may hold issue_P", "its PR is MERGED", "cannot tell",
++                     "restore issue_P's branch", f"delete {self.line} on origin"):
++            self.assertIn(part, blocks[0])
++        self.assertNotIn("Traceback", err)
++
++    def test_4c_a_line_without_the_closed_pr_is_still_continued(self) -> None:
++        # The same request, but the earlier run's line holds only Q: nothing closed rides
++        # it, so it is continued (no force) and E and U are built on it; P only holds D.
++        self._finished("P", {"p.txt": "p\n"})
++        q = self._finished("Q", {"q.txt": "q\n"})
++        batch = ["P", "Q", "D", "E", "U"]
++        old = self._earlier_run_folded(batch, q)
++        d = self._planned("D", _edit_p(), extra="- **Depends on:** P\n")
++        e = self._planned("E", _new_file("e.txt", "e"), extra="- **Depends on:** Q\n")
++        u = self._planned("U", _new_file("u.txt", "u"))
++        results, err, _out, pushes, _gh = self._drive(
++            [d, e, u], batch,
++            prs={self._url("P"): {"state": "CLOSED"}, self._url("Q"): {"state": "OPEN"}})
++        self.assertEqual(sorted(self.driven), ["issue_E", "issue_U"], err)
++        self.assertEqual(results.get("D"), state.PLANNED)
++        self.assertEqual(self._forced(pushes), [], pushes)
++        self.assertEqual(self.seen["issue_E"], (self.line, old))
++        self.assertEqual(self.seen["issue_U"], (self.line, old))
++        self.assertFalse(self._ancestor(self._tip("fix/P"), self._tip(self.line)))
++        self.assertEqual(self._block_lines(err), [], err)
++        lines = self._hold_lines(err, "issue_P")
++        self.assertEqual(len(lines), 1, err)
++        for part in ("is not carried", "CLOSED", "issue_D", "re-drive P"):
++            self.assertIn(part, lines[0])
++
++    def test_4d_a_line_already_holding_an_unreadable_pr_is_not_built_on(self) -> None:
++        # The fail-closed half of the closed case: with `gh` missing no PR state can be read,
++        # so the run cannot tell whether the line's P and Q are still wanted.
++        results, err, pushes, old, _head = self._on_line_case("OPEN", gh_missing=True)
++        self._assert_blocked(results, err, pushes, old, "it holds issue_P",
++                             "it holds issue_Q", "`gh` could not be run",
++                             "fix what kept issue_P's PR state from being read")
++
++    def test_4d_a_line_that_may_hold_an_unreadable_pr_is_not_built_on(self) -> None:
++        # P's branch is gone and `gh` fails for its PR, so there is no commit of P to look
++        # for: the run cannot tell whether the line holds it, and fails closed.
++        results, err, pushes, old, _head = self._on_line_case(None, gone=True)
++        self._assert_blocked(results, err, pushes, old, "it may hold issue_P",
++                             "cannot tell", "could not be read")
++
++    # -- (5) nothing to carry; a merged PR goes to the fold ---------------------------------
++
++    def _nothing_to_carry(self, patch_text: str | None) -> None:
++        p = self._finished("P", {"p.txt": "p\n"})
++        if patch_text is None:
++            # A close / no-fix outcome: its close marker stands in for the patch, so it is
++            # still COMPLETE (#60).
++            (p / "patch.diff").unlink()
++            (p / state.CLOSE_MARKER).write_text("close\n", encoding="utf-8")
++            self.assertEqual(state.state(p), state.COMPLETE)
++        else:
++            (p / "patch.diff").write_text(patch_text, encoding="utf-8")
++        d = self._planned("D", _new_file("d.txt", "d"), extra="- **Depends on:** P\n")
++        self._line_of("P", "D")
++        results, err, _out, pushes, _gh = self._drive(
++            [d], ["P", "D"], prs={self._url("P"): {"state": "OPEN"}})
++        self.assertEqual(self.driven, ["issue_D"], err)
++        self.assertEqual(results.get("D"), state.COMPLETE, err)
++        self.assertEqual(self.seen["issue_D"], ("", ""))
++        self.assertEqual(pushes, [])
++        self.assertIsNone(self._tip(self.line))
++        self.assertEqual(self._hold_lines(err, "issue_P"), [])
++
++    def test_5_an_empty_patch_is_nothing_to_carry(self) -> None:
++        self._nothing_to_carry("  \n")
++
++    def test_5_a_missing_patch_is_nothing_to_carry(self) -> None:
++        self._nothing_to_carry(None)
++
++    def test_5_a_merged_pr_is_handed_to_the_fold(self) -> None:
++        # P's PR merged into main and its branch was deleted: the fold judges it by the
++        # head its PR merged with (the line, started off main, already has it).
++        self._finished("P", {"p.txt": "p\n"})
++        head = self._tip("fix/P")
++        _git(self.human, "fetch", "-q", "origin")
++        _git(self.human, "checkout", "-q", "-B", "main", "origin/main")
++        _git(self.human, "merge", "-q", "--no-ff", "--no-edit", "origin/fix/P")
++        _git(self.human, "push", "-q", "origin", "main")
++        _git(self.origin, "branch", "-D", "fix/P")
++        d = self._planned("D", _edit_p(), extra="- **Depends on:** P\n")
++        line = self._line_of("P", "D")
++        results, err, _out, _pushes, _gh = self._drive(
++            [d], ["P", "D"], prs={self._url("P"): {"state": "MERGED", "headRefOid": head}})
++        self.assertNotIn("STOPPING", err)
++        self.assertEqual(self._hold_lines(err, "issue_P"), [])
++        self.assertEqual(self.seen["issue_D"], (line, self.line_at["issue_D"]))
++        self.assertTrue(self._ancestor(head, self.line_at["issue_D"]))
++        self.assertEqual(results.get("D"), state.COMPLETE, err)
++
++    # -- (6) a failing carry fold — or its red re-gate — stops the run before wave 0 -------
++
++    def test_6_a_failing_carry_fold_stops_before_wave_0(self) -> None:
++        # P's branch is gone and its PR is still OPEN: the fold refuses (nothing of P to
++        # merge, and not known to be merged).
++        self._finished("P", {"p.txt": "p\n"})
++        _git(self.origin, "branch", "-D", "fix/P")
++        d = self._planned("D", _new_file("d.txt", "d"), extra="- **Depends on:** P\n")
++        u = self._planned("U", _new_file("u.txt", "u"))
++        self._line_of("P", "D", "U")
++        results, err, _out, _pushes, _gh = self._drive(
++            [d, u], ["P", "D", "U"], prs={self._url("P"): {"state": "OPEN"}})
++        self.assertEqual(self.driven, [], err)
++        self.assertEqual(results.get("D"), state.PLANNED)
++        self.assertEqual(results.get("U"), state.PLANNED)
++        stop = [ln for ln in err.splitlines() if "did not integrate" in ln]
++        self.assertEqual(len(stop), 1, err)
++        self.assertIn("issue_P", stop[0])
++        self.assertIn("STOPPING", stop[0])
++        self.assertNotIn("Traceback", err)
++
++    def test_6_a_red_re_gate_of_the_carried_line_stops_before_wave_0(self) -> None:
++        # Sign-off: with [driver].regate_between_waves on, the carried line is re-gated
++        # before wave 0 builds on it, as every folded line is before the next wave. The
++        # repo's gate (a real one) is red on any tree that carries P.
++        self.cfg.regate_between_waves = True
++        self.cfg.gates_checks = [_line_gate("test ! -e p.txt")]
++        self._finished("P", {"p.txt": "p\n"})
++        d = self._planned("D", _edit_p(), extra="- **Depends on:** P\n")
++        u = self._planned("U", _new_file("u.txt", "u"))
++        line = self._line_of("P", "D", "U")
++        gated: list[tuple] = []
++        results, err, _out, _pushes, _gh = self._drive(
++            [d, u], ["P", "D", "U"], prs={self._url("P"): {"state": "OPEN"}},
++            regate=self._regate_spy(gated))
++        self.assertEqual(self.driven, [], err)
++        self.assertEqual(results.get("D"), state.PLANNED)
++        self.assertEqual(results.get("U"), state.PLANNED)
++        self.assertEqual(len(gated), 1, gated)
++        tree, hold_lock, verdict = gated[0]
++        self.assertEqual(tree, self._tip(line))               # the carried line it pushed
++        self.assertTrue(self._ancestor(self._tip("fix/P"), tree))
++        self.assertFalse(hold_lock)                          # the carry already holds it
++        self.assertEqual(verdict, "fail")
++        stop = [ln for ln in err.splitlines() if "re-gate FAILED" in ln]
++        self.assertEqual(len(stop), 1, err)
++        for part in ("issue_P", "STOPPING", "no wave run"):
++            self.assertIn(part, stop[0])
++        self.assertNotIn("Traceback", err)
++
++    # -- (7) unchanged where nothing finished is depended on --------------------------------
++
++    def test_7_no_dependency_on_a_finished_id_runs_as_before(self) -> None:
++        self._finished("P", {"p.txt": "p\n"})
++        d = self._planned("D", _new_file("d.txt", "d"))
++        publish.write_stack_base(d, "pdca-integration/stale", ABSENT)   # a prior run's
++        self._line_of("P", "D")
++        results, err, _out, pushes, gh = self._drive(
++            [d], ["P", "D"], prs={self._url("P"): {"state": "OPEN"}})
++        self.assertEqual(results.get("D"), state.COMPLETE, err)
++        self.assertEqual(self.seen["issue_D"], ("", ""))      # stale stack base cleared
++        self.assertEqual((pushes, gh.calls), ([], []))
++        self.assertIsNone(self._tip(self.line))
++
++    def test_7_stacks_on_and_depends_on_merged_do_not_carry(self) -> None:
++        self._finished("P", {"p.txt": "p\n"})
++        s = self._planned("S", _new_file("s.txt", "s"), extra="- **Stacks on:** P\n")
++        m = self._planned("M", _new_file("m.txt", "m"),
++                          extra="- **Depends on (merged):** P\n")
++        self._line_of("P", "S", "M")
++        results, err, _out, pushes, gh = self._drive(
++            [s, m], ["P", "S", "M"], prs={self._url("P"): {"state": "OPEN"}})
++        self.assertEqual(pushes, [])
++        self.assertIsNone(self._tip(self.line))
++        self.assertEqual(self._hold_lines(err, "issue_P"), [])
++        # Stacks on (#123): built once P is COMPLETE, its own stack base untouched by a line.
++        self.assertEqual(results.get("S"), state.COMPLETE, err)
++        self.assertEqual(self.seen["issue_S"], ("", ""))
++        # Depends on (merged) (#186): waits for the merge, read with the merge gate's query.
++        self.assertNotIn("issue_M", self.driven)
++        self.assertIn("issue_M skipped — prerequisite(s) not ready (P)", err)
++        self.assertEqual([c[-1] for c in gh.calls], ["state"])
++
++    def test_7_a_dry_run_asks_no_host_holds_nothing_and_prints_the_plan(self) -> None:
++        self.cfg.publisher = LeafConfig(mode="stub", interactive=True)
++        self._finished("P", {"p.txt": "p\n"}, record=False)  # a real run would hold it
++        d = self._planned("D", _new_file("d.txt", "d"), extra="- **Depends on:** P\n")
++        line = self._line_of("P", "D")
++        results, err, out, pushes, gh = self._drive([d], ["P", "D"])
++        self.assertEqual(gh.calls, [])
++        self.assertEqual(pushes, [])
++        self.assertIsNone(self._tip(line))
++        self.assertEqual(self.driven, ["issue_D"], err)
++        self.assertEqual(self._hold_lines(err, "issue_P"), [])
++        self.assertEqual(self.seen["issue_D"], ("", ""))
++        self.assertIn(f"continue {line} if origin has it", out)
++        self.assertIn("(issue_P)", out)
++        self.assertEqual(results.get("D"), state.COMPLETE, err)
++
++    def test_7_no_publish_and_merge_mode_carry_nothing(self) -> None:
++        self._finished("P", {"p.txt": "p\n"})
++        d = self._planned("D", _new_file("d.txt", "d"), extra="- **Depends on:** P\n")
++        self._line_of("P", "D")
++        results, err, _out, pushes, gh = self._drive(
++            [d], ["P", "D"], prs={self._url("P"): {"state": "OPEN"}}, do_publish=False)
++        self.assertEqual((pushes, gh.calls), ([], []))
++        self.assertEqual(self.seen["issue_D"], ("", ""))
++        self.assertEqual(results.get("D"), state.COMPLETE, err)
++        self.assertFalse((d / "publish.json").exists())
++
++        self.cfg.wave_mode = "merge"
++        e = self._planned("E", _new_file("e.txt", "e"), extra="- **Depends on:** P\n")
++        _results, err, _out, pushes, gh = self._drive(
++            [e], ["P", "E"], prs={self._url("P"): {"state": "OPEN"}})
++        self.assertEqual((pushes, gh.calls), ([], []))
++        self.assertEqual(self.seen["issue_E"], ("", ""))
++        self.assertIsNone(self._tip(integrate.integration_branch(self.cfg, "main",
++                                                                 ["P", "E"])))
++
++    # -- (8) an unrelated wave-0 bundle rides the carried line ------------------------------
++
++    def test_8_an_unrelated_bundle_is_pointed_at_the_carried_line(self) -> None:
++        self._finished("P", {"p.txt": "p\n"})
++        d = self._planned("D", _edit_p(), extra="- **Depends on:** P\n")
++        u = self._planned("U", _new_file("u.txt", "u"))
++        line = self._line_of("P", "D", "U")
++        results, err, _out, _pushes, _gh = self._drive(
++            [d, u], ["P", "D", "U"], prs={self._url("P"): {"state": "OPEN"}})
++        tip = self.line_at["issue_U"]
++        self.assertIsNotNone(tip, err)
++        self.assertEqual(self.seen["issue_U"], (line, tip))
++        self.assertEqual(self.seen["issue_U"], self.seen["issue_D"])
++        self.assertEqual(results.get("U"), state.COMPLETE, err)
++        rec = json.loads((u / "publish.json").read_text(encoding="utf-8"))
++        self.assertEqual((rec["mode"], rec["base"]), ("stacked-pr", "main"))   # #593
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/template/tests/test_integrate_stack_bases.py b/template/tests/test_integrate_stack_bases.py
+index 97b1a7d..d48c85e 100644
+--- a/template/tests/test_integrate_stack_bases.py
++++ b/template/tests/test_integrate_stack_bases.py
+@@ -831,7 +831,8 @@ class StackFoldGit(unittest.TestCase):
+     def test_a_late_publish_refuses_a_tip_the_line_no_longer_holds(self) -> None:
+         # Case 15: a later run's first fold has force-pushed a fresh line (one that does not
+         # hold U's recorded tip). Publishing U must refuse, push nothing, and send the human
+-        # to re-drive it (#616) — never cut a PR from an orphaned commit.
++        # to re-drive it — never cut a PR from an orphaned commit. A re-issued run that
++        # carries the batch's finished bundles keeps the line (#646); the message says so.
+         a = self._publish("A", {"a.txt": "a\n"})
+         integrate.fold(self.cfg, [a], folded_this_run={})
+         t1 = self._tip(LINE)
+@@ -841,7 +842,8 @@ class StackFoldGit(unittest.TestCase):
+         self.assertFalse(self._ancestor(t1, LINE))
+         rc, err = self._late_publish(u)
+         self.assertNotEqual(rc, 0)
+-        for part in ("issue_U", t1, LINE, "#616", "re-drive it in a new run"):
++        for part in ("issue_U", t1, LINE, "started fresh by a run that carried nothing",
++                     "continues the line and keeps it", "re-drive it in a new run"):
+             self.assertIn(part.lower(), err.lower())
+         self.assertFalse(self._has("fix/U-u"))               # nothing pushed
+         self.assertFalse((u / "publish.json").exists())
+@@ -849,7 +851,7 @@ class StackFoldGit(unittest.TestCase):
+         self._delete(LINE)
+         rc, err = self._late_publish(u)
+         self.assertNotEqual(rc, 0)
+-        self.assertIn("#616", err)
++        self.assertIn("re-drive it in a new run", err)
+         self.assertFalse(self._has("fix/U-u"))
+ 
+     # -- #591: one integration line per batch, not per base -------------------------------
+@@ -1009,7 +1011,11 @@ class StackPublishDryRun(unittest.TestCase):
+         self.assertIn(f"checkout -B fix/DEP-my-fix {ABSENT}", out)
+         self.assertIn("--base main", out)
+         self.assertIn(f"recorded tip {ABSENT} is still on origin/{LINE}", out)
+-        self.assertIn("#616", out)
++        # Qualified (#646): only a re-issued run that carries keeps the line.
++        self.assertIn("a re-issued run of the batch that carries its finished bundles "
++                      "keeps it there", out)
++        self.assertIn("one that carried nothing starts the line fresh", out)
++        self.assertIn("re-drive it in a new run", out)
+ 
+ 
+ class StackBaseTip(unittest.TestCase):

@@ -1,0 +1,11 @@
+{
+  "mode": "new-pr",
+  "branch": "fix/531-merge-mode-stale-base-merge",
+  "pr_url": "https://github.com/eduralph/pdca-harness/pull/637",
+  "base": "main",
+  "repo": "eduralph/pdca-harness",
+  "by": "Eduard Ralph",
+  "date": "2026-10-04",
+  "id_pending": false,
+  "host_ci_base": "c67a14d77537fcf7208bfc0785e4c60a5f11eda0"
+}

@@ -1,0 +1,6 @@
+Three Do attempts have each closed the previous fix list and surfaced 3-5 new edge cases in the same hold/carry logic (patch now ~1400 lines). Re-check the approach in Plan before another build: decide whether to re-think or split it.
+Open findings the new plan must answer:
+- Holds must be known before any line starts. The current carry logic counts only its own hold reasons, so a dependent held by a `Depends on (merged)` wait, or by a held in-batch prerequisite, still starts a line and puts P's unmerged work under unrelated same-target bundles (U). This contradicts the patch's own docs ("A held bundle starts no line").
+- "PR MERGED" is treated as "in the base" without checking where it merged. A PR merged into another fix's branch (stacked record, base != target base) lets D build silently without P. Count MERGED only when the record's base is the target base and it is not a stacked record; otherwise carry or hold.
+- Hold-message advice can loop: the pre-wave fold force-replaces an earlier run's line (so an accepted-but-unpublished H becomes unpublishable), and "re-publish" likely fails while the old PR is open. Decide: keep and extend the earlier run's line, or change the advice (re-drive / add PR URL by hand).
+Consider splitting: (1) carrying published unmerged prerequisites onto the line, vs (2) hold rules and user-facing hold messages.
