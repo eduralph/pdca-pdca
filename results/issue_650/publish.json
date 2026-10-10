@@ -1,0 +1,11 @@
+{
+  "mode": "new-pr",
+  "branch": "fix/650-merge-mode-reads-head-from-its-own-remote",
+  "pr_url": "https://github.com/eduralph/pdca-harness/pull/669",
+  "base": "main",
+  "repo": "eduralph/pdca-harness",
+  "by": "Eduard Ralph",
+  "date": "2026-10-10",
+  "id_pending": false,
+  "host_ci_base": "b5f5c29b31d93bb2e41a4692bc56affd1cfd72bb"
+}
