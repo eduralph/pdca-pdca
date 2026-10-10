@@ -177,7 +177,7 @@ def main(argv: list[str] | None = None) -> int:
     p_flow.add_argument("--by", default="", help="who signed off (recorded in §9)")
     p_flow.add_argument("--lanes", type=int, help="unattended Do+Check worker-pool size (docs 09; overrides [driver].lanes / PDCA_LANES)")
     p_flow.add_argument("--max-passes", type=int, help="sign-off pass budget before the driver stops driving a bundle (#260; overrides [driver].max_passes / PDCA_MAX_PASSES)")
-    p_flow.add_argument("--auto-iterate", action="store_true", help="rebuild without stopping when every Check finding is implementation-level; a judgment finding still halts (#264; overrides [driver].auto_iterate / PDCA_AUTO_ITERATE)")
+    p_flow.add_argument("--auto-iterate", action="store_true", help="rebuild without stopping while Check finds implementation-level work; findings needing human judgment are deferred to the handover §6, and the loop stops at [driver].max_auto_iters or the size backstop (#264, #409; overrides [driver].auto_iterate / PDCA_AUTO_ITERATE)")
     p_flow.add_argument("--no-inhibit", action="store_true", help="don't hold a suspend inhibitor for the run (also PDCA_NO_INHIBIT=1) — for CI/containers where it's unavailable or unwanted (#244)")
 
     p_size = sub.add_parser("size",
@@ -194,6 +194,10 @@ def main(argv: list[str] | None = None) -> int:
                          help="comma-separated tracker ids, one per child, IN PROPOSAL "
                               "ORDER. Omit to have the child issues filed for you, each as "
                               "a sub-issue of the parent")
+    p_split.add_argument("--force", action="store_true",
+                         help="with --accept: split even a bundle already two or more "
+                              "splits deep (refused by default, #545). The human's call; "
+                              "overrides only the depth refusal")
 
     p_status = sub.add_parser("status", help="list bundle states (cheap-first queue)")
     p_status.add_argument("issue_id", nargs="?")
@@ -654,6 +658,13 @@ def _flow_claimed(cfg: Config, args: argparse.Namespace, claims: drive_claim.Run
     except flow.PreflightError as exc:
         print(f"flow: {exc}", file=sys.stderr)
         return 1
+    except waves.DependencyGraphError as exc:
+        # An unschedulable dependency graph is operator input (#589), refused like a bad
+        # pdca.toml (rc 2, #92) — not a traceback. Only this subtype: any other ValueError
+        # out of `flow_ids` is a real fault and still propagates.
+        print(f"flow: {exc}\n  refusing to start — no bundle was built.\n"
+              f"  Ways out: {exc.remedy}.", file=sys.stderr)
+        return 2
 
     # Two PRESENTATIONS of that one map — never two drive paths, and never a second source
     # of truth: both read only `results`, so neither can report what the other cannot see.
@@ -805,7 +816,9 @@ def _split(cfg: Config, args) -> int:
     try:
         proposal_text = (d / split.PROPOSAL).read_text(encoding="utf-8")
         children = split.parse(proposal_text)
-        split.preflight(d, children, cfg)
+        # `force` is read with a default: callers that build a bare namespace without it
+        # (tests, scripts) keep today's behaviour — the depth refusal applies (#545).
+        split.preflight(d, children, cfg, force=bool(getattr(args, "force", False)))
     except OSError:
         split.advisory(f"split: {d.name} has no {split.PROPOSAL} — run "
                        f"`{_prog()} split {args.issue_id}` first")
@@ -1049,8 +1062,9 @@ def _publish_flag(d: Path) -> str:
     url, base = rec.get("pr_url"), rec.get("base")
     if not url:
         return "  [published]"
-    # A stacked PR (#wave-model / #123) targets the wave integration branch, not the base —
-    # show ↑<base> so the human knows to merge the stack bottom-up.
+    # ↑<base> means "part of a stack, merge bottom-up" (#wave-model / #123). For a wave stack
+    # it no longer names an intermediate branch: every PR targets the real base (#593), so
+    # it reads ↑main, and the order to merge in comes from the briefs' `Depends on`.
     stacked = rec.get("mode") in ("stacked-pr", "stacked")
     return f"  [PR {url}{f' ↑{base}' if stacked else ''}]"
 
@@ -1439,7 +1453,9 @@ def _signoff(cfg: Config, args: argparse.Namespace) -> int:
 
     if args.accept:
         action = "accept"
-        open_items = signoff.open_needs_human(summary)
+        # The C6 read every accept path shares — it also puts an unreadable deferred-findings
+        # ledger into §6 first (#409), which a check of this path's own would skip.
+        open_items = flow.accept_blockers(d)
         if open_items:
             print("cannot accept — §6 NEEDS-HUMAN still open (C6):", file=sys.stderr)
             for it in open_items:
