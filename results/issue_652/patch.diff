@@ -1,0 +1,240 @@
+diff --git a/docs/07-crosscutting.md b/docs/07-crosscutting.md
+index 05f22c6..70330b2 100644
+--- a/docs/07-crosscutting.md
++++ b/docs/07-crosscutting.md
+@@ -687,9 +687,16 @@ wave builds on, via `[driver].wave_mode`:
+   its PR is open (or merged, with its head already on your base or the line), it
+   merges onto the line without error, and, with `[driver].regate_between_waves`,
+   the carried line's re-gate is not red. A finished prerequisite that is not
+-  clean holds only the bundles whose plain `Depends on` names it, and is named
+-  on one line with the reason and what to do; the rest of the run goes on. If
+-  the line on origin holds a commit the run cannot account for, nothing is
++  clean holds the bundles whose plain `Depends on` names it, and is named on one
++  line with the reason and what to do; the rest of the run goes on. One judged
++  not clean before the fold, from its PR state and head, also holds the finished
++  prerequisites built on it (their plain `Depends on` names it, directly or
++  through others), since their branches carry its work: none of them is carried
++  or accounts for a commit on the line, and the bundles that depend on them are
++  held, each named on one line with the cause. A prerequisite whose merge fails
++  only during the fold does not hold the finished prerequisites built on it: one
++  that merges in the same fold is still carried, with the failed one's commits.
++  If the line on origin holds a commit the run cannot account for, nothing is
+   carried onto it and those bundles are held: delete that line on origin
+   (unless the run's own fold already replaced it) and re-issue. A line the run
+   did not carry onto is still replaced by its first fold, as above. Known limits,
+diff --git a/template/src/pdca_harness/flow.py b/template/src/pdca_harness/flow.py
+index e9ae345..4e93c3f 100644
+--- a/template/src/pdca_harness/flow.py
++++ b/template/src/pdca_harness/flow.py
+@@ -863,9 +863,41 @@ _CARRY_HINTS = {
+     "edge": "remove the `Depends on: {iid}` edge from the dependent's brief, then re-issue",
+     "line": "delete {line} on origin unless this run's own fold already replaced it, then "
+             "re-issue",
++    "built_on": "{name} was built on {cause}, which is not carried (see its line): get "
++                "{cause} carried, or re-drive {name} on a base without it, then re-issue",
+ }
+ 
+ 
++def _cascade_not_clean(cfg: Config, ids: list[Path],
++                       why: dict[str, tuple[str, str]]) -> dict[str, str]:
++    """Spread "not clean" along the plain ``Depends on`` edges between one target's finished
++    ``ids``, as judged before the fold (#652). A finished id whose brief names a not-clean
++    one (in ``why``) was built on it, so its branch carries that work: it is not clean
++    either, through any number of finished ids. Each one goes into ``why`` with the
++    ``built_on`` hint. Returns name → the not-clean id its ``Depends on`` names (the cause
++    its held line gives). An edge to an id outside ``ids`` is not followed, and neither is
++    a ``Stacks on`` or ``Depends on (merged)`` edge."""
++    names = {d.name for d in ids}
++    prereqs: dict[str, list[str]] = {}
++    for d in ids:
++        bp = d / "brief.md"
++        prereqs[d.name] = [cfg.bundle(dep).name for dep in
++                           (brief.depends_on(bp) if bp.exists() else [])
++                           if cfg.bundle(dep).name in names]
++    causes: dict[str, str] = {}
++    grew = True
++    while grew:                     # to a fixed point: a chain of any length, in any order
++        grew = False
++        for d in ids:
++            cause = next((n for n in prereqs[d.name] if n in why), None)
++            if cause and d.name not in why:
++                why[d.name] = (f"its `Depends on` names {cause}, whose work its branch "
++                               f"carries", "built_on")
++                causes[d.name] = cause
++                grew = True
++    return causes
++
++
+ def _carry_finished(cfg: Config, bundles: list[Path], finished: list[Path], *,
+                     batch: list[str], integ: dict[tuple[str, str], str],
+                     folded_tips: dict[tuple[str, str], str | None], held: set[str]) -> None:
+@@ -880,9 +912,15 @@ def _carry_finished(cfg: Config, bundles: list[Path], finished: list[Path], *,
+     by ONE fold per target (:func:`_fold_lines`), which continues origin's line from the
+     tip checked here (no force; refused if it moved) or starts it when absent. The target
+     is then seeded into ``integ`` / ``folded_tips``: wave 0 is pointed at the line and every
+-    later fold continues it. Any other finished id goes into ``held``, so only its plain
++    later fold continues it. Any other finished id goes into ``held``, so its plain
+     ``Depends on`` dependents wait (:func:`_runnable`), named with its reason on ONE stderr
+-    line; the run goes on. A target the carry did not put to use is not seeded, so the
++    line; the run goes on. One judged not clean BEFORE the fold, from its PR state and head,
++    makes every finished id built on it not clean too — its plain ``Depends on`` names it,
++    directly or through others, so its branch carries that work (:func:`_cascade_not_clean`,
++    #652): none of them is folded or accounts for a commit on origin's line, and their
++    dependents wait too, each named with the cause. One whose merge fails only DURING the
++    fold does not spread: its work still reaches the line through a finished id built on it
++    that merges in the same fold. A target the carry did not put to use is not seeded, so the
+     run's first fold of it starts fresh, as today. A dry-run (stub publisher) asks no host
+     and holds nothing: it prints the plan. A prerequisite that is no requested id, such as
+     a split child an earlier run adopted, is not carried: :func:`_runnable` holds its plain
+@@ -905,6 +943,7 @@ def _carry_finished(cfg: Config, bundles: list[Path], finished: list[Path], *,
+             continue
+         why: dict[str, tuple[str, str]] = {}    # not clean: name → (reason, hint)
+         heads: dict[str, str] = {}              # state-clean: name → its PR head
++        causes: dict[str, str] = {}             # built on a not-clean id: name → that id
+         base_ref, tip, bad = f"{cfg.base_remote}/{tgt[1]}", None, None
+         try:
+             repo, tip = integrate.carry_view(cfg, tgt[0], line, [
+@@ -918,12 +957,17 @@ def _carry_finished(cfg: Config, bundles: list[Path], finished: list[Path], *,
+                     heads[d.name] = v
+                 else:
+                     why[d.name] = v
+-            bad = integrate.foreign_commit(repo, tip, base_ref, heads.values()) if tip else None
++            # One built on a not-clean id carries its work (#652): not clean either, so its
++            # head accounts for nothing on origin's line.
++            causes = _cascade_not_clean(cfg, ids, why)
++            bad = integrate.foreign_commit(repo, tip, base_ref, [
++                h for n, h in heads.items() if n not in why]) if tip else None
+         except integrate.IntegrationError as exc:
+             why = {d.name: (str(exc), "open") for d in ids}
+         if bad:   # an untrusted line: carry nothing onto it, point nothing at it
+             why = {d.name: (f"origin's {line} holds {bad[:12]}, which neither {base_ref} nor "
+-                            f"a finished prerequisite's PR accounts for", "line") for d in ids}
++                            f"a clean finished prerequisite's PR accounts for", "line")
++                   for d in ids}
+         clean = [d for d in ids if d.name not in why]
+         if clean:
+             skipped: dict[str, str] = {}
+@@ -949,7 +993,8 @@ def _carry_finished(cfg: Config, bundles: list[Path], finished: list[Path], *,
+                 held.add(d.name)
+                 reason, hint = why[d.name]
+                 advice = _CARRY_HINTS[hint].format(name=d.name, line=line,
+-                                                   iid=d.name.removeprefix("issue_"))
++                                                   iid=d.name.removeprefix("issue_"),
++                                                   cause=causes.get(d.name, ""))
+                 print(f"flow: {d.name} (finished in an earlier run) is not carried onto "
+                       f"{line}: {reason} — holding "
+                       f"{', '.join(dependents.get(d.name, [])) or 'no bundle'} this run; "
+diff --git a/template/tests/test_flow_resume_stack_prereqs.py b/template/tests/test_flow_resume_stack_prereqs.py
+index b0c92f3..50401cc 100644
+--- a/template/tests/test_flow_resume_stack_prereqs.py
++++ b/template/tests/test_flow_resume_stack_prereqs.py
+@@ -368,6 +368,109 @@ class ResumeStackPrereqs(unittest.TestCase):
+         self.assertEqual((list(skipped), pushes), (["issue_S"], []))
+         self.assertFalse(self.fx._has(self._line(["Y"])))
+ 
++    # -- (9): not clean spreads to the finished ids built on it (#652, #624) -----------------
++
++    def _finished_on(self, iid: str, prereq: str, *, pr: str = "OPEN") -> Path:
++        """``iid`` finished in an earlier run, built on finished ``prereq``: its brief says
++        ``Depends on: <prereq>`` and its branch is cut from ``origin/fix/<prereq>``, so it
++        holds ``prereq``'s commit."""
++        d = self.fx._publish(iid, {f"{iid.lower()}.txt": f"{iid}\n"},
++                             cut_from=f"origin/fix/{prereq}")
++        sb._brief(d, extra=f"- **Depends on:** {prereq}\n")   # after: _publish rewrites it
++        sb._accept(d)
++        self.assertEqual(state.state(d), state.COMPLETE)
++        self.assertTrue(self.fx._ancestor(self.fx._tip(f"fix/{prereq}"),
++                                          self.fx._tip(f"fix/{iid}")))
++        self.gh[iid] = pr
++        return d
++
++    def _not_carried(self, iid: str) -> str:
++        """The ONE stderr line saying finished ``iid`` is not carried."""
++        lines = [x for x in self.err.splitlines()
++                 if x.startswith(f"flow: issue_{iid} (finished in an earlier run) is not")]
++        self.assertEqual(len(lines), 1, self.err)
++        return lines[0]
++
++    def test_a_finished_id_built_on_a_closed_one_is_not_carried(self):
++        # Q's PR is open, but its branch holds P's closed work. Before: Q was carried, and D
++        # was built on a line holding P.
++        self._finished("P", {"p.txt": "p\n"}, pr="CLOSED")
++        self._finished_on("Q", "P")
++        d, u = self._planned("D", "Q"), self._planned("U")
++        self._run([d, u], ["P", "Q", "D", "U"])
++        held = self._held("Q", "D", "issue_P", "built on")
++        self.assertNotIn("get issue_Q's PR open", held)         # not the `open` hint
++        self.assertIn("get issue_P carried, or re-drive issue_Q on a base without it", held)
++        self.assertIn("CLOSED", self._not_carried("P"))
++        self.assertNotIn("flow: carried", self.err)
++        self.assertFalse(self.fx._has(self.line))               # no line holds anything
++        self._on_base("U")
++
++    def test_a_hold_cascades_through_a_dependent_finished_before_the_run(self):
++        # (#624) U is held; D finished before the run (`Depends on: U`); E depends on D.
++        self._finished("U", {"u.txt": "u\n"}, pr="CLOSED")
++        self._finished_on("D", "U")
++        e = self._planned("E", "D")
++        self._run([e], ["U", "D", "E"])
++        self._held("D", "E", "issue_U")
++        self.assertFalse(self.fx._has(self.line))
++
++    def test_not_clean_spreads_through_a_chain_of_finished_ids(self):
++        # P (CLOSED) ← Q ← R ← D, asked for from the far end: any length, in any order.
++        self._finished("P", {"p.txt": "p\n"}, pr="CLOSED")
++        self._finished_on("Q", "P")
++        self._finished_on("R", "Q")
++        d = self._planned("D", "R")
++        self._run([d], ["R", "Q", "P", "D"])
++        self._held("R", "D", "issue_Q", "built on")
++        self.assertIn("issue_P", self._not_carried("Q"))
++        self.assertFalse(self.fx._has(self.line))
++
++    def test_a_clean_finished_id_beside_them_is_still_carried(self):
++        # X is clean, so it is carried: the line exists and is built on, and it holds
++        # nothing of P's or Q's.
++        self._finished("P", {"p.txt": "p\n"}, pr="CLOSED")
++        self._finished_on("Q", "P")
++        self._finished("X", {"x.txt": "x\n"})
++        d, e, u = self._planned("D", "Q"), self._planned("E", "X"), self._planned("U")
++        self._run([d, e, u], ["P", "Q", "X", "D", "E", "U"])
++        self._held("Q", "D", "issue_P", "built on")
++        self.assertIn("flow: carried issue_X (finished", self.err)
++        self.assertTrue(self.fx._has(self.line), self.err)
++        for iid in ("E", "U"):
++            base, tip, line_tip = self._built(iid)
++            self.assertEqual((base, tip), (self.line, line_tip), self.err)
++            self.assertTrue(self.fx._ancestor(self.fx._tip("fix/X"), tip))
++            for gone in ("P", "Q"):
++                self.assertFalse(self.fx._ancestor(self.fx._tip(f"fix/{gone}"), tip), gone)
++            self.assertEqual(self.results[iid], state.COMPLETE)
++        for gone in ("P", "Q"):
++            self.assertFalse(self.fx._ancestor(self.fx._tip(f"fix/{gone}"), self.line), gone)
++
++    def test_a_held_ids_head_does_not_vouch_for_an_old_line(self):
++        # An earlier run's line holds P and Q, and P's PR was closed since. Q is not clean,
++        # so its head accounts for nothing on that line: nothing is carried onto it (X
++        # neither), and the run's first fold replaces it.
++        p = self._finished("P", {"p.txt": "p\n"}, pr="CLOSED")
++        q = self._finished_on("Q", "P")
++        self._finished("X", {"x.txt": "x\n"})
++        d, e = self._planned("D", "Q"), self._planned("E", "X")
++        u, w = self._planned("U"), self._planned("W", "U")
++        batch = ["P", "Q", "X", "D", "E", "U", "W"]
++        line = self._line(batch)
++        integrate.fold(self.cfg, [p, q], folded_this_run={}, batch=batch)   # the earlier run
++        old = self.fx._tip(line)
++        self._run([d, e, u, w], batch)
++        self._held("Q", "D", line, "delete")
++        self._held("X", "E", line, "delete")
++        self._on_base("U")
++        self.assertEqual(self._built("U")[2], old)              # the carry pushed nothing
++        w_base, w_tip, w_line = self._built("W")
++        self.assertEqual((w_base, w_tip), (line, w_line))
++        for gone in ("P", "Q"):
++            self.assertFalse(self.fx._ancestor(self.fx._tip(f"fix/{gone}"), w_line), gone)
++        self.assertEqual(self.results["W"], state.COMPLETE)
++
+ 
+ if __name__ == "__main__":
+     unittest.main()

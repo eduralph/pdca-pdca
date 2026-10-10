@@ -1,0 +1,11 @@
+{
+  "band": "ok",
+  "independent_outcomes": [
+    "Merge mode's base/head reads fetch the remote the bundle's publish record names (via integrate._published_ref), so a stacked PR whose head lives only on a third remote can be judged and merged; a head still missing after the fetches is refused with a message that names the commit and the remotes fetched."
+  ],
+  "proposed_seams": [
+    "Only seam on offer, and not recommended: the named-commit refusal (criteria 2/2b) could ship alone as a pure error-message fix ahead of the extra fetch (criterion 1). It is not worth cutting. Both halves change the same few lines of merge.py:256-337, share one real-git fixture and one test file, and the human confirmed them together at Plan as one fix for one defect. The message is the fail-closed fallback of the fetch change (2b only makes sense once the record's remote is looked up), so splitting would mean editing the same code twice and writing the fixture twice. The iteration-1 churn (wording of the refusal) is a detail inside this one outcome, not a sign of a second one."
+  ],
+  "confidence": "medium",
+  "brief_sha": "b91fedf9496457b2"
+}

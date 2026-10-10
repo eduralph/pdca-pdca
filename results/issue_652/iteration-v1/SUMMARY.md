@@ -1,0 +1,117 @@
+# Result — issue 652 / carry-not-clean-cascades-across-finished-ids
+
+## 1. Spec (from brief.md)              ← Check verifies against THIS
+- Defect / goal: Before wave 0 a re-issued stack run carries its finished named ids onto the integration line (`flow._carry_finished`, `template/src/pdca_harness/flow.py:869-956`, called at `:2146-2149`). Each finished id is judged on its own: `_finished_head` (`flow.py:836-857`) checks only that id's PR state and head. A finished id that is not clean goes into `held` (`flow.py:947-956`), and `_runnable` then holds only the drive-set bundles whose plain `Depends on` names it (`flow.py:751-754`). Nothing looks at the edges BETWEEN finished ids. So when a finished `P` is not clean (e.g. its PR is CLOSED) and a finished `Q` was built on `P` (`Q`'s brief: `Depends on: P`, its branch cut from a line holding `P`) and is clean, `Q` is carried. `Q`'s branch carries `P`'s commits, so they come onto the line with it (the fold merges `Q`'s branch tip, `integrate._merge_published`, `template/src/pdca_harness/integrate.py:461-475`). A drive-set `D` with `Depends on: Q` is then built on a line holding `P`'s closed work, and nothing says so. #624's shape is the same gap one level up: `U` held → `D` finished before the run (`Depends on: U`) → `E` (`Depends on: D`) is built.
+- Success criterion: With the patch, driving `flow._drive_and_act(cfg, [<drive set>], …, batch=[<all requested ids>])` on the real-git fixture of `template/tests/test_flow_resume_stack_prereqs.py` (`ResumeStackPrereqs`: stack mode, a non-stub publisher, `gh` stubbed):
+  (1) **#652.** `P` finished with its PR CLOSED. `Q` finished with its PR OPEN, `Depends on: P`, its branch cut from `origin/fix/P` (so it contains `P`'s commit). `D` in the drive set with `Depends on: Q`. An unrelated `U` in the drive set. Run with batch `["P", "Q", "D", "U"]`. `Q` is not carried. `D` is never built and stays PLANNED, and ONE stderr line names `issue_Q` and `issue_D` and gives the reason (it names `issue_P` as the cause), and its advice is the new cascade hint (see Scope), not the `open` hint: `Q`'s PR is already open, so "get issue_Q's PR open" would be wrong. No commit of `P`'s branch is reachable from origin's line (if a line exists at all). `U` is built and COMPLETE: the run goes on.
+  (2) **#624.** `U` finished with its PR CLOSED (not clean). `D` finished, PR OPEN, `Depends on: U`, its branch cut from `origin/fix/U`. `E` in the drive set with `Depends on: D`. Batch `["U", "D", "E"]`. `E` is never built, stays PLANNED, and is named on one stderr line with `issue_D`. No commit of `U`'s branch is on the line.
+  (3) **Chain.** `P` (CLOSED) ← `Q` (OPEN, `Depends on: P`) ← `R` (OPEN, `Depends on: Q`), with `D` in the drive set `Depends on: R`: `D` is held. Not clean spreads through any number of finished ids.
+  (4) **Unchanged.** Every existing test in `test_flow_resume_stack_prereqs.py` passes. In particular a clean `Q` on a clean `P` is still carried (`test_a_clean_finished_prerequisite_is_on_the_line_its_dependent_builds_on`, `:176`), and a not-clean `P` with no finished dependents still holds only its own dependents (`test_a_closed_prerequisite_holds_only_its_dependents`, `:226`).
+  Pre-fix, in (1) and (2) `D` / `E` is built (in `self.seen`) on a line holding the closed bundle's commit. That is the RED.
+- Repo + branch target: eduralph/pdca-harness @ main
+- Scope (one logical fix) / out of scope: Make "not clean" spread along plain `Depends on` edges between the finished ids the pre-wave carry judges, so a finished id built on a not-clean one is itself not clean: not carried, its dependents held and named with the cause. The held line for a cascaded id uses a NEW `_CARRY_HINTS` entry (`flow.py:858-864`) whose text names the cause, e.g. "{name} was built on {cause}, which is not carried (see its line): get {cause} carried, or re-drive {name} on a base without it, then re-issue"; the `.format(...)` call at `flow.py:951-952` gains the cause. Also in scope, one clause: update the second sentence of `docs/07-crosscutting.md:686-691` and the `_carry_finished` docstring (`flow.py:883-885`) to say a not-clean finished id also holds the finished ids built on it, and their dependents. / out of scope: a finished id that becomes not clean only DURING the fold (state-clean, but its merge fails and the fold records it in `skipped`, `integrate.py:433-439`, `flow.py:937-938`) while a later finished id that contains its commits is still merged in the same fold. That id's PR is open and reviewed, so this is a conflict, not unreviewed work reaching the line; handling it needs pruning dependents during the fold, a larger change. It is a known residual for the human to confirm at sign-off; a prerequisite of a finished id that is NOT one of the requested ids (it is not judged by the carry; #647's `_runnable` rule covers drive-set dependents only); `Stacks on` and `Depends on (merged)` edges between finished ids (the carry's rule is plain `Depends on`, `flow.py:893-897`); a drive-set bundle that is not accepted or held this run, with a finished dependent made COMPLETE ahead of it (the #624 residual, stated exactly in `results/issue_624/brief.md`, recorded in #624's tracker comment as a known residual rather than lost); which head the carry folds (#653).
+
+## 2. Disposition claimed               ← sign-off confirms or overrides
+- Outcome: likely-fix
+- Confidence: medium
+- Recommendation: (set by Do)
+
+## 3. Correctness (Check — chain)
+- C1 Spec: none — brief.md
+- C2 Reproduction (red pre-fix): none — (no gate configured)
+- C3 Change: none — patch.diff
+- C4 fix verified: bundle test red pre-fix, green post-fix: pass — C4 PASS — red without the fix, green with it
+- C5 added test exercises production, not a copy: pass — patch adds no new test file — nothing to assert
+
+## 4. Conformance (Check — stack)
+- T1 Structure: none — (no gate configured)
+- T2 shape: docs lint + site render link audit: pass — docs lint clean, site render + link audit clean
+- T2 host CI parity: target docs-check.yml on the pushed tree: pass — host CI parity on the patched tree — docs lint clean, site render + link audit clean
+- T3 runtime: render/update-compat + offline driver suites: pass — root suite OK, driver suite OK
+- T4 PR body has a user-impact opener + tracker id in both artifacts: deferred — pr-description.md not drafted yet — the substantive T4 audit of the contribution artifacts runs at publish
+- T5 Judgment: none — reviewer + human sign-off
+- T5 judgment: → see §5.
+
+## 5. Advisory review (artifact-only, decorrelated)
+Reviewer ran without build-notes.md. Summary:
+
+Review issue #652 / #624: prevent a finished bundle from carrying rejected prerequisite work through another finished bundle before wave 0.
+
+| Item | Verdict | Basis |
+|------|---------|-------|
+| C1 Spec | PASS | The pre-fold rejection boundary and three observable failure scenarios make this a falsifiable, bounded fix; fold-time failures are explicitly excluded (brief.md:15, brief.md:29; target/template/tests/test_flow_resume_stack_prereqs.py:393). |
+| C2 Reproduction (red pre-fix) | PASS | Independently stashing the production changes while retaining the tests produces exactly three assertion failures: dependent D/E is wrongly built (review-red-green.log:8, review-red-green.log:23, review-red-green.log:39; target/template/tests/test_flow_resume_stack_prereqs.py:154). |
+| C3 Change | NEEDS-HUMAN | Confirm the recorded prior-art conclusions for the affected paths — the brief reports merged and closed-PR searches, but the supplied one-commit repository has no remote or review history to independently settle duplication/rejected-work status (brief.md:34; review-target.log:1). |
+| C4 Verification (red→green) | PASS | After stash restoration, all 16 regression tests pass; the red leg failed on the intended behavior, not setup, and the restored target diff exactly matches the supplied patch (review-red-green.log:55, review-red-green.log:73; target/template/tests/test_flow_resume_stack_prereqs.py:393). |
+| C5 Causal adequacy | PASS | Dependency closure excludes contaminated finished branches before the actual fold; real-git red→green and independent reverse-order/clean-chain checks support the scoped cause, with no optional-capability workaround (target/template/src/pdca_harness/flow.py:887, target/template/src/pdca_harness/flow.py:962; review-extra.log:1, review-extra.log:7). |
+| T1 Structure | PASS | The change stays within carry judgment, its existing fixture and its documented contract; dependency parsing and bundle naming reuse existing interfaces (target/template/src/pdca_harness/flow.py:882; target/template/tests/test_flow_resume_stack_prereqs.py:373). |
+| T2 Shape | PASS | Independently rerun docs lint, site render/internal-link audit and git diff whitespace check pass; frozen host-parity evidence agrees, while semantic wording is addressed under T5 (target/docs/07-crosscutting.md:689; gate-logs/host-ci-docs.log:10; review-target.log:6). |
+| T3 Runtime | PASS | Independent offline suite: 2,372 tests, two skips, no failures; frozen evidence separately shows 24 root render/update tests passing, which this review interpreter cannot rerun because copier is not importable (review-suite.log:1797; gate-logs/T3-suite.log:38, gate-logs/T3-suite.log:54). |
+| T4 Contribution | N/A | Contribution artifacts are intentionally drafted after Check; the substantive contribution audit must rerun at publish (gate-logs/T4-contribution.log:10). |
+| T5 Judgment | NEEDS-HUMAN [impl] | Narrow the documentation and docstring guarantee to rejection known before folding — their unconditional cascade promise also covers merge failures, but an independently exercised fold-time conflict still carries the dependent and prerequisite ancestry (target/docs/07-crosscutting.md:689; target/template/src/pdca_harness/flow.py:913; review-extra.log:12). |
+| Validation — fitness-to-purpose | NEEDS-HUMAN | Accept the explicitly bounded recovery behavior and remaining fold-time, out-of-batch, alternate-edge and #624 live-drive limitations — the verified fix addresses pre-fold rejection only, and the fold-time residual was observed directly (brief.md:29; target/template/src/pdca_harness/flow.py:974; review-extra.log:12). |
+
+The T5 correction is wording, not a request to expand the runtime scope. The docs define “clean” using merge success, then promise that no finished dependent of a not-clean prerequisite is carried. The docstring makes the same promise. Qualify both with “judged not clean before the fold” and state that a later merge failure does not cascade in this change.
+
+I exercised the known residual using the existing real-git fixture: publish S with `c.txt = s`, P with `c.txt = p`, and Q from P with `c.txt = s` plus its own file; give Q `Depends on: P`, D `Depends on: Q`, and A `Depends on: P`. Run batch `[S, P, Q, D, A]`. S merges, P conflicts, Q merges, A stays held, and D reaches COMPLETE on a line containing P's commit. `review-extra.log:12` records that observed outcome. This is consistent with the brief's runtime exclusion but contradicts the newly written unconditional guarantee.
+
+The frozen production-path scanner only checked for newly added test files and had nothing to assert (`gate-logs/C5-prod-path.log:10`). I reran the available reference scanner and independently traced the modified fixture to production `_drive_and_act` and the real integration fold (`target/template/tests/test_flow_resume_stack_prereqs.py:140`, `target/template/tests/test_flow_resume_stack_prereqs.py:145`). The `gh` response stub does not hide the forbidden Git ancestry: the independent pre-fix run reproduces it. No unmet external dependency is needed for this scoped regression. Root render/update coverage rests on the frozen successful run, not a claim that copier ran locally.
+
+Prior-art evidence is limited to the supplied brief: it names merged history and closed work by production path, but the disposable target contains only its synthetic base commit and no remote (`review-target.log:1`). The available integration template enumerates no additional concrete human-only items (`target/template/docs/INTEGRATION.md.jinja:80`). The target is current for this patch, and the supplied changes were restored exactly after verification.
+
+<!-- pdca:leaf-complete -->
+
+### Advisory — code-review
+
+# Advisory code review — issue_652
+
+I found no correctness bug in the patch. The cascade (`_cascade_not_clean`, a loop that spreads "not clean" from a finished id to the finished ids that name it in `Depends on`) is right for the cases in the brief:
+
+- It runs after the `bad` line check and the per-id judgement, and before the fold (`template/src/pdca_harness/flow.py:962`). So a cascaded id never reaches `_fold_lines`.
+- The loop stops when nothing new is marked. That means chains of any length work, and a cycle cannot make it loop forever (`flow.py:888-896`).
+- An id that already has its own reason keeps it and is not relabelled `built_on` (`flow.py:892`).
+- The new hint gets `cause=` filled in. Older hints ignore the extra keyword, so `str.format` does not break them (`flow.py:987-989`).
+
+The C4 log shows the three new tests red without the fix (`issue_D` built on a line carrying Q and R) and green with it. T3 passes: 2372 tests OK.
+
+Findings, all minor:
+
+- NEEDS-HUMAN [impl] — `template/src/pdca_harness/flow.py:963`: there is a typo, `clean =[d for d in ids ...]`, with the space missing after `=`. The line before the patch was `clean = [...]`. Restore the space.
+- NEEDS-HUMAN [impl] — `template/tests/test_flow_resume_stack_prereqs.py` (new `_not_on_the_line` helper and its callers in the three new tests): every finished id in these tests is held, so nothing is folded before wave 0, and `_not_on_the_line` probably passes only because no line exists. The brief allows "if a line exists at all", and the `self.seen` / `_held` checks are the real RED. Still, no test covers a mixed target, where a clean, unrelated finished id IS carried while P and Q are held, so the line exists and has to leave out P's commit. Adding one more finished id (say `X`, OPEN, with a planned dependent) to the clause-1 test would make that check meaningful and test the "the rest is still carried" half of the invariant.
+- `template/src/pdca_harness/flow.py:879-883` (simplification, no action needed): `_cascade_not_clean` reads each finished id's brief to build its `Depends on` list. `_carry_finished` already does the same read for drive-set bundles (`flow.py:927-931`). The two loops could share one small "plain Depends-on names in this set" helper. That is cosmetic, and the cost is trivial (a few brief reads per target).
+- `template/src/pdca_harness/flow.py:871-896` (style, no action needed): the function both changes `why` in place and returns `causes`. The docstring says so, so the side effect is documented. Storing the cause in the `why` tuple would avoid a second dict, but it would also change the tuple shape that the "open"/"edge"/"line" paths share. The current choice is reasonable.
+
+Out of scope and not filed, as the brief says: the fold-time skip case (`flow.py:974-975`), a cascade across different targets (the edges only cover `ids` of the same target), and prerequisites that are not requested ids.
+
+<!-- pdca:leaf-complete -->
+
+## 6. NEEDS-HUMAN — items the human must clear before sign-off
+- [ ] C3 Change — Confirm the recorded prior-art conclusions for the affected paths — the brief reports merged and closed-PR searches, but the supplied one-commit repository has no remote or review history to independently settle duplication/rejected-work status (brief.md:34; review-target.log:1).
+- [ ] T5 Judgment — Narrow the documentation and docstring guarantee to rejection known before folding — their unconditional cascade promise also covers merge failures, but an independently exercised fold-time conflict still carries the dependent and prerequisite ancestry (target/docs/07-crosscutting.md:689; target/template/src/pdca_harness/flow.py:913; review-extra.log:12).
+- [ ] Validation — fitness-to-purpose — Accept the explicitly bounded recovery behavior and remaining fold-time, out-of-batch, alternate-edge and #624 live-drive limitations — the verified fix addresses pre-fold rejection only, and the fold-time residual was observed directly (brief.md:29; target/template/src/pdca_harness/flow.py:974; review-extra.log:12).
+- [ ] `template/src/pdca_harness/flow.py:963`: there is a typo, `clean =[d for d in ids ...]`, with the space missing after `=`. The line before the patch was `clean = [...]`. Restore the space.
+- [ ] `template/tests/test_flow_resume_stack_prereqs.py` (new `_not_on_the_line` helper and its callers in the three new tests): every finished id in these tests is held, so nothing is folded before wave 0, and `_not_on_the_line` probably passes only because no line exists. The brief allows "if a line exists at all", and the `self.seen` / `_held` checks are the real RED. Still, no test covers a mixed target, where a clean, unrelated finished id IS carried while P and Q are held, so the line exists and has to leave out P's commit. Adding one more finished id (say `X`, OPEN, with a planned dependent) to the clause-1 test would make that check meaningful and test the "the rest is still carried" half of the invariant.
+- [ ] **The invariant is wider than the criterion, and a fold-time "not clean" is not covered.** The brief's invariant says "The pre-wave carry never puts onto the line work it has judged not clean, directly or through another finished bundle's branch". The criterion only spreads "not clean" from the PR-state judgment that runs before the fold (`_finished_head`, `flow.py:913-920`). An id can also become not clean *during* the fold. `integrate.fold` with `skipped` records a merge failure for one bundle "and the next bundle is merged" (`integrate.py:334-336`, `:433-439`). The carry then adds it to `why` after the fold (`flow.py:937-938`). So a finished `P` that is state-clean but skipped at fold time (a conflict, as in `test_of_two_conflicting_prerequisites…`, `:246`), followed in the same fold by a finished `Q` with `Depends on: P` whose branch contains `P`, still puts `P`'s commits on the line. A fix that only spreads the pre-fold `why` before line 927 meets criteria (1)–(3) and still breaks the stated invariant. The planner should either narrow the invariant to "judged not clean before the fold" and list the fold-time case as out of scope, or add a criterion: a `P` skipped at fold time means `Q` is not folded. Doing that means pruning dependents during the fold or re-folding without them, which is a larger change.
+- [ ] **The fix contradicts the documented contract the brief cites, and no doc update is in scope.** The brief draws its invariant from `docs/07-crosscutting.md:686-691`. The second sentence there says "A finished prerequisite that is not clean holds **only** the bundles whose plain `Depends on` names it". The `_carry_finished` docstring says the same: "Any other finished id goes into `held`, so only its plain `Depends on` dependents wait" (`flow.py:883-885`). After the fix, a closed `P` also holds `Q`'s dependents, so both texts become wrong. Yet the brief cites both as the source of the invariant. Scope and Citations do not list updating either one. Either add the doc and docstring edits to Scope as one clause, or a reviewer will flag them as drift (or as an unplanned change) during Check.
+- [ ] **#624 is closed as a duplicate while its literal shape is explicitly left out.** The thread describes #624 as "the hold of an **unpublished** bundle doesn't cascade through a pre-run COMPLETE dependent". Criterion (2) swaps in "`U` finished with its PR CLOSED". The brief's Scope then excludes "a drive-set bundle whose own push fails mid-run … the rare residual of #624, not briefed". There is no `sources/` directory in this bundle, so I could not check #624's own thread or the human's Plan decision against the brief. If #624 is closed as a duplicate of this bundle, that residual has no tracker item left. Before #624 closes, the human should confirm the residual is acceptable or file a follow-up for it.
+- [ ] **The 652 → 653 ordering is stated in prose but not declared.** The Ordering note says "Separate waves: 652 first, and 653 builds on it". The brief declares only `Conflicts with: 653`, which separates the two into different waves but does not set their order. There is no `dependency-state.json` here, so I could not check whether 653's brief declares `Depends on: 652` / `Stacks on: 652`. If it doesn't, the "652 first" order is not enforced by anything.
+- [ ] **The hint for a cascaded hold is not specified.** Criterion (1) requires that the held line "names `issue_P` as the cause", but the brief does not say which `_CARRY_HINTS` entry (`flow.py:860-866`) `Q`'s line uses. The existing hints are worded for the id itself. For example, `"open"` says "get {name}'s PR open", which would tell the operator to reopen `Q`'s PR, but `Q`'s PR is already OPEN. The useful action is to fix `P`, or to remove `Q`'s `Depends on: P` edge. The brief should state the expected advice, or a hint key, so that the line's wording can be checked rather than left to Do.
+
+## 7. Proven / not proven
+- Proven by which oracle: gates overall = pass (stub oracles).
+- Unproven / needs manual run: anything flagged in §6.
+
+## 8. Ready-to-ship attachments
+- patch.diff
+- tracker-comment.md     (ALWAYS, every tracker item)
+- build-notes.md         (builder rationale — for the human, not the reviewer)
+
+## 9. Check sign-off                     ← human completes Check here
+- Disposition confirmed / overridden:
+- Outcome: iterated-to-Do
+- Iteration delta (if iterating): Auto-iterate (round 1): rebuilding for the implementation-level findings — T5 Judgment — Narrow the documentation and docstring guarantee to rejection known before folding — their unconditional cascade promise also covers merge failures, but an independently exercised fold-time conflict still carries the dependent and prerequisite ancestry (target/docs/07-crosscutting.md:689; target/template/src/pdca_harness/flow.py:913; review-extra.log:12).; `template/src/pdca_harness/flow.py:963`: there is a typo, `clean =[d for d in ids ...]`, with the space missing after `=`. The line before the patch was `clean = [...]`. Restore the space.; `template/tests/test_flow_resume_stack_prereqs.py` (new `_not_on_the_line` helper and its callers in the three new tests): every finished id in these tests is held, so nothing is folded before wave 0, and `_not_on_the_line` probably passes only because no line exists. The brief allows "if a line exists at all", and the `self.seen` / `_held` checks are the real RED. Still, no test covers a mixed target, where a clean, unrelated finished id IS carried while P and Q are held, so the line exists and has to leave out P's commit. Adding one more finished id (say `X`, OPEN, with a planned dependent) to the clause-1 test would make that check meaningful and test the "the rest is still carried" half of the invariant.. Deferred, not addressed here: 6 finding(s) that need human judgment, held in deferred-findings.json for the human at handover — not build work
+- By / date: auto-iterate / 2026-10-10
+
+## 10. Act candidates (hints for the next Act review)
+- Plan advisory: 5 finding(s); brief revised: yes (plan-advisory-*.md)
+- (empty is the common case)

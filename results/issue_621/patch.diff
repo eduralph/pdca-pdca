@@ -1,0 +1,489 @@
+diff --git a/docs/07-crosscutting.md b/docs/07-crosscutting.md
+index 05f22c6..f172e12 100644
+--- a/docs/07-crosscutting.md
++++ b/docs/07-crosscutting.md
+@@ -728,6 +728,13 @@ wave builds on, via `[driver].wave_mode`:
+   at all; `gh pr merge` alone would only refuse what *this host* marks required in
+   branch protection, so without that read a thin protection config lets the next
+   wave build on a base that never went green.
++  A green read is confirmed by a second read one poll interval later, and that
++  read must list the same checks (each name as many times), so a rollup whose
++  set of checks changed in between is not a confirmation. The rollup lists only
++  the checks registered so far, so a slow job that has not registered yet cannot
++  be seen: name such checks in `[driver].expected_checks` and a green read that
++  lacks one counts as still running. With nothing declared (the default), a job
++  that registers more than a poll interval late still gets through.
+   A rollup only describes the head it ran on, so the driver first checks in git
+   whether the PR's head is behind its base (an earlier PR of the same wave just
+   merged): `git merge-base --is-ancestor` after a fetch. If it is, the driver
+diff --git a/template/pdca.toml.jinja b/template/pdca.toml.jinja
+index 8ae102e..d65c6a1 100644
+--- a/template/pdca.toml.jinja
++++ b/template/pdca.toml.jinja
+@@ -192,6 +192,16 @@ merge_requires = "all"
+ #   300  (default) — a sensible bound for CI to register and report on a freshly-opened PR.
+ #   0    — perform no wait at all: a single read, the original immediate-refusal behaviour.
+ merge_wait_secs = 300
++# Checks a complete rollup must contain (merge mode, merge_requires = "all"; issue #621).
++# The confirm read above must list the same checks as the green it confirms, but it cannot
++# know about a slow job that has not registered yet: with nothing declared, green(dco) then
++# green(dco) still merges before a late `e2e` shows up. Name such checks here and a green
++# read missing one counts as pending (the wait goes on, then refuses naming it). A declared
++# check counts once it passes or is skipped/neutral (e.g. a path filter skipped it). A bare
++# string is one name. A malformed value (not a name or a list of names) refuses every PR.
++#   []   (default) — declare nothing.
++#   ["dco", "e2e"] — merge only once both have reported and passed.
++# expected_checks = ["dco", "e2e"]
+ # Optional integration re-gate (#wave-model). After each wave folds (stack mode), run the
+ # repo-scoped gates over the folded integration tip before the next wave builds on it, so a
+ # combination that is red though each fix was green ALONE stops the run. Off by default
+diff --git a/template/src/pdca_harness/config.py b/template/src/pdca_harness/config.py
+index 679fe6f..8da9640 100644
+--- a/template/src/pdca_harness/config.py
++++ b/template/src/pdca_harness/config.py
+@@ -384,6 +384,16 @@ class Config:
+     # performs no wait at all — a single read, the original immediate-refusal behaviour.
+     # [driver].merge_wait_secs.
+     merge_wait_secs: int = 300
++    # Checks a complete rollup must contain (issue #621). The confirm read above only proves
++    # the same checks stayed green; it cannot know about a slow job that has not registered
++    # yet. Every name here must be reported and pass (or be skipped/neutral) before the
++    # merge-mode rollup gate reads green; a missing one reads as pending. Empty (default)
++    # declares nothing. [driver].expected_checks: a list of check names, or one bare name.
++    expected_checks: tuple[str, ...] = ()
++    # Why ``[driver].expected_checks`` was malformed, or "" when it parsed. Set ⇒ merge mode
++    # refuses every PR naming the bad setting (fail-closed: falling back to the empty list
++    # would be the weakest reading and merge what the operator configured against).
++    expected_checks_error: str = ""
+     # Optional integration re-gate (#wave-model): after each wave folds onto the
+     # integration branch, run the repo-scoped gates over that tip before the next wave
+     # builds on it, so a combination that is red though each fix was green alone STOPs the
+@@ -744,6 +754,13 @@ class Config:
+             print(f"config: [driver].merge_wait_secs must be >= 0, got {merge_wait_secs} — "
+                   "using the default 300", file=sys.stderr)
+             merge_wait_secs = 300
++        # Checks a complete rollup must contain (issue #621). A bad value warns and fails
++        # CLOSED like merge_requires above — never to the empty default, the weakest reading.
++        expected_checks, expected_checks_error = _expected_checks(
++            driver_cfg.get("expected_checks", []))
++        if expected_checks_error:
++            print(f"config: {expected_checks_error} — merge mode will refuse every PR until "
++                  "it is fixed", file=sys.stderr)
+         regate_between_waves = bool(driver_cfg.get("regate_between_waves", False))
+         act_cadence = max(1, int(driver_cfg.get("act_cadence", 5)))  # issue #109
+         # Footprint sweep mode (issue #297). An unknown value falls back to "clean" with a
+@@ -852,6 +869,8 @@ class Config:
+             merge_method=merge_method,
+             merge_requires=merge_requires,
+             merge_wait_secs=merge_wait_secs,
++            expected_checks=expected_checks,
++            expected_checks_error=expected_checks_error,
+             regate_between_waves=regate_between_waves,
+             act_cadence=act_cadence,
+             sweep_worktrees=sweep_worktrees,
+@@ -875,6 +894,18 @@ class Config:
+         )
+ 
+ 
++def _expected_checks(raw: object) -> tuple[tuple[str, ...], str]:
++    """Parse ``[driver].expected_checks`` (issue #621) into ``(names, "")``, or ``((),
++    why)`` when it is malformed. A bare string is one name; a list must hold only non-blank
++    strings. Names are stripped and de-duplicated in order. Anything else — another type, a
++    blank name — is malformed: the caller fails closed on ``why``, never on ``()``."""
++    items = [raw] if isinstance(raw, str) else raw
++    if isinstance(items, list) and all(isinstance(n, str) and n.strip() for n in items):
++        return tuple(dict.fromkeys(n.strip() for n in items)), ""
++    return (), ("[driver].expected_checks must be a check name or a list of non-blank check "
++                f"names, got {raw!r}")
++
++
+ def _normalize_host_ci(entries: list) -> list[dict]:
+     """Normalize ``[gates] host_ci`` (issue #311) into gate-check-shaped rows.
+ 
+diff --git a/template/src/pdca_harness/merge.py b/template/src/pdca_harness/merge.py
+index 870d6e5..df14f0a 100644
+--- a/template/src/pdca_harness/merge.py
++++ b/template/src/pdca_harness/merge.py
+@@ -40,7 +40,10 @@ time. A ``green`` read is confirmed once before it is believed (issue #582): the
+ lists only the checks registered so far, so a fast check that passed can read green while
+ a slow job has not reported yet. The wait re-reads one full poll interval later and merges
+ only if that read is green too; a green seen with less than a poll interval of budget left
+-to confirm it refuses as pending.
++to confirm it refuses as pending. The confirm read must also list the same checks as the
++green it confirms (issue #621), and ``[driver].expected_checks`` can name checks a complete
++rollup must contain: a green read missing one counts as pending. With nothing declared, a
++slow job that registers more than a poll interval after the fast ones still gets through.
+ Whichever way ``_merge_one`` declines to merge a PR it already readied — the rollup
+ never resolving green, a failing ``gh pr merge`` — ``_undo_ready`` marks it back to draft
+ (``gh pr ready --undo``) before returning, so a stopped wave never leaves a PR advertising
+@@ -108,9 +111,12 @@ def merge_wave(cfg: Config, bundles: list[Path], *, dry_run: bool = False,
+     return 0
+ 
+ 
+-def _check_rollup(pr_url: str) -> tuple[str, str]:
++def _check_rollup(pr_url: str) -> tuple[str, str, tuple[str, ...]]:
+     """Classify PR ``pr_url``'s FULL check rollup (issue #413). Returns
+-    ``(verdict, detail)``; only ``"green"`` may merge.
++    ``(verdict, detail, names)``; only ``"green"`` may merge. ``names`` (issue #621) is the
++    sorted name of every check the read reported, one entry per check (so a name listed
++    twice appears twice), or ``()`` when no list was read; ``_wait_for_green`` compares it
++    between a green and its confirm read and checks the declared checks against it.
+ 
+     * ``"green"``      — every reported check completed without failing (pass, or
+       skipped/neutral); ``detail`` counts what was verified, for the run log.
+@@ -140,37 +146,55 @@ def _check_rollup(pr_url: str) -> tuple[str, str]:
+         # refuse under the default, so a gh that reworded the message costs a message, not
+         # a wrong merge.
+         if r.returncode == 0 or "no checks reported" in err.lower():
+-            return "empty", err or "no checks reported"
+-        return "unreadable", err or f"`gh pr checks` exited {r.returncode}"
++            return "empty", err or "no checks reported", ()
++        return "unreadable", err or f"`gh pr checks` exited {r.returncode}", ()
+     try:
+         checks = json.loads(out)
+     except ValueError:
+-        return "unreadable", f"unparsable `gh pr checks` output: {out[:200]}"
++        return "unreadable", f"unparsable `gh pr checks` output: {out[:200]}", ()
+     if not isinstance(checks, list):
+-        return "unreadable", f"unexpected `gh pr checks` payload: {out[:200]}"
++        return "unreadable", f"unexpected `gh pr checks` payload: {out[:200]}", ()
+     if not checks:
+-        return "empty", "no checks reported"
++        return "empty", "no checks reported", ()
++    names = tuple(sorted(_name(c) for c in checks))
+     failing = [c for c in checks if _bucket(c) not in _ROLLUP_OK | _ROLLUP_PENDING]
+     if failing:
+-        return "failing", _names(failing)
++        return "failing", _names(failing), names
+     waiting = [c for c in checks if _bucket(c) in _ROLLUP_PENDING]
+     if waiting:
+-        return "pending", _names(waiting)
+-    return "green", f"{len(checks)} check{'' if len(checks) == 1 else 's'}"
++        return "pending", _names(waiting), names
++    return "green", f"{len(checks)} check{'' if len(checks) == 1 else 's'}", names
+ 
+ 
+ def _bucket(check: object) -> str:
+     return str(check.get("bucket") or "") if isinstance(check, dict) else ""
+ 
+ 
++def _name(check: object) -> str:
++    return str((check.get("name") if isinstance(check, dict) else None) or "?")
++
++
+ def _names(checks: list) -> str:
+-    return ", ".join(
+-        f"{(c.get('name') if isinstance(c, dict) else None) or '?'} ({_bucket(c) or '?'})"
+-        for c in checks)
++    return ", ".join(f"{_name(c)} ({_bucket(c) or '?'})" for c in checks)
++
++
++def _read_rollup(pr_url: str, expected: tuple[str, ...]) -> tuple[str, str, tuple[str, ...]]:
++    """``_check_rollup``, then the declared checks (issue #621, ``[driver].expected_checks``):
++    a green read that lacks any name in ``expected`` is not the complete rollup, so it is
++    returned as ``pending``, naming what is missing. A declared check that reported counts
++    when the read is green, i.e. it passed or was skipped/neutral (``_ROLLUP_OK``)."""
++    verdict, detail, names = _check_rollup(pr_url)
++    if verdict == "green":
++        missing = [n for n in expected if n not in names]
++        if missing:
++            return "pending", (f"expected check{'' if len(missing) == 1 else 's'} "
++                               f"{', '.join(missing)} not reported yet ({detail} "
++                               "reported)"), names
++    return verdict, detail, names
+ 
+ 
+ def _wait_for_green(pr_url: str, wait_secs: int, *, poll_interval: int = 15,
+-                    spent: int = 0) -> tuple[str, str]:
++                    spent: int = 0, expected: tuple[str, ...] = ()) -> tuple[str, str]:
+     """Re-read ``pr_url``'s check rollup (``_check_rollup``) until it clears ``pending``/
+     ``empty`` or ``wait_secs`` of (patchable) wall-clock time is exhausted (issue #462).
+     Returns the final ``(verdict, detail)`` — this never itself decides to merge.
+@@ -189,16 +213,23 @@ def _wait_for_green(pr_url: str, wait_secs: int, *, poll_interval: int = 15,
+     ``empty`` goes back into the wait; ``failing``/``unreadable`` is returned at once. The
+     confirm is never shortened to fit the budget: a green first seen with less than one
+     poll interval of budget left is returned as ``pending`` (fail-closed), with a detail
+-    that says so — so a ``wait_secs`` below ``poll_interval`` never returns ``green``. This
+-    compares verdicts only, not check names: a slow job that has not registered within one
+-    poll interval still gets through.
+-
+-    ``wait_secs <= 0`` performs exactly one read and returns its verdict as-is: the
+-    original behaviour, for a host whose checks are known to already be in by the time the
+-    wave boundary fires. Sleeps go through the module-level ``_sleep`` so a test can make
+-    the whole loop cost no real time; their sum never exceeds ``wait_secs``.
++    that says so — so a ``wait_secs`` below ``poll_interval`` never returns ``green``.
++
++    The confirm compares check NAMES too (issue #621): it confirms only if it lists the
++    same checks as the green it confirms, each name as many times. A green confirm read
++    with a different set is itself a new first green, confirmed one poll interval later.
++    ``expected`` (``[driver].expected_checks``) names checks a complete rollup must
++    contain; a green read missing one reads as ``pending`` (``_read_rollup``), so the wait
++    goes on until it registers. Without ``expected`` the harness cannot know about a slow
++    job that has not registered within one poll interval: that one still gets through.
++
++    ``wait_secs <= 0`` performs exactly one read and returns its verdict as-is (a missing
++    declared check still reads as ``pending``): the original behaviour, for a host whose
++    checks are known to already be in by the time the wave boundary fires. Sleeps go
++    through the module-level ``_sleep`` so a test can make the whole loop cost no real
++    time; their sum never exceeds ``wait_secs``.
+     """
+-    verdict, detail = _check_rollup(pr_url)
++    verdict, detail, names = _read_rollup(pr_url, expected)
+     if wait_secs <= 0:
+         return verdict, detail
+     waited = spent
+@@ -207,7 +238,7 @@ def _wait_for_green(pr_url: str, wait_secs: int, *, poll_interval: int = 15,
+             step = min(poll_interval, wait_secs - waited)
+             _sleep(step)
+             waited += step
+-            verdict, detail = _check_rollup(pr_url)
++            verdict, detail, names = _read_rollup(pr_url, expected)
+         if verdict != "green":
+             return verdict, detail
+         # Confirm a full poll interval later or not at all: a re-read squeezed into what is
+@@ -219,9 +250,12 @@ def _wait_for_green(pr_url: str, wait_secs: int, *, poll_interval: int = 15,
+                                f"little to confirm it {poll_interval}s later ({detail})")
+         _sleep(poll_interval)
+         waited += poll_interval
+-        verdict, detail = _check_rollup(pr_url)
+-        if verdict == "green":
++        first = names
++        verdict, detail, names = _read_rollup(pr_url, expected)
++        if verdict == "green" and names == first:
+             return verdict, detail
++        # A green over a different set of checks confirms nothing (issue #621): it is a new
++        # first green, and the loop above confirms it in turn (or refuses for lack of budget).
+ 
+ 
+ def _pr_head(pr_url: str) -> tuple[str, str, str]:
+@@ -386,6 +420,15 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
+     iid = d.name.removeprefix("issue_")
+     if merged.is_merged(cfg, iid):
+         return 0  # already merged (a resumed run) — idempotent
++    # Issue #621: a malformed [driver].expected_checks fails closed. Config.load keeps the
++    # list empty and records why; merging on that empty list would be the weakest reading
++    # of a setting the operator wrote to be stricter. Refused before the ready-mark, so the
++    # PR stays a draft with nothing to undo.
++    if cfg.expected_checks_error:
++        print(f"\n!!! merge: {d.name} ({pr_url}) was NOT merged — "
++              f"{cfg.expected_checks_error}. STOP: later waves are NOT run; fix the setting "
++              "in pdca.toml, then re-run (the run resumes idempotently).\n", file=sys.stderr)
++        return 1
+ 
+     # The publisher opens every PR as a draft (STOP discipline), but `gh pr merge` refuses a
+     # draft — so in merge mode a non-final wave's PRs must be readied before they can advance
+@@ -448,7 +491,10 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
+         # A wave boundary fires seconds after the PR opened (issue #462), so the first read
+         # is routinely pending/empty — not a verdict yet. Wait for it to resolve, bounded by
+         # [driver].merge_wait_secs, before treating an unresolved rollup as a refusal.
+-        verdict, detail = _wait_for_green(str(pr_url), cfg.merge_wait_secs, spent=waited)
++        # Issue #621: the green must also be the complete rollup — every declared check in
++        # it, and a confirm read over the same checks.
++        verdict, detail = _wait_for_green(str(pr_url), cfg.merge_wait_secs, spent=waited,
++                                          expected=cfg.expected_checks)
+         if verdict != "green":
+             why = {
+                 "failing": f"a check is FAILING — {detail}",
+diff --git a/template/tests/test_merge.py b/template/tests/test_merge.py
+index 1ee4030..f0f6985 100644
+--- a/template/tests/test_merge.py
++++ b/template/tests/test_merge.py
+@@ -1152,5 +1152,198 @@ class MergeAgainstCurrentBase(unittest.TestCase):
+                                     f"merged with {budget - polled}s left after polling")
+ 
+ 
++# ---- issue #621: a green rollup is believed only once it is the complete one ------------
++
++def _green(*names: str) -> SimpleNamespace:
++    """A green `gh pr checks` read: every named check passed."""
++    return _rollup(*((n, "pass") for n in names))
++
++
++class MergeConfirmRequiresCompleteRollup(unittest.TestCase):
++    """Issue #621: the #582 confirm compared verdicts only, so `green(dco)` → `green(dco)`
++    merged before a slow `e2e` had registered, and `green(dco)` → `green(dco, e2e)` counted
++    as confirmed though the two reads saw different checks. Now the confirm read must list
++    the same checks (as a multiset), and `[driver].expected_checks` names checks a green
++    read must contain. With nothing declared, `green(dco)` → `green(dco)` still merges."""
++
++    URL = "https://gh/pr/1"
++
++    def setUp(self) -> None:
++        self.tmp = Path(tempfile.mkdtemp())
++        self.addCleanup(shutil.rmtree, self.tmp, True)
++
++    def _wait(self, reads: list[SimpleNamespace], wait_secs: int = 300,
++              **kw: object) -> tuple[str, str, int, list[int]]:
++        """`merge._wait_for_green` over scripted `gh pr checks` reads (the last repeats),
++        with `merge._sleep` patched. Returns verdict, detail, reads made, sleeps."""
++        n = {"read": 0}
++        slept: list[int] = []
++
++        def fake_run(cmd, **_):
++            self.assertEqual(cmd[:3], ["gh", "pr", "checks"])
++            n["read"] += 1
++            return reads[min(n["read"], len(reads)) - 1]
++
++        with mock.patch("pdca_harness.merge.subprocess.run", side_effect=fake_run), \
++                mock.patch.object(merge, "_sleep", side_effect=slept.append):
++            verdict, detail = merge._wait_for_green(self.URL, wait_secs, **kw)
++        self.assertLessEqual(sum(slept), wait_secs)
++        return verdict, detail, n["read"], slept
++
++    def _merge(self, reads: list[SimpleNamespace], cfg: Config) -> tuple[int, list, str]:
++        """One COMPLETE bundle through `merge.merge_wave` with scripted rollup reads.
++        Returns the exit code, every command shelled, and stderr."""
++        d = cfg.bundle("621")
++        d.mkdir(parents=True)
++        (d / "patch.diff").write_text("diff\n", encoding="utf-8")
++        (d / "publish.json").write_text(json.dumps({"pr_url": self.URL, "repo": "org/repo"}),
++                                        encoding="utf-8")
++        calls: list[list[str]] = []
++        n = {"read": 0}
++
++        def fake_run(cmd, **_):
++            calls.append(cmd)
++            if cmd[:3] == ["gh", "pr", "checks"]:
++                n["read"] += 1
++                return reads[min(n["read"], len(reads)) - 1]
++            return _up_to_date(cmd) or SimpleNamespace(returncode=0, stdout="", stderr="")
++
++        with mock.patch("pdca_harness.merge.subprocess.run", side_effect=fake_run), \
++                mock.patch.object(merge, "_sleep"), \
++                mock.patch.object(merge.state, "state", return_value=state.COMPLETE), \
++                mock.patch.object(merge.merged, "is_merged", return_value=False), \
++                redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()) as err:
++            rc = merge.merge_wave(cfg, [d])
++        return rc, calls, err.getvalue()
++
++    @staticmethod
++    def _merged(calls: list[list[str]]) -> bool:
++        return any(c[:3] == ["gh", "pr", "merge"] for c in calls)
++
++    # (1) declared checks -------------------------------------------------------------
++
++    def test_declared_check_that_never_registers_never_reads_green(self) -> None:
++        verdict, detail, reads, _ = self._wait([_green("dco")], expected=("dco", "e2e"))
++        self.assertEqual(verdict, "pending")
++        self.assertIn("e2e", detail)
++        self.assertNotIn("dco", detail.split("(")[0])   # names only what is missing
++        self.assertGreater(reads, 2)                     # it kept waiting to the bound
++
++    def test_declared_check_missing_refuses_the_merge_and_undoes_ready(self) -> None:
++        cfg = _cfg(self.tmp, expected_checks=("dco", "e2e"))
++        rc, calls, err = self._merge([_green("dco")], cfg)
++        self.assertEqual(rc, 1)
++        self.assertFalse(self._merged(calls))
++        self.assertIn("e2e", err)
++        self.assertIn(["gh", "pr", "ready", self.URL, "--undo"], calls)
++
++    def test_declared_check_that_registers_and_passes_merges_after_two_same_reads(self) -> None:
++        reads = [_green("dco"), _green("dco"), _green("dco", "e2e"), _green("dco", "e2e")]
++        verdict, _, n, slept = self._wait(reads, expected=("dco", "e2e"))
++        self.assertEqual((verdict, n), ("green", 4))
++        self.assertEqual(slept[-1], 15)                  # confirm one poll interval later
++        rc, calls, _ = self._merge(reads, _cfg(self.tmp, expected_checks=("dco", "e2e")))
++        self.assertEqual(rc, 0)
++        self.assertTrue(self._merged(calls))
++
++    def test_declared_check_that_is_skipped_does_not_block(self) -> None:
++        # gh reports skipped and neutral checks as `skipping` — a completed non-failure.
++        read = _rollup(("dco", "pass"), ("e2e", "skipping"))
++        verdict, _, n, _ = self._wait([read], expected=("dco", "e2e"))
++        self.assertEqual((verdict, n), ("green", 2))
++
++    # (1b) single read --------------------------------------------------------------
++
++    def test_declared_check_applies_to_the_single_read_of_wait_zero(self) -> None:
++        verdict, detail, n, slept = self._wait([_green("dco")], 0, expected=("dco", "e2e"))
++        self.assertEqual((verdict, n, slept), ("pending", 1, []))
++        self.assertIn("e2e", detail)
++        rc, calls, err = self._merge(
++            [_green("dco")], _cfg(self.tmp, merge_wait_secs=0, expected_checks=("dco", "e2e")))
++        self.assertEqual(rc, 1)
++        self.assertFalse(self._merged(calls))
++        self.assertIn("e2e", err)
++        self.assertIn(["gh", "pr", "ready", self.URL, "--undo"], calls)
++
++    # (2) names compared ------------------------------------------------------------
++
++    def test_confirm_read_over_a_different_set_is_not_a_confirmation(self) -> None:
++        # 29 s of budget: room for one confirm (15 s) but not a second, so a changed set at
++        # the confirm leaves the green unconfirmed.
++        verdict, _, n, _ = self._wait([_green("dco"), _green("dco", "e2e")], 29)
++        self.assertEqual((verdict, n), ("pending", 2))
++        # With budget left, the changed set is confirmed by a later read listing the same.
++        verdict, _, n, slept = self._wait(
++            [_green("dco"), _green("dco", "e2e"), _green("dco", "e2e")])
++        self.assertEqual((verdict, n, slept), ("green", 3, [15, 15]))
++        rc, calls, _ = self._merge([_green("dco"), _green("dco", "e2e"), _green("dco", "e2e")],
++                                   _cfg(self.tmp))
++        self.assertEqual(rc, 0)
++        self.assertEqual(len([c for c in calls if c[:3] == ["gh", "pr", "checks"]]), 3)
++
++    def test_names_are_compared_as_a_multiset(self) -> None:
++        # The same job name in two workflows (or a re-run listed twice) is a different rollup.
++        verdict, _, n, _ = self._wait([_green("build"), _green("build", "build")], 29)
++        self.assertEqual((verdict, n), ("pending", 2))
++        verdict, _, n, _ = self._wait(
++            [_green("build"), _green("build", "build"), _green("build", "build")])
++        self.assertEqual((verdict, n), ("green", 3))
++
++    # (3) unchanged with nothing declared ---------------------------------------------
++
++    def test_same_set_with_nothing_declared_still_confirms(self) -> None:
++        verdict, detail, n, slept = self._wait([_green("dco")])
++        self.assertEqual((verdict, detail, n, slept), ("green", "1 check", 2, [15]))
++        rc, calls, _ = self._merge([_green("dco")], _cfg(self.tmp))
++        self.assertEqual(rc, 0)
++        self.assertTrue(self._merged(calls))
++
++    # (4) the setting -----------------------------------------------------------------
++
++    def test_expected_checks_comes_from_the_driver_table(self) -> None:
++        root = self.tmp / "instance"
++        root.mkdir()
++        toml = root / "pdca.toml"
++        base = '[paths]\nbundle_root = "results"\n'
++
++        toml.write_text(base, encoding="utf-8")                    # unset ⇒ empty
++        cfg = Config.load(root)
++        self.assertEqual((cfg.expected_checks, cfg.expected_checks_error), ((), ""))
++
++        toml.write_text(base + '\n[driver]\nexpected_checks = ["dco", "e2e"]\n',
++                        encoding="utf-8")
++        self.assertEqual(Config.load(root).expected_checks, ("dco", "e2e"))
++
++        toml.write_text(base + '\n[driver]\nexpected_checks = "e2e"\n', encoding="utf-8")
++        cfg = Config.load(root)                                    # bare string ⇒ one item
++        self.assertEqual((cfg.expected_checks, cfg.expected_checks_error), (("e2e",), ""))
++
++        for bad in ("5", '["e2e", 3]', '{ name = "e2e" }', '[""]', "true"):
++            with self.subTest(value=bad):
++                toml.write_text(base + f"\n[driver]\nexpected_checks = {bad}\n",
++                                encoding="utf-8")
++                with redirect_stderr(io.StringIO()) as err:
++                    cfg = Config.load(root)
++                self.assertIn("expected_checks", err.getvalue())   # warns on stderr
++                self.assertIn("expected_checks", cfg.expected_checks_error)
++
++    def test_malformed_expected_checks_fails_closed_in_merge_mode(self) -> None:
++        # Not the empty default: a green rollup that would merge without the setting is
++        # refused, naming the bad setting.
++        root = self.tmp / "instance2"
++        root.mkdir()
++        (root / "pdca.toml").write_text(
++            '[paths]\nbundle_root = "results"\n\n[driver]\nexpected_checks = 5\n',
++            encoding="utf-8")
++        with redirect_stderr(io.StringIO()):
++            loaded = Config.load(root)
++        cfg = _cfg(self.tmp, expected_checks=loaded.expected_checks,
++                   expected_checks_error=loaded.expected_checks_error)
++        rc, calls, err = self._merge([_green("dco", "e2e")], cfg)
++        self.assertEqual(rc, 1)
++        self.assertFalse(self._merged(calls))
++        self.assertIn("expected_checks", err)
++
++
+ if __name__ == "__main__":
+     unittest.main()

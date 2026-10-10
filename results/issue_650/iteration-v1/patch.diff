@@ -1,0 +1,421 @@
+diff --git a/template/src/pdca_harness/merge.py b/template/src/pdca_harness/merge.py
+index 870d6e5..3f3d448 100644
+--- a/template/src/pdca_harness/merge.py
++++ b/template/src/pdca_harness/merge.py
+@@ -55,18 +55,22 @@ on). Whether that happens must not hinge on ``strict`` any more than on required
+ under the default ``merge_requires = "all"`` ``_merge_one`` decides, after the ready-mark,
+ whether the PR is behind its base, in plain git as ``publish._line_tip_refusal`` does
+ (#593): read the PR's head from the host, fetch, record the base branch's tip, and ask
+-``git merge-base --is-ancestor <tip> <head>`` (``_base_read``). A PR that is behind is
+-brought up to date with a merge-commit update of its own branch (``gh pr update-branch``,
+-never ``--rebase`` — a rebase rewrites the commits sign-off reviewed — whatever
+-``merge_method`` is). GitHub may finish that update after the command returns, so
+-``_wait_for_update`` re-reads the head until it contains the recorded tip, charged to the
+-same ``merge_wait_secs`` budget the rollup wait then gets for the NEW head. After the green
+-the head and base are read again: the head must be the one read before the wait (so the
+-green was that head's) and must not be behind, and ``gh pr merge`` is pinned to it
+-(``--match-head-commit``), so a head that changes after the green read is refused by the
+-host instead of merged. Every refusal on that path undoes the ready-mark. The base moving
+-between the last read and the host executing the merge is a gap no client can close: a
+-``strict`` host refuses that merge, a non-strict one would merge it.
++``git merge-base --is-ancestor <tip> <head>`` (``_base_read``). The fetch covers the base
++remote, ``origin``, and the remote the bundle's publish record says its branch was pushed
++to (``_remotes``, #650 — an ``Onto branch`` bundle's may be a third one); a head commit
++still missing after it is refused by name (``_have``), not as a bare git failure. A PR
++that is behind is brought up to date with a merge-commit update of its own branch
++(``gh pr update-branch``, never ``--rebase`` — a rebase rewrites the commits sign-off
++reviewed — whatever ``merge_method`` is). GitHub may finish that update after the
++command returns, so ``_wait_for_update`` re-reads the head until it contains the recorded
++tip, charged to the same ``merge_wait_secs`` budget the rollup wait then gets for the NEW
++head. After the green the head and base are read again: the head must be the one read
++before the wait (so the green was that head's) and must not be behind, and ``gh pr
++merge`` is pinned to it (``--match-head-commit``), so a head that changes after the green
++read is refused by the host instead of merged. Every refusal on that path undoes the
++ready-mark. The base moving between the last read and the host executing the merge is a
++gap no client can close: a ``strict`` host refuses that merge, a non-strict one would
++merge it.
+ ``merge_requires = "required"`` (trust the host's protection) is unchanged: no base read,
+ no update, no pin.
+ """
+@@ -79,7 +83,7 @@ import sys
+ import time
+ from pathlib import Path
+ 
+-from . import merged, publish, state
++from . import integrate, merged, publish, state
+ from .config import Config
+ 
+ # Patchable indirection so a test can drive the wait loop below with no real wall-clock
+@@ -253,16 +257,38 @@ def _git_failed(repo: Path, what: str, r: subprocess.CompletedProcess) -> str:
+             f"({tail[-1] if tail else 'no output'})")
+ 
+ 
+-def _fetch(cfg: Config, repo: Path) -> str:
+-    """Fetch the PR's base (``base_remote``) and its branch (``origin``, where publish
+-    pushed it — the same remote on an own-repo checkout) into ``repo``. "" or why not."""
+-    for remote in dict.fromkeys((cfg.base_remote, "origin")):
++def _remotes(cfg: Config, d: Path) -> tuple[str, ...]:
++    """The remotes to fetch before reading bundle ``d``'s PR head against its base (issue
++    #650): the PR's base (``base_remote``), ``origin`` (where a ``new-pr`` /
++    ``stacked-pr`` publish pushed the branch), and — read from the publish record as the
++    fold reads it, ``integrate._published_ref`` — the remote a ``"stacked"`` (``Onto
++    branch``) record pushed to, which may be a third one. Deduplicated, in that order."""
++    pub = integrate._published_ref(d)
++    return tuple(dict.fromkeys((cfg.base_remote, "origin", *(pub[:1] if pub else ()))))
++
++
++def _fetch(repo: Path, remotes: tuple[str, ...]) -> str:
++    """Fetch each of ``remotes`` (``_remotes``) into ``repo``. "" or why not — a failed
++    fetch of any of them, the record's own remote included, is a refusal."""
++    for remote in remotes:
+         r = _git(repo, "fetch", remote)
+         if r.returncode != 0:
+             return _git_failed(repo, f"fetch {remote}", r)
+     return ""
+ 
+ 
++def _have(repo: Path, head: str, remotes: tuple[str, ...]) -> str:
++    """"" when ``repo`` holds commit ``head`` after the fetches; otherwise a refusal that
++    names the commit and the remotes fetched (issue #650), rather than letting ``git
++    merge-base`` fail on it with a bare exit 128."""
++    r = _git(repo, "cat-file", "-e", f"{head}^{{commit}}")
++    if r.returncode == 0:
++        return ""
++    return (f"its head commit {head} is not in the checkout {repo} after fetching "
++            f"{', '.join(remotes)} — the remote its branch was pushed to is not among them "
++            "(or its publish record does not name it)")
++
++
+ def _contains(repo: Path, tip: str, head: str) -> tuple[bool | None, str]:
+     """Whether commit ``head`` contains commit ``tip``: ``git merge-base --is-ancestor <tip>
+     <head>`` in ``repo`` — exit 0 yes, exit 1 no. Any other exit is git failing (a commit
+@@ -273,19 +299,21 @@ def _contains(repo: Path, tip: str, head: str) -> tuple[bool | None, str]:
+     return None, _git_failed(repo, f"merge-base --is-ancestor {tip[:12]} {head[:12]}", r)
+ 
+ 
+-def _base_read(cfg: Config, repo: Path, pr_url: str) -> tuple[str, str, bool | None, str]:
++def _base_read(cfg: Config, repo: Path, pr_url: str,
++               remotes: tuple[str, ...]) -> tuple[str, str, bool | None, str]:
+     """Whether PR ``pr_url``'s head lacks its base branch's current tip (issue #531), in
+     plain git as ``publish._line_tip_refusal`` decides its question (#593), not by a
+     host-side comparison: the head and base branch from the host (``_pr_head``), a fetch
+-    into the checkout ``repo`` (``_fetch``), the base tip recorded from
+-    ``<base_remote>/<base>``, then ``_contains``. Returns ``(head, tip, behind, "")``. On any
+-    failure — ``gh`` unreadable, a failed fetch, a base that does not resolve, ``git
+-    merge-base`` exiting other than 0/1 — ``behind`` is None and the last item says why:
++    of ``remotes`` (``_remotes``) into the checkout ``repo`` (``_fetch``), the base tip
++    recorded from ``<base_remote>/<base>``, then ``_contains``. Returns ``(head, tip,
++    behind, "")``. On any failure — ``gh`` unreadable, a failed fetch, a base that does not
++    resolve, a head the fetches did not bring in (``_have``, #650), ``git merge-base``
++    exiting other than 0/1 — ``behind`` is None and the last item says why:
+     the caller refuses, fail-closed, and never guesses "up to date"."""
+     head, base, why = _pr_head(pr_url)
+     if not head:
+         return "", "", None, why
+-    why = _fetch(cfg, repo)
++    why = _fetch(repo, remotes)
+     if why:
+         return head, "", None, why
+     ref = f"{cfg.base_remote}/{base}"
+@@ -294,24 +322,29 @@ def _base_read(cfg: Config, repo: Path, pr_url: str) -> tuple[str, str, bool | N
+     if r.returncode != 0 or not tip:
+         return head, "", None, (f"its base {ref} does not resolve in {repo} after the "
+                                 f"fetch (`git rev-parse` exited {r.returncode})")
++    why = _have(repo, head, remotes)
++    if why:
++        return head, tip, None, why
+     contains, why = _contains(repo, tip, head)
+     if contains is None:
+         return head, tip, None, why
+     return head, tip, not contains, ""
+ 
+ 
+-def _wait_for_update(cfg: Config, repo: Path, pr_url: str, stale: str, tip: str,
+-                     wait_secs: int, *, poll_interval: int = 5) -> tuple[str, int, str]:
++def _wait_for_update(repo: Path, remotes: tuple[str, ...], pr_url: str, stale: str,
++                     tip: str, wait_secs: int, *,
++                     poll_interval: int = 5) -> tuple[str, int, str]:
+     """Wait for ``gh pr update-branch`` to land on PR ``pr_url`` (issue #531). GitHub may
+     apply the update after the command returns, so a read straight after it can still see
+     the old head ``stale``: re-read the head (``_pr_head``) until it contains the recorded
+-    base tip ``tip`` (``_fetch`` + ``_contains``) or ``wait_secs`` of (patchable)
+-    wall-clock time is spent. Returns ``(head, waited, "")`` for the first head that
+-    contains ``tip`` — ``waited`` is then charged to the rollup wait
+-    (``_wait_for_green(spent=waited)``) — or ``("", waited, why)`` to refuse: the bound ran
+-    out, or a read failed (``gh`` unreadable, a failed fetch, ``git merge-base`` exiting
+-    other than 0/1). Only a head not seen before is fetched and checked. ``wait_secs <=
+-    0`` reads once; the sleeps go through ``_sleep`` and never sum past ``wait_secs``."""
++    base tip ``tip`` (``_fetch`` of ``remotes`` + ``_have`` + ``_contains``) or
++    ``wait_secs`` of (patchable) wall-clock time is spent. Returns ``(head, waited, "")``
++    for the first head that contains ``tip`` — ``waited`` is then charged to the rollup
++    wait (``_wait_for_green(spent=waited)``) — or ``("", waited, why)`` to refuse: the
++    bound ran out, or a read failed (``gh`` unreadable, a failed fetch, a head the fetches
++    did not bring in, ``git merge-base`` exiting other than 0/1). Only a head not seen
++    before is fetched and checked. ``wait_secs <= 0`` reads once; the sleeps go through
++    ``_sleep`` and never sum past ``wait_secs``."""
+     waited = 0
+     seen = stale
+     while True:
+@@ -319,7 +352,7 @@ def _wait_for_update(cfg: Config, repo: Path, pr_url: str, stale: str, tip: str,
+         if not head:
+             return "", waited, why
+         if head != seen:
+-            why = _fetch(cfg, repo)
++            why = _fetch(repo, remotes) or _have(repo, head, remotes)
+             if why:
+                 return "", waited, why
+             contains, why = _contains(repo, tip, head)
+@@ -421,7 +454,10 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
+             return _refuse(d, pr_url, "its publish record names no repo, so there is no "
+                                       "checkout to read its base in")
+         repo = publish._checkout_path(cfg, repo_spec)
+-        head, tip, behind, why = _base_read(cfg, repo, str(pr_url))
++        # Issue #650: fetch where publish put the branch too (a `"stacked"` record's own
++        # remote), so the head read below is a commit this checkout holds.
++        remotes = _remotes(cfg, d)
++        head, tip, behind, why = _base_read(cfg, repo, str(pr_url), remotes)
+         if behind is None:
+             return _refuse(d, pr_url, why)
+         waited = 0
+@@ -437,7 +473,7 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
+                                "base, the update refused, or a `gh` too old for it)")
+             # GitHub may apply the update after the command returns: poll for it, charged
+             # to the same merge_wait_secs budget the rollup wait below then gets.
+-            head, waited, why = _wait_for_update(cfg, repo, str(pr_url), head, tip,
++            head, waited, why = _wait_for_update(repo, remotes, str(pr_url), head, tip,
+                                                  cfg.merge_wait_secs)
+             if not head:
+                 return _refuse(d, pr_url, why)
+@@ -473,7 +509,7 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
+         # base again: the head must be the one read before the wait (the green rollup is
+         # then that head's) and must still contain its base's tip. The merge is pinned to
+         # it, so a head that changes after this read is refused by the host, not merged.
+-        after, _, behind, why = _base_read(cfg, repo, str(pr_url))
++        after, _, behind, why = _base_read(cfg, repo, str(pr_url), remotes)
+         if behind is None:
+             return _refuse(d, pr_url, why)
+         if after != head:
+diff --git a/template/tests/test_merge.py b/template/tests/test_merge.py
+index 1ee4030..7685811 100644
+--- a/template/tests/test_merge.py
++++ b/template/tests/test_merge.py
+@@ -821,6 +821,8 @@ class _Host:
+             remote, _, branch = args[-1].removesuffix("^{commit}").partition("/")
+             sha = self.tracking.get(remote) if branch == "main" else None
+             return _res(out=sha + "\n") if sha else _res(1)
++        if args[:2] == ["cat-file", "-e"]:               # #650: is the head here at all?
++            return _res(0 if args[2].removesuffix("^{commit}") in self.local else 1)
+         if args[:2] == ["merge-base", "--is-ancestor"]:
+             tip, head = args[2:4]
+             if self.git_breaks:
+diff --git a/template/tests/test_merge_third_remote.py b/template/tests/test_merge_third_remote.py
+new file mode 100644
+index 0000000..7c4c1b5
+--- /dev/null
++++ b/template/tests/test_merge_third_remote.py
+@@ -0,0 +1,205 @@
++"""Issue #650: merge mode reads a PR's head from the remote publish pushed it to.
++
++An ``Onto branch`` bundle is published by ``publish._publish_stacked`` onto
++``<remote>/<branch>`` and recorded as ``{"mode": "stacked", "base": "<remote>/<branch>",
++"branch": "<branch>", …}``. When ``<remote>`` is neither the base remote nor ``origin``,
++the PR's head commit exists only there. ``_merge_one``'s behind-base read (#531) used to
++fetch only the base remote and ``origin``, so ``git merge-base --is-ancestor`` exited 128
++on the head and the run refused with a bare "git failed". It now fetches the remote the
++record names too (read via ``integrate._published_ref``, as the fold reads it), and a head
++still missing after the fetches is refused by name.
++
++Real git throughout: three bare repos as the remotes of one primary checkout. Only ``gh``
++is scripted; every ``git`` call goes to the real ``subprocess.run``. Everything is driven
++through ``merge._merge_one``. ``merge._wait_for_green`` is patched to record that the
++rollup wait was reached (and to stop there with a non-green verdict). Run from the
++project root:
++    PYTHONPATH=src python -m unittest tests.test_merge_third_remote
++"""
++
++from __future__ import annotations
++
++import io
++import json
++import shutil
++import subprocess
++import tempfile
++import unittest
++from contextlib import redirect_stderr, redirect_stdout
++from pathlib import Path
++from types import SimpleNamespace
++from unittest import mock
++
++from pdca_harness import merge, state
++from pdca_harness.config import Config, LeafConfig
++
++_REAL_RUN = subprocess.run
++_ID = ["-c", "user.name=t", "-c", "user.email=t@example.invalid",
++       "-c", "commit.gpgsign=false"]
++PR = "https://gh/pr/650"
++
++
++def _g(cwd: Path, *args: str) -> str:
++    r = _REAL_RUN(["git", "-C", str(cwd), *_ID, *args], capture_output=True, text=True)
++    if r.returncode != 0:
++        raise AssertionError(f"fixture git {args} failed: {r.stderr}")
++    return r.stdout.strip()
++
++
++class ThirdRemoteHead(unittest.TestCase):
++    def setUp(self) -> None:
++        self.tmp = Path(tempfile.mkdtemp())
++        self.addCleanup(shutil.rmtree, self.tmp, True)
++        for name in ("origin", "upstream", "other"):
++            _REAL_RUN(["git", "init", "--bare", "-q", str(self.tmp / f"{name}.git")],
++                      check=True)
++        # A scratch clone that authors the commits and pushes them where each case wants.
++        self.seed = self.tmp / "seed"
++        self.seed.mkdir()
++        _g(self.seed, "init", "-q")
++        _g(self.seed, "checkout", "-q", "-b", "main")
++        for name in ("origin", "upstream", "other"):
++            _g(self.seed, "remote", "add", name, str(self.tmp / f"{name}.git"))
++        (self.seed / "f.txt").write_text("base\n")
++        _g(self.seed, "add", "f.txt")
++        _g(self.seed, "commit", "-q", "-m", "base")
++        _g(self.seed, "push", "-q", "upstream", "main")
++        _g(self.seed, "push", "-q", "origin", "main")
++        _g(self.seed, "checkout", "-q", "-b", "feat")
++        (self.seed / "g.txt").write_text("feat\n")
++        _g(self.seed, "add", "g.txt")
++        _g(self.seed, "commit", "-q", "-m", "feat")
++        self.feat = _g(self.seed, "rev-parse", "HEAD")
++        # The primary checkout merge mode reads in: all three remotes, nothing fetched yet.
++        self.repo = self.tmp / "repo"
++        self.repo.mkdir()
++        _g(self.repo, "init", "-q")
++        for name in ("origin", "upstream", "other"):
++            _g(self.repo, "remote", "add", name, str(self.tmp / f"{name}.git"))
++        self.cfg = Config(
++            root=self.tmp, bundle_root=self.tmp / "results", process_dir=self.tmp / "p",
++            templates_dir=self.tmp / "t", default_branch="main", tracker_system="github",
++            tracker_url="", issue_id_example="#1",
++            builder=LeafConfig(mode="stub"), reviewer=LeafConfig(mode="stub"),
++            base_remote="upstream", repo_checkouts={"org/repo": str(self.repo)},
++            merge_requires="all", merge_wait_secs=0)
++        self.head = self.feat
++        self.update = None  # what `gh pr update-branch` does, if a case scripts it
++        self.fetches: list[str] = []
++        self.waited: list[str] = []
++        self.gh_calls: list[list[str]] = []
++
++    def _bundle(self, record: dict) -> Path:
++        d = self.cfg.bundle("650")
++        d.mkdir(parents=True)
++        (d / "patch.diff").write_text("diff\n", encoding="utf-8")
++        (d / "publish.json").write_text(
++            json.dumps({"pr_url": PR, "repo": "org/repo", **record}), encoding="utf-8")
++        return d
++
++    def _run(self, cmd, *args, **kw):
++        if cmd[:1] == ["git"]:
++            if "fetch" in cmd:
++                self.fetches.append(cmd[cmd.index("fetch") + 1])
++            return _REAL_RUN(cmd, *args, **kw)
++        if cmd[:1] != ["gh"]:
++            return _REAL_RUN(cmd, *args, **kw)
++        self.gh_calls.append(list(cmd))
++        ok = SimpleNamespace(returncode=0, stdout="", stderr="")
++        if cmd[:3] == ["gh", "pr", "view"]:
++            fields = cmd[cmd.index("--json") + 1]
++            if fields == "state":
++                return SimpleNamespace(returncode=0, stderr="",
++                                       stdout=json.dumps({"state": "OPEN"}))
++            return SimpleNamespace(returncode=0, stderr="", stdout=json.dumps(
++                {"headRefOid": self.head, "baseRefName": "main"}))
++        if cmd[:3] == ["gh", "pr", "update-branch"] and self.update:
++            self.head = self.update()
++        return ok
++
++    def _wait(self, pr_url, wait_secs, *, spent=0):
++        self.waited.append(self.head)
++        return "failing", "recorded by the test; stop here"
++
++    def _merge(self, d: Path) -> tuple[int, str]:
++        err = io.StringIO()
++        with mock.patch("pdca_harness.merge.subprocess.run", side_effect=self._run), \
++                mock.patch.object(merge.state, "state", return_value=state.COMPLETE), \
++                mock.patch.object(merge, "_wait_for_green", side_effect=self._wait), \
++                mock.patch.object(merge, "_sleep"), \
++                redirect_stdout(io.StringIO()), redirect_stderr(err):
++            rc = merge._merge_one(self.cfg, d, dry_run=False, method="merge",
++                                  fetched=set())
++        return rc, err.getvalue()
++
++    STACKED = {"mode": "stacked", "branch": "feat", "base": "other/feat"}
++
++    # (1) the head lives only on the third remote the record names
++    def test_stacked_head_on_third_remote_reaches_rollup_wait(self) -> None:
++        _g(self.seed, "push", "-q", "other", "feat")
++        rc, err = self._merge(self._bundle(self.STACKED))
++        self.assertNotIn("git failed", err)
++        self.assertEqual(self.waited, [self.feat], err)
++        self.assertIn("other", self.fetches)
++        self.assertNotIn(["gh", "pr", "update-branch", PR], self.gh_calls)  # up to date
++
++    def test_stacked_head_behind_is_updated_on_third_remote_and_reaches_wait(self) -> None:
++        _g(self.seed, "push", "-q", "other", "feat")
++        # The base moves after the branch was cut, so the head is behind it.
++        _g(self.seed, "checkout", "-q", "main")
++        (self.seed / "f.txt").write_text("base moved\n")
++        _g(self.seed, "commit", "-q", "-am", "base moves")
++        _g(self.seed, "push", "-q", "upstream", "main")
++
++        def update() -> str:  # the host merges the base into other/feat
++            _g(self.seed, "checkout", "-q", "feat")
++            _g(self.seed, "merge", "-q", "--no-edit", "upstream/main")
++            _g(self.seed, "push", "-q", "other", "feat")
++            return _g(self.seed, "rev-parse", "HEAD")
++
++        _g(self.seed, "fetch", "-q", "upstream")
++        self.update = update
++        rc, err = self._merge(self._bundle(self.STACKED))
++        self.assertNotIn("git failed", err)
++        self.assertIn(["gh", "pr", "update-branch", PR], self.gh_calls)
++        merged_head = _g(self.seed, "rev-parse", "HEAD")
++        self.assertNotEqual(merged_head, self.feat)
++        self.assertEqual(self.waited, [merged_head], err)
++
++    # (2) a head no fetched remote has is refused by name
++    def test_head_in_no_fetched_remote_is_named(self) -> None:
++        # `feat` is pushed nowhere: no remote the run fetches has it.
++        rc, err = self._merge(self._bundle(self.STACKED))
++        self.assertEqual(rc, 1)
++        self.assertEqual(self.waited, [])
++        self.assertNotIn("git failed", err)
++        self.assertIn(self.feat, err)
++        self.assertIn("not in the checkout", err)
++        self.assertIn("upstream, origin, other", err)
++
++    # (2b) a stacked record that names no remote: today's fetches, then the (2) refusal
++    def test_stacked_record_naming_no_remote_fetches_as_today_then_names_head(self) -> None:
++        _g(self.seed, "push", "-q", "other", "feat")
++        for record in ({"mode": "stacked", "base": "other/feat"},
++                       {"mode": "stacked", "branch": "feat", "base": "other/elsewhere"}):
++            with self.subTest(record=record):
++                shutil.rmtree(self.cfg.bundle("650"), ignore_errors=True)
++                self.fetches.clear()
++                rc, err = self._merge(self._bundle(record))
++                self.assertEqual(rc, 1)
++                self.assertEqual(self.fetches, ["upstream", "origin"])
++                self.assertNotIn("git failed", err)
++                self.assertIn(self.feat, err)
++                self.assertIn("not in the checkout", err)
++                self.assertIn("upstream, origin", err)
++
++    # (3) unchanged: a new-pr record fetches the base remote and origin, nothing else
++    def test_new_pr_record_fetches_exactly_base_remote_then_origin(self) -> None:
++        _g(self.seed, "push", "-q", "origin", "feat")
++        rc, err = self._merge(self._bundle({"mode": "new-pr", "branch": "feat"}))
++        self.assertEqual(self.fetches, ["upstream", "origin"])
++        self.assertEqual(self.waited, [self.feat], err)
++
++
++if __name__ == "__main__":
++    unittest.main()

@@ -1,0 +1,22 @@
+publish: count a pushed branch as pushed when gh pr create raises
+
+If `gh pr create` raised after the branch push (for example, `gh` is not
+installed, so the call fails with FileNotFoundError), publish wrote no
+publish.json. The flow then treated the bundle as unpushed: it was left out
+of the integration fold and its dependents were held, even though its branch
+was already on origin. The operator only saw a generic "publish failed".
+
+A `gh pr create` that returns rc 1 was already handled correctly: the record
+is written with an empty pr_url, publish returns 1, and the flow folds the
+branch. A raise from that call now takes the same path, so both failures
+after the push end in the same state, matching the flow's rule that a branch
+pushed this run is folded even if `gh pr create` failed after it.
+
+The message for this case now names the pushed branch and origin, says no
+draft PR was opened, and says how to finish: open the PR by hand or re-run
+`pdca publish <id>`. A failure before the push still counts as unpushed.
+
+The mtime rule this relies on came in with
+b21f24883b36c10dd70c408905db8c18a5327845.
+
+Fixes #632

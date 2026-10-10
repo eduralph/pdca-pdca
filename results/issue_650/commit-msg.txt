@@ -1,0 +1,28 @@
+merge: fetch the remote an Onto-branch PR was pushed to
+
+In merge mode, before a PR is merged the driver checks in git whether the
+PR's head is behind its base. It fetched only the base remote and origin.
+A bundle with an `Onto branch: <remote>/<branch>` is published to that
+remote, which can be a third one, so its head commit (and, after
+`gh pr update-branch`, the new merge commit) was not in the checkout.
+`git merge-base` then exited 128 and the run refused with a bare
+"git failed ... exited 128". Nothing merged wrongly, but such a PR could
+never merge in merge mode once it fell behind, and the message hid why.
+
+The base/head reads now also fetch the remote the bundle's publish record
+names, read the same way the stack-mode fold reads it
+(integrate._published_ref). A failed fetch of it is a refusal, like the
+other fetches. A record that names no remote fetches exactly what it did
+before, and a new-pr record still fetches only the base remote and origin.
+
+If the head commit is still missing after the fetches, the run now refuses
+with a message that names the commit, the checkout, the remotes fetched,
+and where the record puts the branch (or that it names none). It states
+only what was checked and does not guess a cause. Only `git cat-file -e`
+exiting 1 counts as "missing"; any other git error is still reported as a
+git failure.
+
+This closes the known limit left by the behind-base check added in
+e97fbfa882555e0b4a447ecabc00ff9ef3282b7c.
+
+Fixes #650

@@ -1,0 +1,32 @@
+fix(merge): require a complete check rollup before confirming green
+
+In merge mode (merge_requires = "all") the driver confirms a green check
+rollup by reading it again one poll interval later. Commit
+b2740ea030ba3d2fd37abe6d1f5c9b3cf8a56545 added that confirm, but it compared
+only the verdict, never which checks were present. A PR could therefore be
+merged on a partial rollup: a fast `dco` check reads green twice while a
+slow `e2e` job has not registered yet, or the first read saw `dco` and the
+confirm saw `dco, e2e`, and the two were counted as agreeing.
+
+Two changes close most of that gap:
+
+- The confirm read must now list the same checks as the green it confirms,
+  each name as many times. A green over a different set of checks is
+  treated as a new first green and confirmed one poll interval later, within
+  the existing merge_wait_secs budget.
+- A new optional [driver].expected_checks setting names checks a complete
+  rollup must contain. A green read that lacks one counts as still running,
+  so the wait goes on and, if the check never shows up, the PR is refused
+  and put back to draft with a message naming the missing check. This also
+  applies to the single read of merge_wait_secs = 0. A declared check that
+  was skipped or neutral (e.g. a path filter) does not block. A bare string
+  is read as one name; any other malformed value warns and refuses every
+  PR rather than falling back to the empty list.
+
+What remains: with nothing declared (the default), a job that registers
+more than one poll interval after the fast ones still gets through, since
+the rollup cannot show a check that does not exist yet. Operators who need
+that closed must list such checks in expected_checks. Deriving the list
+automatically is not part of this change.
+
+Fixes #621

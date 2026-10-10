@@ -1,0 +1,31 @@
+fix(integrate): stop the fold when the base would undo work on the line
+
+In stack mode, when a folded bundle's PR branch is gone and its PR merged
+at a head the integration line lacks (say a fixup was pushed after the
+fold), the fold merges the base into the line to pick that work up. Commit
+b21f24883b36c10dd70c408905db8c18a5327845 only checked that the base has
+the merged head by ancestry. That check still passes after the merge is
+reverted on the base, so the fold took the revert in with it: the line
+lost the bundle's whole change, not only the fixup, the next wave built
+without it, and stderr still said the merged work "reaches" the line. The
+same happened when the base reverted another bundle already on the line.
+
+The fold now checks the result of taking the base in. A path the line
+changed since it left the base, which the base merge puts back to its
+content at that point (or deletes, if it did not exist there), counts as
+removed work. If any path is removed, the fold resets the line to where
+it was before the base merge and stops with an error that names each path
+and the bundle that brought it (from the fold's bundles or the run's
+batch, archived bundles included). A base that only edits such a file is
+still merged in as before.
+
+Because the line is reset before the error, the pre-wave carry (which
+records a refused bundle and goes on) merges and pushes the remaining
+bundles onto a line without the revert. If the reset itself fails, the
+fold stops even under the carry, so it never pushes a line that has the
+revert. The "reaches ... through" message is printed only when nothing
+was undone.
+
+docs/07-crosscutting.md now says the run also stops in this case.
+
+Fixes #623
