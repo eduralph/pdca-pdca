@@ -1,0 +1,14 @@
+{
+  "band": "watch",
+  "independent_outcomes": [
+    "Core: in stack mode, a same-wave textual conflict holds only the later bundle (and its dependents) for the rest of the run instead of stopping it, and names the pair and the file before the next wave and again at the end of the run (criteria 1-4, plus the iteration-2 guard so a conflict with base content that arrived after publish still stops instead of blaming innocent partners).",
+    "Arguably separate: a `Conflicts with` partner of a bundle held for a same-wave conflict is also held, with its own wording, plus the matching edits to docs/07-crosscutting.md and 09-parallel-lanes.md (added by the iteration-1 carry-forward, not by the original success criterion)."
+  ],
+  "proposed_seams": [
+    "Do not split criteria (1)-(4) or the reporting. Reporting (2) has no meaning without the hold (1). The chain case (4) and the clean-merge guard (3) are tests of the same hold rule. The iteration-2 guard is a correctness fix inside that same rule. Together these are one outcome with one test file.",
+    "Possible seam: the iteration-1 partner-hold (passing held_conflict into _runnable's #629 `conflicts=` check, new wording at flow.py:783-787, doc updates). It has its own defect (a declared Conflicts-with partner gets built on a line without the held work), its own test case, and it touches `_runnable` / the held_unpushed announcement, which in-flight bundle 629 also edits. It could ship as a follow-up PR after the core hold lands, or fold into 629's work. Keeping it here is defensible because without it the core hold silently breaks a declared order, which is why Check asked for it. That trade-off is the human's call at Plan.",
+    "Large uncertain surface even as one outcome: difficulty high, two auto-iterate rounds already spent on correctness edge cases in the hold rule, and three cross-batch bundles (629, 633, 653) editing the same flow.py / integrate.py code. That alone puts it at watch, not ok."
+  ],
+  "confidence": "medium",
+  "brief_sha": "0224693e79bc1cce"
+}

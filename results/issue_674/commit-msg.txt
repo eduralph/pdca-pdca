@@ -1,0 +1,31 @@
+flow: hold a same-wave conflicting bundle instead of stopping the run
+
+In stack mode, two bundles of one wave could both pass Check and still
+conflict textually (they change the same lines and neither declares
+`Conflicts with` the other). Nothing found that until the fold, which then
+failed on the second branch, printed "wave k did not integrate ... an
+undeclared cross-wave overlap" and stopped. Every later wave was dropped,
+including bundles unrelated to the pair, and the message named only one side
+of the clash.
+
+The fold now merges the wave's bundles in name order as before, and a bundle
+whose branch merges cleanly onto the line as the wave found it, but not on
+top of the wave's bundles already merged, is held out of the line for the
+rest of the run. Its dependents and its `Conflicts with` partners are held
+too, the same way a bundle that pushed no branch holds them. The run goes on
+with everything else. A stderr line names the held bundle, the bundle(s) it
+conflicts with and the files before the next wave builds, and a line at the
+end of the run repeats it with a proposed step: declare `Conflicts with` in
+the held bundle's brief and rebuild it on a base that holds its partner. No
+brief is edited.
+
+A bundle is judged against the bundles actually kept, never against one
+already held, so in an A-B, B-C conflict chain only B is held. Bundles that
+share a file but merge cleanly are never held. A conflict with work an
+earlier wave put on the line, or only with a newer base the fold merged in
+mid-wave for a PR that merged and deleted its branch, still stops the run as
+before. The trial merges run in the integration worktree under the fold's
+lock, on a detached HEAD, and leave the tree clean on the line. No new git
+feature or minimum git version is needed.
+
+Fixes #674

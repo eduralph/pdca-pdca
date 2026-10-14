@@ -1,0 +1,29 @@
+flow: hold a dependent whose line lacks its merged prerequisite
+
+In stack mode, a bundle that depends on a prerequisite outside the run
+(a "Depends on (merged)" edge, or a plain "Depends on" the run was not
+asked for) waits until that prerequisite's PR has merged into its base.
+But once the run has an integration line for that base, the dependent is
+cut from the line, not from the base, and the line does not follow the
+base. If the prerequisite's PR merged after the line was started, the
+dependent passed the check and was built, verified and published on a
+line without the prerequisite's change, with no warning.
+
+The gate now also asks whether the line tip the run recorded has the
+prerequisite's work: the commit its PR merge put on the base
+(mergeCommit, which covers merge, squash and rebase merges), or the PR's
+head (which the resume carry puts on a line it continues). If neither is
+there, the dependent is held and named on one stderr line with the line
+and its tip, and told the way out: once the run ends, delete the line on
+origin, then re-run. If the merge commit cannot be read or the checkout
+cannot be fetched, the dependent is held too. A target with no line yet,
+and merge mode, behave as before.
+
+merged.py gains merge_and_head(), and pr_state() now shares one gh pr
+view helper with it. docs/07-crosscutting.md describes the new hold.
+
+This closes the gap listed under "Known limits" of
+1b6831b02fb1f413c8f9f24f653ef0ae4a928870, whose plain-edge hold reuses
+the same check.
+
+Fixes #655
