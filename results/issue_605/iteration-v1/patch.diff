@@ -1,0 +1,194 @@
+diff --git a/template/src/pdca_harness/assemble.py b/template/src/pdca_harness/assemble.py
+index cdf3f79..b5c558d 100644
+--- a/template/src/pdca_harness/assemble.py
++++ b/template/src/pdca_harness/assemble.py
+@@ -44,12 +44,14 @@ class NeedsHumanItem(NamedTuple):
+ 
+     text: str
+     kind: str
+-    # True for a row the harness writes itself because a review or a gate gave NO verdict
+-    # this round — the review missing or a placeholder, an advisory leaf's placeholder, a gate
+-    # that could not run. It is about this Check's own run, not the patch, and every Check
+-    # runs the review and the gates again, so the next Check's §6 carries the row exactly
+-    # while the problem lasts. That is why auto-iterate never defers one (#409): held for the
+-    # handover, it would ask the human to clear a failure that had long since recovered.
++    # True for a row about this Check's own run, not the patch: one the harness writes itself
++    # because a review or a gate gave NO verdict this round — the review missing or a
++    # placeholder, an advisory leaf's placeholder, a gate that could not run — or the note on
++    # this Check's own advisory selection (`check-advisory-decorrelation.md`, #605). Every
++    # Check runs the review, the advisory selection and the gates again, so the next Check's
++    # §6 carries the row exactly while the problem lasts. That is why auto-iterate never
++    # defers one (#409): held for the handover, it would ask the human to clear a problem
++    # that had long since gone, or a note about a review of a patch that was thrown away.
+     no_verdict: bool = False
+ 
+ 
+@@ -404,9 +406,17 @@ def collect_needs_human(d: Path, cfg: Config) -> list[NeedsHumanItem]:
+         items = [it._replace(no_verdict=True) for it in items]
+     for p in sorted(d.glob("check-advisory-*.md")):
+         leaf = p.stem.removeprefix("check-advisory-")
+-        items += _items_from_artifact(
++        found = _items_from_artifact(
+             p.read_text(encoding="utf-8"),
+             no_verdict=lambda t, leaf=leaf: _is_advisory_unavailable(t, leaf))
++        if leaf == "decorrelation":
++            # `leaves._decorrelation_note`: this Check's advisory selection could not pick a
++            # different-vendor reviewer. It is about this Check's own run, not the patch, and
++            # every Check re-selects (and re-writes or removes the note), so it is never
++            # deferred (#605). Keyed on the artifact: the note carries no status marker, so
++            # the `no_verdict` callback above never sees it.
++            found = [it._replace(no_verdict=True) for it in found]
++        items += found
+     # A gate that COULD NOT RUN is not builder-fixable — a rebuild cannot supply the missing
+     # mechanic — so it is HUMAN regardless of its (gate-kind) element: it never causes an
+     # auto-iterate round. It is no verdict either, so it is not deferred (#409): every Check
+diff --git a/template/src/pdca_harness/autoiterate.py b/template/src/pdca_harness/autoiterate.py
+index e200b7b..365bdb4 100644
+--- a/template/src/pdca_harness/autoiterate.py
++++ b/template/src/pdca_harness/autoiterate.py
+@@ -304,13 +304,14 @@ def deferrable(items: list[NeedsHumanItem]) -> list[str]:
+     are the round's work, not a deferral, and STANDING is emitted every cycle whatever the
+     reviewer found — neither is held.
+ 
+-    Nor is a ``no_verdict`` row — a review or a gate that gave no verdict this round (the
+-    review missing or a placeholder, an advisory leaf's placeholder, a gate that could not
+-    run). It reports on this Check's own run, not on the patch, and every Check runs the
+-    review and the gates again, so the next Check's §6 carries the row exactly while the
+-    problem lasts and drops it once it has recovered. Held instead, a failure that had since
+-    recovered would still come back at handover for the human to clear by hand — the human
+-    ruled it must not (#409 sign-off).
++    Nor is a ``no_verdict`` row — a row about this Check's own run, not the patch: a review
++    or a gate that gave no verdict this round (the review missing or a placeholder, an
++    advisory leaf's placeholder, a gate that could not run), or the note that this Check's
++    advisory selection could not be decorrelated from the builder (#605). Every Check runs
++    the review, the advisory selection and the gates again, so the next Check's §6 carries
++    the row exactly while the problem lasts and drops it once it has gone. Held instead, a
++    problem that had since gone would still come back at handover for the human to clear by
++    hand — the human ruled it must not (#409 sign-off).
+ 
+     The one definition :func:`defer` records, and :func:`rationale` and the flow's notice
+     count, so neither can report a finding held that the ledger does not hold.
+diff --git a/template/src/pdca_harness/flow.py b/template/src/pdca_harness/flow.py
+index e9ae345..67b4640 100644
+--- a/template/src/pdca_harness/flow.py
++++ b/template/src/pdca_harness/flow.py
+@@ -379,8 +379,8 @@ def _maybe_auto_iterate(
+     rerun = sum(1 for item in items if item.no_verdict)
+     deferred = (f"; {held} finding(s) needing human judgment deferred to handover "
+                 f"({autoiterate.DEFERRED_FILE})" if held else "")
+-    rechecked = (f"; {rerun} review/gate row(s) with no verdict left for the next Check to "
+-                 "re-run" if rerun else "")
++    rechecked = (f"; {rerun} row(s) about this Check's own run left for the next Check to "
++                 "re-check" if rerun else "")
+     print(f"flow: {d.name} — auto-iterate {spent + 1}/{cfg.max_auto_iters}: rebuilding for "
+           f"{impl} implementation-level finding(s){deferred}{rechecked}", file=sys.stderr)
+     return _apply_decision(cfg, d, by="auto-iterate", today=today,
+diff --git a/template/tests/test_autoiterate.py b/template/tests/test_autoiterate.py
+index bc168e0..13c7ac0 100644
+--- a/template/tests/test_autoiterate.py
++++ b/template/tests/test_autoiterate.py
+@@ -763,7 +763,7 @@ class DefersHumanFindings(_Base):
+                 self.assertNotIn(row, _section6(summ), "a recovered failure came back")
+                 self.assertEqual(flow.accept_blockers(d), [f"- [ ] {ordinary}"])
+                 self.assertEqual(_ledger(d), [ordinary])
+-                self.assertIn("with no verdict left for the next Check", buf.getvalue())
++                self.assertIn("about this Check's own run left for the next Check", buf.getvalue())
+ 
+     def test_only_a_review_or_gate_with_no_verdict_is_left_to_the_next_check(self) -> None:
+         """Which rows count as "no verdict", pinned at the source (`collect_needs_human`):
+@@ -2294,3 +2294,95 @@ class TagContractPrompts(unittest.TestCase):
+ 
+ if __name__ == "__main__":
+     unittest.main()
++
++
++class CheckDecorrelationNoteIsNotDeferred(_Base):
++    """#605 — the Check-side decorrelation note is a row about that Check's own run.
++
++    Under ``[leaves.advisory_selection] mode = "vendor-complement"``, a Check that cannot pick
++    a different-vendor advisory writes ``check-advisory-decorrelation.md``
++    (``leaves._decorrelation_note``). The note describes that Check's leaf selection, not the
++    patch, and every Check re-selects: so, like a review or gate with no verdict, it must not
++    be deferred into the ledger. It shows in a round's §6 exactly when that round wrote it.
++
++    Round 1 has no ``loop-telemetry.json`` (the builder family is unknown), so the REAL
++    writer (``leaves._select_advisory``) emits the note beside an IMPL row; auto-iterate
++    decides, and the iterate-do is driven through ``driver.advance``.
++    """
++
++    _NOTE = "could not be decorrelated from the builder"
++
++    def _round1(self, iid: str, pool: list[dict]) -> Path:
++        d = self._bundle(iid, review=_IMPL_ONLY_REVIEW)
++        self.cfg.advisory_leaves = pool
++        self.cfg.advisory_selection = {"mode": "vendor-complement"}
++        self.assertFalse((d / "loop-telemetry.json").exists(), "precondition: family unknown")
++        self.assertEqual(leaves._select_advisory(pool, d, self.cfg), [pool[0]])
++        self.assertTrue(leaves.advisory_artifact(d, "decorrelation").exists())
++        assemble.assemble_summary(d, self.cfg)
++        self.assertIn(self._NOTE, _section6(d / "SUMMARY.md"), "precondition: round 1 shows it")
++        items = assemble.collect_needs_human(d, self.cfg)
++        self.assertTrue(any(it.kind == assemble.IMPL for it in items), items)
++        with redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
++            autoiterate.write_decision(d, items)
++            self.assertEqual(flow._apply_decision(self.cfg, d, by="auto-iterate",
++                                                  today="2026-10-10", apply_now=False),
++                             "iterate-do")
++            self.assertEqual(state.state(d), state.ITERATE_DO)
++            driver.advance(d, self.cfg)                   # the iterate: archive the round
++        self.assertTrue((d / "iteration-v1").is_dir())
++        self.assertFalse(leaves.advisory_artifact(d, "decorrelation").exists(),
++                         "premise: the round-1 note is gone before round 2")
++        return d
++
++    def _round2(self, d: Path) -> Path:
++        def clean_review(bundle: Path, cfg: Config) -> None:
++            (bundle / "check-review.md").write_text(_CLEAN_REVIEW, encoding="utf-8")
++
++        with mock.patch.object(leaves, "run_review", clean_review), \
++             redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
++            driver.run_issue(d, self.cfg)   # Do (stub) → Check (real advisory selection)
++        self.assertEqual(state.state(d), state.AWAITING_SIGNOFF)
++        return d / "SUMMARY.md"
++
++    def test_a_note_round_2_did_not_write_is_not_carried_into_its_section6(self) -> None:
++        d = self._round1("DECOR1", [{"id": "adversary", "family": "codex"}])
++        # Round 2's Do recorded the builder that ran, so selection finds a complement.
++        (d / "loop-telemetry.json").write_text(
++            json.dumps({"attempts": [{"family": "claude"}]}), encoding="utf-8")
++        summ = self._round2(d)
++        self.assertFalse(leaves.advisory_artifact(d, "decorrelation").exists(),
++                         "precondition: round 2 wrote no note")
++        self.assertTrue(leaves.advisory_artifact(d, "adversary").exists())
++        self.assertNotIn(self._NOTE, _section6(summ),
++                         "a note about round 1's thrown-away review came back in §6")
++        self.assertFalse(any(self._NOTE in t for t in autoiterate.deferred(d)),
++                         autoiterate.deferred(d))
++        self.assertFalse(any(self._NOTE in b for b in flow.accept_blockers(d)))
++
++    def test_a_note_round_2_wrote_again_shows_once_and_blocks_accept(self) -> None:
++        d = self._round1("DECOR2", [{"id": "adversary", "family": "codex"}])
++        summ = self._round2(d)                     # still no loop-telemetry.json
++        self.assertTrue(leaves.advisory_artifact(d, "decorrelation").exists(),
++                        "precondition: round 2's own selection wrote the note")
++        sec6 = _section6(summ)
++        rows = [ln for ln in sec6.splitlines() if self._NOTE in ln]
++        self.assertEqual(len(rows), 1, sec6)
++        self.assertTrue(rows[0].startswith("- [ ] "), rows)
++        self.assertEqual([b for b in flow.accept_blockers(d) if self._NOTE in b], rows)
++        self.assertFalse(any(self._NOTE in t for t in autoiterate.deferred(d)))
++
++    def test_the_flow_notice_does_not_call_the_note_a_row_with_no_verdict(self) -> None:
++        d = self._bundle("DECOR3", review=_IMPL_ONLY_REVIEW)
++        self.cfg.advisory_leaves = [{"id": "adversary", "family": "codex"}]
++        self.cfg.advisory_selection = {"mode": "vendor-complement"}
++        leaves._select_advisory(self.cfg.advisory_leaves, d, self.cfg)
++        assemble.assemble_summary(d, self.cfg)
++        buf = io.StringIO()
++        with redirect_stderr(buf), redirect_stdout(io.StringIO()):
++            self.assertTrue(flow._maybe_auto_iterate(
++                self.cfg, d, by="", today="2026-10-10", apply_now=False))
++        notice = buf.getvalue()
++        self.assertNotIn("with no verdict", notice)
++        self.assertIn("1 row(s) about this Check's own run left for the next Check", notice)
++        self.assertFalse(_ledger(d), "nothing about this Check's own run is held")

@@ -1,0 +1,30 @@
+integrate: stop the run when a carried PR branch is rewritten
+
+A stacked flow run folds each published PR branch onto its integration
+line, and every later wave builds on that line. If one of those branches
+is rewritten mid-run, for example by a `pdca publish` re-publish in
+another terminal (it force-pushes), a force-push, or "Update with
+rebase", the next fold used to merge the new tip on top of the old
+commits. The line then carried both the old and the rewritten work, or
+hit a conflict that was blamed on an undeclared cross-wave overlap. In
+both cases the run gave no sign that a branch had been rewritten.
+
+The in-run folds now share one per-run record of the head each bundle's
+branch had when a fold put it on the line. Before any target merges or
+pushes, the fold checks that every recorded branch still contains that
+head. If one does not, the fold stops with a message that names the
+bundle, the branch and both commits, and says how to recover. The tip
+read for that check is the exact commit merged, so a later fetch or push
+in the same checkout cannot swap in an unchecked commit. The fold's own
+fetch still runs under the integration lock, so a line moved by another
+run is still refused with the #591 message.
+
+Fast-forward updates, including GitHub's merge-style "Update branch",
+still reach the line at the next fold, as before. The pre-wave carry and
+gone (deleted) branches are unchanged. A carried branch updated with a
+rebase or force-push now stops the run instead of being merged.
+
+This builds on b21f24883b36c10dd70c408905db8c18a5327845, which made the
+fold merge published branches instead of re-applying them.
+
+Fixes #633

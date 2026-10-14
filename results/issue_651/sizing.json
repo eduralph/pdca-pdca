@@ -1,0 +1,12 @@
+{
+  "band": "ok",
+  "independent_outcomes": [
+    "Reword the stale strict-levelling comment block above `offered = _offered_by_seeds(...)` in `_drive_and_act` (flow.py:2141-2162) so it matches the post-#590 behaviour, and fix its stale `waves.py:243-246` reference."
+  ],
+  "proposed_seams": [
+    "None needed. The brief is one comment-only edit in one block with one success criterion. The optional #590 paragraph at flow.py:2157-2159 sits inside the same block, so it belongs in the same PR.",
+    "Do not split the `waves.py` docstring reference from the block. It is a stale pointer inside the same comment, and fixing it separately would leave the block inconsistent for a moment."
+  ],
+  "confidence": "high",
+  "brief_sha": "87a9e3cd06808518"
+}

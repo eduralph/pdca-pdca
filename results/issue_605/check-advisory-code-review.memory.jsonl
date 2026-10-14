@@ -1,0 +1,3 @@
+{"event": "spawn", "bound": "16G"}
+{"ts": "2026-10-14T20:20:07", "elapsed": 15.0, "unit": "run-p1215476-i1270086.scope", "memory": 164868096, "peak": 176783360, "procs": 1, "top": [{"cmd": "/home/eddie/.local/bin/claude -p --agent code-review --permission-mode acceptEdits --allowedTools Read,Bash,Grep,Glob --model claude-opus-5-5 --effort medium --", "n": 1, "rss": 288452608}]}
+{"ts": "2026-10-14T20:20:22", "elapsed": 30.0, "unit": "run-p1215476-i1270086.scope", "memory": 156717056, "peak": 176783360, "procs": 1, "top": [{"cmd": "/home/eddie/.local/bin/claude -p --agent code-review --permission-mode acceptEdits --allowedTools Read,Bash,Grep,Glob --model claude-opus-5-5 --effort medium --", "n": 1, "rss": 281612288}]}

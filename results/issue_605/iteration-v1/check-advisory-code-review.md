@@ -1,0 +1,11 @@
+# Advisory code review — issue 605 (check-decorrelation-note-not-deferred)
+
+The production change is correct and small. `collect_needs_human` marks the items read from `check-advisory-decorrelation.md` as `no_verdict` after the fact (`template/src/pdca_harness/assemble.py:409-419`). This follows the missing-review pattern at `assemble.py:404-406`, as the brief asked, and does not go through the marker-only callback. The docstring, comment and notice edits match. No other file in the target still uses the old notice text ("review/gate row(s) with no verdict"). In the C4 red leg (`gate-logs/C4-verify.log:249-275`), all three new tests fail for the right reason: the note is deferred or carried into §6, and the notice wording is the old one. They are not tripping on setup. Findings:
+
+- NEEDS-HUMAN [impl] — The new test class `CheckDecorrelationNoteIsNotDeferred` is appended *after* the `if __name__ == "__main__": unittest.main()` block (`template/tests/test_autoiterate.py:2295-2299`). Run as a script (`python tests/test_autoiterate.py`), `unittest.main()` runs and exits before the class is defined, so its three tests are silently skipped. Discovery-based runs (the C4 and T3 gates) do pick it up, which is why the gates are green. Fix: move the class above the `__main__` guard.
+- Minor reuse nit (not blocking): the artifact stem `"decorrelation"` is now a bare string literal in two modules: written and unlinked at `template/src/pdca_harness/leaves.py:3641` / `:3655`, matched at `template/src/pdca_harness/assemble.py:412`. If someone renames the writer's stem, the assemble check would silently stop matching, and only these tests would catch it. A shared module-level constant (e.g. in `assemble.py` or `state.py`, which `leaves` can import without a cycle) would tie the two together. Optional.
+- Edge case, pre-existing and not added by this diff: a user-configured advisory leaf with `id = "decorrelation"` would share the artifact name with the note. After this patch, its real findings would also be marked `no_verdict` and never deferred (`assemble.py:412`). This is unlikely and comes from the existing naming scheme, so I'm only noting it.
+
+Correctness lens: no other bugs found. Efficiency: no concerns (one string compare per advisory file).
+
+<!-- pdca:leaf-complete -->
