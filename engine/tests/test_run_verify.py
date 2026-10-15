@@ -170,6 +170,13 @@ class RunVerify(unittest.TestCase):
         self.assertEqual(r.returncode, 77, r.stdout + r.stderr)
         self.assertIn("no behavioral production change", r.stdout)
 
+    def test_each_leg_uses_an_isolated_python_bytecode_cache(self) -> None:
+        script = SCRIPT.read_text(encoding="utf-8")
+        self.assertIn('CACHE_ROOT="$(mktemp -d', script)
+        self.assertIn('RUN_CACHE="$(mktemp -d "$CACHE_ROOT/leg.', script)
+        self.assertIn('PYTHONPYCACHEPREFIX="$RUN_CACHE" PYTHONPATH=src', script)
+        self.assertIn('PYTHONPYCACHEPREFIX="$RUN_CACHE" "$PY" -m unittest "$mod"', script)
+
 
 if __name__ == "__main__":
     unittest.main()
