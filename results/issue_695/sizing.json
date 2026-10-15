@@ -1,0 +1,15 @@
+{
+  "band": "oversized",
+  "independent_outcomes": [
+    "A rewritten carried branch is reported at the end of the run and the run exits 1 (criteria 1, 1b, 1c, 2, 2b). This needs the 693 holds signal, so it waits on 693.",
+    "A single transient failure of the carried-branch fetch no longer stops the fold; a second failure still does (criteria 3, 4). It touches only integrate.fold and needs no other bundle."
+  ],
+  "proposed_seams": [
+    "Cut the fetch retry (defect b, integrate.py:587 and the _fetch path) into its own bundle. It shares no code path with the end-of-run report, has its own test (criteria 3 and 4), and does not depend on 693. It could go first.",
+    "Keep the end-of-run rewrite report (defect a, flow.py:2570-2572 plus the holds collector from 693) as the second bundle. It depends on 693, and its tests (1, 1b, 1c, 2, 2b) do not need the retry.",
+    "The docs edit (docs/07-crosscutting.md:669-675 and the integrate.py docstring at :39-45) describes both changes. Assign each sentence to the bundle that makes it true, so neither bundle ships a doc claim it does not yet meet.",
+    "The brief already shares one new test file (test_integrate_carried_rewrite_late.py) between both halves. Split it into two files, or have the retry bundle own the file and the report bundle add to it."
+  ],
+  "confidence": "medium",
+  "brief_sha": "1d7ab1a284a2c080"
+}

@@ -1,0 +1,12 @@
+{
+  "mode": "stacked-pr",
+  "branch": "fix/695-run-catches-a-late-carried-rewrite-and-retries-the-fetch",
+  "pr_url": "https://github.com/eduralph/pdca-harness/pull/721",
+  "base": "main",
+  "repo": "eduralph/pdca-harness",
+  "by": "Eduard Ralph",
+  "date": "2026-10-15",
+  "id_pending": false,
+  "host_ci_base": "ec1a36e8ba164d93ab865c675605e260531f5f38",
+  "stacks_on": []
+}
