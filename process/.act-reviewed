@@ -1,5 +1,5 @@
 {
-  "count": 90,
+  "count": 108,
   "reviewed": [
     "issue_311",
     "issue_316",
@@ -88,9 +88,27 @@
     "issue_591",
     "issue_593",
     "issue_597",
+    "issue_603",
+    "issue_604",
+    "issue_605",
     "issue_616",
+    "issue_621",
+    "issue_623",
+    "issue_624",
+    "issue_629",
+    "issue_630",
+    "issue_631",
+    "issue_632",
+    "issue_633",
     "issue_646",
-    "issue_647"
+    "issue_647",
+    "issue_650",
+    "issue_651",
+    "issue_652",
+    "issue_653",
+    "issue_655",
+    "issue_658",
+    "issue_674"
   ],
   "fingerprints": {
     "issue_311": "18d7bf1a64397f124f84204b36451e1ffca0ca4191f19c124095ed352f1f26be",
@@ -180,9 +198,27 @@
     "issue_591": "8980aae8762cfda12b4c2e52dee32f0ee042c4bd9a649402904e5887f6d7070c",
     "issue_593": "7b0b4e32a7ad24e741b8c2c06ad3af1e05dbb60d77ab4b6879d48b8224afb57e",
     "issue_597": "2021254acaa25b8acc40a7f1cb7f16051245d5af3d49590b40ba6c2e7b172111",
+    "issue_603": "0c42d7ed9c8ac49a35948a4d3dc78483b5f4b5ccc0066ac963917a59d70e4478",
+    "issue_604": "b713bce3a05599ae28423a1ce5f5b88f8c53722ae337c8fea2b5e7b002121b28",
+    "issue_605": "9491f730aa99bea0d2b09c992a970d80fc96486dbe082d749bf4413473f387f1",
     "issue_616": "42682aaeda6b31e49bfa630b7196041a39c0cf146dfba3799527b82f7d3b8146",
+    "issue_621": "166a5e719ca18e84da2f25cea9398aad9e6a6c51cf850b978e108451e76ae355",
+    "issue_623": "93048917b0e5ab080a760811a52e574a6527b110562b59f02e9cddc5f17df2e4",
+    "issue_624": "ff53e5f57a7837746dc967750e3a43da52f4174fc0ce8fd722a8d1ecf7576b81",
+    "issue_629": "862153c06ddde13ff0899bc04b4ed0b207d3ebd9c1c9e597e018848ec7ddeff7",
+    "issue_630": "813d8eb709a2c1ac247d4fca90a496eb782345c9527ebaf361e19669cbb99836",
+    "issue_631": "961af542faea458c14bd05b3906fc2bd36a5617b3b24885bbc3127aa75d2d580",
+    "issue_632": "c2c1b6a27a617f803cd6b7a1e042a873574ed61cc9b570dee90ca415efe15dd4",
+    "issue_633": "04d458b5443d77b32e16fbee3ec4bf46746baa6f49e78edcd6fd3f154289e47e",
     "issue_646": "95be68517d0db5835f4cb9b662ad593e5a07eec3307b7460faa41d6e79b3e556",
-    "issue_647": "4bd728248f930b033e99ad4b534d993901b96fa88cc31289c23890772a928061"
+    "issue_647": "4bd728248f930b033e99ad4b534d993901b96fa88cc31289c23890772a928061",
+    "issue_650": "14a3ebb451f329ab790b80cb51821579b22c8963707530df461788bef0f04322",
+    "issue_651": "d6ff2e83cf449263936d9c9c6109d86d1a73a27878043888c1337d3e6cb013ba",
+    "issue_652": "18384a9d55dd3ffcdf307f73ea0241d99ee79d52aff3dded606893cc64ab4934",
+    "issue_653": "661b742fa5aedf4e2205d2c4b54878f29b8eea524810ef4e1c6b951e939e89ef",
+    "issue_655": "250701b1c3e5ec566bce14538fb1451fb31432522ce817724779c36f7431c0db",
+    "issue_658": "4e0df90e636ecfa467c9f5aeaa5fa0bd07f0ce74ebcd6666b994f737f7fb5fd6",
+    "issue_674": "f3d7b5d5418bc11c3a8dcfb8e73b88c33a5d65616efb8f823c843425a6ef9419"
   },
-  "last_review_date": "2026-10-04"
+  "last_review_date": "2026-10-14"
 }

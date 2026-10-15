@@ -1718,3 +1718,214 @@ Found by this review:
   Do rounds or fewer, with no "new combination" findings after the first round. If it spins
   like 616/646 again, raise #656's priority with the human.
 - #634: check at the first review whose batch has a multi-line §10 bullet.
+
+# Act review — 2026-10-10 — cycles considered: issue_603, issue_604, issue_621, issue_623, issue_624, issue_630, issue_631, issue_632, issue_650, issue_652
+
+Fifteenth Act review. Ten bundles were signed off on 2026-10-10. Eight were published as
+draft PRs on eduralph/pdca-harness: 603 → #663, 604 → #664, 621 → #665, 623 → #666,
+631 → #667, 632 → #668, 650 → #669, 652 → #670. 624 and 630 closed as `duplicate`. The
+index lists 100 bundles; the other 90 were handled at earlier reviews. No instance delta.
+Three items were filed upstream and one comment posted, after a prior-art check, as agreed
+with the human.
+
+## What the cycles' records exposed
+
+- **New: a `duplicate` close has no safe way to finish.** issue_624's brief closes #624 only
+  when #652's PR merges, through `Fixes #624` in that PR's body, and comments on #624 now
+  (`results/issue_624/brief.md:19`, `:33`). PR #670 says only `Fixes #652`, and #624 has no
+  comment. 624's own reviewer (§6) and its §10 both warned that nothing pins this, and it
+  slipped anyway. issue_630's brief leaves the close-or-keep-open call on #630 to the human
+  (`results/issue_630/brief.md:15`, criteria b and c); #630 is still open. Both are at
+  risk from `pdca cleanup`, which closes every COMPLETE close bundle with an empty patch at
+  once as "not planned" (`template/src/pdca_harness/cleanup.py:425-432` on upstream `main`
+  @ `b5f5c29`). That is harness machinery, so it was filed upstream (#671 below).
+- **Untracked deferrals: 3 found in 2 bundles** (sweep per the 2026-10-02 practice: every
+  `iteration-v*/session-carry-forward`, `deferred-findings.json`, PR "Known limits"/"Out of
+  scope", and §10). 652: the fold-time residual and the squash/rebase `edge` hold advice
+  (its §10). 623: two of its four PR known limits are real gaps. Baseline trend: 13 in 4
+  bundles (2026-10-02) → 7 in 6 (2026-10-04) → 3 in 2 (now). The other out-of-scope notes
+  are tracked or settled: 604 → #607; 621 (branch protection/workflow files) and 632
+  (stacked path already pushes) are not deferrals; 624's hand-driven residual was decided
+  at Plan as "re-file if ever seen"; 631's raise-vs-reset choice was decided at sign-off.
+- **#656 baseline (not yet landed):** the four hold/recover briefs in this batch (623, 631,
+  650, 652) converged in 1, 2, 1 and 1 Do rounds, with no "new combination" spin like
+  593/616/646. Recorded as a baseline only; #656 can't take credit for it.
+- **Expected repeats, no action:** T5 prior art in all 8 patch bundles (pending #575; same
+  class, #501). Fitness-to-purpose items are human-only by design (new ledger key, row 29).
+  Plan-advisory counts (4-5, every brief revised) are telemetry (new key, row 30). The
+  index's "ineffective" flag on T5 rows 21/22 is the same pending-#575 class, not a failed
+  delta.
+- **#634:** 652's §10 bullet was a single line again; still cannot confirm multi-line
+  bullets come through whole.
+
+## Process deltas
+
+- **No instance delta warranted.** The one new gap (#671) is in `cleanup.py`, harness
+  machinery; a local edit would be overwritten by `copier update`.
+- **Review practice (until #671 lands):** do not run `pdca cleanup --apply` on a
+  `duplicate` close bundle; close it by hand once its condition is met. The deferral sweep
+  from the 2026-10-02 entry stays until #636 lands.
+- **Ledger** (`process/act-ledger.json`): rows 29 (fitness-to-purpose) and 30 (plan
+  advisory 4 findings) set structural; row 31 (`duplicate` close confirmation) kept open
+  with its location set to #671 and the cleanup hold above. T5 rows 21, 22, 24, 26 and 28
+  noted as recurring in all 8 patch bundles, still pending #575.
+
+## Follow-ups routed (not process deltas — work handed to an owner)
+
+Filed on eduralph/pdca-harness with label `bug` and no milestone (the human sets
+milestones). Each was checked for prior art first: issue search by keyword (squash,
+rebase-merge, fold-time, cascade, revert, carry, skipped, unpublished, pre-wave, close
+disposition duplicate). Only #626 overlapped, so item 4 went there as a comment.
+
+1. `pdca cleanup` closes a `duplicate` close bundle at once as "not planned"; no
+   "duplicate of #N" and no "close when PR X merges" condition (evidence 624, 630)
+   → https://github.com/eduralph/pdca-harness/issues/671
+2. 652 residual: a prerequisite skipped at fold time still reaches the line through a
+   finished dependent's branch → https://github.com/eduralph/pdca-harness/issues/672
+3. 623 known limits: partial/below-cut-point reverts and a revert brought in by a later
+   bundle's own branch are not detected → https://github.com/eduralph/pdca-harness/issues/673
+4. 652 §10: the cascaded-hold advice is wrong for a squash/rebase-merged P (`edge` case);
+   needs a test for a MERGED-not-on-base P with a finished dependent → comment on #626:
+   https://github.com/eduralph/pdca-harness/issues/626#issuecomment-6097209834
+
+Open Act items (owner: the human; revisit at the next review):
+
+- **#624:** add `Fixes #624` to PR #670's body and post the comment 624's brief planned
+  (`results/issue_624/brief.md:19`), or close #624 by hand when #670 merges.
+- **#630:** make the criterion (b)/(c) call: close #630 as a duplicate of #463 (its
+  Done-when already carries the {A, Z} → B test; both are in milestone 0.60.0), or keep it
+  open as the blocking bug.
+- Carried, unchanged: the triage rubric should state five buckets explicitly (issue_316
+  §10). No triage brief ran.
+- Carried, open upstream, no new filing: #556, #573, #575, #586, #603, #606, #607, #608,
+  #634, #636, #640–#645, #650–#656.
+
+## How effectiveness will be judged
+
+- #671: after it lands, a `duplicate` close bundle with a recorded condition is reported,
+  not closed, by `pdca cleanup` until the condition is met. Until then, at each review,
+  check that every `duplicate` close bundle's issue is in the state its brief asked for.
+- Open Act items: #624 and #630 are in their briefed state by the next review.
+- Deferral sweep: untracked deferrals per review keep falling (13 → 7 → 3).
+- #656: hold/recover briefs keep converging in two Do rounds or fewer; a spin like 616/646
+  raises its priority with the human.
+
+# Act review — 2026-10-14 — cycles considered: issue_605, issue_629, issue_633, issue_651, issue_653, issue_655, issue_658, issue_674
+
+Sixteenth Act review. Eight bundles were signed off on 2026-10-14, all `merged-wider`.
+Seven were published as draft PRs on eduralph/pdca-harness: 605 → #683, 629 → #684,
+633 → #685, 651 → #686, 655 → #689, 658 → #687, 674 → #690. 653 was not published (see
+below). The index lists 108 bundles; the other 100 were handled at earlier reviews. No
+instance delta. Seven issues were filed upstream and one comment posted, after a prior-art
+check, as agreed with the human.
+
+## What the cycles' records exposed
+
+- **New: auto-iterate rebuilds for a C4 row no rebuild can change.** issue_651 was a 3 KB,
+  one-file comment fix. Its brief said C4 would report unverifiable and that Do must not
+  add a token test (`results/issue_651/brief.md:13`, `:23`). The reviewer's C4 row was
+  NEEDS-HUMAN ("Decide whether source comparison suffices"). `_classify_finding` tags it
+  IMPL only because C4 is a gate cell (`template/src/pdca_harness/assemble.py:347-348` on
+  upstream `main` @ `41210bc`). Result: three extra builds at opus/max
+  (`results/issue_651/loop-telemetry.json`, `iterations_to_pass: 4`), the same gate table
+  each round, and the loop stopped at the cap. That is also why the size backstop fired on a
+  3 KB patch and why the index lists the size rule (ledger row 12) as "ineffective" for 651.
+  That flag is a false alarm caused by this bug, not a threshold problem. Filed upstream
+  (#691).
+- **New: plan-advisory findings cannot be cleared at Plan.** All 8 bundles had their
+  plan-reviewer findings folded into the first Check's §6 as open rows, even though every
+  brief was revised to deal with them: 605: 4, 629: 8, 633: 5, 651: 3, 653: 4, 655: 4,
+  658: 5, 674: 6, 39 rows in total. The human cleared them again at sign-off. #603 (merged in
+  PR #663, not yet released; the instance is on v0.59.0) covers only later rounds, not the
+  first Check. issue_655's §10 asked for this. Filed upstream (#692).
+- **653 accepted but not published.** Host CI found that its patch no longer applies:
+  `results/issue_653/host-ci.json` says "the base advanced past the fix". PR #670 (652)
+  merged on 2026-10-14 and changed the same carry code. The brief declared only
+  `Conflicts with: 652`, a bundle from an earlier batch, so the declaration ordered nothing.
+  The plan reviewer raised it, and the planner kept the conflict-only declaration on
+  purpose. The harness stopped safely with a clear "rebase/re-Check" message. One case, so
+  no delta. Recorded as an open Act item.
+- **Deferral sweep** (2026-10-02 practice): 674 has three PR "Known limits". Two were filed
+  (#693, #694). The third (a same-wave clash whose earlier PR merged and whose branch was
+  deleted before the fold) is documented in the patch as a deliberate stop. The other four were
+  filed or posted at the human's follow-up call (items 5-8 below):
+  - 655: there is no built-in way to restart a stale stack-mode line (§10; added to #654).
+  - 633: a branch rewritten during the run's last fold is not caught (PR "Known limits").
+  - 605: an advisory leaf with id `decorrelation` would collide with the note's file name.
+  - 651: one test docstring is slightly out of date (`template/tests/test_flow_adopt_split.py:597-598`).
+
+  653's race window was accepted at Plan. Trend: 13 in 4 bundles → 7 in 6 → 3 in 2 → 7 in
+  5 (now). 674 alone has 3 of the 7.
+- **Expected repeats, no action:**
+  - The T5 prior-art row is in all 8 bundles (pending #575, milestone 0.61.0). It now also
+    has a sixth ledger key (row 32, #501).
+  - Fitness-to-purpose rows are human-only by design.
+  - Plan-advisory counts (3-8 findings, every brief revised) are telemetry.
+  - The plan reviewer's Bash failed with `apply-seccomp` in all 16 bundles of the last two
+    batches. This is the known limit on this host (unprivileged user namespaces denied).
+    The harness flags it (`leaves.py:4044`) and the leaf still produces findings using
+    Read/Grep.
+- **#624 is now due.** PR #670 merged on 2026-10-14 without `Fixes #624`. #624 is still open
+  and has no comment.
+
+## Process deltas
+
+- **No instance delta warranted.** The two new gaps (#691, #692) are in `assemble.py`,
+  which is harness machinery; a local edit would be overwritten by `copier update`.
+- **Ledger** (`process/act-ledger.json`):
+  - Row 12 (size backstop): noted that 651's firing is caused by #691, not a threshold
+    miss. No change to `[driver.size_signal]`.
+  - Row 32 (new T5 key): set to the same pending-#575 class as rows 21, 22, 24, 26 and 28.
+    Those rows are noted as recurring in all 8 patch bundles.
+
+## Follow-ups routed (not process deltas — work handed to an owner)
+
+Filed on eduralph/pdca-harness with label `bug` and no milestone (the human sets
+milestones). Each was checked for prior art first, by issue search: auto-iterate
+unverifiable/C4, comment-only, PDCA-UNVERIFIABLE, implementation-level, plan advisory
+cleared, exit code held, `_results_rc`, carry message. The near matches were #642 (deferred
+items carried, a different defect), #603 (later rounds only) and #497 (single-id exit code).
+None covers these.
+
+1. Auto-iterate tags a reviewer C4 row on a no-test patch as build work and rebuilds to the
+   cap (evidence 651) → https://github.com/eduralph/pdca-harness/issues/691
+2. Plan-advisory findings already settled by the Plan revision come back as open rows in
+   the first Check's §6 (evidence: all 8 bundles, 39 rows; 655 §10)
+   → https://github.com/eduralph/pdca-harness/issues/692
+3. A run that holds a bundle (#593 unpushed, #674 conflict) exits 0 (674 §10, PR #690
+   known limits) → https://github.com/eduralph/pdca-harness/issues/693
+4. Re-issuing after a #674 hold gives the #646 carry's "cross-wave, get the PR open" advice
+   (674 §10, PR #690 known limits) → https://github.com/eduralph/pdca-harness/issues/694
+5. 655 §10: a built-in restart for a stale stack-mode line, instead of deleting it on origin
+   by hand → comment on #654:
+   https://github.com/eduralph/pdca-harness/issues/654#issuecomment-6181195484
+6. 633 known limits: a rewrite during the last fold is not caught, and the up-front fetch
+   runs outside the lock → https://github.com/eduralph/pdca-harness/issues/695
+7. 605 known limit: an advisory leaf named `decorrelation` collides with the note's file
+   → https://github.com/eduralph/pdca-harness/issues/696
+8. 651 out of scope: stale test docstring (label `documentation`)
+   → https://github.com/eduralph/pdca-harness/issues/697
+
+Open Act items (owner: the human; revisit at the next review):
+
+- **#624:** close it by hand now that #670 has merged, or comment and link it. This is
+  carried from 2026-10-10 and is now due.
+- **#630:** still needs the criterion (b)/(c) call: close it as a duplicate of #463, or keep
+  it open. Carried.
+- **653:** rebase onto the current base, re-Check, then publish. Its patch no longer applies
+  on top of #670.
+- Carried, unchanged: the triage rubric should state five buckets explicitly (issue_316
+  §10).
+- Carried, open upstream, no new filing: #556, #573, #575, #586, #606, #607, #608, #626,
+  #634, #636, #640–#645, #650–#656, #671–#673.
+
+## How effectiveness will be judged
+
+- #691: after it lands, a comment-only or docs-only bundle reaches AWAITING_SIGNOFF with no
+  auto-iterate round, and the size backstop stops firing on small no-test patches.
+- #692 (with #603 once released): the first Check's §6 holds only plan findings with no
+  Plan disposition. Count the plan-advisory rows the human clears per bundle; today it is
+  3-8.
+- #693/#694: no measure until #674 (PR #690) is merged and a run holds a bundle.
+- Open Act items: #624 is closed or linked, #630 is decided, and 653 is published by the
+  next review.
