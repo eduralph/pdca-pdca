@@ -1,0 +1,682 @@
+diff --git a/docs/07-crosscutting.md b/docs/07-crosscutting.md
+index 09e50da..4365344 100644
+--- a/docs/07-crosscutting.md
++++ b/docs/07-crosscutting.md
+@@ -726,9 +726,16 @@ wave builds on, via `[driver].wave_mode`:
+   through others), since their branches carry its work: none of them is carried
+   or accounts for a commit on the line, and the bundles that depend on them are
+   held, each named on one line with the cause. A prerequisite whose merge fails
+-  only during the fold does not hold the finished prerequisites built on it: one
+-  that merges in the same fold is still carried, with the failed one's commits.
+-  If the line on origin holds a commit the run cannot account for, nothing is
++  during the fold also holds every finished prerequisite whose branch holds some
++  of its work, whatever their briefs declare (one cut from its branch, or from
++  an earlier commit of it): none of them is carried, the bundles that depend on
++  them are held, each named on one line with the cause, and the line is pushed
++  once, holding none of that work. Its work is every commit its branch adds over
++  your base, merge commits included (a merge can hold a resolved conflict),
++  except what it was built on: the line commit the run recorded when it built
++  it, and the branches of the finished prerequisites it holds whole or that its
++  plain `Depends on` names. Those are still carried. If the line on origin
++  already holds such work, or a commit the run cannot account for, nothing is
+   carried onto it and those bundles are held: delete that line on origin
+   (unless the run's own fold already replaced it) and re-issue. A line the run
+   did not carry onto is still replaced by its first fold, as above. Known limits,
+@@ -736,9 +743,14 @@ wave builds on, via `[driver].wave_mode`:
+   prerequisite squash- or rebase-merged with its branch deleted; a closed PR
+   that a newer PR replaced; a prerequisite with no recorded PR URL; a rejected
+   or force-pushed-over commit left on the old line; two finished prerequisites
+-  that conflict with each other; an old line that still holds a prerequisite
+-  whose PR was closed since; and an accepted but unpublished bundle whose line a
+-  later run's fresh fold replaced (publish refuses it, as above).
++  that conflict with each other; two finished prerequisites whose branches share
++  commits the run cannot give to either (say one was cut by hand from the
++  other's branch, which moved on since, and its plain `Depends on` does not name
++  it): when one's merge fails, the other is held too, and so is every finished
++  prerequisite of the target if the line on origin holds such a commit; an old
++  line that still holds a prerequisite whose PR was closed since; and an
++  accepted but unpublished bundle whose line a later run's fresh fold replaced
++  (publish refuses it, as above).
+ 
+   A plain `Depends on` prerequisite that is not one of the ids the run was
+   asked to drive (a `pdca flow --from-csv` sweep never includes a finished
+diff --git a/template/src/pdca_harness/flow.py b/template/src/pdca_harness/flow.py
+index 7a2abc0..ea6764c 100644
+--- a/template/src/pdca_harness/flow.py
++++ b/template/src/pdca_harness/flow.py
+@@ -916,6 +916,7 @@ def _fold_lines(cfg: Config, bundles: list[Path], *, dry: bool,
+                 carried: dict[str, str] | None = None,
+                 held_out: dict[str, tuple[list[str], list[str]]] | None = None,
+                 wave: Collection[str] = (),
++                skip_causes: dict[str, str] | None = None,
+                 ) -> tuple[dict[tuple[str, str], tuple[str, Path | None]],
+                            dict[tuple[str, str], str | None], tuple[str, str] | None]:
+     """ONE :func:`integrate.fold` of ``bundles`` and, with ``[driver].regate_between_waves``,
+@@ -930,7 +931,9 @@ def _fold_lines(cfg: Config, bundles: list[Path], *, dry: bool,
+     passes none. ``held_out`` / ``wave`` (#674): the in-run folds pass the wave just
+     published, so a bundle of it whose branch conflicts with ones of its own wave merged
+     before it (and not with the line as the wave found it) is left out and recorded in
+-    ``held_out``, not stopped on; the carry passes none.
++    ``held_out``, not stopped on; the carry passes none. ``skip_causes`` (#672, the carry,
++    with ``skipped``): each bundle the fold skipped because its branch holds work of one it
++    skipped, mapped to that one (:func:`integrate.fold`); the in-run folds pass none.
+ 
+     Returns ``(folded, tips, red)``: the fold's result, each folded target's pushed tip
+     (None in a dry-run, which pushes nothing), and the first target whose re-gate is red
+@@ -939,7 +942,8 @@ def _fold_lines(cfg: Config, bundles: list[Path], *, dry: bool,
+     with contextlib.ExitStack() as locks:
+         folded = integrate.fold(cfg, bundles, dry_run=dry, locks=locks,
+                                 folded_this_run=folded_this_run, batch=batch, skipped=skipped,
+-                                carried=carried, held_out=held_out, wave=wave)
++                                carried=carried, held_out=held_out, wave=wave,
++                                skip_causes=skip_causes)
+         tips = {tgt: integrate.pushed_tip(wt) if wt is not None else None
+                 for tgt, (_branch, wt) in folded.items()}
+         # hold_lock=False: the locks stack already holds each tree's lock (re-acquiring
+@@ -1049,13 +1053,19 @@ def _carry_finished(cfg: Config, bundles: list[Path], finished: list[Path], *,
+     makes every finished id built on it not clean too — its plain ``Depends on`` names it,
+     directly or through others, so its branch carries that work (:func:`_cascade_not_clean`,
+     #652): none of them is folded or accounts for a commit on origin's line, and their
+-    dependents wait too, each named with the cause. One whose merge fails only DURING the
+-    fold does not spread: its work still reaches the line through a finished id built on it
+-    that merges in the same fold. A target the carry did not put to use is not seeded, so the
+-    run's first fold of it starts fresh, as today. A dry-run (stub publisher) asks no host
+-    and holds nothing: it prints the plan. A prerequisite that is no requested id, such as
+-    a split child an earlier run adopted, is not carried: :func:`_runnable` holds its plain
+-    ``Depends on`` dependents until its PR merges into their base (#647)."""
++    dependents wait too, each named with the cause. One whose merge fails DURING the fold
++    keeps its work off the line however it would get there (#672): every finished id whose
++    branch holds some of it — by ancestry, whatever its brief declares — is left out of the
++    line too, before the fold's one push (:func:`integrate.fold`), and is held like one
++    built on a not-clean id, named with the skipped id as the cause; its dependents wait.
++    Its work is what its branch adds over the base, less what it was built on (the line
++    commit its stack base records, the finished ids it holds whole or its ``Depends on``
++    names). A line on origin that already holds such work is not carried onto, as for a
++    line the carry cannot account for. A target the carry did not put to use is not seeded,
++    so the run's first fold of it starts fresh, as today. A dry-run (stub publisher) asks no
++    host and holds nothing: it prints the plan. A prerequisite that is no requested id, such
++    as a split child an earlier run adopted, is not carried: :func:`_runnable` holds its
++    plain ``Depends on`` dependents until its PR merges into their base (#647)."""
+     cands = {d.name: (d, (repo, base), ref)
+              for d, repo, base, _slug, ref in integrate._fold_candidates(finished)}
+     dependents: dict[str, list[str]] = {}
+@@ -1102,15 +1112,24 @@ def _carry_finished(cfg: Config, bundles: list[Path], finished: list[Path], *,
+         clean = [d for d in ids if d.name not in why]
+         if clean:
+             skipped: dict[str, str] = {}
++            within: dict[str, str] = {}     # held for a skipped id's work → that id (#672)
++            hint = "open"
+             try:
+                 folded, tips, red = _fold_lines(cfg, clean, dry=False, batch=batch,
+                                                 folded_this_run={tgt: tip} if tip else {},
+-                                                skipped=skipped)
++                                                skipped=skipped, skip_causes=within)
+             except integrate.IntegrationError as exc:
+                 folded, tips, red = {}, {}, None
+                 skipped.update({d.name: str(exc) for d in clean})
++                within.clear()
++                if isinstance(exc, integrate.SkippedWorkOnLine):   # origin's line holds it
++                    hint = "line"
+             carried = [d.name for d in clean if d.name not in skipped]
+-            why.update({name: (msg, "open") for name, msg in skipped.items()})
++            # One whose branch holds a skipped id's work was built on it (#672): named with
++            # that id as the cause, like one built on an id not clean before the fold.
++            why.update({name: (msg, "built_on" if name in within else hint)
++                        for name, msg in skipped.items()})
++            causes.update(within)
+             if red:
+                 why.update({name: (f"the re-gate of {line} carrying it is red", "open")
+                             for name in carried})
+diff --git a/template/src/pdca_harness/integrate.py b/template/src/pdca_harness/integrate.py
+index 43248a1..ea35f72 100644
+--- a/template/src/pdca_harness/integrate.py
++++ b/template/src/pdca_harness/integrate.py
+@@ -65,7 +65,7 @@ import sys
+ from collections.abc import Collection, Iterable, Mapping, Sequence
+ from pathlib import Path
+ 
+-from . import merged, publish
++from . import brief, merged, publish
+ from .config import Config
+ 
+ 
+@@ -96,6 +96,13 @@ class _Conflict(IntegrationError):
+     conflict from any other failed merge."""
+ 
+ 
++class SkippedWorkOnLine(IntegrationError):
++    """Under ``skipped`` (the flow's pre-wave carry, #672): the line :func:`fold` continues
++    from origin already holds work of a bundle whose merge it skipped. A line is never
++    rewritten, so the fold pushes nothing rather than hand that work on; the carry holds
++    every finished id of that target, as it does for a line it cannot account for."""
++
++
+ def integration_branch(cfg: Config, base: str, batch: Iterable[str] | None = None) -> str:
+     """The run-scoped integration branch for a target ``base`` — deterministic (a resumed run
+     rebuilds the same branch) and **injective in the base** (#187): the base is flattened to a
+@@ -305,6 +312,7 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
+          carried: dict[str, str] | None = None,
+          held_out: dict[str, tuple[list[str], list[str]]] | None = None,
+          wave: Collection[str] = (),
++         skip_causes: dict[str, str] | None = None,
+          ) -> dict[tuple[str, str], tuple[str, Path | None]]:
+     """Fold the cumulative accepted bundles' published branches onto a per-target
+     integration branch.
+@@ -370,12 +378,24 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
+     raised while merging ONE bundle (:func:`_merge_published`, its :func:`_gone_branch`
+     included) is recorded as ``skipped[name] = message`` and the next bundle is merged — a
+     failed merge is undone (the tree reset to the line tip it had before it, #631), so the
+-    tree is clean for it. A target whose every bundle was skipped pushes nothing and has no
+-    entry in the result. Every other failure still raises: the lock, the worktree (one that
+-    cannot be made, or reset — :class:`IntegrationTreeError`), a moved line, the push, and
+-    the up-front refusal of a bundle with no published branch (the carry passes only
+-    bundles that have one). ``None`` (every other caller) raises on the first failure, as
+-    before.
++    tree is clean for it. A skipped bundle's work never reaches the line through another
++    branch either (#672): its work is what its branch adds over the base, merge commits
++    included, less what it was built on (:func:`_own_work`), and a bundle whose branch
++    holds any of it is skipped too — by ancestry, whatever its brief declares — and is a
++    skipped bundle in turn. One folded after the skip is skipped before it merges. One
++    merged before it (cut from an earlier commit of the skipped branch, say) makes the fold
++    put the line back where it started and fold it again without that one: nothing has
++    been pushed yet, so the line is pushed once and holds none of that work.
++    ``skip_causes``, when given, records each bundle skipped this way, in place: name → the
++    skipped bundle whose work its branch holds. A line continued from origin that already
++    holds such work raises :class:`SkippedWorkOnLine`, before anything is pushed. A bundle
++    whose whole branch one merged before it holds is never skipped: its merge is a no-op
++    (already in the line). A target whose every bundle was skipped pushes nothing and has
++    no entry in the result. Every other failure still raises: the lock, the worktree (one
++    that cannot be made, or reset — :class:`IntegrationTreeError`), a moved line, a git
++    step that fails while the fold judges whose work a branch holds, the push, and the
++    up-front refusal of a bundle with no published branch (the carry passes only bundles
++    that have one). ``None`` (every other caller) raises on the first failure, as before.
+ 
+     ``carried`` (#633, the flow's in-run folds): the run's record, filled in place like
+     ``skipped``, of the head each bundle's branch had when a fold of this run put it on its
+@@ -512,36 +532,75 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
+             for o in [*bundles, *(cfg.find_bundle(str(n).removeprefix("issue_"))
+                                   for n in batch or ())]:
+                 owners.setdefault(o.name, o)
+-            took: dict[str, str] = {}   # bundle name → the head this fold put on the line
+-            pre: str | None = None      # the line before the wave's first merge (#674)
+-            kept: list[tuple[str, str]] = []   # the wave's bundles merged so far: (name, head)
+-            for d in bundles:
+-                # Its branch's tip, read once — a carried branch's is the one checked (#633).
+-                head = checked[d.name] if d.name in checked else _rev(wt, refs[d.name][1])
+-                ours = held_out is not None and d.name in wave
+-                if ours and pre is None:
+-                    pre = _rev(wt, "HEAD")
+-                    if pre is None:
+-                        raise IntegrationTreeError(f"could not read the tip of {branch} in "
+-                                                   f"{wt} — check that checkout, then re-run")
+-                try:
+-                    _merge_published(cfg, wt, d, refs[d.name], head, branch=branch, base=base,
+-                                     owners=tuple(owners.values()))
+-                except IntegrationError as exc:
+-                    if (held_out is not None and ours and kept and head is not None
+-                            and pre is not None and isinstance(exc, _Conflict)):
+-                        clash = _held_by(wt, branch, head, pre, kept)
+-                        if clash:   # a same-wave conflict: this bundle only (#674)
+-                            held_out[d.name] = clash
+-                            continue
+-                    if skipped is None or isinstance(exc, (IntegrationTreeError, _LineBroken)):
+-                        raise
+-                    skipped[d.name] = str(exc)   # this bundle only; its merge was undone
+-                else:
+-                    if head is not None:        # merged, or in the line already
+-                        took[d.name] = head
+-                        if ours:
+-                            kept.append((d.name, head))
++            # Each branch's tip, read once — a carried branch's is the one checked (#633) — so
++            # every pass below merges, and judges, the same commit.
++            heads = {d.name: checked[d.name] if d.name in checked else _rev(wt, refs[d.name][1])
++                     for d in bundles}
++            base_ref = f"{base_remote}/{base}"
++            left: set[str] = set()          # skipped or held out: not merged again (#672)
++            own: dict[str, list[str]] = {}  # each one skipped, with a tip → its work (#672)
++            adds: dict[str, set[str]] = {}  # each tip judged → what it adds over the base
++            while True:   # one pass; another only when one merged holds skipped work (#672)
++                took: dict[str, str] = {}   # bundle name → the head this fold put on the line
++                pre: str | None = None      # the line before the wave's first merge (#674)
++                kept: list[tuple[str, str]] = []   # the wave's bundles merged so far
++                for d in bundles:
++                    if d.name in left:
++                        continue
++                    head = heads[d.name]
++                    ours = held_out is not None and d.name in wave
++                    if ours and pre is None:
++                        pre = _rev(wt, "HEAD")
++                        if pre is None:
++                            raise IntegrationTreeError(f"could not read the tip of {branch} "
++                                                       f"in {wt} — check that checkout, then "
++                                                       f"re-run")
++                    holds = _skipped_work(wt, head, own, base_ref, adds) if own and head else None
++                    try:
++                        if holds:   # it would put a skipped one's work on the line (#672)
++                            raise IntegrationError(
++                                f"{d.name}'s branch {refs[d.name][1]} holds {holds[1][:12]}, "
++                                f"work of {holds[0]}, whose merge this fold skipped, so it is "
++                                f"not merged onto {branch} either")
++                        _merge_published(cfg, wt, d, refs[d.name], head, branch=branch,
++                                         base=base, owners=tuple(owners.values()))
++                    except IntegrationError as exc:
++                        if (held_out is not None and ours and kept and head is not None
++                                and pre is not None and isinstance(exc, _Conflict)):
++                            clash = _held_by(wt, branch, head, pre, kept)
++                            if clash:   # a same-wave conflict: this bundle only (#674)
++                                held_out[d.name] = clash
++                                left.add(d.name)
++                                continue
++                        if skipped is None or isinstance(exc, (IntegrationTreeError,
++                                                               _LineBroken)):
++                            raise
++                        skipped[d.name] = str(exc)   # this bundle only; its merge was undone
++                        left.add(d.name)
++                        if holds and skip_causes is not None:
++                            skip_causes[d.name] = holds[0]
++                        if head is not None:
++                            own[d.name] = _own_work(cfg, wt, d, head, heads, base_ref)
++                    else:
++                        if head is not None:        # merged, or in the line already
++                            took[d.name] = head
++                            if ours:
++                                kept.append((d.name, head))
++                if skipped is None or not own:
++                    break
++                holds = None if fresh else _skipped_work(wt, start_ref, own, base_ref, adds)
++                if holds:
++                    raise SkippedWorkOnLine(
++                        f"origin's {branch} already holds {holds[1][:12]}, work of {holds[0]}, "
++                        f"whose merge this fold skipped; a line is never rewritten, so nothing "
++                        f"was carried onto it or pushed")
++                if not any(_skipped_work(wt, h, own, base_ref, adds) for h in took.values()):
++                    break
++                # A bundle merged before a skip holds the skipped one's work (cut from an
++                # earlier commit of its branch, say). Nothing is pushed yet: put the line
++                # back where it started and fold it again — the check before each merge
++                # leaves that bundle out this time, so the line is pushed once, without it.
++                _reset_tree(wt, start_ref)
+             if skipped is not None and all(d.name in skipped for d in bundles):
+                 continue   # nothing of this target merged: push nothing, report nothing
+             # Fresh: the run's first fold of this target replaces an earlier run of the same
+@@ -860,6 +919,58 @@ def _in_line(wt: Path, rev: str, what: str, branch: str, *, of: str = "HEAD") ->
+         f"checkout, then re-run")
+ 
+ 
++def _commits(wt: Path, tip: str, base_ref: str, *without: str) -> list[str]:
++    """The commits ``tip`` has that neither ``base_ref`` nor any of ``without`` has, newest
++    first (#672) — merge commits too: a merge can hold a change neither of its parents has
++    (a conflict resolved, an edit made while merging). A git failure raises."""
++    return _out(wt, "rev-list", tip, "--not", base_ref, *without,
++                what=f"the commits {tip[:12]} adds over {base_ref}").split()
++
++
++def _own_work(cfg: Config, wt: Path, d: Path, head: str, heads: Mapping[str, str | None],
++              base_ref: str) -> list[str]:
++    """The work of bundle ``d``, which the fold skipped with its branch at ``head`` (#672):
++    the commits ``head`` adds over ``base_ref`` (:func:`_commits`) that are not in what
++    ``d`` was built on. That is the line commit its stack base records
++    (:func:`publish.read_stack_base_tip`: publish cut its branch from it), when ``head``
++    still holds it, and the branch of each other bundle of the fold (``heads``: name → its
++    tip) that ``d`` was built on — one whose tip ``head`` holds, or one ``d``'s plain
++    ``Depends on`` names, whose branch may have moved on since (unless that branch holds
++    ``head``: then it was built on ``d``, whatever the brief says). Those commits are the
++    work of the bundles under ``d`` (their own merges carry them) or of the fold that made
++    that line; the base's are no bundle's work at all. This trusts that ``d`` was not built
++    on its own earlier work through one of them. Two branches whose shared commits none of
++    this explains count them as ``d``'s: the other is skipped too. A git failure raises."""
++    under: list[str] = []
++    cut = publish.read_stack_base_tip(d)
++    if cut and _carries(wt, cut, f"{d.name}'s recorded line commit {cut[:12]}",
++                        f"{d.name}'s branch", of=head):
++        under.append(cut)
++    bp = d / "brief.md"
++    named = {cfg.bundle(dep).name for dep in (brief.depends_on(bp) if bp.exists() else [])}
++    for name, tip in heads.items():
++        if not tip or name == d.name:
++            continue
++        if _in_line(wt, tip, f"{name}'s head {tip[:12]}", f"{d.name}'s branch", of=head) or (
++                name in named and not _in_line(wt, head, f"{d.name}'s head {head[:12]}",
++                                               f"{name}'s branch", of=tip)):
++            under.append(tip)
++    return _commits(wt, head, base_ref, *under)
++
++
++def _skipped_work(wt: Path, tip: str, own: Mapping[str, Sequence[str]], base_ref: str,
++                  adds: dict[str, set[str]]) -> tuple[str, str] | None:
++    """``(name, commit)`` when the branch or line at ``tip`` holds work of a bundle the fold
++    skipped (#672) — ``own`` maps each one, in the order skipped, to its work
++    (:func:`_own_work`): the first such bundle, and the newest commit of its work that
++    ``tip`` has. None: it holds none of it. ``adds`` keeps what each tip adds over
++    ``base_ref``, read once. A git failure raises."""
++    if tip not in adds:
++        adds[tip] = set(_commits(wt, tip, base_ref))
++    return next(((name, c) for name, work in own.items() for c in work if c in adds[tip]),
++                None)
++
++
+ def _merge(wt: Path, rev: str, message: str) -> tuple[int, list[str]]:
+     """Merge ``rev`` onto the line in ``wt``; return the exit code and, on a failure, the
+     paths left conflicting (none: it failed for another reason). A failed merge is undone by
+diff --git a/template/tests/test_flow_resume_stack_prereqs.py b/template/tests/test_flow_resume_stack_prereqs.py
+index 50401cc..4c8707d 100644
+--- a/template/tests/test_flow_resume_stack_prereqs.py
++++ b/template/tests/test_flow_resume_stack_prereqs.py
+@@ -471,6 +471,317 @@ class ResumeStackPrereqs(unittest.TestCase):
+             self.assertFalse(self.fx._ancestor(self.fx._tip(f"fix/{gone}"), w_line), gone)
+         self.assertEqual(self.results["W"], state.COMPLETE)
+ 
++    # -- (10): work the fold skipped stays off the line, whatever branch holds it (#672) -------
++
++    def _on_the_line_without(self, iid: str, *gone: str) -> str:
++        """``iid`` was built, COMPLETE, on the carried line, and neither that line nor the tip
++        recorded for ``iid`` holds any of the commits ``gone``. Returns the recorded tip."""
++        self.assertTrue(self.fx._has(self.line), self.err)
++        base, tip, line_tip = self._built(iid)
++        self.assertEqual((base, tip), (self.line, line_tip), self.err)
++        self.assertEqual(self.results[iid], state.COMPLETE)
++        for commit in gone:
++            self.assertFalse(self.fx._ancestor(commit, self.line), commit)
++            self.assertFalse(self.fx._ancestor(commit, tip), commit)
++        return tip
++
++    def _update_keeping_ours(self, iid: str) -> str:
++        """``fix/<iid>``'s author updates it from the base, resolving a conflict in the
++        branch's favour (``git merge -X ours``), and pushes it. Returns its new tip."""
++        human = self.fx.human
++        sb._git(human, "fetch", "-q", "origin")
++        sb._git(human, "checkout", "-q", "-B", f"fix/{iid}", f"origin/fix/{iid}")
++        sb._git(human, "merge", "-q", "-X", "ours", "--no-edit", "origin/main")
++        sb._git(human, "push", "-q", "origin", f"fix/{iid}")
++        return self.fx._tip(f"fix/{iid}")
++
++    def _q_resolves_what_p_does_not(self, *, declared: bool = True,
++                                    p_names_q: bool = False) -> tuple[str, str]:
++        """P and Q (cut from ``fix/P``) finished with open PRs, X beside them. Then the base
++        got a change that conflicts with P's; Q's author updated ``fix/Q`` from the base,
++        resolving it in Q's favour, and P's author did not. ``declared``: Q's brief says
++        ``Depends on: P``; else it names no edge, its branch holding P's commit all the same.
++        ``p_names_q``: P's brief says ``Depends on: Q`` — wrongly, as Q's branch holds P's.
++        Returns P's and Q's branch tips."""
++        self._finished("P", {"base.txt": "p\n"})
++        self._finished_on("Q", "P")
++        if not declared:
++            sb._brief(self.cfg.bundle("Q"))                   # no `Depends on: P`
++            sb._accept(self.cfg.bundle("Q"))
++        if p_names_q:
++            sb._brief(self.cfg.bundle("P"), extra="- **Depends on:** Q\n")
++            sb._accept(self.cfg.bundle("P"))
++        self._finished("X", {"x.txt": "x\n"})
++        self.fx._push_from_human({"base.txt": "r\n"}, to="main")
++        p_head, q_head = self.fx._tip("fix/P"), self._update_keeping_ours("Q")
++        self.assertTrue(self.fx._ancestor(p_head, q_head))
++        self.assertTrue(self.fx._ancestor(self.fx._tip("main"), q_head))
++        return p_head, q_head
++
++    def _q_is_held_for_p(self, **setup: bool) -> None:
++        """The carry's fold, from the base, skips P (it conflicts), while Q would merge
++        cleanly with P's commit: Q is held with P as the cause, so D (on Q) waits, and E (on
++        X) is built on a line holding none of P's or Q's commits, pushed once."""
++        p_head, q_head = self._q_resolves_what_p_does_not(**setup)
++        d, e = self._planned("D", "Q"), self._planned("E", "X")
++        pushes = self.fx._pushes(lambda: self._run([d, e], ["P", "Q", "X", "D", "E"]))
++        held = self._held("Q", "D", "issue_P")
++        self.assertIn("get issue_P carried, or re-drive issue_Q on a base without it", held)
++        self.assertIn("conflict", self._not_carried("P"))
++        self.assertIn("holding no bundle", self._not_carried("P"))
++        self.assertIn("flow: carried issue_X (finished", self.err)
++        tip = self._on_the_line_without("E", p_head, q_head)
++        self.assertTrue(self.fx._ancestor(self.fx._tip("fix/X"), tip))
++        self.assertEqual(len(pushes), 1, pushes)              # the carry's, never redone
++
++    def test_a_finished_id_built_on_one_the_fold_skipped_is_held(self):
++        # (1) Before: Q was carried with P's commit, and D was built on that line.
++        self._q_is_held_for_p(declared=True)
++
++    def test_a_branch_holding_a_skipped_ids_work_is_held_without_a_declared_edge(self):
++        # (2) By what its branch holds, not by what its brief declares.
++        self._q_is_held_for_p(declared=False)
++
++    def test_a_depends_on_the_branches_contradict_does_not_carry_the_work(self):
++        # P's brief names Q, but Q's branch holds P's: Q was built on P, whatever P's brief
++        # says, so P's commit is still P's work and Q is held.
++        self._q_is_held_for_p(declared=False, p_names_q=True)
++
++    def test_a_branch_folded_before_the_one_it_holds_whole_carries_both(self):
++        # Unchanged: Q, asked for before P, merges first with all of P's branch, so P's
++        # merge is a no-op. Nothing failed, and both are carried.
++        p_head, q_head = self._q_resolves_what_p_does_not()
++        d = self._planned("D", "Q")
++        self._run([d], ["Q", "P", "X", "D"])
++        self.assertIn("flow: carried issue_Q, issue_P, issue_X (finished", self.err)
++        self.assertNotIn("is not carried", self.err)
++        base, tip, line_tip = self._built("D")
++        self.assertEqual((base, tip), (self.line, line_tip), self.err)
++        self.assertTrue(self.fx._ancestor(q_head, tip))
++        self.assertEqual(self.results["D"], state.COMPLETE)
++
++    def test_a_branch_merged_before_the_skip_with_part_of_its_work_is_left_out(self):
++        # Q, cut from P's first commit, is asked for first and merges; P's later commit then
++        # conflicts with the base, so P is skipped. Before: the pushed line kept Q, and with
++        # it P's first commit, and D was built on it. Now the line is folded again without Q
++        # before its one push.
++        self._finished("P", {"p-first.txt": "p\n"})
++        first = self.fx._tip("fix/P")
++        self._finished_on("Q", "P")
++        later = self.fx._push_from_human({"base.txt": "p\n"}, to="fix/P", off="origin/fix/P")
++        self.fx._push_from_human({"base.txt": "r\n"}, to="main")
++        self._finished("X", {"x.txt": "x\n"})
++        d, e = self._planned("D", "Q"), self._planned("E", "X")
++        pushes = self.fx._pushes(lambda: self._run([d, e], ["Q", "P", "X", "D", "E"]))
++        self._held("Q", "D", "issue_P")
++        self.assertIn("conflict", self._not_carried("P"))
++        self.assertIn("flow: carried issue_X (finished", self.err)
++        self._on_the_line_without("E", first, later, self.fx._tip("fix/Q"))
++        self.assertEqual(len(pushes), 1, pushes)
++
++    def test_work_a_skipped_id_did_in_a_merge_commit_stays_off_the_line(self):
++        # P's only change of its own is in a merge commit: built on X, its author merged the
++        # base in and edited base.txt while merging. The base then changed base.txt too, so
++        # P's merge fails. Q, cut from P and updated from the base keeping its own side,
++        # merges cleanly, its branch holding P's merge commit. Before: Q was carried with it
++        # (the line got P's base.txt), and D was built on it.
++        self._finished("X", {"x.txt": "x\n"})
++        self.fx._push_from_human({"n.txt": "n\n"}, to="main")
++        self._finished_on("P", "X")
++        human = self.fx.human                       # P's branch: X's, then only that merge
++        sb._git(human, "fetch", "-q", "origin")
++        sb._git(human, "checkout", "-q", "-B", "fix/P", "origin/fix/X")
++        sb._git(human, "merge", "-q", "--no-ff", "--no-commit", "origin/main")
++        (human / "base.txt").write_text("p\n", encoding="utf-8")
++        sb._git(human, "commit", "-q", "-a", "-s", "--no-edit")
++        sb._git(human, "push", "-q", "--force", "origin", "fix/P")
++        p_head = self.fx._tip("fix/P")
++        self.assertEqual(sb._git(self.fx.origin, "rev-list", "--no-merges", p_head, "--not",
++                                 "refs/heads/main", "refs/heads/fix/X").split(), [])
++        self.fx._push_from_human({"base.txt": "r\n"}, to="main")
++        self._finished_on("Q", "P")
++        q_head = self._update_keeping_ours("Q")
++        d, e = self._planned("D", "Q"), self._planned("E", "X")
++        pushes = self.fx._pushes(lambda: self._run([d, e], ["X", "P", "Q", "D", "E"]))
++        self._held("Q", "D", "issue_P")
++        self.assertIn("conflict", self._not_carried("P"))
++        self.assertIn("flow: carried issue_X (finished", self.err)
++        self._on_the_line_without("E", p_head, q_head)
++        self.assertEqual(self.fx._show(self.line, "base.txt"), "r\n")      # not P's edit
++        self.assertEqual(len(pushes), 1, pushes)
++
++    def test_base_history_two_branches_share_is_no_skipped_ids_work(self):
++        # The carry continues an earlier run's line, which is behind the base. P and Y were
++        # both updated from the newer base, so its commit is history they share; P conflicts
++        # with X on that line and is skipped. Y holds none of P's work: it is carried.
++        x = self._finished("X", {"c.txt": "x\n"})
++        self._finished("P", {"c.txt": "p\n"})
++        self._finished("Y", {"y.txt": "y\n"})
++        batch = ["X", "P", "Y", "D", "E"]
++        integrate.fold(self.cfg, [x], folded_this_run={}, batch=batch)    # the earlier run
++        old = self.fx._tip(self._line(batch))
++        self.fx._push_from_human({"n.txt": "n\n"}, to="main")
++        for iid in ("P", "Y"):
++            self.fx._update_branch(iid)
++        d, e = self._planned("D", "P"), self._planned("E", "Y")
++        pushes = self.fx._pushes(lambda: self._run([d, e], batch))
++        self._held("P", "D", "conflict")
++        self.assertIn("flow: carried issue_X, issue_Y (finished", self.err)
++        tip = self._on_the_line_without("E", self.fx._tip("fix/P"))
++        self.assertTrue(self.fx._ancestor(old, tip))                     # continued
++        self.assertTrue(self.fx._ancestor(self.fx._tip("fix/Y"), tip))
++        self.assertEqual([a for a in pushes if "--force" in a], [], pushes)
++
++    def _skipped_on_a_prerequisite(self, *, declared: bool) -> None:
++        """P, cut from ``fix/X``, conflicts with the base and is skipped. The commit their
++        branches share is X's, which P was built on: X is still carried, and E with it.
++        ``declared``: P's brief says ``Depends on: X``, and X's branch moved on since P was cut
++        from it, so P's branch no longer holds X's tip; else P declares no edge, and X's
++        branch is as P was cut from it."""
++        self._finished("X", {"x.txt": "x\n"})
++        self._finished_on("P", "X")
++        if declared:
++            self.fx._push_from_human({"x2.txt": "x2\n"}, to="fix/X", off="origin/fix/X")
++        else:
++            sb._brief(self.cfg.bundle("P"))                   # no `Depends on: X`
++            sb._accept(self.cfg.bundle("P"))
++        self.fx._push_from_human({"p.txt": "r\n"}, to="main")     # P adds p.txt as well
++        d, e = self._planned("D", "P"), self._planned("E", "X")
++        self._run([d, e], ["X", "P", "D", "E"])
++        self._held("P", "D", "conflict")
++        self.assertIn("flow: carried issue_X (finished", self.err)
++        tip = self._on_the_line_without("E", self.fx._tip("fix/P"))
++        self.assertTrue(self.fx._ancestor(self.fx._tip("fix/X"), tip))
++
++    def test_the_prerequisite_a_skipped_id_was_cut_from_is_still_carried(self):
++        self._skipped_on_a_prerequisite(declared=False)
++
++    def test_a_declared_prerequisite_that_moved_on_since_is_still_carried(self):
++        self._skipped_on_a_prerequisite(declared=True)
++
++    def _cut_from_the_line(self, iid: str, files: dict[str, str], line: str, at: str) -> Path:
++        """``iid`` finished in an earlier run as one of its wave 1: built on ``line`` at
++        commit ``at`` — recorded with its stack base, as the run records it — and its PR
++        branch cut from that commit, as publish cuts it. Its brief names no ``Depends on``."""
++        b = self.fx._publish(iid, files, cut_from=at)
++        sb._accept(b)
++        publish.write_stack_base(b, line, at)
++        self.assertEqual(publish.read_stack_base_tip(b), at)
++        return b
++
++    def test_a_sibling_cut_from_the_same_line_is_still_carried(self):
++        # P and Z were built on an earlier run's line holding X (its wave 1), so both their
++        # branches hold that line's merge commit; the line is gone since, so the carry starts
++        # a new one. P conflicts with the base and is skipped. That merge is the line's, which
++        # P was built on, and X's commit is X's: neither is P's work, so Z is carried.
++        x = self._finished("X", {"x.txt": "x\n"})
++        batch = ["X", "P", "Z", "D", "E"]
++        line = self._line(batch)
++        integrate.fold(self.cfg, [x], folded_this_run={}, batch=batch)    # the earlier run
++        at = self.fx._tip(line)
++        for iid in ("P", "Z"):
++            self._cut_from_the_line(iid, {f"{iid.lower()}.txt": f"{iid}\n"}, line, at)
++        self.fx._delete(line)
++        self.fx._push_from_human({"p.txt": "r\n"}, to="main")     # P adds p.txt as well
++        d, e = self._planned("D", "P"), self._planned("E", "Z")
++        pushes = self.fx._pushes(lambda: self._run([d, e], batch))
++        self._held("P", "D", "conflict")
++        self.assertIn("flow: carried issue_X, issue_Z (finished", self.err)
++        tip = self._on_the_line_without("E", self.fx._tip("fix/P"))
++        self.assertTrue(self.fx._ancestor(self.fx._tip("fix/Z"), tip))
++        self.assertEqual(len(pushes), 1, pushes)
++
++    def test_a_later_wave_built_on_a_line_holding_a_skipped_ids_work_is_held(self):
++        # An earlier run built X (wave 0), then P and Z on its line (wave 1), folded them,
++        # and built R (`Depends on: Z`) on that line (wave 2), so R's branch holds P's
++        # commit; then it stopped. P's branch got a fixup since that conflicts with the
++        # base, and the line is gone, so the carry starts a new one: P is skipped, and R is
++        # held with P as the cause. Before: R was carried with P's commit, and D built on
++        # it. Z, built beside P, is carried: the line it was built on is no work of P's.
++        batch = ["X", "P", "Z", "R", "D", "E"]
++        x, p, z = self._planned("X"), self._planned("P", "X"), self._planned("Z", "X")
++        self._run([x, p, z, self._planned("R", "Z")], batch)       # the earlier run
++        for iid in ("X", "P", "Z", "R"):
++            self.assertEqual(self.results[iid], state.COMPLETE, self.err)
++        first = self.fx._tip("fix/P")
++        self.assertTrue(self.fx._ancestor(first, self.fx._tip("fix/R")))
++        self.fx._delete(self.line)
++        later = self.fx._push_from_human({"fixup.txt": "p\n"}, to="fix/P", off="origin/fix/P")
++        self.fx._push_from_human({"fixup.txt": "r\n"}, to="main")
++        d, e = self._planned("D", "R"), self._planned("E", "Z")
++        pushes = self.fx._pushes(lambda: self._run([d, e], batch))
++        self._held("R", "D", "work of issue_P")
++        self.assertIn("conflict", self._not_carried("P"))
++        self.assertIn("flow: carried issue_X, issue_Z (finished", self.err)
++        self._on_the_line_without("E", first, later, self.fx._tip("fix/R"))
++        self.assertEqual(len(pushes), 1, pushes)
++
++    def test_a_line_holding_a_prerequisites_old_head_is_still_carried_onto(self):
++        # The earlier run's line holds X; P (its wave 1) was built on that line and names no
++        # `Depends on: X`. X's branch moved on since, with a fixup that conflicts with P's
++        # change, so the fold skips P. X's old commit on the line is X's work, under the line
++        # P was built on, not P's: X is carried onto that line, without force, and only P
++        # and D are held — not every bundle of the target.
++        x = self._finished("X", {"x.txt": "x\n"})
++        batch = ["X", "P", "D", "E"]
++        line = self._line(batch)
++        integrate.fold(self.cfg, [x], folded_this_run={}, batch=batch)    # the earlier run
++        old = self.fx._tip(line)
++        self._cut_from_the_line("P", {"x.txt": "p\n"}, line, old)
++        self.fx._push_from_human({"x.txt": "x2\n"}, to="fix/X", off="origin/fix/X")
++        d, e = self._planned("D", "P"), self._planned("E", "X")
++        pushes = self.fx._pushes(lambda: self._run([d, e], batch))
++        self._held("P", "D", "conflict")
++        self.assertIn("flow: carried issue_X (finished", self.err)
++        tip = self._on_the_line_without("E", self.fx._tip("fix/P"))
++        self.assertTrue(self.fx._ancestor(old, tip))                     # continued
++        self.assertTrue(self.fx._ancestor(self.fx._tip("fix/X"), tip))
++        self.assertEqual(len(pushes), 1, pushes)
++        self.assertNotIn("--force", pushes[0])
++
++    def test_a_line_already_holding_a_skipped_ids_work_is_not_carried_onto(self):
++        # The earlier run's line holds P and X. P's branch moved on since, with a commit that
++        # conflicts with X's, so the fold skips P; that line holds P's work, and a line is
++        # never rewritten, so nothing is carried onto it or pushed. Before: X was carried
++        # onto it, and E built on P's work.
++        p = self._finished("P", {"p.txt": "p\n"})
++        x = self._finished("X", {"c.txt": "x\n"})
++        batch = ["P", "X", "D", "E", "U"]
++        line = self._line(batch)
++        integrate.fold(self.cfg, [p, x], folded_this_run={}, batch=batch)  # the earlier run
++        old = self.fx._tip(line)
++        self.fx._push_from_human({"c.txt": "p\n"}, to="fix/P", off="origin/fix/P")
++        d, e, u = self._planned("D", "P"), self._planned("E", "X"), self._planned("U")
++        pushes = self.fx._pushes(lambda: self._run([d, e, u], batch))
++        self._held("P", "D", line, "delete")
++        self._held("X", "E", line, "delete")
++        self._on_base("U")
++        self.assertEqual(pushes, [])
++        self.assertEqual(self.fx._tip(line), old)
++
++    def test_a_shared_commit_the_run_cannot_give_to_either_holds_both_and_the_old_line(self):
++        # The documented limit: P was cut by hand from X's branch and names no `Depends on:
++        # X`; X's branch moved on since. Nothing tells whose their shared commit is — X's,
++        # or P's first, with X cut from it — so when P's merge fails it counts as P's work:
++        # X is held too, and as the earlier run's line holds that commit, nothing is carried
++        # onto it or pushed. Every finished prerequisite of the target is held; U is not.
++        x = self._finished("X", {"x.txt": "x\n"})
++        batch = ["X", "P", "D", "E", "U"]
++        line = self._line(batch)
++        integrate.fold(self.cfg, [x], folded_this_run={}, batch=batch)    # the earlier run
++        old = self.fx._tip(line)
++        self._finished_on("P", "X")
++        sb._brief(self.cfg.bundle("P"))                         # no `Depends on: X`
++        sb._accept(self.cfg.bundle("P"))
++        self.fx._push_from_human({"p.txt": "x2\n"}, to="fix/X", off="origin/fix/X")
++        d, e, u = self._planned("D", "P"), self._planned("E", "X"), self._planned("U")
++        pushes = self.fx._pushes(lambda: self._run([d, e, u], batch))
++        self._held("P", "D", line, "delete")
++        self._held("X", "E", line, "delete")
++        self._on_base("U")
++        self.assertEqual(pushes, [])
++        self.assertEqual(self.fx._tip(line), old)
++
+ 
+ if __name__ == "__main__":
+     unittest.main()

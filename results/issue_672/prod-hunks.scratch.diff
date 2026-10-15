@@ -1,0 +1,178 @@
+diff --git a/template/src/pdca_harness/flow.py b/template/src/pdca_harness/flow.py
+index 7a2abc0..0d97115 100644
+--- a/template/src/pdca_harness/flow.py
++++ b/template/src/pdca_harness/flow.py
+@@ -916,6 +916,7 @@ def _fold_lines(cfg: Config, bundles: list[Path], *, dry: bool,
+                 carried: dict[str, str] | None = None,
+                 held_out: dict[str, tuple[list[str], list[str]]] | None = None,
+                 wave: Collection[str] = (),
++                skip_causes: dict[str, str] | None = None,
+                 ) -> tuple[dict[tuple[str, str], tuple[str, Path | None]],
+                            dict[tuple[str, str], str | None], tuple[str, str] | None]:
+     """ONE :func:`integrate.fold` of ``bundles`` and, with ``[driver].regate_between_waves``,
+@@ -930,7 +931,9 @@ def _fold_lines(cfg: Config, bundles: list[Path], *, dry: bool,
+     passes none. ``held_out`` / ``wave`` (#674): the in-run folds pass the wave just
+     published, so a bundle of it whose branch conflicts with ones of its own wave merged
+     before it (and not with the line as the wave found it) is left out and recorded in
+-    ``held_out``, not stopped on; the carry passes none.
++    ``held_out``, not stopped on; the carry passes none. ``skip_causes`` (#672, the carry,
++    with ``skipped``): each bundle the fold skipped because its branch holds a skipped one's
++    work, mapped to that one (:func:`integrate.fold`); the in-run folds pass none.
+ 
+     Returns ``(folded, tips, red)``: the fold's result, each folded target's pushed tip
+     (None in a dry-run, which pushes nothing), and the first target whose re-gate is red
+@@ -939,7 +942,8 @@ def _fold_lines(cfg: Config, bundles: list[Path], *, dry: bool,
+     with contextlib.ExitStack() as locks:
+         folded = integrate.fold(cfg, bundles, dry_run=dry, locks=locks,
+                                 folded_this_run=folded_this_run, batch=batch, skipped=skipped,
+-                                carried=carried, held_out=held_out, wave=wave)
++                                carried=carried, held_out=held_out, wave=wave,
++                                skip_causes=skip_causes)
+         tips = {tgt: integrate.pushed_tip(wt) if wt is not None else None
+                 for tgt, (_branch, wt) in folded.items()}
+         # hold_lock=False: the locks stack already holds each tree's lock (re-acquiring
+@@ -1050,8 +1054,11 @@ def _carry_finished(cfg: Config, bundles: list[Path], finished: list[Path], *,
+     directly or through others, so its branch carries that work (:func:`_cascade_not_clean`,
+     #652): none of them is folded or accounts for a commit on origin's line, and their
+     dependents wait too, each named with the cause. One whose merge fails only DURING the
+-    fold does not spread: its work still reaches the line through a finished id built on it
+-    that merges in the same fold. A target the carry did not put to use is not seeded, so the
++    fold spreads by ancestry instead (#672): every finished id folded after it whose branch
++    holds its work — whatever its brief declares — is skipped too, before it merges, so the
++    line the carry pushes, once, holds none of it; each is held like a not-clean one, its
++    dependents waiting, named with the skipped id as the cause. A target the carry did not
++    put to use is not seeded, so the
+     run's first fold of it starts fresh, as today. A dry-run (stub publisher) asks no host
+     and holds nothing: it prints the plan. A prerequisite that is no requested id, such as
+     a split child an earlier run adopted, is not carried: :func:`_runnable` holds its plain
+@@ -1102,15 +1109,21 @@ def _carry_finished(cfg: Config, bundles: list[Path], finished: list[Path], *,
+         clean = [d for d in ids if d.name not in why]
+         if clean:
+             skipped: dict[str, str] = {}
++            within: dict[str, str] = {}     # skipped for holding a skipped id's work → it
+             try:
+                 folded, tips, red = _fold_lines(cfg, clean, dry=False, batch=batch,
+                                                 folded_this_run={tgt: tip} if tip else {},
+-                                                skipped=skipped)
++                                                skipped=skipped, skip_causes=within)
+             except integrate.IntegrationError as exc:
+                 folded, tips, red = {}, {}, None
+                 skipped.update({d.name: str(exc) for d in clean})
+             carried = [d.name for d in clean if d.name not in skipped]
+-            why.update({name: (msg, "open") for name, msg in skipped.items()})
++            why.update({name: (msg, "open") for name, msg in skipped.items()
++                        if name not in within})
++            # Its branch holds a skipped id's work (#672): built on it, named as the cause.
++            why.update({name: (f"its branch holds work of {cause}, whose merge the fold "
++                               f"skipped", "built_on") for name, cause in within.items()})
++            causes.update(within)
+             if red:
+                 why.update({name: (f"the re-gate of {line} carrying it is red", "open")
+                             for name in carried})
+diff --git a/template/src/pdca_harness/integrate.py b/template/src/pdca_harness/integrate.py
+index 43248a1..242de2a 100644
+--- a/template/src/pdca_harness/integrate.py
++++ b/template/src/pdca_harness/integrate.py
+@@ -96,6 +96,16 @@ class _Conflict(IntegrationError):
+     conflict from any other failed merge."""
+ 
+ 
++class _HoldsSkipped(IntegrationError):
++    """A published branch that holds work of a bundle this fold skipped (#672): merging it
++    would put the skipped bundle's commits on the line through it. ``cause`` is the skipped
++    bundle's name. Raised by :func:`fold` under ``skipped`` only (:func:`_holds_work_of`)."""
++
++    def __init__(self, message: str, cause: str) -> None:
++        super().__init__(message)
++        self.cause = cause
++
++
+ def integration_branch(cfg: Config, base: str, batch: Iterable[str] | None = None) -> str:
+     """The run-scoped integration branch for a target ``base`` — deterministic (a resumed run
+     rebuilds the same branch) and **injective in the base** (#187): the base is flattened to a
+@@ -305,6 +315,7 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
+          carried: dict[str, str] | None = None,
+          held_out: dict[str, tuple[list[str], list[str]]] | None = None,
+          wave: Collection[str] = (),
++         skip_causes: dict[str, str] | None = None,
+          ) -> dict[tuple[str, str], tuple[str, Path | None]]:
+     """Fold the cumulative accepted bundles' published branches onto a per-target
+     integration branch.
+@@ -375,7 +386,15 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
+     cannot be made, or reset — :class:`IntegrationTreeError`), a moved line, the push, and
+     the up-front refusal of a bundle with no published branch (the carry passes only
+     bundles that have one). ``None`` (every other caller) raises on the first failure, as
+-    before.
++    before. A skipped bundle's work never reaches the line through another bundle (#672):
++    a later bundle of the same target whose branch holds a commit a skipped one's branch
++    has and the line does not (:func:`_holds_work_of`, by ancestry, whatever its brief
++    declares) is skipped too, before it merges — so a branch that resolved the skipped
++    one's conflict cannot carry its commits in. Such a skip is a skipped bundle in turn,
++    and the line is pushed once, holding none of their work. ``skip_causes``, when given,
++    records each of them in place: name → the skipped bundle whose work its branch holds.
++    A bundle folded BEFORE the one that fails is not judged again: its merge already put
++    that work on the line, so the later one's merge is a no-op and nothing is skipped.
+ 
+     ``carried`` (#633, the flow's in-run folds): the run's record, filled in place like
+     ``skipped``, of the head each bundle's branch had when a fold of this run put it on its
+@@ -515,6 +534,7 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
+             took: dict[str, str] = {}   # bundle name → the head this fold put on the line
+             pre: str | None = None      # the line before the wave's first merge (#674)
+             kept: list[tuple[str, str]] = []   # the wave's bundles merged so far: (name, head)
++            dropped: list[tuple[str, str]] = []   # skipped here, with a head: (name, head)
+             for d in bundles:
+                 # Its branch's tip, read once — a carried branch's is the one checked (#633).
+                 head = checked[d.name] if d.name in checked else _rev(wt, refs[d.name][1])
+@@ -525,6 +545,13 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
+                         raise IntegrationTreeError(f"could not read the tip of {branch} in "
+                                                    f"{wt} — check that checkout, then re-run")
+                 try:
++                    if skipped is not None and head is not None:
++                        for name, other in dropped:   # never a skipped one's work (#672)
++                            if _holds_work_of(wt, head, other, branch):
++                                raise _HoldsSkipped(
++                                    f"{d.name}'s branch {refs[d.name][1]} holds work of "
++                                    f"{name}, whose merge this fold skipped — merging it "
++                                    f"would put {name}'s commits on {branch}", name)
+                     _merge_published(cfg, wt, d, refs[d.name], head, branch=branch, base=base,
+                                      owners=tuple(owners.values()))
+                 except IntegrationError as exc:
+@@ -537,6 +564,10 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
+                     if skipped is None or isinstance(exc, (IntegrationTreeError, _LineBroken)):
+                         raise
+                     skipped[d.name] = str(exc)   # this bundle only; its merge was undone
++                    if head is not None:
++                        dropped.append((d.name, head))
++                    if skip_causes is not None and isinstance(exc, _HoldsSkipped):
++                        skip_causes[d.name] = exc.cause
+                 else:
+                     if head is not None:        # merged, or in the line already
+                         took[d.name] = head
+@@ -860,6 +891,27 @@ def _in_line(wt: Path, rev: str, what: str, branch: str, *, of: str = "HEAD") ->
+         f"checkout, then re-run")
+ 
+ 
++def _holds_work_of(wt: Path, head: str, other: str, branch: str) -> bool:
++    """Whether branch tip ``head`` holds a commit that ``other`` (a skipped bundle's branch
++    tip) has and the line checked out in ``wt`` does not (#672) — so merging ``head`` would
++    put some of ``other``'s work on the line. Such a commit exists exactly when a merge base
++    of the two is not in the line: every commit both have is an ancestor of one of their
++    merge bases, and a line holding a merge base holds its ancestors too. Two tips with no
++    common commit share no work. A git failure raises (``branch`` names the line in it),
++    so under the carry's ``skipped`` the bundle is skipped rather than merged unchecked."""
++    r = subprocess.run(["git", "-C", str(wt), "merge-base", "--all", head, other],
++                       capture_output=True, text=True)
++    if r.returncode == 1 and not r.stdout.strip():
++        return False
++    if r.returncode != 0:
++        raise IntegrationError(
++            f"could not tell whether {head[:12]} holds work of {other[:12]} — `git "
++            f"merge-base --all` exited {r.returncode} in {wt}: check that checkout, then "
++            f"re-run")
++    return any(not _in_line(wt, mb, f"merge base {mb[:12]}", branch)
++               for mb in r.stdout.split())
++
++
+ def _merge(wt: Path, rev: str, message: str) -> tuple[int, list[str]]:
+     """Merge ``rev`` onto the line in ``wt``; return the exit code and, on a failure, the
+     paths left conflicting (none: it failed for another reason). A failed merge is undone by
