@@ -1,0 +1,14 @@
+{
+  "band": "watch",
+  "independent_outcomes": [
+    "Run the #623 'would this merge remove work from the line' check on every bundle-branch merge of a fold (raise in-run, skip only that bundle under `skipped`), with its own refusal message that never blames the incoming bundle for removing its own work \u2014 criteria (1), (2), (2b), (3), (4) and the iteration-3 message rewording all test this one behavior",
+    "Document gap 1 (partial revert inside a file the line also changed; revert of work below the cut point) as an accepted limit in docs/07-crosscutting.md:680-684 and the integrate.py module docstring \u2014 docs only, no test, could ship on its own"
+  ],
+  "proposed_seams": [
+    "Possible cut between the code fix and the gap-1 documentation: the docs note does not depend on the new check and could be its own docs-only PR. I would not cut it. It is a few lines next to the same #623 text the fix already touches, it has no test of its own, and splitting it adds a second edit to the docs/07-crosscutting.md stack-mode section that 672, 694 and 695 also edit \u2014 more conflict ordering for very little gain.",
+    "No seam inside the code change. (1)/(2)/(2b)/(3) are one rule (refuse a bundle merge that removes line work, unless the branch's own commits did it) seen from different histories; the own-commit exemption and the refusal wording cannot ship apart from the check they belong to.",
+    "Why watch and not ok: the surface is uncertain, not wide. Three rebuild rounds so far all turned on the same hard part \u2014 how to tell a branch's own commits from base commits it carries (first-parent rule, walk stop points, ambiguous shared commits). That is risk inside one outcome, not a second outcome."
+  ],
+  "confidence": "medium",
+  "brief_sha": "78a375005a071246"
+}
