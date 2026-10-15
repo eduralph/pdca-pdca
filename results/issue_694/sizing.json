@@ -1,0 +1,13 @@
+{
+  "band": "watch",
+  "independent_outcomes": [
+    "When a re-issue's pre-wave carry refuses a finished id because its branch textually conflicts with another finished id of the same batch, the hold line names that partner and the files and gives the #674 remedy (declare Conflicts with, rebuild on a base that holds the partner) instead of the 'open'/'cross-wave' hint \u2014 criteria (1) and (3), plus the docs/07-crosscutting.md carry paragraph."
+  ],
+  "proposed_seams": [
+    "Weak seam, not recommended unless iteration 4 fails again: split the 'which kind of conflict is this' step from 'who exactly is the partner'. Child A: the carry tells a conflict with the base apart from a conflict with work on the line (trial merge onto the base alone), and for the base case prints base-specific advice with no partner and no Conflicts with (criterion 2); it already fixes the wrong 'get PR open / cross-wave' hint for both kinds. Child B: full partner attribution for the line case (criterion 1). B builds on A's classification, so this is a sequenced pair, not two parallel ones. Criterion 2 on its own is a real, separately testable fix, which is why this is 'watch' and not 'ok'.",
+    "Why the band is not 'ok': the outcome is single, but the partner-attribution surface has proven large and uncertain. Three rebuilds were each sent back for attribution edge cases (candidate order vs. ids already on origin's line, partners later removed by the #672 hold, inherited deletes hiding a stacked partner's own edit). The human may want to pin a narrower attribution contract in Plan (e.g. what to print when attribution is uncertain) rather than split.",
+    "Not a seam: the docs/07-crosscutting.md update describes this same behaviour and should ship with it."
+  ],
+  "confidence": "medium",
+  "brief_sha": "48257ab162f3b0a6"
+}
