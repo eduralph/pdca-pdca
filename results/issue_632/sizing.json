@@ -1,0 +1,11 @@
+{
+  "band": "ok",
+  "independent_outcomes": [
+    "A publish whose git push succeeded is recorded as pushed, even when `gh pr create` raises, so the flow folds the bundle and the operator is told the branch is on origin with no PR opened."
+  ],
+  "proposed_seams": [
+    "None. The brief fixes one defect with one fix in publish.py (catch the raise from `gh pr create` and send it down the existing rc-1 path). Criteria (1)-(3) check the same outcome from the flow, the fold, and stderr, so they ship together. The brief already puts the stacked publisher, docs, retries, and the preflight check out of scope."
+  ],
+  "confidence": "high",
+  "brief_sha": "2316e0314ca2d38c"
+}

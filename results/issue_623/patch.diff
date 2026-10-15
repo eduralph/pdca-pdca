@@ -1,0 +1,500 @@
+diff --git a/docs/07-crosscutting.md b/docs/07-crosscutting.md
+index 05f22c6..f01ed42 100644
+--- a/docs/07-crosscutting.md
++++ b/docs/07-crosscutting.md
+@@ -668,7 +668,11 @@ wave builds on, via `[driver].wave_mode`:
+   that has it already carries the PR; one that does not (say a fixup was pushed
+   after the fold) merges your base in, after checking that your base has that
+   commit. If it does not (the PR merged into another branch, or was squashed or
+-  rebased), the run stops rather than build the next wave without that work. An
++  rebased), the run stops rather than build the next wave without that work. It
++  also stops, naming the bundle, when merging your base in would undo work a
++  bundle put on the line (say your base reverted a merged PR, so a file the
++  bundle added would disappear); a base that only edits such a file is merged
++  in as usual. An
+   accepted bundle whose publish pushed no branch holds only the bundles that
+   depend on it; the rest of the run goes on. When you publish it later
+   (`pdca publish <id>`), its PR branch is cut from the line commit it was built
+diff --git a/template/src/pdca_harness/integrate.py b/template/src/pdca_harness/integrate.py
+index 46c46a6..cb0b02b 100644
+--- a/template/src/pdca_harness/integrate.py
++++ b/template/src/pdca_harness/integrate.py
+@@ -42,7 +42,8 @@ the head commit the host says the PR merged with (``merged.merged_head``), never
+ commit message: a line that already has that commit skips it; one that does not (a fixup
+ pushed after the fold) takes the base in, once the base is checked to have that commit —
+ a PR merged somewhere else (its base edited on the host, a squash or rebase merge) stops
+-the run instead. A branch that does not merge cleanly (an undeclared cross-wave overlap)
++the run instead, and so does a base that would undo work already on the line (a revert of
++a merged PR, #623). A branch that does not merge cleanly (an undeclared cross-wave overlap)
+ is a loud :class:`IntegrationError` that stops the run before the next wave builds on a
+ broken base. Mechanics are deterministic ``git`` subprocesses (no model).
+ """
+@@ -53,7 +54,7 @@ import contextlib
+ import hashlib
+ import subprocess
+ import sys
+-from collections.abc import Collection, Iterable, Mapping
++from collections.abc import Collection, Iterable, Mapping, Sequence
+ from pathlib import Path
+ 
+ from . import merged, publish
+@@ -67,6 +68,11 @@ class IntegrationError(RuntimeError):
+     incomplete base."""
+ 
+ 
++class _LineBroken(IntegrationError):
++    """The fold could not put the line back the way it was before a failed step (#623), so
++    it must not go on merging and push: raised even under ``skipped``."""
++
++
+ def integration_branch(cfg: Config, base: str, batch: Iterable[str] | None = None) -> str:
+     """The run-scoped integration branch for a target ``base`` — deterministic (a resumed run
+     rebuilds the same branch) and **injective in the base** (#187): the base is flattened to a
+@@ -315,7 +321,9 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
+     (:func:`_take_in_base`), so the work still reaches the next wave — but only once the
+     base is checked to have that head: a PR merged somewhere else (its base edited on the
+     host, a squash or rebase merge) raises, and so does an ``Onto branch`` record, whose
+-    PR may have merged into another base.
++    PR may have merged into another base. So does a base that would remove work a bundle
++    put on the line (#623): the line is reset to its tip before the base merge, and the
++    bundles of ``accepted`` and ``batch`` are what the message names.
+ 
+     Dry-run (offline rehearse / CI, where the publisher leaf is stubbed) prints each group's
+     git plan and returns the branches with ``None`` worktrees — no worktree, no push — so the
+@@ -430,11 +438,20 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
+             start_ref = f"{base_remote}/{base}" if fresh else line
+             if _git(wt, "checkout", "-B", branch, start_ref) != 0:
+                 raise IntegrationError(f"could not start {branch} off {start_ref}")
++            # Who a path the base would undo belongs to (#623): this fold's bundles, then
++            # the rest of the run's batch (folded earlier, absent from this call), found by
++            # id as the flow finds them — an archived one too (`find_bundle`) — and each
++            # listed once, by name.
++            owners: dict[str, Path] = {}
++            for o in [*bundles, *(cfg.find_bundle(str(n).removeprefix("issue_"))
++                                  for n in batch or ())]:
++                owners.setdefault(o.name, o)
+             for d in bundles:
+                 try:
+-                    _merge_published(cfg, wt, d, refs[d.name], branch=branch, base=base)
++                    _merge_published(cfg, wt, d, refs[d.name], branch=branch, base=base,
++                                     owners=tuple(owners.values()))
+                 except IntegrationError as exc:
+-                    if skipped is None:
++                    if skipped is None or isinstance(exc, _LineBroken):
+                         raise
+                     skipped[d.name] = str(exc)   # this bundle only; the merge was aborted
+             if skipped is not None and all(d.name in skipped for d in bundles):
+@@ -459,15 +476,16 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
+ 
+ 
+ def _merge_published(cfg: Config, wt: Path, d: Path, published: tuple[str, str, bool], *,
+-                     branch: str, base: str) -> None:
++                     branch: str, base: str, owners: Sequence[Path] = ()) -> None:
+     """Merge bundle ``d``'s published branch onto the line checked out in ``wt`` (#593):
+     its own commits, joined by a signed-off merge commit — not a re-applied copy. The
+     branch's CURRENT tip is merged, so commits pushed onto it after an earlier fold carried
+-    it reach the line too."""
++    it reach the line too. ``owners``: the bundles a refusal to take the base in may name
++    (:func:`_take_in_base`)."""
+     _remote, ref, onto = published
+     head = _rev(wt, ref)
+     if head is None:
+-        _gone_branch(cfg, wt, d, ref, onto, branch=branch, base=base)
++        _gone_branch(cfg, wt, d, ref, onto, branch=branch, base=base, owners=owners)
+         return
+     if _in_line(wt, head, f"{d.name}'s branch {ref}", branch):
+         return  # already in the line (an earlier fold carried it) — never merged twice
+@@ -486,7 +504,7 @@ def _merge_published(cfg: Config, wt: Path, d: Path, published: tuple[str, str,
+ 
+ 
+ def _gone_branch(cfg: Config, wt: Path, d: Path, ref: str, onto: bool, *, branch: str,
+-                 base: str) -> None:
++                 base: str, owners: Sequence[Path] = ()) -> None:
+     """``d``'s published branch ``ref`` does not resolve after the pruning fetch — a merged
+     PR's branch is commonly deleted on merge (#593). Decided by commit, never by message:
+ 
+@@ -500,7 +518,8 @@ def _gone_branch(cfg: Config, wt: Path, d: Path, ref: str, onto: bool, *, branch
+        on:`` PR targets its parent's branch, so either may have merged elsewhere, and that
+        raises. Any other PR targeted this base, but it may still have merged into another
+        branch (its base edited on the host), so the fold first checks that the base has the
+-       head: then the line takes the base in (:func:`_take_in_base`). A base without it —
++       head: then the line takes the base in (:func:`_take_in_base`), unless that would
++       remove work a bundle put on the line (#623), which raises. A base without it —
+        or a clone without it, which, having fetched the base, means the same; a squash or
+        rebase merge never puts it on the base either — raises, rather than build the next
+        wave on a line that lacks the PR's work."""
+@@ -533,7 +552,7 @@ def _gone_branch(cfg: Config, wt: Path, d: Path, ref: str, onto: bool, *, branch
+             f"base edited on the host, or a squash or rebase merge), so taking {base_ref} "
+             f"in would not carry that work to the next wave — restore the branch, or get "
+             f"that work into {base_ref}, then re-run")
+-    _take_in_base(wt, d, ref, branch, base_ref, head)
++    _take_in_base(cfg, wt, d, ref, branch, base_ref, head, owners)
+ 
+ 
+ def _carries(wt: Path, commit: str, what: str, branch: str, *, of: str = "HEAD") -> bool:
+@@ -545,12 +564,23 @@ def _carries(wt: Path, commit: str, what: str, branch: str, *, of: str = "HEAD")
+     return _in_line(wt, commit, what, branch, of=of)
+ 
+ 
+-def _take_in_base(wt: Path, d: Path, ref: str, branch: str, base_ref: str, head: str) -> None:
++def _take_in_base(cfg: Config, wt: Path, d: Path, ref: str, branch: str, base_ref: str,
++                  head: str, owners: Sequence[Path] = ()) -> None:
+     """``d``'s branch ``ref`` is gone and its PR merged at ``head``, a commit the line does
+     not have but the base does (the caller checked), so the base carries the merged work.
+     Merge the base in (signed off, on top of the line: a fast-forward for the push, never a
+-    rewrite — #593); a line that already has the base needs nothing."""
++    rewrite — #593); a line that already has the base needs nothing.
++
++    A base merge that would remove work from the line (#623) — the base reverted a merged
++    PR, ``d``'s or one already on the line — is undone (the line is reset to its tip before
++    the merge, so under the carry's ``skipped`` the other bundles merge onto a line without
++    it) and raises, naming each path it would undo and the bundle of ``owners`` that
++    brought it (:func:`_undone_paths`). Commit ancestry alone cannot see this: the base
++    still has the merged head after the revert."""
+     if not _in_line(wt, base_ref, base_ref, branch):
++        before = _rev(wt, "HEAD")
++        if before is None:
++            raise IntegrationError(f"could not read the tip of {branch} in {wt}")
+         rc, conflicts = _merge(wt, base_ref, f"pdca-integrate: {base_ref} (carries merged "
+                                              f"{d.name})")
+         if rc != 0:
+@@ -561,11 +591,129 @@ def _take_in_base(wt: Path, d: Path, ref: str, branch: str, base_ref: str, head:
+                 f"{d.name}'s branch {ref} is gone and its PR merged at {head[:12]}, which "
+                 f"{branch} does not have, but {base_ref}, which carries that work, does not "
+                 f"merge onto {branch} ({why}), then re-run")
++        try:
++            undone = _undone_paths(cfg, wt, before, base_ref, branch, owners)
++        except IntegrationError:
++            _reset_line(wt, before, branch)
++            raise
++        if undone:
++            _reset_line(wt, before, branch)
++            whose = sorted({n for _p, names, _note in undone for n in names})
++            work = f"{', '.join(whose)}'s work" if whose else "folded work"
++            paths = "; ".join(f"{p} ({', '.join(names) or f'{note} on {branch}'})"
++                              for p, names, note in undone)
++            raise IntegrationError(
++                f"{d.name}'s branch {ref} is gone and its PR merged at {head[:12]}, which "
++                f"{branch} does not have, but taking {base_ref} in would remove {work} from "
++                f"{branch}: {paths} would go back to how {base_ref} had it before the line "
++                f"changed it (a revert on {base_ref}?). Not building the next wave on a line "
++                f"without that work — get it back into {base_ref}, or restore {ref}, then "
++                f"re-run")
+     print(f"integrate: {d.name}'s branch {ref} is gone and its PR merged at {head[:12]}, "
+           f"which {branch} did not have — the merged work reaches {branch} through "
+           f"{base_ref}.", file=sys.stderr)
+ 
+ 
++def _out(wt: Path, *args: str, what: str, stdin: str | None = None) -> str:
++    """``git -C wt args``' output; a failing git step raises (``what`` says what it read)."""
++    r = subprocess.run(["git", "-C", str(wt), *args], capture_output=True, text=True,
++                       input=stdin)
++    if r.returncode != 0:
++        raise IntegrationError(f"could not read {what} in {wt} — `git {args[0]}` exited "
++                               f"{r.returncode}; a git step failed: check that checkout, "
++                               f"then re-run")
++    return r.stdout
++
++
++def _cut_point(wt: Path, tip: str, base_ref: str) -> tuple[str | None, list[str]]:
++    """Where the line at ``tip`` leaves the base, and the line's own commits since (#623):
++    ``(cut, chain)``. ``chain`` is the line's first-parent chain, newest first, down to the
++    first commit on it that ``base_ref`` has, which is ``cut`` — decided by commit, never by
++    message. A base that has ``tip`` itself gives ``(tip, [])``. A chain that never meets
++    the base (its oldest commit has no parent) gives a ``cut`` of None: the line starts from
++    nothing."""
++    chain = _out(wt, "rev-list", "--first-parent", "--topo-order", tip, "--not", base_ref,
++                 what=f"the first-parent chain of {tip}").split()
++    if not chain:
++        return tip, chain
++    parents = _out(wt, "rev-list", "--parents", "-n", "1", chain[-1],
++                   what=f"the parents of {chain[-1]}").split()[1:]
++    return (parents[0] if parents else None), chain
++
++
++def _changed(wt: Path, old: str, new: str) -> list[str]:
++    """The paths whose content differs between ``old`` and ``new`` (no rename pairing)."""
++    out = _out(wt, "diff", "--no-renames", "--name-only", "-z", old, new,
++               what=f"the paths changed between {old} and {new}")
++    return [p for p in out.split("\0") if p]
++
++
++def _own_commits(wt: Path, tip: str, since: Sequence[str], skip: Collection[str], *,
++                 what: str) -> set[str]:
++    """The commits a branch at ``tip`` adds of its own since the cut point (#623): each one
++    reachable from ``tip`` without passing through a commit of ``skip`` (the line's and the
++    base's first-parent commits; ``since`` leaves out the cut point's history). A branch cut
++    from the line or from the base, or updated from the base, has those in its history, but
++    they are not its work. A commit merged INTO the branch (say a topic branch merged into
++    the PR branch) is its work, though it is not on the branch's first-parent chain."""
++    out = _out(wt, "rev-list", "--parents", tip, *since, what=what)
++    parents = {c: ps for c, *ps in (row.split() for row in out.splitlines() if row)}
++    own: set[str] = set()
++    todo = [tip]
++    while todo:
++        c = todo.pop()
++        if c in own or c in skip or c not in parents:
++            continue
++        own.add(c)
++        todo.extend(parents[c])
++    return own
++
++
++def _undone_paths(cfg: Config, wt: Path, before: str, base_ref: str, branch: str,
++                  owners: Sequence[Path]) -> list[tuple[str, list[str], str]]:
++    """``(path, bundles, note)`` for each path the base merge just made in ``wt`` undoes
++    (#623): one the line at ``before`` changed since its cut point (:func:`_cut_point`),
++    which is back to its content there now (absent, where the cut point had none). An edit
++    that leaves the path with NEW content removes nothing. ``bundles`` are the ``owners``
++    that brought the change: each one with a commit of its own (:func:`_own_commits`, from
++    its published branch or, gone, the head its PR merged with) among the commits that
++    changed the path on the line; ``note`` names the line commit that last changed it."""
++    cut, chain = _cut_point(wt, before, base_ref)
++    since = ("--not", cut) if cut else ()
++    old = cut or _out(wt, "hash-object", "-t", "tree", "--stdin", stdin="",
++                      what="the empty tree").strip()
++    after = set(_changed(wt, old, "HEAD"))
++    undone = [p for p in _changed(wt, old, before) if p not in after]
++    if not undone:
++        return []
++    skip = {*chain, *_out(wt, "rev-list", "--first-parent", base_ref, *since,
++                          what=f"the first-parent chain of {base_ref}").split()}
++    own: list[tuple[str, set[str]]] = []      # (bundle name, the commits it adds)
++    for o in owners:
++        pub = _published_ref(o)
++        if pub is None:
++            continue
++        tip = _rev(wt, pub[1]) or merged.merged_head(cfg, o.name.removeprefix("issue_"))
++        if tip and _git(wt, "cat-file", "-e", f"{tip}^{{commit}}") == 0:
++            own.append((o.name, _own_commits(wt, tip, since, skip,
++                                             what=f"{o.name}'s commits")))
++    out: list[tuple[str, list[str], str]] = []
++    for path in undone:
++        touched = _out(wt, "rev-list", before, *since, "--", f":(literal){path}",
++                       what=f"the commits on {branch} that changed {path}").split()
++        out.append((path, [name for name, commits in own if commits.intersection(touched)],
++                    f"last changed by {touched[0][:12]}" if touched else "changed"))
++    return out
++
++
++def _reset_line(wt: Path, tip: str, branch: str) -> None:
++    """Put the line in ``wt`` back at ``tip`` (#623); one that will not go back stops the
++    fold even under ``skipped`` (:class:`_LineBroken`) — never merged onto and pushed."""
++    if _git(wt, "reset", "-q", "--hard", tip) != 0 or _rev(wt, "HEAD") != tip:
++        raise _LineBroken(f"could not reset {branch} in {wt} back to {tip} after refusing "
++                          f"to take the base in — check that checkout, then re-run")
++
++
+ def _in_line(wt: Path, rev: str, what: str, branch: str, *, of: str = "HEAD") -> bool:
+     """Whether ``rev`` is an ancestor of ``of`` — by default the line checked out in ``wt``
+     (``branch`` names where it looked, in an error). ``git merge-base --is-ancestor`` exits
+diff --git a/template/tests/test_integrate_stack_bases.py b/template/tests/test_integrate_stack_bases.py
+index 0b5faf8..13a5120 100644
+--- a/template/tests/test_integrate_stack_bases.py
++++ b/template/tests/test_integrate_stack_bases.py
+@@ -20,6 +20,10 @@ before the first fold), several merge bases until "Update branch". Real git agai
+ ``origin`` + a primary checkout (the ``FoldGit`` shape of ``tests/test_integrate.py``),
+ plus offline cases; ``gh`` is always patched.
+ 
++A base that would undo work on the line (a revert of a merged PR) is never merged in: the
++fold stops, names the bundle whose work it would remove, and puts the line back for the
++carry (#623).
++
+ Only modules are imported (never a symbol the fix adds), and the new ``merged.merged_head``
+ is patched with ``create=True``, so with the production change reverted these cases still
+ load and run — and fail.
+@@ -446,6 +450,194 @@ class StackFoldGit(unittest.TestCase):
+         self.assertEqual([x for p in pushes for x in p if x.startswith("--force")], [], pushes)
+         self.assertIn(f"reaches {LINE} through origin/main", err.getvalue())
+ 
++    # -- #623: a base that would undo work on the line is never taken in ------------------
++
++    def _revert_on_main(self, *args: str) -> str:
++        """The maintainer reverts ``args`` (a ``git revert`` target) on ``main`` and pushes;
++        returns the revert commit."""
++        _git(self.human, "fetch", "-q", "origin")
++        _git(self.human, "checkout", "-q", "-B", "main", "origin/main")
++        _git(self.human, "revert", "--no-edit", *args)
++        _git(self.human, "push", "-q", "origin", "main")
++        return _git(self.human, "rev-parse", "HEAD").strip()
++
++    def _fixup_merged_then_reverted(self, batch: list[str] | None = None
++                                    ) -> tuple[Path, str, str, str]:
++        """The #593 adversary repro: fold [A] → T1 (onto ``batch``'s line); a fixup lands on
++        fix/A; fix/A merges into main and is deleted; then main reverts that merge. Returns
++        (A, T1, the head A's PR merged with, the revert)."""
++        a = self._publish("A", {"a.txt": "a\n"})
++        integrate.fold(self.cfg, [a], folded_this_run={}, batch=batch)
++        t1 = self._tip(integrate.integration_branch(self.cfg, "main", batch))
++        self._push_from_human({"fix.txt": "f\n"}, to="fix/A", off="origin/fix/A")
++        head = self._tip("fix/A")
++        self._merge_pr("A")
++        self._delete("fix/A")
++        return a, t1, head, self._revert_on_main("-m", "1", "HEAD")
++
++    def _z_reverted_then_a_gone(self, batch: list[str], *, topic: bool = False
++                                ) -> tuple[Path, Path, str, dict[str, str]]:
++        """Criterion (2)'s history: Z and A are folded onto ``batch``'s line (→ T1); main
++        merges Z's PR, then reverts Z's work — the commit that added z.txt or, with
++        ``topic``, a topic commit adding topic.txt that Z's PR branch had merged in; then a
++        fixup lands on fix/A, fix/A merges and is deleted, and B is published. Returns (A,
++        B, T1, the heads Z's and A's PRs merged with)."""
++        z = self._publish("Z", {"z.txt": "z\n"})
++        undo = self._tip("fix/Z")
++        if topic:                                            # Z's author merges a topic
++            undo = self._push_from_human({"topic.txt": "t\n"}, to="topic")
++            _git(self.human, "fetch", "-q", "origin")
++            _git(self.human, "checkout", "-q", "-B", "fix/Z", "origin/fix/Z")
++            _git(self.human, "merge", "-q", "--no-ff", "--no-edit", "origin/topic")
++            _git(self.human, "push", "-q", "origin", "fix/Z")
++        a = self._publish("A", {"a.txt": "a\n"})
++        integrate.fold(self.cfg, [z, a], folded_this_run={}, batch=batch)
++        t1 = self._tip(integrate.integration_branch(self.cfg, "main", batch))
++        heads = {"Z": self._tip("fix/Z")}
++        self._merge_pr("Z")
++        self._delete("fix/Z")
++        self._revert_on_main(undo)
++        self._push_from_human({"fix.txt": "f\n"}, to="fix/A", off="origin/fix/A")
++        heads["A"] = self._tip("fix/A")
++        self._merge_pr("A")
++        self._delete("fix/A")
++        return a, self._publish("B", {"b.txt": "b\n"}), t1, heads
++
++    def test_a_base_that_reverts_the_gone_bundle_stops_the_fold(self) -> None:
++        # Criterion (1). Ancestry still says main has A's merged head, but taking main in
++        # would delete a.txt from the line: B would build without A. The fold stops, names
++        # A, pushes nothing, and never claims the work "reaches" the line. B, cut from the
++        # reverted main, has A's commit and the revert in its history but brought neither
++        # to the line, so it is not named.
++        a, t1, head, _revert = self._fixup_merged_then_reverted()
++        b = self._publish("B", {"b.txt": "b\n"})
++        err = io.StringIO()
++        with _merged_heads({"A": head}), redirect_stderr(err), \
++                self.assertRaises(integrate.IntegrationError) as ctx:
++            integrate.fold(self.cfg, [a, b], folded_this_run={TARGET: t1})
++        msg = str(ctx.exception)
++        for part in ("issue_A's work", "taking origin/main in would remove",
++                     "a.txt (issue_A) would go back", LINE):
++            self.assertIn(part, msg)
++        self.assertEqual(self._tip(LINE), t1)                # nothing pushed
++        self.assertNotIn("reaches", err.getvalue())
++
++    def test_a_base_that_reverts_another_bundle_on_the_line_stops_the_fold(self) -> None:
++        # Criterion (2). Z and A are on the line; main merges then reverts Z. A's fixup
++        # merges and its branch goes, so the fold would take main in — and with it the
++        # revert of Z. Z is not in this fold's bundles: it is named through the batch.
++        batch = ["Z", "A", "B"]
++        line = integrate.integration_branch(self.cfg, "main", batch)
++        a, b, t1, heads = self._z_reverted_then_a_gone(batch)
++        with _merged_heads(heads), redirect_stderr(io.StringIO()), \
++                self.assertRaises(integrate.IntegrationError) as ctx:
++            integrate.fold(self.cfg, [a, b], folded_this_run={TARGET: t1}, batch=batch)
++        msg = str(ctx.exception)
++        self.assertIn("issue_Z's work", msg)
++        self.assertIn("z.txt (issue_Z)", msg)
++        self.assertEqual(self._tip(line), t1)                # nothing pushed
++
++    def test_a_reverted_topic_merged_into_a_bundles_branch_names_that_bundle(self) -> None:
++        # Z's PR branch merged a topic branch: Z's work, though not on fix/Z's first-parent
++        # chain. Main reverts only the topic commit, so taking main in would remove
++        # topic.txt from the line. The stop names Z for it, not just the topic commit.
++        batch = ["Z", "A", "B"]
++        line = integrate.integration_branch(self.cfg, "main", batch)
++        a, b, t1, heads = self._z_reverted_then_a_gone(batch, topic=True)
++        with _merged_heads(heads), redirect_stderr(io.StringIO()), \
++                self.assertRaises(integrate.IntegrationError) as ctx:
++            integrate.fold(self.cfg, [a, b], folded_this_run={TARGET: t1}, batch=batch)
++        msg = str(ctx.exception)
++        self.assertIn("issue_Z's work", msg)
++        self.assertIn("topic.txt (issue_Z) would go back", msg)
++        self.assertEqual(self._tip(line), t1)                # nothing pushed
++
++    def test_an_archived_batch_bundle_is_still_named(self) -> None:
++        # The batch is looked up by id as the flow looks a bundle up (`find_bundle`), so Z,
++        # archived to results/completed/ after its fold, is still found and named.
++        batch = ["Z", "A", "B"]
++        a, b, t1, heads = self._z_reverted_then_a_gone(batch)
++        archive = self.cfg.bundle_root / "completed"
++        archive.mkdir()
++        self.cfg.bundle("Z").rename(archive / "issue_Z")
++        with _merged_heads(heads), redirect_stderr(io.StringIO()), \
++                self.assertRaises(integrate.IntegrationError) as ctx:
++            integrate.fold(self.cfg, [a, b], folded_this_run={TARGET: t1}, batch=batch)
++        self.assertIn("z.txt (issue_Z) would go back", str(ctx.exception))
++
++    def test_a_bundle_reached_twice_is_named_once(self) -> None:
++        # A is passed to the fold as an archived copy and found again through the batch at
++        # its active path: two paths, one bundle, so it is named once for a.txt.
++        batch = ["A", "B"]
++        a, t1, head, _revert = self._fixup_merged_then_reverted(batch)
++        copy = self.cfg.bundle_root / "completed" / "issue_A"
++        shutil.copytree(a, copy)
++        b = self._publish("B", {"b.txt": "b\n"})
++        with _merged_heads({"A": head}), redirect_stderr(io.StringIO()), \
++                self.assertRaises(integrate.IntegrationError) as ctx:
++            integrate.fold(self.cfg, [copy, b], folded_this_run={TARGET: t1}, batch=batch)
++        self.assertIn("a.txt (issue_A) would go back", str(ctx.exception))
++
++    def test_the_carry_skips_a_bundle_whose_base_would_undo_it_and_folds_the_rest(
++            self) -> None:
++        # Criterion (4). The #646 carry passes `skipped`: A is recorded with the reason and
++        # the line is put back before main came in, so B merges, and the push carries, a
++        # line that still has a.txt and not the revert. B is a later wave, cut from the line
++        # as the flow cuts it — one cut from the reverted main would carry the revert itself.
++        a, t1, head, revert = self._fixup_merged_then_reverted()
++        b = self._publish("B", {"b.txt": "b\n"}, cut_from=f"origin/{LINE}")
++        skipped: dict[str, str] = {}
++        with _merged_heads({"A": head}), redirect_stderr(io.StringIO()):
++            integrate.fold(self.cfg, [a, b], folded_this_run={TARGET: t1}, skipped=skipped)
++        self.assertEqual(list(skipped), ["issue_A"], skipped)
++        self.assertIn("would remove issue_A's work", skipped["issue_A"])
++        tip = self._tip(LINE)
++        self.assertEqual(self._show(tip, "a.txt"), "a\n")
++        self.assertEqual(self._show(tip, "b.txt"), "b\n")
++        self.assertFalse(self._ancestor(revert, tip), "the revert reached the line")
++        self.assertTrue(self._ancestor(t1, tip))
++
++    def test_a_line_that_will_not_go_back_stops_even_the_carry(self) -> None:
++        # Criterion (4)'s guard: a line the fold cannot put back after refusing main still
++        # has the revert, so the carry must not record A as skipped and go on to merge B
++        # and push it. The fold stops instead, and pushes nothing.
++        a, t1, head, _revert = self._fixup_merged_then_reverted()
++        b = self._publish("B", {"b.txt": "b\n"}, cut_from=f"origin/{LINE}")
++        real = integrate._git
++
++        def stuck(repo: Path, *args: str) -> int:
++            return 1 if args[:1] == ("reset",) else real(repo, *args)
++
++        skipped: dict[str, str] = {}
++        with _merged_heads({"A": head}), mock.patch.object(integrate, "_git", stuck), \
++                redirect_stderr(io.StringIO()), \
++                self.assertRaises(integrate.IntegrationError) as ctx:
++            integrate.fold(self.cfg, [a, b], folded_this_run={TARGET: t1}, skipped=skipped)
++        self.assertIn(f"could not reset {LINE}", str(ctx.exception))
++        self.assertEqual(skipped, {})
++        self.assertEqual(self._tip(LINE), t1)                # nothing pushed
++
++    def test_a_base_that_edits_a_bundles_file_is_still_taken_in(self) -> None:
++        # Criterion (5), no false stop: main changes a.txt to new content (not back to what
++        # it was before A) — nothing is removed, so main comes in as before.
++        a = self._publish("A", {"a.txt": "a\n"})
++        integrate.fold(self.cfg, [a], folded_this_run={})
++        t1 = self._tip(LINE)
++        self._push_from_human({"fix.txt": "f\n"}, to="fix/A", off="origin/fix/A")
++        head = self._tip("fix/A")
++        self._merge_pr("A")
++        self._delete("fix/A")
++        self._push_from_human({"a.txt": "a2\n"}, to="main")
++        b = self._publish("B", {"b.txt": "b\n"})
++        err = io.StringIO()
++        with _merged_heads({"A": head}), redirect_stderr(err):
++            integrate.fold(self.cfg, [a, b], folded_this_run={TARGET: t1})
++        tip = self._tip(LINE)
++        self.assertEqual(self._show(tip, "a.txt"), "a2\n")
++        self.assertEqual(self._show(tip, "fix.txt"), "f\n")
++        self.assertEqual(self._show(tip, "b.txt"), "b\n")
++        self.assertIn(f"reaches {LINE} through origin/main", err.getvalue())
++
+     def test_a_merged_head_missing_from_the_clone_is_not_carried(self) -> None:
+         # Case 11. The host names a head commit this clone does not have, though the fold
+         # fetched the base. That is "not on the line", not a git failure (git's exit 128

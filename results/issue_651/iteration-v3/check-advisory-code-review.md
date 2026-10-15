@@ -1,0 +1,14 @@
+# Advisory code review — issue 651 (reword-stale-strict-levelling-comment)
+
+The patch changes `#` comment lines only, in one file (`template/src/pdca_harness/flow.py`). It makes no code change, so it cannot add a correctness bug. T3 (the offline driver suite) passed, so the file still parses. I checked each claim in the new wording against the target source. All of them hold:
+
+- `template/src/pdca_harness/flow.py:2141-2145`: the "exactly as before" and "adoption never relaxes it" claims are gone. The stale `waves.py:243-246` line number is replaced by a symbol reference (`waves.partition_schedulable`'s docstring). The quoted text is there at `template/src/pdca_harness/waves.py:278-279`. Correct.
+- `template/src/pdca_harness/flow.py:2158-2164`: "resolvable here instead of raising, but adds NO edge in `compute_waves`" matches `template/src/pdca_harness/waves.py:95-96` (`if dn in offered and dep not in stacks: continue`). It also matches the docstring at `waves.py:74-80`. "A `Stacks on` edge to such a child still refuses" matches the same `dep not in stacks` guard. The block keeps both facts the brief asks for: the edge is resolvable here, and the seed splice orders it.
+- `template/src/pdca_harness/flow.py:2160-2163`: "a loop through the child is not seen here either … it holds such a loop instead of raising" is true. It is pinned by `test_a_loop_through_an_offered_child_is_held_never_a_raise` (`template/tests/test_flow_adopt_recovery.py:948`). That test asserts the "held this run — dependency cycle" message (`:972`).
+- `template/src/pdca_harness/flow.py:2166`: the cited test `test_a_named_id_depending_on_a_seeds_child_is_driven_after_it` exists at `template/tests/test_flow_adopt_recovery.py:769`. The "other #590 cases beside it" are at `:788-948`.
+- Minor wording nit, not blocking (`template/src/pdca_harness/flow.py:2144`): the first paragraph says the strict check has "one relaxation". The later paragraph (`:2160-2163`) adds that a loop through an offered child is also not caught up front. That follows from the same "adds no edge" rule, so it is not a second relaxation. A reader skimming only the first paragraph could still miss it. If the builder iterates for another reason, they could add "(and so a loop through such a child)" at `:2145`. Optional.
+- Reuse and simplification: nothing to flag. The new #590 paragraph mostly restates the `check_dep_graph` docstring (`waves.py:74-80`). Pointing to that docstring instead would be shorter and less likely to drift. But the brief explicitly asks for the block to keep both facts, so the restatement is justified.
+
+No NEEDS-HUMAN findings from this lens. The C4 row is `unverifiable` (exit 77, no test shipped). The brief says that is the expected outcome for a comment-only slice. The human handles it at sign-off, and it is not a code defect in this diff.
+
+<!-- pdca:leaf-complete -->

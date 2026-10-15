@@ -1,0 +1,13 @@
+{
+  "band": "watch",
+  "independent_outcomes": [
+    "Names compared (criterion 2, plus 3 as regression): _check_rollup carries check names through, and _wait_for_green only accepts a confirm read whose name multiset matches the first green read. No config, no docs beyond the merge.py docstring. Fixes green(dco) -> green(dco, e2e) for every user by default.",
+    "Declared expected checks (criteria 1, 1b, 4): new optional [driver] expected_checks setting in Config (bare string -> list, malformed -> fail closed), enforced on both the loop and the wait_secs <= 0 path, with pdca.toml.jinja, docs/07-crosscutting.md and fork-discipline.md.jinja updates. Fixes green(dco) -> green(dco) for operators who declare the list."
+  ],
+  "proposed_seams": [
+    "Cut between the name-multiset confirm and the declared-list setting. Each has its own success criterion, its own RED (criterion 2 vs criteria 1/1b), and its own test class, and neither needs the other to be correct. The name-compare half is small and closes a default-on gap; the declared-list half carries all the config parsing, fail-closed handling, template and docs surface.",
+    "Reason it may be better left whole: both halves change the same ~50 lines of _wait_for_green and both need _check_rollup to return names. Split, the second PR depends on the first's plumbing (a scheduling edge in the same function), and the human picked both together at Plan as one fix for one invariant (docs/07-crosscutting.md:725-729). The split buys a smaller first PR; it costs a serialized second build and a rebase on the same hunk."
+  ],
+  "confidence": "medium",
+  "brief_sha": "615ce5115b68fe97"
+}

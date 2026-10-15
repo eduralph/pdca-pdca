@@ -1,0 +1,22 @@
+flow: hold a Conflicts-with partner of a bundle that pushed no branch
+
+When two bundles declare `Conflicts with`, stack mode builds them in
+separate waves so the second is built on a line that already holds the
+first. Since b21f24883b36c10dd70c408905db8c18a5327845, an accepted bundle
+whose publish pushed no branch is left out of the integration fold, and
+only the bundles that depend on it are held. Its `Conflicts with` partner
+was still built and published, on a base without the first bundle's work.
+Once the first bundle was published by hand, the two PRs collided on the
+target.
+
+Such a partner is now held as well, with the edge read in either
+direction from the run's current bundles each wave, so split children
+adopted mid-run count. It gets its own stderr line naming the bundle it
+waits on, and is told to publish that bundle and wait for its PR to merge
+before re-running: a re-run's carry starts only from a plain `Depends on`,
+so re-running sooner would build the partner without that work. The rest
+of the run goes on, and the partner's own dependents are skipped as
+before. The "pushed no branch" announcement, the stack-mode docs, the
+reference model and the pdca.toml comment now say partners are held too.
+
+Fixes #629

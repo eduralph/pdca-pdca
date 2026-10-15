@@ -1,0 +1,13 @@
+{
+  "band": "ok",
+  "independent_outcomes": [
+    "Stop building a dependent on a line that lacks its prerequisite's merge: the 'merged' gate (and the plain-edge hold from #647) checks the run's line, not just the base's merge state in the host."
+  ],
+  "proposed_seams": [
+    "No clean cut. The five success criteria all test one gate, and each one only means something with the same fix in place. The plain-edge hold (criterion 2) shares the check with the merged edge, so splitting it out would mean two PRs changing the same function in flow._runnable.",
+    "The docs update at docs/07-crosscutting.md:704-719 can go in the same PR. It only describes the fix, so it does not need its own PR.",
+    "If a split is wanted anyway, the least bad seam is the resumed-run carry case (a prerequisite whose PR head is already on the carried line but whose merge commit is not). The Iteration 1 notes show a false hold there. It could be handled as a follow-up once the basic check lands. This is a judgment call, not a clear boundary."
+  ],
+  "confidence": "medium",
+  "brief_sha": "f9420bb4bdca5408"
+}

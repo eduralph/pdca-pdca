@@ -1,0 +1,11 @@
+{
+  "band": "ok",
+  "independent_outcomes": [
+    "A human's tick on a plan-advisory row in SUMMARY \u00a76 survives every iterate-do, so the row does not come back open on the next round. This is the one defect the brief describes, and it covers both iterate entry points (pdca signoff --iterate-do then pdca run, and the flow's sign-off path)."
+  ],
+  "proposed_seams": [
+    "No cut proposed. The ledger-present leg (brief criterion iii) looks like a separate piece, since it goes through _deferred_needs_human and the #409 ledger. But it needs the same carried-tick record as the plain case, so it cannot ship alone. The plain case and the ledger case are one fix with two entry points."
+  ],
+  "confidence": "medium",
+  "brief_sha": "052c249bada39853"
+}

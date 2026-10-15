@@ -1,0 +1,23 @@
+Keep sign-off text on one line so it cannot fake a NEEDS-HUMAN list
+
+`pdca signoff --iterate-do --delta "<text>"` (and `--by`) wrote the text into
+the SUMMARY.md sign-off section as given, line breaks included. Every reader of
+the NEEDS-HUMAN list takes the section under the LAST `## 6. NEEDS-HUMAN`
+heading. So a multi-line reason holding such a heading -- for example a block
+pasted from an older SUMMARY -- became the list the driver read. On iterate,
+its `- [x]` rows retired deferred findings the human never cleared, and they
+dropped out of later rounds without notice.
+
+`signoff.record` now replaces each run of line-break characters in a value
+with one space before writing it. "Line break" means anything
+`str.splitlines` splits on (`\r`, `\v`, `\f`, `\x1c`-`\x1e`, `\x85`,
+` `, ` ` as well as `\n`), since that is how the readers split the
+file. The rule sits in `record`, so the CLI, the flow and `cleanup` all get
+it. A value with no line break is still recorded byte-for-byte, as
+fd904bb899cd10f9585dfe67d66bfa8251a2a791 promised; backslash handling is
+unchanged.
+
+Side effect: a multi-line reason used to be cut to its first line when carried
+into the next round's brief. It is now carried whole, on one line.
+
+Fixes #604

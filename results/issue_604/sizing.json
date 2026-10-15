@@ -1,0 +1,11 @@
+{
+  "band": "ok",
+  "independent_outcomes": [
+    "Sign-off text can no longer put a line break into SUMMARY.md \u00a79, so a forged '## 6. NEEDS-HUMAN' heading can't change which \u00a76 the driver reads. One fix in signoff.record covers both the delta and the by values."
+  ],
+  "proposed_seams": [
+    "No seam recommended. The delta leg and the by leg are two tests of one rule in one function (signoff.record). Cutting them would make two PRs that edit the same lines. The other items in the brief (the #607 format redesign, the carry-forward change, the last-heading rule in _needs_human_section) are already marked out of scope, so they are not second outcomes here."
+  ],
+  "confidence": "medium",
+  "brief_sha": "42fd6394b31ef113"
+}

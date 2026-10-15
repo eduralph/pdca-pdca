@@ -1,0 +1,10 @@
+{
+ "items": [
+  "T5 Judgment — Confirm merged and closed/rejected prior art for every affected path — the brief reports integrate.py/publish.py history, but not flow.py, docs, or tests, and this target contains only a synthetic base commit with no remote; brief.md:31, review-prior-art.log:1.",
+  "**The brief never says where \"the commit the line took from it\" comes from, and nothing records it today.** The Scope and Invariant depend on comparing a branch's current tip with \"the commit the line took from it\". The issue goes further: \"its **recorded** head is no longer an ancestor of the branch\". No per-bundle head is recorded anywhere:",
+  "**It is unspecified whether the new refusal goes inside `_merge_published`, and that decides whether the #646 pre-wave carry stops or quietly skips.**",
+  "**The brief does not mention a behaviour change that hits legitimate use: a rebase-style \"Update branch\" on a carried PR will now stop the run.**",
+  "**The ordering is declared without a resolvable dependency.**",
+  "**Criterion (1)'s message check is loose.** \"says its branch was rewritten since this run folded it, with what to do\" can only be verified by a reviewer, not by the test. Assert concrete substrings: `issue_A`, `fix/A`, and the word \"rewritten\". Also assert that the text does *not* contain \"cross-wave overlap\" in (1b). The test then fails on a regression in wording, not only on a missing raise."
+ ]
+}

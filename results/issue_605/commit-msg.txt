@@ -1,0 +1,24 @@
+Stop carrying the advisory decorrelation note into later rounds
+
+Under [leaves.advisory_selection] mode = "vendor-complement", a Check that
+cannot pick an advisory reviewer from a different vendor than the builder
+files a note asking the human to confirm the review's independence by hand.
+That note is about that Check's choice of reviewer, not about the patch.
+
+Auto-iterate treated it like any other finding needing human judgment and
+held it for handover. So after a rebuild, even when the next Check did find
+a different-vendor reviewer and wrote no note, the handover still asked the
+human to confirm the independence of a review of a patch that had already
+been thrown away.
+
+The note is now handled like a review or gate that gave no verdict: it is
+never held for handover. Every Check makes the reviewer choice again, so a
+round shows the note exactly when that round wrote it, and it still blocks
+accept there until the human ticks it. Other advisory findings are held as
+before.
+
+The meaning of NeedsHumanItem.no_verdict is widened to "a row about this
+Check's own run", with its comments, the auto-iterate docstrings, the flow's
+auto-iterate notice and docs/07-crosscutting.md updated to match.
+
+Fixes #605

@@ -1,0 +1,26 @@
+# Adversarial review — issue 674 (same-wave conflict holds one bundle, not the run)
+
+I tried to refute the evidence, the fix, and the verdict. The core fix held up against every case I could build. One scope/fitness item for the human is below; the rest are low-severity notes with no tag.
+
+## Evidence — tried to refute, could not
+
+- `template/tests/test_flow_same_wave_conflict.py:150` — the cases call the real `flow._drive_and_act` and the real `integrate.fold`, with real git on a bare origin. Only the build/sign-off leaves, `gh` and the publish cut are stubbed, so no parallel copy of production is under test. I re-ran the file on the patched target: 6/6 green. The red leg in `gate-logs/C4-verify.log` fails at the expected `assertNotIn("did not integrate")` lines for criteria (1), (4) and the partner case, and its stderr shows the real pre-fix stop ("wave 0 did not integrate … STOPPING"). The guards (3) and the earlier-wave stop (`:764`) pass on both sides, as they should. This is not a tautology.
+- `template/tests/test_flow_same_wave_conflict.py:331` (low, no tag) — the docstring at `:16` says every case "fail[s] on their assertions" when the fix is reverted. `test_a_hold_leaves_the_integration_tree_clean_on_the_line` instead fails with `TypeError: fold() got an unexpected keyword argument 'held_out'`. Its red only shows that the new keyword didn't exist before. The other three reds carry the real evidence, so C4's verdict stands.
+
+## Fix — inputs I tried against it (attack scripts in my scratch folder, run on the patched target)
+
+- `template/src/pdca_harness/integrate.py:533-538` + `:886-898` — **add/add** (both add `new.txt`), **modify/delete** (10 edits `shared.txt`, 11 deletes it) and **file/folder** (10 adds a file `foo`, 11 adds `foo/bar.txt`). In each, 11 is held, named with 10, and the run goes on. Could not break.
+- `integrate.py:895-896` — a wave-1 bundle that conflicts with **both** earlier-wave work on the line and a same-wave partner merged before it (21 cut from plain `main`, changing the line that 10 and 20 changed). `_trial(pre, [head])` fails, so it is not held, and the run stops with "wave 1 did not integrate", as the Invariant requires. Could not break.
+- `template/src/pdca_harness/flow.py:2448-2463` — holds in **two waves of one run** (11 against 10 in wave 0, 21 against 20 in wave 1). Each hold names the right wave, 31 (which depends on 21) is skipped, 40 is built on the line, and the end-of-run report repeats both holds. A hold followed by a **different** bundle of the same fold that hits earlier-wave work still stops the run, and the hold is announced first. Could not break.
+- `flow.py:2290` / `:953` — a **re-issued run** of the same batch, both in the same id order and with `11` named first. The carry continues the existing origin line (which already holds 10), so 11 is not carried and 20 stays held either way. The hold is not undone by a re-run. Could not break.
+- `integrate.py:879` → `flow.py:1079-1089` (low, no tag) — for the file/folder case, the message names `foo~HEAD` as the conflicting file. That is git's renamed-aside path, not a path in any branch. Criterion (2) wants the file named; here it is misnamed. The cause is the existing conflict-listing in `_merge`. It's a rare shape, so I'm noting it, not routing it back.
+- `integrate.py:898` (low, no tag) — when no single kept bundle conflicts with `head` on its own, every kept bundle is named as a partner. That could put an unrelated bundle into the `Conflicts with:` proposal. I could not build a line-based case that reaches this branch: git treats touching hunks as conflicts, so a real clash shows up pair by pair. Theoretical only.
+- `flow.py:2421` (context, no tag) — the final wave never folds, so a same-wave conflict in the last wave, which includes every single-wave batch, still gets only `_audit_wave_overlap`'s warning. The brief puts this out of scope ("only where a fold runs"), so it is not a refutation.
+
+## Verdict — where the reviewer might have gone easy
+
+- NEEDS-HUMAN [human] — `template/src/pdca_harness/flow.py:1092-1101`: the end-of-run step "rebuild issue_11 on a base that holds issue_10" names no command, and 11 is COMPLETE, which `docs/00-introduction.md:162` draws as a terminal state. The natural next move, re-issuing the batch (`docs/07-crosscutting.md:704`), reaches the existing carry. I ran it: the carry prints "issue_11 … is not carried … an undeclared cross-wave overlap … get issue_11's PR open with its branch on origin (re-open it, `pdca publish 11`, or re-drive issue_11), then re-issue" (`flow.py:1050`, hint text at `flow.py:913`). For a #674 hold that advice is wrong: 11's PR is already open, and re-publishing changes nothing. This diff doesn't touch that code, and the brief fixed the end-of-run wording on purpose. A human should decide whether the two messages need to agree, here or in a follow-up issue.
+
+Summary: I tried to refute the red→green proof, the hold rule (conflict kinds, earlier-wave vs same-wave, multi-wave holds, a hold mixed with a stop, re-issue in both id orders) and the iteration-1 partner-hold fix, and could not. The only open item is the human question above about the next-step wording.
+
+<!-- pdca:leaf-complete -->

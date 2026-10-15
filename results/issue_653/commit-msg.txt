@@ -1,0 +1,27 @@
+flow: hold a prerequisite whose branch moved past its judged PR head
+
+Before a wave is built, flow carries finished prerequisites from earlier
+runs onto the integration line. It decides a prerequisite is clean by
+reading its PR's head, but then merges the branch's current tip. If
+someone pushed to the branch after the PR was approved or merged, or the
+PR read is stale, that unreviewed commit was carried onto the line and
+every dependent was built on top of it without any warning.
+
+The carry now compares the branch tip, as seen in its own fetched
+checkout, with the PR head it judged. If they differ, the prerequisite
+is not clean: its dependents are held and named on one line that gives
+both commits and says what to do (reset or delete the branch to the
+judged head, or open a PR for the rest, then re-issue). The rest of the
+run goes on. This also holds a merged branch that only took in the base
+afterwards ("Update branch" on GitHub). That is on purpose: the carry
+does not try to tell base-only commits apart.
+
+A deleted branch after a merge is judged by the merged head as before.
+A push that lands between the carry's read and the fold's own fetch is
+still merged; closing that gap would need the expected head passed into
+the fold.
+
+This closes a known limit of the carry added in
+c1f2306984bb9b95469b08de3cea83598d48820f.
+
+Fixes #653

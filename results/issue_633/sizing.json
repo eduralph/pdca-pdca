@@ -1,0 +1,13 @@
+{
+  "band": "ok",
+  "independent_outcomes": [
+    "The in-run fold refuses to merge when a PR branch it already carried this run has been rewritten (force-pushed) so its tip no longer contains the head the line took from it. One defect, one success criterion, one test file."
+  ],
+  "proposed_seams": [
+    "No seam recommended. The check in integrate.fold and the flow.py plumbing that passes the carried mapping are one change. Without the plumbing the check never runs in a real flow, so the two cannot ship separately.",
+    "The docstring at integrate.py:39-40 and the sentence at docs/07-crosscutting.md:665-666 describe the same fast-forward-only rule the check enforces. They should ship with it, not as a separate item.",
+    "The 'Update with rebase' and force-push behaviour change is a consequence of the same check, not a second outcome. The brief already states and accepts it. If the human wants it reviewed as policy, that is a review question for Check, not a split."
+  ],
+  "confidence": "medium",
+  "brief_sha": "bb793eb39e0dbb99"
+}

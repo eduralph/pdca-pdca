@@ -1,0 +1,134 @@
+diff --git a/docs/07-crosscutting.md b/docs/07-crosscutting.md
+index 05f22c6..1dfb57f 100644
+--- a/docs/07-crosscutting.md
++++ b/docs/07-crosscutting.md
+@@ -684,7 +684,10 @@ wave builds on, via `[driver].wave_mode`:
+   it. It continues the line already on origin, without force, when every commit
+   on it is accounted for by your base or a finished prerequisite's PR head, and
+   starts the line when origin has none. Only a clean prerequisite is carried:
+-  its PR is open (or merged, with its head already on your base or the line), it
++  its PR is open (or merged, with its head already on your base or the line),
++  its branch is still at that PR head (any commit pushed onto it after the PR
++  was read or merged, even GitHub's "Update branch", is unreviewed: reset or
++  delete the branch to that head, or open a PR for the rest, and re-issue), it
+   merges onto the line without error, and, with `[driver].regate_between_waves`,
+   the carried line's re-gate is not red. A finished prerequisite that is not
+   clean holds only the bundles whose plain `Depends on` names it, and is named
+diff --git a/template/src/pdca_harness/flow.py b/template/src/pdca_harness/flow.py
+index e9ae345..8945034 100644
+--- a/template/src/pdca_harness/flow.py
++++ b/template/src/pdca_harness/flow.py
+@@ -837,8 +837,11 @@ def _finished_head(d: Path, ref: tuple[str, str, bool] | None, repo: Path, base_
+                    tip: str | None) -> str | tuple[str, str]:
+     """Finished bundle ``d``'s PR head when it is state-clean (#646): its PR reads OPEN, or
+     MERGED with the head already on ``base_ref`` or on the line at ``tip``, and the head
+-    resolves in ``repo``. Else ``(reason, hint)`` — fail-closed: no recorded PR or branch,
+-    or a state that cannot be read, is not clean."""
++    resolves in ``repo``, and its published branch (``ref``), where it still resolves in
++    ``repo``, is at that head (#653): the fold merges the branch's tip, so a tip past the
++    judged head would carry commits nobody reviewed. Else ``(reason, hint)`` — fail-closed:
++    no recorded PR or branch, a state that cannot be read, or a branch tip other than the
++    head is not clean. A ``tip:<head>`` hint names the judged head for the advice."""
+     rec = publish._publish_record(d) if ref else None
+     pr_url = rec.get("pr_url") if isinstance(rec, dict) else None
+     if not pr_url:
+@@ -854,6 +857,10 @@ def _finished_head(d: Path, ref: tuple[str, str, bool] | None, repo: Path, base_
+     if pr == "MERGED" and not any(integrate._carries(repo, head, f"{d.name}'s head", r, of=r)
+                                   for r in (base_ref, tip) if r):
+         return f"its PR merged at {head[:12]}, which neither {base_ref} nor the line has", "edge"
++    branch_tip = integrate._rev(repo, ref[1]) if ref else None   # what the fold would merge
++    if branch_tip is not None and branch_tip != head:
++        return (f"its branch {ref[1]} is at {branch_tip[:12]}, which is not the PR head that "
++                f"was judged ({head[:12]})", f"tip:{head[:12]}")
+     return head
+ 
+ 
+@@ -863,6 +870,8 @@ _CARRY_HINTS = {
+     "edge": "remove the `Depends on: {iid}` edge from the dependent's brief, then re-issue",
+     "line": "delete {line} on origin unless this run's own fold already replaced it, then "
+             "re-issue",
++    "tip": "reset or delete {name}'s branch to {head} (the PR head that was judged), or open "
++           "a PR for the commit(s) after it, then re-issue",
+ }
+ 
+ 
+@@ -948,7 +957,8 @@ def _carry_finished(cfg: Config, bundles: list[Path], finished: list[Path], *,
+             if d.name in why:
+                 held.add(d.name)
+                 reason, hint = why[d.name]
+-                advice = _CARRY_HINTS[hint].format(name=d.name, line=line,
++                hint, _, head = hint.partition(":")     # "tip:<judged head>" carries it
++                advice = _CARRY_HINTS[hint].format(name=d.name, line=line, head=head,
+                                                    iid=d.name.removeprefix("issue_"))
+                 print(f"flow: {d.name} (finished in an earlier run) is not carried onto "
+                       f"{line}: {reason} — holding "
+diff --git a/template/tests/test_flow_resume_stack_prereqs.py b/template/tests/test_flow_resume_stack_prereqs.py
+index b0c92f3..7a09db5 100644
+--- a/template/tests/test_flow_resume_stack_prereqs.py
++++ b/template/tests/test_flow_resume_stack_prereqs.py
+@@ -51,6 +51,7 @@ class ResumeStackPrereqs(unittest.TestCase):
+         self.cfg.publisher = dataclasses.replace(self.cfg.publisher, mode="command")
+         self.gh: dict[str, str] | None = {}   # PR state by id; None: `gh` is not installed
+         self.gh_calls: list[list[str]] = []
++        self.heads: dict[str, str] = {}       # PR head by id, overriding the branch's tip
+         self.events: list[str] = []
+         # bundle → (stack base, recorded tip, origin's line tip) when its wave was driven
+         self.seen: dict[str, tuple[str, str, str | None]] = {}
+@@ -89,14 +90,16 @@ class ResumeStackPrereqs(unittest.TestCase):
+ 
+     def _gh_stub(self, args, *a, **kw):
+         """``gh pr view <url> --json state,headRefOid`` answered from ``self.gh``; the PR head
+-        is the branch's tip on origin. Everything else runs for real."""
++        is ``self.heads[id]`` when set, else the branch's tip on origin. Everything else runs
++        for real."""
+         if not (isinstance(args, list) and args[:1] == ["gh"]):
+             return self._real_run(args, *a, **kw)
+         self.gh_calls.append(list(args))
+         if self.gh is None:
+             raise FileNotFoundError(2, "No such file or directory", "gh")
+         iid = str(args[3]).rsplit("/", 1)[-1]
+-        head = self.fx._tip(f"fix/{iid}") if self.fx._has(f"fix/{iid}") else ""
++        head = self.heads.get(iid) or (self.fx._tip(f"fix/{iid}")
++                                       if self.fx._has(f"fix/{iid}") else "")
+         out = json.dumps({"state": self.gh.get(iid, "OPEN"), "headRefOid": head})
+         return subprocess.CompletedProcess(args, 0, out, "")
+ 
+@@ -368,6 +371,38 @@ class ResumeStackPrereqs(unittest.TestCase):
+         self.assertEqual((list(skipped), pushes), (["issue_S"], []))
+         self.assertFalse(self.fx._has(self._line(["Y"])))
+ 
++    # -- (9): a branch tip that is not the judged PR head is not carried (#653) -------------
++
++    def _lines_with(self, commit: str) -> list[str]:
++        """Every branch on origin, other than a PR branch ``fix/*``, that holds ``commit``."""
++        refs = sb._git(self.fx.origin, "for-each-ref", "--format=%(refname:short)",
++                       "--contains", commit, "refs/heads").split()
++        return [r for r in refs if not r.startswith("fix/")]
++
++    def _tip_held(self, head: str, extra: str) -> None:
++        held = self._held("P", "D", "not the PR head that was judged", head[:12],
++                          extra[:12], "reset", "delete")
++        self.assertIn("re-issue", held)
++        self.assertEqual(self._lines_with(extra), [], self.err)
++        self._on_base("U")
++
++    def test_a_merged_prerequisite_pushed_to_after_the_merge_is_not_carried(self):
++        self._finished("P", {"p.txt": "p\n"}, pr="MERGED")
++        self.fx._merge_pr("P")
++        head = self.heads["P"] = self.fx._tip("fix/P")
++        extra = self.fx._push_from_human({"extra.txt": "x\n"}, to="fix/P", off="origin/fix/P")
++        d, u = self._planned("D", "P"), self._planned("U")
++        self._run([d, u], ["P", "D", "U"])
++        self._tip_held(head, extra)
++
++    def test_an_open_prerequisite_whose_head_moved_since_the_read_is_not_carried(self):
++        self._finished("P", {"p.txt": "p\n"})
++        head = self.heads["P"] = self.fx._tip("fix/P")      # what the PR read still reports
++        extra = self.fx._push_from_human({"extra.txt": "x\n"}, to="fix/P", off="origin/fix/P")
++        d, u = self._planned("D", "P"), self._planned("U")
++        self._run([d, u], ["P", "D", "U"])
++        self._tip_held(head, extra)
++
+ 
+ if __name__ == "__main__":
+     unittest.main()

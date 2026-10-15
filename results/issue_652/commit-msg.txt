@@ -1,0 +1,30 @@
+flow: don't carry finished bundles built on a bundle that isn't clean
+
+When a stack run is re-issued, bundles finished in an earlier run are put
+back onto the integration line before the first wave. Only a "clean" one
+(PR open or merged, merges without error) should be carried. But each
+finished bundle was judged on its own. If bundle P's PR had been closed and
+a finished bundle Q was built on P (its brief says `Depends on: P` and its
+branch holds P's commits), Q was still carried because its own PR was open.
+P's closed work then reached the line through Q's branch, and bundles that
+depend on Q were built on top of it without any warning.
+
+Now "not clean" spreads along plain `Depends on` edges between the finished
+bundles of a run, through chains of any length. A finished bundle built on
+one that is not clean is not carried either, its head no longer vouches for
+commits on an earlier run's line, and the bundles that depend on it are held
+and named on one line that gives the cause and what to do. The rest of the
+run goes on, and clean finished bundles beside them are still carried.
+
+This also covers #624: a held bundle now holds the dependents of a bundle
+that finished before the run, too.
+
+Out of scope, and now documented: a bundle that passes the pre-fold check
+but whose merge fails during the fold does not spread. A finished bundle
+built on it that merges in the same fold still brings its commits onto the
+line.
+
+This closes the "known limit" recorded when the carry was added in
+c1f2306984bb9b95469b08de3cea83598d48820f.
+
+Fixes #652

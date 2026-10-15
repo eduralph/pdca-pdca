@@ -1,0 +1,25 @@
+Keep ticked plan-advisory findings cleared across iterate-do
+
+After an iterate-do, every plan-advisory finding came back in the next
+round's SUMMARY.md §6 as an open, unticked row, even the ones the human had
+already ticked. An iterate-do keeps the plan-advisory files, so each new
+assembly read them again, and nothing carried the human's tick forward. The
+human had to clear the same plan findings again every round, and accept was
+blocked until they did.
+
+Now, at an iterate-do, the plan-advisory findings the human ticked in §6
+are recorded in plan-advisory-cleared.json in the bundle. Later assemblies
+leave those findings out of §6. They are dropped rather than shown as
+"- [x]", so assembly never writes a tick that could be read as the human's.
+A copy of the finding in the deferred-findings ledger does not bring it
+back either.
+
+The record keeps the "plan-advisory-" prefix, so it is removed at the same
+time as the plan-advisory evidence: on iterate-plan, and when the plan
+advisory runs again. A re-run that raises the same text opens the finding
+again. A finding the human never ticked stays open and still blocks accept.
+Ticks are read only from the §6 that assembly wrote, so a "- [x]" quoted
+elsewhere in the summary clears nothing. If the record cannot be written or
+read, the findings show as open, which is the safe side.
+
+Fixes #603

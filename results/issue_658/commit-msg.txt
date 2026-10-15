@@ -1,0 +1,25 @@
+merge: never ready or merge an Onto branch PR in merge mode
+
+With [driver] wave_mode = "merge", an unattended run could mark ready and
+merge a pull request it did not open. A bundle whose brief names an
+"Onto branch" is published as one extra commit on an existing open PR,
+which may belong to someone else, carry other work, and target any base.
+Merge mode read that PR from the publish record like any other and ran
+gh pr ready and gh pr merge on it, so the whole PR landed without anyone
+approving it.
+
+Merge mode now refuses such a record (publish mode "stacked") before it
+makes any gh call for that PR: no ready-mark, no branch update, no merge,
+and nothing to undo. The wave stops with a message that names the bundle
+and the PR, says why, and gives two ways forward: run the batch in the
+default wave_mode = "stack", or take the bundle out of the merge-mode
+batch. The refusal also applies in a dry run (no merge plan is printed
+for it) and when the PR already reads merged, matching how the
+merged-check and the fold already treat these records. PRs the run
+opened itself merge exactly as before.
+
+This undoes on purpose the part of 298503116ecebf81d3198ac6b71f9e38a8f2104a
+that let merge mode go on to merge an Onto branch PR. The third-remote
+fetch it added is kept; its tests now call the head read directly.
+
+Fixes #658

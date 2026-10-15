@@ -1,0 +1,12 @@
+{
+  "mode": "stacked-pr",
+  "branch": "fix/674-same-wave-conflict-holds-one-bundle-not-the-run",
+  "pr_url": "https://github.com/eduralph/pdca-harness/pull/690",
+  "base": "main",
+  "repo": "eduralph/pdca-harness",
+  "by": "Eduard Ralph",
+  "date": "2026-10-14",
+  "id_pending": false,
+  "host_ci_base": "420f8b49f1c63eb5a8badd2c196cdfdb73051b57",
+  "stacks_on": []
+}

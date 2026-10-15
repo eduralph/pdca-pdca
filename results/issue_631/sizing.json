@@ -1,0 +1,12 @@
+{
+  "band": "watch",
+  "independent_outcomes": [
+    "Fold starts from a clean tree: before each fold, reset the shared integration worktree to its start ref and remove non-ignored untracked files (and any leftover MERGE_HEAD), so re-gate build output or a crashed/mid-merge tree no longer makes the next fold refuse. Covers criteria (1), (2), (4).",
+    "Failed `git merge --abort` is not ignored in the carry's `skipped` mode: `_merge` checks the abort's return code, resets the tree to the pre-merge line tip, records the bundle as skipped and keeps going, raising IntegrationTreeError only if that reset also fails. Covers criterion (3)."
+  ],
+  "proposed_seams": [
+    "Seam between `_prepare_worktree`/fold-entry cleanup (criteria 1, 2, 4) and `_merge`'s abort handling (criterion 3, `integrate.py:583-595`). Each has its own defect, test and success criterion, and the second could ship alone since nothing in it depends on the start-of-fold clean. Arguments against cutting: both restore the same stated invariant ('nothing left in the tree changes a fold'), both touch the same few lines of `integrate.fold`, criterion (4) already covers the default-mode effect of a failed abort, and the bundle is on its third build with only naming/assertion findings left. Cutting now costs more than it saves. Flagged as watch, not oversized; a split is optional."
+  ],
+  "confidence": "medium",
+  "brief_sha": "95a76a0db93dd07f"
+}

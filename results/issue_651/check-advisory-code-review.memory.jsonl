@@ -1,0 +1,2 @@
+{"event": "spawn", "bound": "16G"}
+{"ts": "2026-10-14T21:33:18", "elapsed": 15.0, "unit": "run-p2250991-i2279588.scope", "memory": 189689856, "peak": 207183872, "procs": 1, "top": [{"cmd": "/home/eddie/.local/bin/claude -p --agent code-review --permission-mode acceptEdits --allowedTools Read,Bash,Grep,Glob --model claude-opus-5-5 --effort medium --", "n": 1, "rss": 283680768}]}

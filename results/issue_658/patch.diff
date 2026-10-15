@@ -1,0 +1,486 @@
+diff --git a/template/src/pdca_harness/merge.py b/template/src/pdca_harness/merge.py
+index 8497720..a6c9795 100644
+--- a/template/src/pdca_harness/merge.py
++++ b/template/src/pdca_harness/merge.py
+@@ -73,14 +73,22 @@ between the last read and the host executing the merge is a gap no client can cl
+ ``merge_requires = "required"`` (trust the host's protection) is unchanged: no base read,
+ no update, no pin.
+ 
+-The head ``_base_read`` asks about lives where publish pushed the PR's branch, and that is
+-not always ``base_remote`` or ``origin`` (issue #650): an ``Onto branch`` bundle's
+-``"stacked"`` record names the remote it pushed to, which may be a third one. So the fetch
+-covers that remote too, read from the record as the fold reads it
+-(``integrate._published_ref``), and a head commit the fetches still did not bring in is
+-refused by name (``_have``) — with the remotes fetched and where the record puts the
+-branch, not a guess at why — instead of being left to ``git merge-base`` to fail on with a
+-bare exit 128.
++The head ``_base_read`` asks about lives where publish pushed the PR's branch, read from
++the publish record as the fold reads it (``integrate._published_ref``, issue #650), and a
++head commit the fetches still did not bring in is refused by name (``_have``) — with the
++remotes fetched and where the record puts the branch, not a guess at why — instead of
++being left to ``git merge-base`` to fail on with a bare exit 128. An ``Onto branch``
++bundle's ``"stacked"`` record names the remote it pushed to, which may be a third one, and
++``_remotes`` keeps that remote for a caller passing such a record's ``pub`` directly; it is
++not reached from ``_merge_one``, which refuses a ``"stacked"`` record (issue #658) before
++it reads the head.
++
++Merge mode readies and merges only a PR this run opened for the bundle (a ``"new-pr"`` /
++``"stacked-pr"`` record). A ``"stacked"`` record is one commit added to an EXISTING PR —
++possibly someone else's, with other work on it and any base — so ``_merge_one`` refuses it
++(issue #658) before any ``gh`` call for that PR, in a dry run too, and whether or not the
++PR already reads merged, as ``merged.merged_into`` and the fold (``integrate._gone_branch``)
++never trust such a record either.
+ """
+ 
+ from __future__ import annotations
+@@ -303,7 +311,9 @@ def _remotes(cfg: Config, pub: tuple[str, str, bool] | None) -> tuple[str, ...]:
+     ``(remote, ref, onto)``, or None when it names no remote). Deduplicated, in that order,
+     so a ``new-pr`` / ``stacked-pr`` record (``origin``) or one naming no remote fetches
+     exactly the base remote and ``origin``, as before; an ``Onto branch`` record's remote,
+-    possibly a third one, comes last."""
++    possibly a third one, comes last. ``_merge_one`` refuses a ``"stacked"`` record before
++    it reads the head (issue #658), so that last remote is kept for a caller passing such a
++    record's ``pub`` directly; it is not reached from ``_merge_one``."""
+     return tuple(dict.fromkeys((cfg.base_remote, "origin", *(pub[:1] if pub else ()))))
+ 
+ 
+@@ -466,6 +476,22 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
+         print(f"merge: {d.name} is COMPLETE but has no recorded PR — cannot merge a wave "
+               "whose member wasn't published. STOP.", file=sys.stderr)
+         return 1
++    # Issue #658: an `Onto branch` bundle's `"stacked"` record is one commit added to an
++    # EXISTING PR (`publish._publish_stacked`), which may be someone else's, carry other
++    # work, and target any base. Merge mode readies and merges only the PRs this run
++    # opened, so it refuses such a record here, before any `gh` call for it (nothing to
++    # undo), and above the dry-run plan and the `is_merged` skip: a dry run prints no
++    # merge for it, and a PR that already reads merged is refused all the same, as
++    # `merged.merged_into` never counts a `"stacked"` record merged either.
++    if rec.get("mode") == "stacked":
++        print(f"\n!!! merge: {d.name} ({pr_url}) was NOT merged — it is an `Onto branch` "
++              "commit added to an existing PR, and merge mode does not ready or merge a PR "
++              "this run did not open. STOP: later waves are NOT run. Run this batch in the "
++              "default [driver] wave_mode = \"stack\", or take this bundle out of this "
++              "merge-mode batch, then re-run. The PR itself stays the human's to ready or "
++              "merge, but doing so does not let this merge-mode run continue: its record "
++              "is refused the same way merged or not.\n", file=sys.stderr)
++        return 1
+ 
+     cmd = ["gh", "pr", "merge", str(pr_url), f"--{method}"]
+     if dry_run:
+@@ -518,9 +544,10 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
+             return _refuse(d, pr_url, "its publish record names no repo, so there is no "
+                                       "checkout to read its base in")
+         repo = publish._checkout_path(cfg, repo_spec)
+-        # Issue #650: the head is read where publish put the branch. An `Onto branch`
+-        # bundle's `"stacked"` record names that remote and it may be neither the base
+-        # remote nor `origin`, so read the record as the fold does and fetch it too.
++        # Issue #650: the head is read where publish put the branch, from the record as the
++        # fold reads it. A `"stacked"` record (whose remote may be neither the base remote
++        # nor `origin`) never gets here: it was refused above before the head was read
++        # (issue #658); `_remotes` keeps its remote for a caller passing such a `pub`.
+         pub = integrate._published_ref(d)
+         head, tip, behind, why = _base_read(cfg, repo, pub, str(pr_url))
+         if behind is None:
+diff --git a/template/tests/test_merge_onto_branch.py b/template/tests/test_merge_onto_branch.py
+new file mode 100644
+index 0000000..3601050
+--- /dev/null
++++ b/template/tests/test_merge_onto_branch.py
+@@ -0,0 +1,174 @@
++"""Issue #658: merge mode never readies or merges the PR behind a ``"stacked"`` record.
++
++An ``Onto branch`` bundle is published by ``publish._publish_stacked`` as one commit added
++to an EXISTING open PR — possibly someone else's, with other work on it and any base — and
++recorded in ``publish.json`` with ``"mode": "stacked"``. Merge mode (``[driver].wave_mode
++= "merge"``) readies and merges only the PRs the run opened, so ``merge.merge_wave`` — the
++call ``flow`` makes for a non-final merge-mode wave — must refuse such a record before any
++``gh`` call for that PR (no ready, no update, no merge, no undo), stop the wave, and say
++why and what the operator can do instead. It refuses a PR that already reads merged too
++(``merged.merged_into`` never counts a ``"stacked"`` record merged), and a dry run prints
++no merge plan for it. A ``"new-pr"`` record (or one with no ``mode``) merges as before.
++
++``gh``, ``git`` and state are stubbed — no network. Run from the project root:
++    PYTHONPATH=src python -m unittest tests.test_merge_onto_branch
++"""
++
++from __future__ import annotations
++
++import io
++import json
++import shutil
++import tempfile
++import unittest
++from contextlib import redirect_stderr, redirect_stdout
++from pathlib import Path
++from types import SimpleNamespace
++from unittest import mock
++
++from pdca_harness import merge, state
++from pdca_harness.config import Config, LeafConfig
++
++PR = "https://gh/pr/1"
++STACKED = {"mode": "stacked", "branch": "feat", "base": "other/feat", "pr_url": PR,
++           "repo": "org/repo"}
++HEAD = "1" * 40
++BASE_TIP = "b" * 40
++
++
++def _cfg(root: Path) -> Config:
++    return Config(
++        root=root, bundle_root=root / "results", process_dir=root / "process",
++        templates_dir=root / "templates", default_branch="main", tracker_system="github",
++        tracker_url="", issue_id_example="#1",
++        builder=LeafConfig(mode="stub"), reviewer=LeafConfig(mode="stub"),
++        base_remote="origin", repo_checkouts={"org/repo": str(root / "repo")})
++
++
++def _ok_run(cmd, **kw):
++    """Every `gh`/`git` call succeeds: an up-to-date head, a green rollup — so a record
++    that is NOT refused goes all the way to `gh pr merge`."""
++    if cmd[:3] == ["gh", "pr", "view"]:
++        return SimpleNamespace(returncode=0, stderr="", stdout=json.dumps(
++            {"headRefOid": HEAD, "baseRefName": "main"}))
++    if cmd[:3] == ["gh", "pr", "checks"]:
++        return SimpleNamespace(returncode=0, stderr="",
++                               stdout=json.dumps([{"name": "ci", "bucket": "pass"}]))
++    if cmd[:1] == ["git"] and "rev-parse" in cmd:
++        return SimpleNamespace(returncode=0, stderr="", stdout=BASE_TIP + "\n")
++    return SimpleNamespace(returncode=0, stdout="", stderr="")
++
++
++class OntoBranchRecordInMergeMode(unittest.TestCase):
++    def setUp(self) -> None:
++        self.tmp = Path(tempfile.mkdtemp())
++        self.addCleanup(shutil.rmtree, self.tmp, True)
++        self.cfg = _cfg(self.tmp)
++        sleeper = mock.patch.object(merge, "_sleep")
++        sleeper.start()
++        self.addCleanup(sleeper.stop)
++
++    def _bundle(self, iid: str, record: dict) -> Path:
++        d = self.cfg.bundle(iid)
++        d.mkdir(parents=True)
++        (d / "patch.diff").write_text("diff\n", encoding="utf-8")
++        (d / "publish.json").write_text(json.dumps(record), encoding="utf-8")
++        return d
++
++    def _wave(self, b: Path, *, dry_run: bool = False,
++              is_merged: bool = False) -> tuple[int, list[list[str]], str, str]:
++        calls: list[list[str]] = []
++
++        def run(cmd, **kw):
++            calls.append(list(cmd))
++            return _ok_run(cmd, **kw)
++
++        out, err = io.StringIO(), io.StringIO()
++        with mock.patch("pdca_harness.merge.subprocess.run", side_effect=run), \
++                mock.patch.object(merge.state, "state", return_value=state.COMPLETE), \
++                mock.patch.object(merge.merged, "is_merged", return_value=is_merged), \
++                redirect_stdout(out), redirect_stderr(err):
++            rc = merge.merge_wave(self.cfg, [b], dry_run=dry_run, method="merge")
++        return rc, calls, out.getvalue(), err.getvalue()
++
++    def _assert_no_pr_action(self, calls: list[list[str]], out: str) -> None:
++        for forbidden in (["gh", "pr", "ready", PR], ["gh", "pr", "ready", PR, "--undo"],
++                          ["gh", "pr", "update-branch", PR]):
++            self.assertNotIn(forbidden, calls)
++        self.assertFalse([c for c in calls if c[:3] == ["gh", "pr", "merge"]], calls)
++        self.assertFalse([c for c in calls if c[:2] == ["gh", "pr"]], calls)
++        self.assertNotIn(f"gh pr merge {PR}", out)
++
++    def _assert_says_why(self, d: Path, err: str) -> None:
++        self.assertIn(d.name, err)
++        self.assertIn(PR, err)
++        self.assertIn("Onto branch", err)
++        self.assertIn("existing PR", err)
++        self.assertIn("does not ready or merge", err)
++        self.assertIn('wave_mode = "stack"', err)
++        self.assertIn("take this bundle out of this merge-mode batch", err)
++        # Merging the PR by hand would not unblock the run (criterion 3), so the message
++        # must not offer it as a way forward; it may only say it does not help.
++        self.assertIn("does not let this merge-mode run continue", err)
++
++    # (1) + (2): no ready, no update, no merge, no undo; the wave stops and says why
++    def test_stacked_record_is_refused_before_any_gh_call(self) -> None:
++        b = self._bundle("658", STACKED)
++        rc, calls, out, err = self._wave(b)
++        self.assertNotEqual(rc, 0)
++        self._assert_no_pr_action(calls, out)
++        self.assertEqual(b.name, "issue_658")
++        self._assert_says_why(b, err)
++
++    # (3): a PR that already reads MERGED is refused all the same, not skipped
++    def test_stacked_record_already_merged_is_still_refused(self) -> None:
++        b = self._bundle("658", STACKED)
++        rc, calls, out, err = self._wave(b, is_merged=True)
++        self.assertNotEqual(rc, 0)
++        self._assert_no_pr_action(calls, out)
++        self._assert_says_why(b, err)
++
++    # (4): a dry run prints no merge plan for it and stops too
++    def test_stacked_record_dry_run_prints_no_merge_plan(self) -> None:
++        b = self._bundle("658", STACKED)
++        rc, calls, out, err = self._wave(b, dry_run=True)
++        self.assertNotEqual(rc, 0)
++        self.assertEqual(calls, [])
++        self.assertNotIn("gh pr merge", out)
++        self._assert_says_why(b, err)
++
++    # The wave stops at the stacked member: a later member is not merged either.
++    def test_wave_stops_at_the_stacked_member(self) -> None:
++        a = self._bundle("658", STACKED)
++        b = self._bundle("659", {"mode": "new-pr", "branch": "fix", "pr_url": PR + "9",
++                                 "repo": "org/repo"})
++        calls: list[list[str]] = []
++
++        def run(cmd, **kw):
++            calls.append(list(cmd))
++            return _ok_run(cmd, **kw)
++
++        with mock.patch("pdca_harness.merge.subprocess.run", side_effect=run), \
++                mock.patch.object(merge.state, "state", return_value=state.COMPLETE), \
++                mock.patch.object(merge.merged, "is_merged", return_value=False), \
++                redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
++            rc = merge.merge_wave(self.cfg, [a, b], method="merge")
++        self.assertNotEqual(rc, 0)
++        self.assertEqual([c for c in calls if c[:2] == ["gh", "pr"]], [])
++
++    # (5): a "new-pr" record, or one with no mode, merges exactly as before
++    def test_new_pr_and_modeless_records_still_merge(self) -> None:
++        for iid, record in (("1", {"mode": "new-pr", "branch": "feat", "pr_url": PR,
++                                   "repo": "org/repo"}),
++                            ("2", {"pr_url": PR, "repo": "org/repo"})):
++            with self.subTest(record=record):
++                rc, calls, out, err = self._wave(self._bundle(iid, record))
++                self.assertEqual(rc, 0, err)
++                gh = [c for c in calls if c[:2] == ["gh", "pr"]]
++                self.assertEqual(gh[0], ["gh", "pr", "ready", PR])
++                self.assertEqual(gh[-1], ["gh", "pr", "merge", PR, "--merge",
++                                          "--match-head-commit", HEAD])
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/template/tests/test_merge_third_remote.py b/template/tests/test_merge_third_remote.py
+index 7720b8a..9ee03c1 100644
+--- a/template/tests/test_merge_third_remote.py
++++ b/template/tests/test_merge_third_remote.py
+@@ -3,11 +3,11 @@
+ An ``Onto branch`` bundle is published by ``publish._publish_stacked`` onto
+ ``<remote>/<branch>`` and recorded as ``{"mode": "stacked", "base": "<remote>/<branch>",
+ "branch": "<branch>", …}``. When ``<remote>`` is neither the base remote nor ``origin``,
+-the PR's head commit exists only there. ``_merge_one``'s behind-base read (#531) used to
+-fetch only the base remote and ``origin``, so ``git merge-base --is-ancestor`` exited 128
+-on the head and the run refused with a bare "git failed". It now fetches the remote the
+-record names too (read via ``integrate._published_ref``, as the fold reads it), and a head
+-still missing after the fetches is refused by name.
++the PR's head commit exists only there. The behind-base read (#531, ``merge._base_read``)
++used to fetch only the base remote and ``origin``, so ``git merge-base --is-ancestor``
++exited 128 on the head and the run refused with a bare "git failed". It now fetches the
++remote the record names too (read via ``integrate._published_ref``, as the fold reads it),
++and a head still missing after the fetches is refused by name.
+ 
+ That refusal says what was checked and nothing more: the commit, the checkout, the remotes
+ fetched, and where the record puts the branch (that remote was fetched and did not bring
+@@ -15,11 +15,20 @@ the commit in) or that the record names no remote. It does not guess a cause, so
+ that WAS fetched is never blamed as left out: a fetch refspec that skips the branch, or a
+ ``new-pr`` head that is not on ``origin``, is reported as exactly that.
+ 
++Issue #658: ``merge._merge_one`` now refuses a ``"stacked"`` record before it reads the
++head at all — merge mode never readies or merges a PR the run only added a commit to — so
++a ``"stacked"`` record no longer reaches that read through ``merge_wave``. The cases about
++readying, waiting on or merging such a PR assert that refusal instead. The cases about the
++fetch / missing-head logic for a ``"stacked"`` record (``_remotes``, ``_fetch``, ``_have``)
++call ``merge._base_read`` directly with the ``pub`` that ``integrate._published_ref`` gives
++for the record, which is the code #650 added and #658 keeps. ``new-pr`` records are still
++driven through ``merge._merge_one``.
++
+ Real git throughout: three bare repos as the remotes of one primary checkout. Only ``gh``
+-is scripted; every ``git`` call goes to the real ``subprocess.run``. Everything is driven
+-through ``merge._merge_one``, never a helper the fix changes. ``merge._wait_for_green`` is
+-patched to record the head the rollup wait was reached with, and to stop there with a
+-non-green verdict unless a case scripts a green. Run from the project root:
++is scripted; every ``git`` call goes to the real ``subprocess.run``. In the
++``_merge_one`` cases ``merge._wait_for_green`` is patched to record the head the rollup
++wait was reached with, and to stop there with a non-green verdict. Run from the project
++root:
+     PYTHONPATH=src python -m unittest tests.test_merge_third_remote
+ """
+ 
+@@ -36,7 +45,7 @@ from pathlib import Path
+ from types import SimpleNamespace
+ from unittest import mock
+ 
+-from pdca_harness import merge, state
++from pdca_harness import integrate, merge, state
+ from pdca_harness.config import Config, LeafConfig
+ 
+ _REAL_RUN = subprocess.run
+@@ -147,69 +156,56 @@ class ThirdRemoteHead(unittest.TestCase):
+                                   fetched=set())
+         return rc, out.getvalue(), err.getvalue()
+ 
++    def _read(self, d: Path) -> tuple[str, str, bool | None, str]:
++        """``merge._base_read`` for bundle ``d``'s PR, with the ``pub`` the fold reads from
++        its publish record (``integrate._published_ref``) — the path a ``"stacked"`` record
++        no longer reaches through ``_merge_one`` (issue #658)."""
++        with mock.patch("pdca_harness.merge.subprocess.run", side_effect=self._run):
++            return merge._base_read(self.cfg, self.repo, integrate._published_ref(d), PR)
++
++    def _assert_refused_up_front(self, rc: int, err: str) -> None:
++        """Issue #658: a ``"stacked"`` record is refused before any ``gh`` or ``git`` call."""
++        self.assertEqual(rc, 1)
++        self.assertEqual(self.gh_calls, [])
++        self.assertEqual(self.fetches, [])
++        self.assertEqual(self.waited, [])
++        self.assertIn("`Onto branch` commit added to an existing PR", err)
++
+     def _missing(self, *fetched: str) -> str:
+         """How the refusal opens for a head the fetches of ``fetched`` did not bring in."""
+         return (f"its head commit {self.feat} is not in the checkout {self.repo} after "
+                 f"fetching {', '.join(fetched)};")
+ 
+-    # (1) the head lives only on the third remote the record names
+-    def test_stacked_head_on_third_remote_reaches_rollup_wait(self) -> None:
+-        _g(self.seed, "push", "-q", "other", "feat")
+-        rc, out, err = self._merge(self._bundle(STACKED))
+-        self.assertNotIn("git failed", err)
+-        self.assertEqual(self.waited, [self.feat], err)
+-        self.assertIn(f"head {self.feat[:12]} contains base commit", out)
+-        self.assertEqual(self.fetches, self._fetched("upstream", "origin", "other"))
+-        self.assertNotIn(["gh", "pr", "update-branch", PR], self.gh_calls)  # up to date
+-
+-    def test_stacked_head_behind_is_updated_on_third_remote_and_reaches_wait(self) -> None:
++    # (1) issue #658: a "stacked" record no longer reaches the ready-mark, the rollup wait
++    # or the merge, whether its head is up to date, behind, or would read green
++    def test_stacked_record_is_refused_before_the_ready_mark(self) -> None:
+         _g(self.seed, "push", "-q", "other", "feat")
+-        # The base moves after the branch was cut, so the head is behind it.
+-        _g(self.seed, "checkout", "-q", "main")
+-        (self.seed / "f.txt").write_text("base moved\n", encoding="utf-8")
+-        _g(self.seed, "commit", "-q", "-am", "base moves")
+-        _g(self.seed, "push", "-q", "upstream", "main")
+-        _g(self.seed, "fetch", "-q", "upstream")
+-
+-        def update() -> str:  # the host merges the base into other/feat, and only there
+-            _g(self.seed, "checkout", "-q", "feat")
+-            _g(self.seed, "merge", "-q", "--no-edit", "upstream/main")
+-            _g(self.seed, "push", "-q", "other", "feat")
+-            return _g(self.seed, "rev-parse", "HEAD")
++        for verdict in (("failing", "recorded by the test; stop here"), ("green", "1 check")):
++            with self.subTest(verdict=verdict[0]):
++                self.verdict = verdict
++                self.gh_calls.clear()
++                self.fetches.clear()
++                rc, out, err = self._merge(self._bundle(STACKED))
++                self._assert_refused_up_front(rc, err)
+ 
+-        self.update = update
+-        rc, out, err = self._merge(self._bundle(STACKED))
+-        self.assertNotIn("git failed", err)
+-        self.assertIn(["gh", "pr", "update-branch", PR], self.gh_calls)
+-        updated = _g(self.seed, "rev-parse", "HEAD")
+-        self.assertNotEqual(updated, self.feat)
+-        self.assertIn(f"updated: head {updated[:12]} contains base commit", out)
+-        self.assertEqual(self.waited, [updated], err)
+-
+-    def test_stacked_green_merges_pinned_to_the_head_on_third_remote(self) -> None:
+-        # The read after the green fetches the record's remote again, then the merge is
+-        # pinned to the head read there.
++    # The read #650 added still finds a head that lives only on the third remote.
++    def test_stacked_head_on_third_remote_is_read_there(self) -> None:
+         _g(self.seed, "push", "-q", "other", "feat")
+-        self.verdict = ("green", "1 check")
+-        rc, out, err = self._merge(self._bundle(STACKED))
+-        self.assertEqual(rc, 0, err)
+-        self.assertIn(["gh", "pr", "merge", PR, "--merge", "--match-head-commit",
+-                       self.feat], self.gh_calls)
+-        self.assertEqual(self.fetches,
+-                         self._fetched("upstream", "origin", "other") * 2
+-                         + self._fetched("upstream"))   # the post-merge base refresh
++        head, tip, behind, why = self._read(self._bundle(STACKED))
++        self.assertEqual(why, "")
++        self.assertEqual(head, self.feat)
++        self.assertIs(behind, False)
++        self.assertEqual(self.fetches, self._fetched("upstream", "origin", "other"))
+ 
+     # (2) a head no fetched remote has is refused by name
+     def test_head_in_no_fetched_remote_is_named(self) -> None:
+         # `feat` is pushed nowhere: no remote the run fetches has it.
+-        rc, out, err = self._merge(self._bundle(STACKED))
+-        self.assertEqual(rc, 1)
+-        self.assertEqual(self.waited, [])
++        head, tip, behind, err = self._read(self._bundle(STACKED))
++        self.assertIsNone(behind)
+         self.assertNotIn("git failed", err)
+         self.assertIn(self._missing("upstream", "origin", "other"), err)
+         self.assertIn("its publish record puts its branch at other/feat, and fetching "
+                       "other did not bring that commit in", err)
+-        self.assertIn(["gh", "pr", "ready", PR, "--undo"], self.gh_calls)
+ 
+     # The refusal reports what was checked, never a cause it did not check: a remote that
+     # was fetched is not blamed as left out.
+@@ -222,9 +218,8 @@ class ThirdRemoteHead(unittest.TestCase):
+            "+refs/heads/main:refs/remotes/other/main")
+         self.assertEqual(_g(self.repo, "ls-remote", "other", "refs/heads/feat").split()[0],
+                          self.feat)
+-        rc, out, err = self._merge(self._bundle(STACKED))
+-        self.assertEqual(rc, 1)
+-        self.assertEqual(self.waited, [])
++        head, tip, behind, err = self._read(self._bundle(STACKED))
++        self.assertIsNone(behind)
+         self.assertEqual(self.fetches, self._fetched("upstream", "origin", "other"))
+         self.assertNotIn("git failed", err)
+         self.assertIn(self._missing("upstream", "origin", "other"), err)
+@@ -251,15 +246,15 @@ class ThirdRemoteHead(unittest.TestCase):
+         # git failing, and the refusal says that instead of claiming the commit is missing.
+         _g(self.seed, "push", "-q", "other", "feat")
+         self.head = "not-a-commit"
+-        rc, out, err = self._merge(self._bundle(STACKED))
+-        self.assertEqual(rc, 1)
+-        self.assertEqual(self.waited, [])
++        head, tip, behind, err = self._read(self._bundle(STACKED))
++        self.assertIsNone(behind)
+         self.assertIn("git failed: `git cat-file -e not-a-commit` in "
+                       f"{self.repo} exited 128", err)
+         self.assertNotIn("not in the checkout", err)
+ 
+-    # (2b) a stacked record that names no remote: today's fetches, no up-front refusal, and
+-    # the (2) refusal if the head is still missing
++    # (2b) a stacked record that names no remote: the read fetches as for any other record,
++    # and the (2) refusal if the head is still missing. Through `_merge_one` it is refused
++    # up front like every "stacked" record (issue #658).
+     NAMES_NO_REMOTE = ({"mode": "stacked", "base": "other/feat"},
+                        {"mode": "stacked", "branch": "feat", "base": "other/elsewhere"})
+ 
+@@ -268,9 +263,8 @@ class ThirdRemoteHead(unittest.TestCase):
+         for record in self.NAMES_NO_REMOTE:
+             with self.subTest(record=record):
+                 self.fetches.clear()
+-                rc, out, err = self._merge(self._bundle(record))
+-                self.assertEqual(rc, 1)
+-                self.assertEqual(self.waited, [])
++                head, tip, behind, err = self._read(self._bundle(record))
++                self.assertIsNone(behind)
+                 self.assertEqual(self.fetches, self._fetched("upstream", "origin"))
+                 self.assertNotIn("git failed", err)
+                 self.assertIn(self._missing("upstream", "origin"), err)
+@@ -278,15 +272,14 @@ class ThirdRemoteHead(unittest.TestCase):
+                               "on, so no other remote was fetched", err)
+                 self.assertNotIn("puts its branch at", err)
+ 
+-    def test_stacked_record_naming_no_remote_is_not_refused_up_front(self) -> None:
++    def test_stacked_record_naming_no_remote_is_refused_up_front(self) -> None:
+         _g(self.seed, "push", "-q", "origin", "feat")
+         for record in self.NAMES_NO_REMOTE:
+             with self.subTest(record=record):
+                 self.fetches.clear()
+-                self.waited.clear()
++                self.gh_calls.clear()
+                 rc, out, err = self._merge(self._bundle(record))
+-                self.assertEqual(self.fetches, self._fetched("upstream", "origin"))
+-                self.assertEqual(self.waited, [self.feat], err)
++                self._assert_refused_up_front(rc, err)
+ 
+     # (3) unchanged: a new-pr record fetches the base remote, then origin, deduplicated
+     def test_new_pr_record_fetches_exactly_base_remote_then_origin(self) -> None:

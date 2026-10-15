@@ -1,0 +1,24 @@
+flow: fix comment claiming adoption never relaxes strict levelling
+
+The comment above the up-front levelling in `_drive_and_act` said the batch
+named on the command line is levelled strictly "exactly as before" and that
+adoption "never relaxes it". Since 29a79433456b01521e3c59fb2103223bfb2e6cdc
+(#590) that is no longer true: a `Depends on` / `Depends on (merged)` edge
+to an in-flight child that a named recovery seed offers is accepted there
+instead of being refused. A later paragraph of the same comment already said
+so, so the block contradicted itself, and anyone reading only its opening
+would expect a refusal that no longer happens.
+
+The comment now names that one relaxation and states both halves of it: the
+edge is resolvable at the up-front check but adds no ordering edge there, and
+the child only joins the schedule at the recovery seed's splice, which
+re-levels with it in place and is what orders the edge (and holds a loop
+through the child instead of raising). A `Stacks on` edge to such a child,
+or any other unresolvable dependency, still refuses. It also names the test
+that pins this behaviour, and swaps a line-number reference to
+`waves.partition_schedulable`'s docstring, which had drifted, for a symbol
+reference.
+
+Comment lines only; no code changes.
+
+Fixes #651

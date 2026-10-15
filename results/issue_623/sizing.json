@@ -1,0 +1,14 @@
+{
+  "band": "watch",
+  "independent_outcomes": [
+    "The fold stops before pushing when taking the base in would put a line path back to its cut-point content (a revert of line work), resets the worktree to the pre-base-merge line so the carry path still pushes a clean line, and only prints 'reaches ... through' when it is true. Criteria (1), (3), (4) and (5), plus the docs sentence.",
+    "Arguably separate: naming the bundle that owns each removed path, including bundles found only through the run's batch and changes that came in through merge parents (criterion (2)'s 'names Z'). Without it the fold still stops, fail-closed, naming the path and the line commit that last changed it."
+  ],
+  "proposed_seams": [
+    "If cut at all, cut between the stop/reset guard and owner attribution. The guard (detection rule, pre-raise reset, true stderr, docs) is one defect with one invariant: the fold never drops line work. Attribution (batch lookup via cfg.find_bundle, dedupe by bundle name, following merge parents for ownership) is a diagnosis-quality follow-up; the brief's own fallback message ('path + last line commit') already makes the guard shippable without it. Iteration 1's rejected findings were both in this attribution part, which is the uncertain surface that makes this 'watch' rather than 'ok'.",
+    "Do NOT cut the carry-mode reset (criterion (4)) away from the guard: raising without resetting would let the #646 carry push a line that has the revert, so the guard alone would be unsafe to ship.",
+    "Do NOT cut the docs update away: it describes the same stop rule and belongs with it."
+  ],
+  "confidence": "medium",
+  "brief_sha": "d40feb4c975b7304"
+}

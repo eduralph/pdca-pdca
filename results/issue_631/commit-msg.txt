@@ -1,0 +1,25 @@
+integrate: start every fold from a clean integration worktree
+
+A run reuses one integration worktree per target for every fold, for the
+pre-wave carry and for the optional between-waves re-gate. A fold reused that
+tree as it found it. Build output left by the re-gate (an untracked file a
+later branch adds, a tracked file it rewrote), or a merge left in progress,
+made the next fold's checkout or merge refuse, and the run stopped with "did
+not integrate" even though the branches themselves merged cleanly. A failed
+`git merge --abort` was also ignored, so the carry merged the next bundle into
+a tree still mid-merge and reported it as a conflict.
+
+Each fold now resets the tree to its start ref first: `reset --hard`, then
+`clean -ffd`. That removes untracked files, including a nested repository a
+gate created. Ignored files are kept, because git overwrites them on merge
+without refusing and the re-gate can reuse its build caches. A failed merge
+now resets to the tip the line had before it, instead of an unchecked
+`merge --abort`. If the tree cannot be reset, the fold raises the new
+IntegrationTreeError, a subclass of IntegrationError, so existing callers
+still catch it. The carry's per-bundle skip mode does not absorb it, since
+every later merge would run in an unknown tree.
+
+This makes the existing docs true as written: "each fold resets its tree to
+a freshly fetched ref" (template/pdca.toml.jinja, sweep.py).
+
+Fixes #631
