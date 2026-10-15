@@ -1,0 +1,11 @@
+{
+  "mode": "new-pr",
+  "branch": "fix/693-flow-run-with-holds-exits-3",
+  "pr_url": "https://github.com/eduralph/pdca-harness/pull/703",
+  "base": "main",
+  "repo": "eduralph/pdca-harness",
+  "by": "Eduard Ralph",
+  "date": "2026-10-15",
+  "id_pending": false,
+  "host_ci_base": "d6057ebc8c9b31987a2e145f487e9cec76181768"
+}
