@@ -1,0 +1,13 @@
+{
+  "band": "watch",
+  "independent_outcomes": [
+    "In stack mode, each bundle is built on, verified against and cut from a base that holds only its declared in-run prerequisite closure (Depends on / Stacks on / earlier-wave Conflicts with, transitively, plus #646-carried ids), or the real base when that closure is empty; the run's line stays as a check only. Criteria (1)-(7), the #655 flip and the doc updates are all parts of this one rule change, not separate deliverables."
+  ],
+  "proposed_seams": [
+    "Weak seam, not recommended: the integrate.fold API change (fold onto a named destination branch started fresh from the fetched base, own folded_tips entry, plain-push-on-create / force-push-on-rebuild, IntegrationError on a refused push) could land first as a prep PR with its own unit test on StackFoldGit. It fixes no defect by itself and has no user-visible success criterion, so it is a refactor split, not a second outcome. Only worth it if the human wants the fold API change reviewed apart from the base-selection change.",
+    "Not a seam: the #655 change (Design section 6, criterion 7) and the #646 carry closure (criterion 6) look separable but are direct consequences of 'no bundle is cut from the run's line'. Shipping either without the base rule would be wrong or untestable.",
+    "Not a seam: the doc and vendored-spec updates (07-crosscutting.md, integrate.py docstring, publish.py comment, 09-parallel-lanes.md) state the new rule and must ship with it."
+  ],
+  "confidence": "medium",
+  "brief_sha": "27d31f8a37d07483"
+}
