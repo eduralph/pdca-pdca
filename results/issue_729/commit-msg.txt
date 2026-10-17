@@ -1,0 +1,20 @@
+flow: stop holding a bundle for a merge its own base already has
+
+In stack mode, a bundle whose out-of-batch prerequisite merged into main
+after the run's first fold was held with "does not have that merge",
+even though it would be built on a base of its own (or on the real base)
+that is fetched after the check and so already holds that merge. The
+user had to delete the run's line and re-run for nothing.
+
+The run's line is now checked only for bundles that are still built on
+it: those a seam keeps there (a `Stacks on` or `Onto branch` edge, or a
+carried prerequisite). Every other bundle is judged by whether the
+prerequisite merged into its target base, which is the tree it is built
+on. Whether a bundle is on the line comes from the same per-wave plan
+that later points it at its base, so the two cannot disagree.
+
+The line-based tests keep their held assertions, now with a dependent
+that a seam keeps on the line. A new test file covers the own-base and
+real-base cases and the still-unmerged guard.
+
+Fixes #729
