@@ -1,0 +1,14 @@
+{
+  "band": "watch",
+  "independent_outcomes": [
+    "Each runnable bundle in stack mode is built on a base holding exactly its declared-prerequisite closure (Depends on, in-batch Depends on (merged), earlier-wave Conflicts with partner, legacy Stacks on; built or carried in this run), not on the run's shared integration line; criteria (1)-(9) and the restated suites in (10) are all checks of this one rule."
+  ],
+  "proposed_seams": [
+    "Weak seam, not recommended: in-batch closures (criteria 1-5) vs. carried prerequisites (criteria 6-8). The in-batch half could in principle ship alone with carry dependents left on the line, but that ships a mixed rule where the invariant holds for some bundles and not others, and the #646 suite would have to keep asserting line-based bases for one release. The iteration-1 findings are mostly at the carried/in-batch boundary (Conflicts with and Depends on (merged) edges to carried bundles, carried heads not recorded per base), so splitting there would separate the code from the cases that break it.",
+    "Not a seam: the #655 rework (remove _line_lacks_merge and merged.merge_and_head, criterion 9). The brief's plan-review note (f) is right: once a bundle is no longer cut from the line, that check asks about a tree the bundle does not use and holds it wrongly. It cannot ship before the core change and the core change regresses without it, so it belongs in this PR.",
+    "Already cut out: base-build-failure holds, cross-wave overlap holds, and all stack-rule prose are deferred to #725; the base-build primitive is #723. What remains is one rule change.",
+    "Why watch and not ok: one outcome, but a large uncertain surface. It is high difficulty, on its second build, and the round-1 review found five implementation-level closure-walk defects plus 7 deferred findings. The risk is getting this one rule right, not too much scope."
+  ],
+  "confidence": "medium",
+  "brief_sha": "0d1b40c46cf89a56"
+}

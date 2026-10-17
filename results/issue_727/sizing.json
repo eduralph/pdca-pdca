@@ -1,0 +1,13 @@
+{
+  "band": "watch",
+  "independent_outcomes": [
+    "In-batch bundles get a base that holds only their declared-prerequisite closure, not the whole integration line (criteria 1-6b), with the #633/#695 rewrite checks fed and worded per base (criterion 7). These are one outcome: the checks cannot ship first (there are no per-bundle bases for them to name yet), and the base change cannot ship without them (iteration v1 was rejected because the #695 check could not see what a bundle's own base took, and its messages named the wrong commit and PRs)."
+  ],
+  "proposed_seams": [
+    "Weak seam, not recommended unless the build stalls again: a refactor-only first PR that changes integrate.rewritten_carried / flow._report_late_rewrites to take a map of {base -> head that base took}, with the line as the only base, and splits the message wording into 'line' and 'per-bundle base' forms (both the rewritten and the unchecked paths). It changes no behaviour and fixes no defect by itself, so it fails the 'own defect' test. It would only shrink the main patch and let the message wording be reviewed apart from the closure walk.",
+    "Not a seam: the seam-fallback cases (criterion 6) and the walk-only-through-built-bundles rule (6b). They are guards on the same closure walk. Shipping the walk without them brings back the exact failures that got iterations v1-v3 rejected.",
+    "Note on the uncertain surface: this brief is already the child of a split (#724 -> #727/#728/#729/#725), and has been sent back for rebuild three times, each time for edge cases inside the same closure walk and check plumbing (untested guards, filters in _heads_taken, line-PR lists). That points to one change that is hard to get right, not to several outcomes bundled together. Hence watch, not oversized."
+  ],
+  "confidence": "medium",
+  "brief_sha": "0b574ed197da9a69"
+}
