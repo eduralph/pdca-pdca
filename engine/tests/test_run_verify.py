@@ -15,6 +15,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -76,6 +77,32 @@ def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["git", *args], cwd=cwd, check=True, capture_output=True, text=True
     )
+
+
+def _bash_path(p: Path) -> str:
+    """A path git-bash can test with -s/cd: /c/... on Windows, as-is elsewhere."""
+    if os.name != "nt":
+        return str(p)
+    drive, rest = str(p).split("\\", 1)
+    return f"/{drive[0].lower()}/{rest.replace(chr(92), '/')}"
+
+
+def _git_bash() -> str:
+    """The bash this suite must drive the gates with.
+
+    On Windows ``shutil.which("bash")`` finds the WSL shim in system32 (which
+    is inserted ahead of PATH and cannot see C:\\ paths); the gates need
+    Git-bash. Upstream CI is Linux, where this is just ``bash``.
+    """
+    found = shutil.which("bash") or "bash"
+    if os.name != "nt":
+        return found
+    candidates = [found, r"C:\Program Files\Git\bin\bash.exe"]
+    for cand in candidates:
+        if os.path.basename(cand).lower() == "bash.exe" and "Git" in cand:
+            return cand
+    root = os.environ.get("ProgramFiles", r"C:\Program Files")
+    return os.path.join(root, "Git", "bin", "bash.exe")
 
 
 @unittest.skipUnless((TARGET / ".git").exists(), "sibling ../pdca-harness missing")
@@ -176,6 +203,96 @@ class RunVerify(unittest.TestCase):
         self.assertIn('RUN_CACHE="$(mktemp -d "$CACHE_ROOT/leg.', script)
         self.assertIn('PYTHONPYCACHEPREFIX="$RUN_CACHE" PYTHONPATH=src', script)
         self.assertIn('PYTHONPYCACHEPREFIX="$RUN_CACHE" "$PY" -m unittest "$mod"', script)
+
+
+# Issue #100's hazard does not need the sibling target: a reverted source that
+# keeps the patched file's SIZE and whole-second MTIME makes Python reuse the
+# green leg's .pyc, and the red leg executes the FIXED bytecode — a false
+# "C4 FAIL — still green without the fix". This class drives the real script
+# against a synthetic target whose patch is a same-length one-char flip
+# (`X = 1 - 1` -> `X = 1 + 1`), aligns the revert into the second the green
+# bytecode was compiled in, and pins that the gate still reports a genuine red.
+class StaleBytecode(unittest.TestCase):
+    # The stale load only fires when the red leg's revert lands in the whole
+    # second the green .pyc's header recorded. Each attempt parks the patched
+    # source a different step ahead of "now" so the sweep crosses that second;
+    # with a shared cache one attempt goes falsely green, with per-leg caches
+    # every attempt reports a genuine red.
+    ATTEMPTS = 10
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="pdca-c4-pyc-"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.wt = self.tmp / "wt"
+        (self.wt / "tests").mkdir(parents=True)
+        self._git("init", "-q")
+        self._git("config", "user.email", "t@example.invalid")
+        self._git("config", "user.name", "t")
+        # Byte sizes drive the .pyc validity check; CRLF rewriting would break
+        # the same-size premise on a Windows contributor host.
+        self._git("config", "core.autocrlf", "false")
+        (self.wt / "m.py").write_text("X = 1 - 1\n", encoding="utf-8")
+        self._git("add", "-A")
+        self._git("commit", "-qm", "base")
+        (self.wt / "tests" / "test_m.py").write_text(
+            "import unittest\n\nimport m\n\n\nclass T(unittest.TestCase):\n"
+            "    def test_sum(self) -> None:\n"
+            "        self.assertEqual(m.X, 2)\n",
+            encoding="utf-8",
+        )
+        (self.wt / "m.py").write_text("X = 1 + 1\n", encoding="utf-8")
+        bundle = self.tmp / "bundle"
+        bundle.mkdir()
+        self._git("add", "-A")
+        patch = self._git("diff", "--cached").stdout
+        (bundle / "patch.diff").write_text(patch, encoding="utf-8")
+        self._git("reset", "-q")   # driver state: base + patch applied to the tree
+
+    def _git(self, *args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["git", *args], cwd=self.wt, check=True, capture_output=True, text=True
+        )
+
+    def _run_gate(self) -> subprocess.CompletedProcess[str]:
+        env = dict(os.environ)
+        env["PDCA_BUNDLE"] = _bash_path(self.tmp / "bundle")
+        env["PDCA_WORKTREE"] = _bash_path(self.wt)
+        return subprocess.run(
+            [_git_bash(), _bash_path(SCRIPT)], cwd=INSTANCE, env=env,
+            capture_output=True, text=True,
+        )
+
+    def test_the_red_leg_never_runs_the_green_legs_cached_bytecode(self) -> None:
+        stale = "still green WITHOUT the fix"
+        for attempt in range(self.ATTEMPTS):
+            shutil.rmtree(self.wt / "__pycache__", ignore_errors=True)
+            shutil.rmtree(self.wt / "tests" / "__pycache__", ignore_errors=True)
+            # Park the patched source step*0.23s ahead of now, then compile the
+            # green bytecode: its header records (size=10, that second). The
+            # gate's green leg reuses it; the red leg's `git apply -R` restores
+            # the same-size base file with mtime=now, and whenever that lands
+            # in the parked second a shared cache hands the red leg the FIXED
+            # bytecode — the false C4 FAIL of issue #100.
+            subprocess.run(
+                [sys.executable, "-c",
+                 "import os, sys, time\n"
+                 "now = time.time() + float(sys.argv[2])\n"
+                 "os.utime(sys.argv[1], (now, now))\n",
+                 str(self.wt / "m.py"), str(attempt * 0.23)],
+                check=True,
+            )
+            subprocess.run(
+                [sys.executable, "-c", "import m"], cwd=self.wt, check=True,
+                capture_output=True,
+            )
+            r = self._run_gate()
+            combined = r.stdout + r.stderr
+            self.assertNotIn(
+                stale, combined,
+                f"attempt {attempt}: the red leg executed the green leg's cached "
+                f"bytecode — the false C4 FAIL of issue #100:\n{combined}",
+            )
+            self.assertIn("C4 PASS", combined, combined)
 
 
 if __name__ == "__main__":
