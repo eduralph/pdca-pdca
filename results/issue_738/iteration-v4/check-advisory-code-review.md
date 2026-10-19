@@ -1,0 +1,13 @@
+# Advisory code review — issue #738 (hold a bundle whose own base cannot be built)
+
+Lenses: bugs the patch introduces, and reuse / simplification. Anchors are on the patched target at `$PDCA_TARGET`.
+
+I found no correctness bug in the production change. One scope question and two minor notes follow.
+
+- NEEDS-HUMAN [human] — `template/src/pdca_harness/flow.py:1040` now catches every `IntegrationError` from `build_bundle_base` and holds just that bundle. That includes `IntegrationTreeError` (`template/src/pdca_harness/integrate.py:103`), which `_reset_tree` raises at `template/src/pdca_harness/integrate.py:889`. That class's docstring says a worktree that cannot be reset "is not about one bundle … the fold stops". After this patch, each later bundle on the same target is held one by one, with the same reset failure each time. The run only stops later, when the wave's fold reaches the same worktree. None of the brief's four causes (moved base, rewrite, fetch, push) is a broken shared worktree. Should this class still stop the run, for example by re-raising it from `_bundle_bases`? The wave loop no longer has a `STOPPING` handler (it was removed around `flow.py:2897-2907`, where `_bundle_bases` is now called with `held=failed`), so re-raising would need that handler back for this one class. This is a decision about what counts as one bundle's failure, so it is tagged [human]. It is low risk: nothing is pushed, and the fold still stops the run.
+- `template/src/pdca_harness/integrate.py:1315` (`lost_now`) repeats the fetch → `_rev` → `_carried_rewrite` steps from `rewritten_carried` (`integrate.py:1274-1290`), for one branch. The copy is short, and the error handling has to differ (`lost_now` raises, while `rewritten_carried` collects the error and keeps going). Sharing a helper would save little. No action needed.
+- `template/src/pdca_harness/flow.py:2836-2848` (passing `held=… | held_base` and `unbuilt=held_base` to `_runnable`) follows the existing `held_unpushed` / `unpushed` pattern exactly. That is consistent, not duplicated logic. `_report_stale_prs` (`flow.py:1091`) reads `dirs[m]` and `dirs[o]` from `accepted`. That is safe today: base members come from `built`, which is `accepted` (`flow.py:2827`), and every PR owner pushed, so it was accepted. When #735 adds carried-from-an-earlier-run members to bases, those members will not be in `accepted`, and these lookups will raise `KeyError`. #735 is out of scope here; it should know about this.
+
+Tests: the cases in the brief are all present (`template/tests/test_flow_bundle_base_holds.py`). The C4 log shows the edited existing tests fail on the red leg with `STOPPING`, as the brief intends. I saw no test that passes without the fix.
+
+<!-- pdca:leaf-complete -->

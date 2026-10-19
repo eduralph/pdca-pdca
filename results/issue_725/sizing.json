@@ -1,0 +1,15 @@
+{
+  "band": "oversized",
+  "independent_outcomes": [
+    "A bundle whose own base cannot be built (moved main, foreign ancestry, rewritten carried prerequisite, failed fetch, refused push, clashing prerequisites) is held with its dependents, and the rest of the wave runs. Cases (1), (2), (4), (4b), (5).",
+    "A bundle whose branch clashes at the line fold with a bundle from an earlier wave, where the clash is only with that bundle's own branches, is held out of the line instead of stopping the run. Case (3), plus the flip of test_flow_same_wave_conflict.py:351."
+  ],
+  "proposed_seams": [
+    "Seam 1: split the base-build failures from the line-fold overlap. The first outcome lives in the base-build path of flow._drive_and_act and adds a held set for per-bundle base failures. The second lives in the line-fold block (flow.py fold section near :2620-2660, and integrate._held_by at integrate.py:1261). Each has its own defect, its own success criterion and its own test file, so each can be its own PR. Brief case (3) can ship without cases (1)-(5), and the reverse also works.",
+    "Seam 2 (shared mechanism): both halves want a held set that _runnable already honours (held_conflict, held_unpushed). Whichever child lands first adds or extends that mechanism. The second child reuses it. Check should confirm the second child does not copy the mechanism.",
+    "Seam 3: the docs rewrite (criterion 6, about 20 sites across docs, glossary, config and docstrings) can stay as a third child that lands last, after both code children. The brief keeps it together on purpose so the docs describe the finished rule once. A human who wants a smaller PR can move it, but the docs must be fixed in the same release as the behaviour they describe, or the grep gate will fail.",
+    "Keep test_flow_same_wave_conflict.py:399 as a stop. It is the line's own conflict with a commit the fold took in, so it stays in the fold-overlap child as a stop case. The brief already says so."
+  ],
+  "confidence": "medium",
+  "brief_sha": "09793f8043be2f3c"
+}

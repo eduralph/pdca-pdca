@@ -1,0 +1,31 @@
+flow: hold a bundle whose own base cannot be built, not the run
+
+In a stacked run, when building one bundle's own base failed, the whole
+run stopped with STOPPING. Bundles that had nothing to do with the failure
+were left PLANNED, and the user had to fix one bundle's problem before
+any of the others could be built. The usual causes are narrow: main moved
+and now clashes with a prerequisite, a prerequisite's branch was
+force-pushed, a fetch failed, or origin refused the push of the base
+branch.
+
+Such a failure now holds only that bundle. A bundle that depends on it is
+skipped, one tied to it by `Conflicts with` is held, and the rest of the
+wave is built. Each hold prints one stderr line that names the cause and
+a fix that fits it: rebuild on the new main, restore or re-publish a
+rewritten branch, or check the remote and re-run.
+
+When the held bundle's cause is a rewritten prerequisite and a fold
+still follows this wave, the line says the next fold will stop the run
+unless the branch is restored first, as that fold refuses a rewritten
+branch. A rewritten prerequisite still fails the run at its end (exit 1),
+since the line still carries commits no PR holds.
+
+Two failures still stop the run: a shared integration worktree that
+cannot be reset, and a branch that cannot be put back after a trial
+merge. Any bundle already held in that wave is named first, so the stop
+never hides its cause.
+
+Exit codes: a run whose only problems are such holds exits 3; a skipped
+dependent or held partner left unbuilt exits 1, as before.
+
+Fixes #738

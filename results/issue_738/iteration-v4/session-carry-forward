@@ -1,0 +1,6 @@
+Back to Plan to review the open scope questions — not necessarily a split. The code itself is fine (no defects found; all gates pass); the open items are scope calls the brief must settle before another build:
+- A rewritten prerequisite held in a non-last wave still stops the run at the next fold (§6 112/122/124/126). Decide: in scope here (fold treats an already-refused rewrite as a hold) or a follow-up like #739.
+- Exit code for the same rewrite is 1 or 3 depending on whether a dependent's base read it; conflicts with #695 and the `_results_rc` docstring (§6 123). Decide which rule wins.
+- IntegrationTreeError (broken shared worktree) is now held per bundle instead of stopping the run (§6 113). Decide whether it should still stop.
+- Confirm the operator recovery contract (hold = exit 3, skipped dependent = exit 1, later fold may still stop) (§6 111).
+Cleared at this sign-off: prior art, the plan-review leftovers, the size backstop.
