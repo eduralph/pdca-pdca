@@ -1,0 +1,32 @@
+flow: hold a bundle that clashes with earlier-wave work, not the run
+
+When a bundle built on its own base clashed at the line fold with work
+already on the line from an earlier wave, the whole run stopped with
+STOPPING. Bundles with no link to the clash were left PLANNED, and the
+user had to sort out one bundle's overlap before any of the others could
+be built. Only a clash between bundles of the same wave was held (#674).
+
+Now, when the clash is clearly one bundle's, it holds only that bundle,
+as a same-wave clash does. That means its own head merges onto the base
+alone, named bundles already on the line conflict with it, and the line
+without those bundles takes it cleanly. Its dependents and its
+`Conflicts with` partners are held with it, and the rest of the run goes
+on. The hold line names every partner and says where each one came from:
+the same wave, an earlier wave, or a finished bundle carried onto the
+line before wave 0. Carried bundles are now checked as partners too.
+
+The advice fits the partner. For a bundle the held one does not depend
+on, the end-of-run line proposes `Conflicts with: <id>` as today. When
+the partner is the held bundle's own prerequisite, it says to rebuild
+the branch on the prerequisite's instead, since declaring a conflict with
+a prerequisite makes no sense.
+
+A clash the rule cannot pin on named partners still stops the run as
+before: a clash with the base itself, one that only shows when two line
+bundles are both present, a partner whose own head no longer fits the
+base, or a bundle left on the line that was built on a partner.
+
+Exit codes: a run whose only problems are such holds exits 3; a PLANNED
+dependent left unbuilt exits 1, as before.
+
+Fixes #747

@@ -1,0 +1,23 @@
+Review issue #739: hold bundle-local cross-wave fold conflicts, identify the causal partners and their remedies, and keep unrelated waves running.
+
+| Item | Verdict | Basis |
+|------|---------|-------|
+| C1 Spec | PASS | The brief distinguishes bundle-local clashes from shared-line failures and fixes the partner, dependent, and exit-code expectations; the real-git acceptance cases cover those boundaries (`template/tests/test_flow_cross_wave_fold_holds.py:284`, `template/tests/test_flow_cross_wave_fold_holds.py:1033`). |
+| C2 Reproduction (red pre-fix) | PASS | Independently stashing only the two production files reproduced 21 assertion failures among 29 executed tests, including the earlier-wave STOPPING symptom; no collection failure (`review-evidence/red.log:247`, `review-evidence/red.log:250`). |
+| C3 Change | PASS | Conflict holds remain limited to actual merge conflicts; other integration errors retain the stop path, and carried finished heads participate in attribution (`template/src/pdca_harness/integrate.py:655`, `template/src/pdca_harness/integrate.py:1869`). |
+| C4 Verification (red→green) | PASS | Restoring the production patch made all 29 focused tests pass independently, matching the frozen verifier's substantive red→green evidence (`review-evidence/green.log:4`, `gate-logs/C4-verify.log:278`). |
+| C5 Causal adequacy | PASS | Real-git coverage exercises direct and joint clashes, unrelated partners, stacked ownership, moved/reverted bases, and older prerequisite tips; attribution tests invoke production flow and merge code, and no optional-capability probe masks a load-time cause (`template/src/pdca_harness/integrate.py:1882`, `template/src/pdca_harness/integrate.py:1899`, `template/tests/test_flow_cross_wave_fold_holds.py:974`). |
+| T1 Structure | PASS | Merge classification stays in integration code and remediation wording is shared by both hold reporters and conflict partners; added arguments are optional and existing callers pass the full suite (`template/src/pdca_harness/integrate.py:1826`, `template/src/pdca_harness/flow.py:1562`, `template/src/pdca_harness/flow.py:865`). |
+| T2 Shape | PASS | Independently reran docs lint, site rendering with internal-link audit, and git diff whitespace checks successfully; frozen docs and host-CI logs agree (`gate-logs/T2-docs.log:11`, `gate-logs/host-ci-docs.log:11`). |
+| T3 Runtime | PASS | Independent offline driver run executed 2,631 tests successfully with two skips; frozen evidence additionally shows 24 root render/update tests passed (`review-evidence/driver-suite.log:1817`, `gate-logs/T3-suite.log:54`, `gate-logs/T3-suite.log:1874`). |
+| T4 Contribution | N/A | Contribution artifacts are absent by design at Check; the mandatory publish-time contribution audit owns the substantive verdict (`gate-logs/T4-contribution.log:10`). |
+| T5 Judgment | PASS | Prior art was checked by all four affected paths against main commit history and all 293 closed PRs: 68 relevant PRs, seven closed without direct merge but documented as carried by integration PRs; no competing cross-wave hold fix found (`review-evidence/prior-art.txt:1`, `review-evidence/history-integrate.py.txt:1`). |
+| Validation — fitness-to-purpose | NEEDS-HUMAN | Decide whether the observed hold behavior and owner-directed recovery advice fit live batch operations — automated real-git tests establish execution outcomes, while operational acceptance remains the maintainer's decision (`template/src/pdca_harness/flow.py:1602`, `template/src/pdca_harness/flow.py:1610`, `template/src/pdca_harness/flow.py:1617`). |
+
+All source citations above are grounded in the applied disposable `$PDCA_TARGET`; its prerequisite-bearing base was executable, with no stale-target caveat. Production changes were restored after the red run, and no implementation files were edited.
+
+The instance-scoped oracle wrappers were assessed through their frozen logs, and available underlying checks were rerun independently. Copier is absent from the review interpreter, so root render/update coverage rests on the frozen log's actual successful execution; this is a reviewer-host limitation, not an unmet dependency in the supplied gate run. The brief declares no external dependencies. The supplied integration template enumerates no additional project-specific human-only items (`template/docs/INTEGRATION.md.jinja:80`).
+
+Prior-art evidence includes path-filtered main history (92 flow commits, 22 integration commits, one existing same-wave test commit, no prior cross-wave test file), closed PR metadata, and the seven unmerged PRs' disposition comments. Those comments record carriage by merged integration PRs #615 or #657. No publish or live tracker mutation was performed.
+
+<!-- pdca:leaf-complete -->
