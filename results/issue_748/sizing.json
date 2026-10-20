@@ -1,0 +1,13 @@
+{
+  "band": "watch",
+  "independent_outcomes": [
+    "Joint-attribution fallback in the fold's classification: a cross-wave fold clash caused by a size-1 or size-2 minimal conflicting set of line bundles holds the bundle and names exactly those bundles (cases 1-5, plus the flow.py multi-partner announce wording, which only matters once several partners can be named)",
+    "Arguably separate: the own-change helper (merge-base of the head and each shared-history line bundle as leading revs to `_trial`), which child-3 #749 also reuses and which the iteration-1 carry-forward says has no test of its own yet"
+  ],
+  "proposed_seams": [
+    "If a cut is wanted, it falls at the own-change helper: ship it first as its own PR with its own test (head stacked on a line bundle that edits the clashing file, named correctly with the helper and wrongly without it), then the joint fallback and child-3 #749 both build on it. Against cutting: the brief states no defect the helper fixes alone; its only observable effect is inside the joint trials, so a standalone PR would need a test that reaches through this same fallback or through child-1's trials. Keeping it here is defensible.",
+    "Do NOT split the size-1 vs size-2 naming, the acceptance trial, or the flow.py announce wording from the fallback: they are one rule with one success criterion (case 3 needs size-1 and size-2 together; the wording has nothing to show without several partners)."
+  ],
+  "confidence": "medium",
+  "brief_sha": "0ce6d4177d5906a6"
+}

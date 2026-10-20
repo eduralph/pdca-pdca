@@ -1,0 +1,26 @@
+flow: hold a bundle that clashes with two line bundles together
+
+A stack-mode run held a bundle whose change clashed with one bundle
+already on the integration line, but a clash that two of them caused
+only together still stopped the whole run: the bundle merged cleanly
+after either one alone, not after both. Unrelated bundles in later waves
+were left unbuilt.
+
+The fold now also names the bundles in a pair the held branch conflicts
+with, found by trial merges (clean or not, nothing else): a bundle is
+named when the branch's own change fails after it alone, or after it and
+one other bundle but after neither alone. The named set is accepted only
+when the line without it merges the branch cleanly, the same check used
+for a single partner. A bundle in no such set is never named. Trials
+first merge what the branch already holds of each line bundle, so a
+branch built on a line bundle is judged on its own change only.
+
+A clash that only three or more bundles make together, or one that
+needs a line bundle stacked on another, is not attributed and still
+stops the run. The search costs up to n(n+1)/2 trial merges and runs only
+after a fold merge has already conflicted.
+
+The guard test added in d51849a50eee53e4989c8b8c1984a6cb312c0108, which
+pinned the old stop, now asserts the hold.
+
+Fixes #748
