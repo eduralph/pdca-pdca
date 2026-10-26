@@ -1,0 +1,27 @@
+Bash was unavailable in this run (every command failed with `apply-seccomp: write /proc/self/setgroups … Permission denied`); this review used Read, Grep and Glob only.
+
+# Plan review — document-the-dependency-scoped-base-and-hold-rule
+
+Checked against the target source at `$PDCA_TARGET`. The root cause holds up: today's grep finds the five literal patterns at the sites the brief lists (`docs/05-check.md:814`, `docs/07-crosscutting.md:647,653`, `docs/index.yml:65`, `08-glossary.md:276,293`, `09-parallel-lanes.md:57,69`, `pdca.toml.jinja:116`, `integrate.py:22`, `flow.py:679`). The `build-notes.md` withholding cite (`docs/04-do.md:250`) is correct. The findings below are the gaps.
+
+- NEEDS-HUMAN — **I could not check the brief against the tracker thread.** The bundle has no `notes.json` and no `sources/` (cwd holds only `brief.md` and `dependency-state.json`). The brief's own pointer, "The thread is at `results/issue_725/notes.json` (the split parent)" (brief line 18), does not resolve on the target either: Glob `results/issue_7*/**` returns nothing. The prior-art hunks in `results/issue_725/iteration-v1/patch.diff` (brief line 12) cannot be found from here either. Nobody downstream can verify the "Prior-art check" reuse instruction or any maintainer constraint in #725. Attach the thread, or say where Do reads it from.
+
+- NEEDS-HUMAN — **Some production docstrings in scope still say a clash stops the run, and the brief does not list them.** For `integrate.py`, the brief scopes only "the module docstring (incl. `:63-68`)". Two more docstrings in that file state the clash-stops rule that #747 turns into a hold for one bundle's clash:
+  - `template/src/pdca_harness/integrate.py:86-89`: `IntegrationError`: "a published branch does not merge cleanly (undeclared overlap) … The caller STOPs rather than build the next wave on an incomplete base."
+  - `integrate.py:353-354` (the fold function's docstring): "Raises :class:`IntegrationError` on a real failure (a branch does not merge cleanly, …) so the caller STOPs."
+
+  The literal search does not catch either one. The success criterion makes review check P2/P3 only at the listed sites, so both will survive and contradict the Invariant ("Every … production docstring … states the rule the code follows"). Add them to Scope with the same rewrite-or-keep-if-still-a-stop rule as `07-crosscutting.md:690-697`. The cleaner fix is to make Do grep for `STOP|stops the run|does not merge cleanly|undeclared` across `template/src/pdca_harness/` on the folded base, instead of relying on a hand-picked line list.
+
+- NEEDS-HUMAN — **The Falsifiability cite does not resolve.** The brief cites `engine/scripts/run-verify.sh:142-146` (brief line 9). On the target the file is `template/engine/scripts/run-verify.sh`, it has only 95 lines, and the exit-77 / `PDCA-UNVERIFIABLE` logic is at `:63-83`. Fix the path and line numbers so review and sign-off can follow the "unverifiable by construction" argument.
+
+- NEEDS-HUMAN — **The plan-review response contradicts the dependency line.** Response (a) says "`Depends on: 738, 739` puts this bundle last" (brief line 18). The Ordering note (line 14) and `Depends on: 738, 747, 748, 749` (line 16) correctly say that 739 alone would not wait, because a split parent counts as COMPLETE. A reader acting on (a) could re-declare 739. Reword (a) to match line 16.
+
+- NEEDS-HUMAN — **"#738 accepted" is not proven by the recorded state.** `dependency-state.json` shows 738 `COMPLETE` and 747/748/749 `PLANNED`. The PLANNED entries are expected for a last-in-order bundle. But the brief's guard says "If either is discontinued … this bundle goes back to Plan", and COMPLETE does not tell you whether 738 was accepted or discontinued. Before this bundle runs, someone needs to confirm that 738 was accepted with the held-set behaviour this brief describes (base-hold holds dependents *and* `Conflicts with` partners, P2; see "hole 1" on line 12), not just that it finished. Otherwise Do documents P2 from #738's brief instead of its code.
+
+- NEEDS-HUMAN — **Success-criterion half 1 is checked only by people.** The wrap-aware search is the only mechanical check of "none of these literal patterns". It lives in the withheld `build-notes.md`, and the brief says it "is judged by T2 and by the human at sign-off, who re-runs the loop". No gate runs it, and C4 is 77 by construction. That is acceptable for a docs-only bundle, but the human must actually re-run the loop. To make it reproducible, the brief should spell out the exact script (or a fixed location for it) rather than "a short Python loop" that Do writes. Otherwise each person re-running it may strip comment leaders differently and get a different hit list.
+
+Scope otherwise holds: it is one logical change (docs, comments and docstrings, no behaviour change). Merge-mode text is correctly kept out; `09-parallel-lanes.md:70` "a non-mergeable PR STOPs the run" is merge-mode and stays. `gates.py:242` ("red … means the caller STOPs") is already consistent with P3.
+
+> **pdca:** Bash was unavailable to this reviewer. The vendor sandbox could not start on this host, so every Bash call it made failed before running (`apply-seccomp: write /proc/self/setgroups (nested userns is capability-restricted; caller must provide CAP_SYS_ADMIN): Permission denied`) and it ran no commands; this review was delivered without Bash.
+
+<!-- pdca:leaf-complete -->
