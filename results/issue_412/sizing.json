@@ -1,0 +1,13 @@
+{
+  "band": "ok",
+  "independent_outcomes": [
+    "A `Merges with` brief field that, in wave_mode = \"merge\", stops any group member seen by the run from being built: the strict path (compute_waves, used by `pdca flow <ids>` and bare `pdca waves`) refuses with the two ways out, and the tolerant path (partition_schedulable, used by the --from-csv sweep) holds the group and its dependents. Stack mode is unchanged. Template line and docs come with it."
+  ],
+  "proposed_seams": [
+    "No seam recommended. The parser alone (brief.py plus the template line) could merge on its own, but it fixes nothing: a field the driver ignores leaves the defect in place and has no red test. It only ships as part of the refusal.",
+    "The one seam that could technically be cut is strict refusal (criteria a, b, c, f) versus tolerant hold (criterion d). Each has its own test and its own entry point in waves.py. Cutting there would be a mistake, though. With only the strict half, the --from-csv sweep keeps building group members in merge mode, so the brief's stated invariant ('no group member is built in merge mode') would be only half true. Both halves share the same membership rule, and splitting would mean defining it twice or landing it in an order that matters. Keep them together.",
+    "Everything that would be a real second outcome (hold-and-release, chained pairs, carrying the field to split children, reading out-of-run briefs) has already been moved to #778. That is the correct cut, and it has been made."
+  ],
+  "confidence": "medium",
+  "brief_sha": "549120649e86203a"
+}

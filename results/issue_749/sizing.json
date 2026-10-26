@@ -1,0 +1,13 @@
+{
+  "band": "watch",
+  "independent_outcomes": [
+    "Replace the per-trial stake positions in _held_by_move with one shared three-diff frame (move O->S, own S->head, partner O->partner), so a repeated-lines clash gets the same hold as its two-file and unique-lines twins. Tests (11), (13), (14) and (15) all test this one function and its contract; none of them can ship without it."
+  ],
+  "proposed_seams": [
+    "Weak seam, not recommended: the seven-'=' underline defect (12) is its own bug with its own test, and could ship as a small fix to _diff3_blocks on top of iteration 6. But the new frame deletes _diff3_blocks and the whole marker reader, so that fix would be thrown away as soon as the frame lands. Inside this brief, (12) is a regression test that the frame passes for free, not a second outcome.",
+    "Weak seam, not recommended: the more-than-one-merge-base stop (15) could be split off as a follow-up. It is part of the new stake function's error contract, though, and the frame has to decide what to do with criss-cross bases anyway, so splitting it would leave the function half-specified.",
+    "No seam between the frame and the random probe (14): the probe is the only check of the human's 'no false ties' line, so the frame without it cannot be signed off. The probe and its R/I exemptions are the large uncertain surface here (a <=1% bound and a no-false-tie assertion that might not hold on Do's real code). That uncertainty, not decomposability, is why this is watch and not ok."
+  ],
+  "confidence": "medium",
+  "brief_sha": "c271cbdb632031e7"
+}

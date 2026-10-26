@@ -1,0 +1,1671 @@
+diff --git a/CONTRIBUTING.md b/CONTRIBUTING.md
+index c1188e3..9230230 100644
+--- a/CONTRIBUTING.md
++++ b/CONTRIBUTING.md
+@@ -35,3 +35,70 @@ This appends a `Signed-off-by: Your Name <you@example.com>` trailer (using your
+ 
+ See the vendored process model under `template/PCDA/quality-cycle/` for the full
+ Plan · Do · Check · Act discipline this harness embodies.
++
++## Checking stack mode on real GitHub
++
++The offline suites test stack mode against a local bare `origin` and a stubbed `gh`.
++`tools/live/stack_mode_live.py` (standard library only, not shipped to rendered
++instances) checks the same workflow on GitHub: a disposable private repository, real
++`git`, real `gh`, PRs merged on GitHub. Each run goes through the driver as
++`pdca flow <ids>` does, with the model leaves replaced by fixed patches, so it makes no
++model calls. Run it after a change to stack mode, or when GitHub's behaviour may have
++changed:
++
++```bash
++W=$(mktemp -d)
++python3 tools/live/stack_mode_live.py setup    --workdir "$W"   # creates pdca-live-stack-<UTC time>
++python3 tools/live/stack_mode_live.py run      --workdir "$W"   # writes observations.json
++python3 tools/live/stack_mode_live.py judge    --workdir "$W"   # writes report.md + report.json
++python3 tools/live/stack_mode_live.py teardown --workdir "$W"   # deletes the repository (--keep skips)
++```
++
++It needs an authenticated `gh` whose token has the `repo` and `delete_repo` scopes
++(`gh auth refresh -s delete_repo`). A run creates and deletes one private repository,
++opens seven PRs and takes several minutes, mostly waiting for GitHub to recompute PR
++diffs. GitHub does that in the background after a PR's base or head moves, so `run` polls
++each PR's file list: from `--settle` seconds after the merge or update (default 15), every
++5 seconds, until two reads in a row agree on a list that differs from the one before the
++change, or `--settle-max` seconds have passed (default 180). The stop rule never looks at
++the files a check expects, so a list that stays wrong is recorded as it is, with how long
++`run` waited. `setup` refuses to reuse an existing repository without `--reuse`, `setup`
++and `run` refuse a work directory that was already used, and `teardown` deletes only a
++repository whose name starts with `pdca-live-stack-`.
++
++`setup` records the repository in the work directory as soon as GitHub has created it. If
++a later step fails (a refused push, say), `setup` exits 1 and names the repository, `run`
++refuses that work directory, and `teardown` still deletes the repository. If
++`gh repo create` itself fails, `setup` records nothing and prints the `gh repo delete`
++command to run in case GitHub made the repository anyway.
++
++`judge` reads only `observations.json` and needs no network, so it can be re-run on a
++saved file. It exits 0 only if every check passes. The report's result is PASS, FAIL or
++INCOMPLETE. A FAIL is a stack-mode finding, and `judge` reports one only when the run
++observed everything the checks need. INCOMPLETE means it did not: `run` could not drive
++the scenario to its end (a run of the flow that raised, run 2 included; a run 1, 3 or 4
++that left a bundle unfinished; a bundle that finished with no PR; a merge or branch
++delete GitHub refused), or a value a check needs was not read (a PR's file list whose
++last two reads differ, a commit git could not place). `run` exits 1 on the same rule and
++says why. That is a problem with the run, not a stack-mode finding; the check that
++needed the missing value FAILs with `not observed`. Run 2's own outcome is what `E3`
++checks, so a hold or a stop there is a FAIL; a raise is INCOMPLETE, because the flow was
++never driven. The checks have stable ids:
++
++- `E0`: all seven PRs were opened, each with the real base as its base, never the
++  integration line. If run 2 held or stopped D, D has no PR; `E3` judges that.
++- `E1`: a PR on two merged wave-0 branches shows only its own files after "Update branch".
++- `E1b`: in a plain chain, the dependent PR shows only its own files once its prerequisite
++  merges, with no "Update branch".
++- `E2`: a PR merged with a merge commit and its branch deleted still reports `state`
++  `MERGED`, the head the run pushed as `headRefOid`, and a `mergeCommit` on the base.
++- `E3`: a later run that names the merged ids again carries their deleted branches in
++  through the base and finishes: the fold says each branch is gone and merged and goes
++  on, the run exits 0 with no holds, and the new dependent is built on a line holding the
++  merged work.
++- `E4`: after a squash merge, `mergeCommit` is on the base and `headRefOid` is not.
++- `E5`: merging the stack bottom-up puts every change on the base.
++
++`tests/test_stack_mode_live_tool.py` tests `judge` offline, and `setup` / `teardown`
++against a stand-in `gh` and local git remotes. Nothing in CI runs `run` or any other
++live step.
+diff --git a/tests/test_stack_mode_live_tool.py b/tests/test_stack_mode_live_tool.py
+new file mode 100644
+index 0000000..614a0c7
+--- /dev/null
++++ b/tests/test_stack_mode_live_tool.py
+@@ -0,0 +1,559 @@
++"""The stack-mode live check's ``judge`` step reads raw observations and names each failure
++(#625). ``tools/live/stack_mode_live.py`` drives the stack-mode scenario against a real
++GitHub repository and records what it saw in ``observations.json``; ``judge`` turns that
++file into ``report.json`` / ``report.md`` and exits 0 only if every check passes. A FAIL is a
++stack-mode finding, reported only on a complete observation; anything the run did not
++observe makes the report INCOMPLETE instead, which blocks accept. These cases write
++observation files to a temp dir and run ``judge`` on them as a subprocess, by path: the tool
++is never imported, so with it absent each case still runs and fails on its assertions. The
++last class runs ``setup`` and ``teardown`` the same way, against a stand-in ``gh`` and local
++git remotes. No network, no copier.
++
++    python3 -m tests.run_root_suite tests.test_stack_mode_live_tool
++"""
++
++from __future__ import annotations
++
++import json
++import os
++import shutil
++import subprocess
++import sys
++import tempfile
++import unittest
++from pathlib import Path
++from types import SimpleNamespace
++
++TOOL = Path(__file__).resolve().parents[1] / "tools" / "live" / "stack_mode_live.py"
++CHECKS = ["E0", "E1", "E1b", "E2", "E3", "E4", "E5"]
++IDS = ["A", "B", "C", "D", "P", "Q", "S"]
++LINE = "pdca-integration/main-r0123456789ab"
++
++HEAD_A, MERGE_A = "a" * 40, "1" * 40
++HEAD_C = "c" * 40
++HEAD_S, MERGE_S = "5" * 40, "6" * 40
++HEADS = {"A": HEAD_A, "C": HEAD_C, "S": HEAD_S}
++
++ABC, BC, AB = ["a.txt", "b.txt", "c.txt"], ["b.txt", "c.txt"], ["a.txt", "b.txt"]
++PQ = ["p.txt", "q.txt"]
++
++
++def _branch(iid: str) -> str:
++    return f"fix/{iid}-live-{iid.lower()}"
++
++
++def _pr(iid: str, number: int) -> dict:
++    head = HEADS.get(iid, f"{number:040d}")
++    return {"number": number, "url": f"https://github.com/o/pdca-live-stack-x/pull/{number}",
++            "baseRefName": "main", "headRefName": _branch(iid), "headRefOid": head,
++            "pushed_head": head}
++
++
++def _run(ids: list[str], stderr: str = "") -> dict:
++    return {"ids": ids, "rc": 0, "raised": "", "results": dict.fromkeys(ids, "COMPLETE"),
++            "holds": {}, "stderr": stderr, "stdout": ""}
++
++
++def _reads(*lists: list[str] | None, before: list[str] | None = None,
++           seconds: float = 25.0) -> dict:
++    """What ``run`` records for one polled PR file list: every read, in order."""
++    return {"before": before, "reads": [None if x is None else list(x) for x in lists],
++            "window": 180.0, "seconds": seconds}
++
++
++# What run 2's fold prints for a deleted, merged branch it goes on with — both wordings of
++# template/src/pdca_harness/integrate.py (:1434-1436 and :1509-1511), one per branch.
++GONE_A = (f"integrate: issue_A's branch origin/{_branch('A')} is gone and its PR merged at "
++          f"{HEAD_A[:12]} — {LINE} already carries that commit; skipped.")
++GONE_C = (f"integrate: issue_C's branch origin/{_branch('C')} is gone and its PR merged at "
++          f"{HEAD_C[:12]}, which {LINE} did not have — the merged work reaches {LINE} "
++          f"through origin/main.")
++# The carry's line for a finished id it refused (flow.py:1575-1578), here over the
++# IntegrationError of integrate.py:1491: the same opening words as the lines above.
++REFUSED_A = (f"flow: issue_A (finished in an earlier run) is not carried onto {LINE}: "
++             f"issue_A's branch origin/{_branch('A')} is gone and its PR merged at "
++             f"{HEAD_A[:12]}, which {LINE} does not have, but origin/main, which carries that "
++             f"work, does not merge onto {LINE} (conflicts in a.txt; update the clashing "
++             f"PR's branch from the base), then re-run — holding issue_B this run; re-run "
++             f"once its PR is open.")
++RUN2_ERR = "\n".join([
++    "flow: issue_A — already terminal (COMPLETE), skipped",
++    "flow: issue_B — already terminal (COMPLETE), skipped",
++    "flow: issue_C — already terminal (COMPLETE), skipped",
++    GONE_A, GONE_C,
++    f"flow: carried issue_A, issue_C, issue_B (finished in an earlier run) onto {LINE} at "
++    f"{'e' * 40} before wave 0 — this run's o/pdca-live-stack-x @ main bundles build on it.",
++]) + "\n"
++BOOM = "Traceback (most recent call last):\nRuntimeError: boom\n"
++
++
++def _good() -> dict:
++    """Observations of a finished run matching every expectation."""
++    gone = {"delete": "deleted", "branch_gone": True}
++    return {
++        "repo": "o/pdca-live-stack-x", "base": "main", "finished": True, "errors": [],
++        "files": {iid: [f"{iid.lower()}.txt"] for iid in IDS},
++        "prs": {iid: _pr(iid, n) for n, iid in enumerate(IDS, start=1)},
++        "runs": {"run1": _run(["A", "C", "B"]),
++                 "run2": _run(["A", "B", "C", "D"], RUN2_ERR),
++                 "run3": _run(["P", "Q"]), "run4": _run(["S"])},
++        "merged": {"A": {"method": "merge", "branch": _branch("A"), **gone},
++                   "C": {"method": "merge", "branch": _branch("C"), **gone},
++                   "P": {"method": "merge", "branch": _branch("P"), **gone},
++                   "B": {"method": "merge", "branch": _branch("B"), **gone},
++                   "S": {"method": "squash", "branch": _branch("S"), **gone}},
++        # Each read after a merge or update starts on the list from before it (GitHub had
++        # not recomputed yet) and ends on two reads that agree.
++        "B_files_opened": _reads(ABC, ABC),
++        "B_files_after_A_merge": _reads(ABC, BC, BC, before=ABC),
++        "B_files_before_update": _reads(BC, AB, AB, before=BC),
++        "B_update_branch": {"head_before": "2" * 40, "head_after": "7" * 40, "moved": True},
++        "B_files_after_update": _reads(AB, ["b.txt"], ["b.txt"], before=AB),
++        "A_after_merge": {"view": {"state": "MERGED", "headRefOid": HEAD_A,
++                                   "mergeCommit": {"oid": MERGE_A}},
++                          "on_base": {"headRefOid": True, "mergeCommit": True}},
++        "D_built_on": "e" * 40,
++        "D_built_on_holds": {"A": True, "C": True},
++        "Q_files_opened": _reads(PQ, PQ),
++        "Q_files_after_P_merge": _reads(PQ, ["q.txt"], ["q.txt"], before=PQ),
++        "after_B_merge": {"on_base": {"A": True, "B": True, "C": True}},
++        "S_after_squash": {"view": {"state": "MERGED", "headRefOid": HEAD_S,
++                                    "mergeCommit": {"oid": MERGE_S}},
++                           "on_base": {"headRefOid": False, "mergeCommit": True}},
++    }
++
++
++def _unbuilt_d(obs: dict) -> None:
++    """Run 2 never built D: no PR for it, no base it was built on."""
++    del obs["prs"]["D"]
++    obs["D_built_on"], obs["D_built_on_holds"] = "", {"A": None, "C": None}
++
++
++class JudgeLiveObservations(unittest.TestCase):
++
++    def _judge(self, obs: dict) -> tuple[int, dict, str]:
++        with tempfile.TemporaryDirectory() as tmp:
++            work = Path(tmp)
++            (work / "observations.json").write_text(json.dumps(obs), encoding="utf-8")
++            r = subprocess.run([sys.executable, str(TOOL), "judge", "--workdir", str(work)],
++                               capture_output=True, text=True, timeout=60)
++            report = work / "report.json"
++            data = json.loads(report.read_text(encoding="utf-8")) if report.is_file() else {}
++            md = work / "report.md"
++            text = md.read_text(encoding="utf-8") if md.is_file() else ""
++        return r.returncode, data, text + r.stdout + r.stderr
++
++    def _results(self, data: dict) -> dict[str, dict]:
++        return {c["id"]: c for c in data.get("checks", [])}
++
++    def _fails(self, obs: dict, observed: dict[str, str],
++               result: str = "FAIL") -> tuple[dict[str, dict], dict, str]:
++        """``judge`` exits non-zero and FAILs exactly the checks of ``observed``, each with
++        its text in the observed value; every other check PASSes. The report's result is
++        ``result``: FAIL for a finding on a complete observation, INCOMPLETE for a run that
++        did not observe everything a check needs."""
++        rc, data, out = self._judge(obs)
++        self.assertNotEqual(rc, 0, out)
++        res = self._results(data)
++        self.assertEqual(sorted(res), sorted(CHECKS), out)
++        for cid, needle in observed.items():
++            self.assertEqual(res[cid]["result"], "FAIL", (cid, out))
++            self.assertIn(needle, json.dumps(res[cid]["observed"]), (cid, out))
++            self.assertTrue(res[cid]["expected"], out)
++        others = {k: v["result"] for k, v in res.items() if k not in observed}
++        self.assertEqual(set(others.values()), {"PASS"}, (sorted(observed), others, out))
++        self.assertFalse(data.get("passed"), out)
++        self.assertEqual(data.get("result"), result, out)
++        self.assertEqual(data.get("complete"), result != "INCOMPLETE", out)
++        self.assertEqual(bool(data.get("incomplete")), result == "INCOMPLETE", out)
++        return res, data, out
++
++    # (1) every expectation met → exit 0, every check PASS
++    def test_observations_meeting_every_expectation_pass(self):
++        rc, data, out = self._judge(_good())
++        self.assertEqual(rc, 0, out)
++        res = self._results(data)
++        self.assertEqual(sorted(res), sorted(CHECKS), out)
++        self.assertEqual({k: v["result"] for k, v in res.items()},
++                         dict.fromkeys(CHECKS, "PASS"), out)
++        self.assertTrue(data.get("passed"), out)
++        self.assertEqual(data.get("result"), "PASS", out)
++        self.assertEqual(data.get("incomplete"), [], out)
++        self.assertIn("| E2 | PASS |", out)            # report.md has one line per check
++
++    # (2) A's PR, merged and its branch deleted, reports no headRefOid → E2 FAIL
++    def test_a_merged_pr_with_no_head_oid_fails_e2(self):
++        obs = _good()
++        del obs["A_after_merge"]["view"]["headRefOid"]
++        self._fails(obs, {"E2": '"headRefOid": null'})
++
++    # (3) B's files after Update branch still list A's file → E1 FAIL
++    def test_b_still_showing_a_file_of_a_after_update_branch_fails_e1(self):
++        obs = _good()
++        obs["B_files_after_update"] = _reads(AB, AB, AB, before=AB, seconds=180.0)
++        self._fails(obs, {"E1": "a.txt"})
++
++    # (4) a squash-merged S whose headRefOid is on the base → E4 FAIL
++    def test_a_squash_merge_whose_head_is_on_the_base_fails_e4(self):
++        obs = _good()
++        obs["S_after_squash"]["on_base"]["headRefOid"] = True
++        self._fails(obs, {"E4": '"headRefOid on base": true'})
++
++    # (5) a PR opened against the integration line → E0 FAIL
++    def test_a_pr_against_the_integration_line_fails_e0(self):
++        obs = _good()
++        obs["prs"]["D"]["baseRefName"] = LINE
++        self._fails(obs, {"E0": LINE})
++
++    # (6) Q's files after P merged list a file of P's → E1b FAIL
++    def test_q_showing_a_file_of_p_after_p_merged_fails_e1b(self):
++        obs = _good()
++        obs["Q_files_after_P_merge"] = _reads(PQ, PQ, PQ, before=PQ, seconds=180.0)
++        res, _data, out = self._fails(obs, {"E1b": "p.txt"})
++        # Read to the end of the window, never moving: the human sees how long it waited.
++        self.assertEqual(res["E1b"]["observed"]["seconds"], 180.0, out)
++        self.assertIs(res["E1b"]["observed"]["changed"], False, out)
++
++    # -- a FAIL needs a complete observation (#625 review, rounds 1 and 3) ------------------
++
++    # A PR the scenario opens and nobody observed cannot be "against the real base".
++    def test_a_scenario_pr_never_observed_is_incomplete(self):
++        obs = _good()
++        del obs["prs"]["Q"]
++        self._fails(obs, {"E0": "Q has no PR (run3: COMPLETE)"}, result="INCOMPLETE")
++
++    # A run 2 that raised never drove the flow, so there is no outcome for E3 to judge: the
++    # report is INCOMPLETE, which blocks accept, not a FAIL to file as a finding. Judged off
++    # run 2's own record, so a file whose `finished` says true reads the same.
++    def test_a_run_2_that_raised_is_incomplete_not_a_finding(self):
++        def as_run_writes_it(obs: dict) -> None:      # `run` stops at run 2
++            obs["finished"] = False
++            obs["errors"] = ["Incomplete: run2 (A B C D): raised RuntimeError: boom, so the "
++                             "flow was not driven — see runs.run2 in observations.json"]
++            for key in ("Q_files_opened", "Q_files_after_P_merge", "after_B_merge",
++                        "S_after_squash"):
++                del obs[key]
++            for iid in ("P", "Q", "S"):
++                del obs["prs"][iid]
++            for iid in ("P", "B", "S"):
++                del obs["merged"][iid]
++            del obs["runs"]["run3"], obs["runs"]["run4"]
++
++        cases = {"finished says true": (None, {}),
++                 "as run writes it": (as_run_writes_it, {
++                     "E1b": "run3 did not finish (not recorded)",
++                     "E4": "run4 did not finish (not recorded)",
++                     "E5": "B's merge was not recorded"})}
++        for name, (shape, more) in cases.items():
++            with self.subTest(name):
++                obs = _good()
++                obs["runs"]["run2"].update({"rc": None, "results": {}, "raised": BOOM})
++                _unbuilt_d(obs)
++                if shape:
++                    shape(obs)
++                _res, data, out = self._fails(
++                    obs, {"E3": "run2 raised RuntimeError: boom",
++                          "E0": "D has no PR (run2: not in its results)", **more},
++                    result="INCOMPLETE")
++                self.assertIn("E3 not observed: run2 raised RuntimeError: boom: `flow_ids` "
++                              "did not return, so the flow was not driven",
++                              data["incomplete"], out)
++                self.assertIn("**INCOMPLETE**", out)
++
++    # Run 2 drove the flow and the flow did not finish D: a hold or a stop is the flow's
++    # own answer, so it is E3's finding (FAIL), not an incomplete run. D, never built,
++    # opened no PR, and E0 does not ask for one.
++    def test_a_run_2_that_held_d_fails_e3(self):
++        planned = {"A": "COMPLETE", "B": "COMPLETE", "C": "COMPLETE", "D": "PLANNED"}
++        cases = {
++            "the carry held D": ({"rc": 1, "results": planned}, "D is PLANNED"),
++            "D's base could not be built": ({"rc": 3, "holds": {"D": "base"},
++                                             "results": planned}, '"holds": {"D": "base"}'),
++        }
++        for name, (change, needle) in cases.items():
++            with self.subTest(name):
++                obs = _good()
++                obs["runs"]["run2"].update(change)
++                _unbuilt_d(obs)
++                res, _data, out = self._fails(obs, {"E3": needle})
++                self.assertEqual(res["E0"]["observed"]["not published"],
++                                 ["D (run2: PLANNED; E3 judges it)"], out)
++
++    # A hold of a finished id is a finding too, with D built and published.
++    def test_a_run_2_that_held_a_carried_branch_fails_e3(self):
++        obs = _good()
++        obs["runs"]["run2"].update({"rc": 1, "holds": {"B": "rewritten"}})
++        self._fails(obs, {"E3": '"holds": {"B": "rewritten"}'})
++
++    # A D that run 2 finished but did not publish leaves E0 nothing to read for it.
++    def test_a_d_finished_with_no_pr_is_incomplete(self):
++        obs = _good()
++        del obs["prs"]["D"]
++        self._fails(obs, {"E0": "D has no PR (run2: COMPLETE)"}, result="INCOMPLETE")
++
++    # A refusal opens with the words the fold's success lines open with; it is no
++    # "gone and merged".
++    def test_a_refused_carry_is_not_read_as_gone_and_merged(self):
++        obs = _good()
++        obs["runs"]["run2"]["stderr"] = RUN2_ERR.replace(GONE_A, REFUSED_A)
++        res, _data, out = self._fails(obs, {"E3": '"not carried": ["A"]'})
++        self.assertIsNone(res["E3"]["observed"]["gone and merged"]["A"], out)
++
++    # A run 2 whose fold printed no "gone and merged" line never took the path E3 is about,
++    # however cleanly it finished.
++    def test_a_run_2_that_named_no_branch_gone_fails_e3(self):
++        obs = _good()
++        obs["runs"]["run2"]["stderr"] = RUN2_ERR.replace(GONE_A + "\n", "").replace(
++            GONE_C + "\n", "")
++        self._fails(obs, {"E3": '"gone and merged": {"A": null, "C": null}'})
++
++    # E2 and E3 are read "after the delete": a branch not confirmed gone is not observed.
++    def test_a_branch_not_confirmed_deleted_is_incomplete(self):
++        obs = _good()
++        obs["merged"]["A"]["branch_gone"] = False
++        self._fails(obs, {"E2": "A's branch was not confirmed deleted",
++                          "E3": "A's branch was not confirmed deleted"}, result="INCOMPLETE")
++
++    # A commit git could not place (exit 128: one the clone lacks) is not observed, never
++    # "not on the base" — and never a FAIL to file.
++    def test_a_commit_git_could_not_place_is_incomplete(self):
++        cases = {
++            "S's squash head": ("E4", "S_after_squash", "headRefOid",
++                                "whether the base has S's headRefOid 555555555555"),
++            "A's merge commit": ("E2", "A_after_merge", "mergeCommit",
++                                 "whether the base has A's mergeCommit 111111111111"),
++            "B's change on the base": ("E5", "after_B_merge", "B",
++                                       "whether the base has B's change: not read"),
++        }
++        for name, (cid, key, field, needle) in cases.items():
++            with self.subTest(name):
++                obs = _good()
++                obs[key]["on_base"][field] = None
++                self._fails(obs, {cid: needle}, result="INCOMPLETE")
++        with self.subTest("D's base and C's head"):
++            obs = _good()
++            obs["D_built_on_holds"]["C"] = None
++            self._fails(obs, {"E3": "holds C's pushed head: git could not tell"},
++                        result="INCOMPLETE")
++
++    # -- a polled PR file list (#625 review, round 3) ---------------------------------------
++
++    # The first read after P's merge still lists P's file (GitHub had not recomputed the
++    # diff yet); the judge takes the list the reads settled on, so it is no finding.
++    def test_a_stale_first_read_is_judged_on_the_settled_list(self):
++        rc, data, out = self._judge(_good())
++        self.assertEqual(rc, 0, out)
++        e1b = self._results(data).get("E1b") or {}
++        self.assertEqual(e1b.get("result"), "PASS", out)
++        self.assertEqual(e1b["observed"]["files"], ["q.txt"], out)
++        self.assertEqual(e1b["observed"]["reads"], 3, out)
++        self.assertIs(e1b["observed"]["changed"], True, out)
++
++    # A list whose last two reads differ (or that was never read) is not observed: a FAIL on
++    # it could be GitHub mid-recompute, not stack mode.
++    def test_a_file_list_that_never_settled_is_incomplete(self):
++        cases = {
++            "Q after P's merge flips to the end": (
++                "E1b", "Q_files_after_P_merge", _reads(PQ, ["q.txt"], PQ, before=PQ,
++                                                       seconds=180.0),
++                "Q's files after P's merge did not settle"),
++            "every read of B after Update branch failed": (
++                "E1", "B_files_after_update", _reads(None, None, None, before=AB,
++                                                     seconds=180.0),
++                "B's files after Update branch did not settle"),
++            "B before Update branch, the list the next read must move off": (
++                "E1", "B_files_before_update", _reads(BC, AB, before=BC, seconds=180.0),
++                "B's files before Update branch did not settle"),
++            "Q never read when its PR opened": (
++                "E1b", "Q_files_opened", None, "Q's files when its PR opened not read"),
++        }
++        for name, (cid, key, rec, needle) in cases.items():
++            with self.subTest(name):
++                obs = _good()
++                if rec is None:
++                    del obs[key]
++                else:
++                    obs[key] = rec
++                self._fails(obs, {cid: needle}, result="INCOMPLETE")
++
++    # A run that stopped early is INCOMPLETE; what it never reached is "not observed".
++    def test_a_run_that_stopped_early_is_incomplete(self):
++        obs = _good()
++        obs["runs"]["run3"].update({"rc": 1, "results": {"P": "PLANNED", "Q": "PLANNED"}})
++        for key in ("Q_files_opened", "Q_files_after_P_merge", "after_B_merge",
++                    "S_after_squash"):
++            del obs[key]
++        for iid in ("P", "Q", "S"):
++            del obs["prs"][iid]
++        for iid in ("P", "B", "S"):
++            del obs["merged"][iid]
++        del obs["runs"]["run4"]
++        obs["finished"] = False
++        obs["errors"] = ["Incomplete: run3 (P Q) did not finish: exit code 1"]
++        res, data, out = self._fails(obs, {"E0": "not observed", "E1b": "run3 did not finish",
++                                           "E4": "run4 did not finish",
++                                           "E5": "B's merge was not"}, result="INCOMPLETE")
++        self.assertFalse(data.get("complete"), out)
++        self.assertIn("**INCOMPLETE**", out)
++        self.assertIn("P has no PR (run3: PLANNED)", json.dumps(res["E0"]["observed"]))
++        self.assertIn("run error: Incomplete: run3 (P Q) did not finish: exit code 1",
++                      data["incomplete"], out)
++
++# -- setup and teardown, offline (#625 review, round 2) -------------------------------------
++
++# A stand-in for `gh`, first on PATH. It answers the calls `setup` and `teardown` make, logs
++# each call, and keeps the repositories it "created" in repos.json. FAKE_GH_FAIL refuses the
++# call whose arguments start with it; FAKE_GH_LOSE_CREATE makes `repo create` make the
++# repository and still fail, as an answer lost on its way back would.
++FAKE_GH = """\
++import json, os, sys
++from pathlib import Path
++
++args = sys.argv[1:]
++home = Path(os.environ["FAKE_GH_HOME"])
++with (home / "calls.jsonl").open("a", encoding="utf-8") as log:
++    log.write(json.dumps(args) + "\\n")
++store = home / "repos.json"
++repos = json.loads(store.read_text(encoding="utf-8")) if store.exists() else []
++fail = os.environ.get("FAKE_GH_FAIL")
++if fail and " ".join(args).startswith(fail):
++    sys.exit("HTTP 502: Bad Gateway")
++if args[:2] == ["api", "user"]:
++    print("fake-owner")
++elif args[:2] == ["repo", "view"]:
++    sys.exit(0 if args[2] in repos else "GraphQL: Could not resolve to a Repository")
++elif args[:2] == ["repo", "create"]:
++    store.write_text(json.dumps(repos + [args[2]]), encoding="utf-8")
++    if os.environ.get("FAKE_GH_LOSE_CREATE"):
++        sys.exit("HTTP 502: Bad Gateway")
++elif args[:2] == ["repo", "delete"]:
++    if args[2] not in repos:
++        sys.exit("GraphQL: Could not resolve to a Repository")
++    store.write_text(json.dumps([r for r in repos if r != args[2]]), encoding="utf-8")
++elif args[:3] != ["api", "-X", "PATCH"]:
++    sys.exit(f"fake gh: unexpected call {args}")
++"""
++
++
++class SetupLeavesItsRepositoryToTeardown(unittest.TestCase):
++    """``setup`` records the repository it created before any later step can fail, so a
++    setup that stops part-way leaves it to ``teardown`` instead of orphaning it. Offline: the
++    stand-in ``gh`` above, and real ``git`` whose ``https://github.com/`` remotes go to local
++    paths (``remote/<owner>/<name>.git``, absent unless a case makes it, so a push fails)."""
++
++    REPO = "fake-owner/pdca-live-stack-offline"
++
++    def _sandbox(self, **env: str) -> SimpleNamespace:
++        tmp = tempfile.TemporaryDirectory()
++        self.addCleanup(tmp.cleanup)
++        root = Path(tmp.name)
++        bindir, gh_home = root / "bin", root / "gh-home"
++        bindir.mkdir()
++        gh_home.mkdir()
++        gh = bindir / "gh"
++        gh.write_text(f"#!{sys.executable}\n{FAKE_GH}", encoding="utf-8")
++        gh.chmod(0o755)
++        gitconfig = root / "gitconfig"
++        gitconfig.write_text(f'[url "{(root / "remote").as_posix()}/"]\n'
++                             f"\tinsteadOf = https://github.com/\n", encoding="utf-8")
++        kept = {k: v for k, v in os.environ.items()
++                if not k.startswith(("GH_", "GITHUB_", "GIT_"))}
++        full = {**kept, "PATH": f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}",
++                "FAKE_GH_HOME": str(gh_home), "GH_CONFIG_DIR": str(root / "gh-config"),
++                "GIT_CONFIG_GLOBAL": str(gitconfig), "GIT_CONFIG_NOSYSTEM": "1",
++                "GIT_TERMINAL_PROMPT": "0", **env}
++        # The real gh must never answer here: it would create a real repository.
++        self.assertEqual(shutil.which("gh", path=full["PATH"]), str(gh))
++        return SimpleNamespace(work=root / "work", env=full, gh_home=gh_home,
++                               remote=root / "remote")
++
++    def _tool(self, box: SimpleNamespace, step: str,
++              *extra: str) -> subprocess.CompletedProcess:
++        return subprocess.run([sys.executable, str(TOOL), step, "--workdir", str(box.work),
++                               *extra], capture_output=True, text=True, timeout=120,
++                              env=box.env)
++
++    def _setup(self, box: SimpleNamespace) -> subprocess.CompletedProcess:
++        return self._tool(box, "setup", "--repo", self.REPO.split("/")[1])
++
++    @staticmethod
++    def _repos(box: SimpleNamespace) -> list[str]:
++        """The repositories the stand-in ``gh`` holds."""
++        f = box.gh_home / "repos.json"
++        return json.loads(f.read_text(encoding="utf-8")) if f.is_file() else []
++
++    @staticmethod
++    def _calls(box: SimpleNamespace, *head: str) -> list[list[str]]:
++        """The ``gh`` calls made so far whose arguments start with ``head``."""
++        f = box.gh_home / "calls.jsonl"
++        lines = f.read_text(encoding="utf-8").splitlines() if f.is_file() else []
++        return [c for c in map(json.loads, lines) if c[:len(head)] == list(head)]
++
++    def test_a_setup_that_stops_after_creating_its_repository_leaves_it_to_teardown(self):
++        cases = {
++            "GitHub refuses the repository settings": {"FAKE_GH_FAIL": "api -X PATCH"},
++            "the push of the base commit fails": {},     # no remote/<owner>/<name>.git
++        }
++        for name, env in cases.items():
++            with self.subTest(name):
++                box = self._sandbox(**env)
++                r = self._setup(box)
++                out = r.stdout + r.stderr
++                self.assertEqual(r.returncode, 1, out)
++                self.assertEqual(self._repos(box), [self.REPO], out)     # it was created
++                self.assertIn(f"{self.REPO} is left on GitHub", out)
++                self.assertIn(f"teardown --workdir {box.work}", out)
++
++                # `run` drives nothing on a setup that did not finish ...
++                r = self._tool(box, "run")
++                self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
++                self.assertIn("did not finish", r.stderr)
++                self.assertFalse((box.work / "observations.json").exists())
++                # ... and a second `setup` in that work directory names what it left.
++                r = self._setup(box)
++                self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
++                self.assertIn(f"did not finish and left {self.REPO}", r.stderr)
++
++                # `teardown` deletes it, once.
++                for _ in range(2):
++                    r = self._tool(box, "teardown")
++                    self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
++                self.assertIn("already deleted", r.stdout)
++                self.assertEqual(self._repos(box), [], r.stdout + r.stderr)
++                self.assertEqual(self._calls(box, "repo", "delete"),
++                                 [["repo", "delete", self.REPO, "--yes"]])
++
++    def test_a_setup_that_finishes_pushes_the_base_and_teardown_deletes_its_repo(self):
++        box = self._sandbox()
++        bare = box.remote / f"{self.REPO}.git"
++        subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True,
++                       capture_output=True, env=box.env)
++        r = self._setup(box)
++        out = r.stdout + r.stderr
++        self.assertEqual(r.returncode, 0, out)
++        self.assertIn(f"setup: {self.REPO} ready", r.stdout)
++        self.assertNotIn("left on GitHub", out)
++        base = subprocess.run(["git", "--git-dir", str(bare), "show", "main:base.txt"],
++                              capture_output=True, text=True, env=box.env)
++        self.assertEqual(base.stdout, "base\n", base.stderr)
++        r = self._setup(box)                       # a used work directory is refused
++        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
++        self.assertNotIn("did not finish", r.stderr)
++        r = self._tool(box, "teardown")
++        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
++        self.assertEqual(self._repos(box), [], r.stdout + r.stderr)
++
++    def test_a_failed_create_names_the_repository_and_how_to_delete_it(self):
++        box = self._sandbox(FAKE_GH_LOSE_CREATE="1")
++        r = self._setup(box)
++        out = r.stdout + r.stderr
++        self.assertEqual(r.returncode, 1, out)
++        self.assertEqual(self._repos(box), [self.REPO], out)     # made, though gh said no
++        self.assertIn(f"gh repo delete {self.REPO} --yes", out)
++        # Not recorded: setup cannot tell its own repository from another's here, so it
++        # leaves the call to the human rather than to `teardown`.
++        self.assertFalse((box.work / "state.json").exists(), out)
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/tools/live/stack_mode_live.py b/tools/live/stack_mode_live.py
+new file mode 100644
+index 0000000..104adfd
+--- /dev/null
++++ b/tools/live/stack_mode_live.py
+@@ -0,0 +1,1025 @@
++#!/usr/bin/env python3
++"""Check stack mode against a real GitHub repository (#625). Standard library only.
++
++The #593 stack-mode workflow is tested offline against a local bare ``origin`` and a stubbed
++``gh``. This tool runs it against GitHub: a disposable private repository, real ``git``, real
++``gh``, and PRs merged on GitHub. The model leaves are replaced by fixed patches, so it makes
++no model calls. Four steps, each its own subcommand, sharing one work directory:
++
++    python3 tools/live/stack_mode_live.py setup    --workdir DIR [--owner O] [--repo N]
++    python3 tools/live/stack_mode_live.py run      --workdir DIR [--settle S] [--settle-max S]
++    python3 tools/live/stack_mode_live.py judge    --workdir DIR [--observations FILE]
++    python3 tools/live/stack_mode_live.py teardown --workdir DIR [--keep]
++
++``setup`` creates the repository (merge commits and squash allowed), pushes a base commit
++from a fresh local checkout, and writes the scenario's briefs. ``run`` drives the scenario
++through the real driver code, each run as ``pdca flow <ids>`` drives it (``flow.flow_ids``,
++real ``publish.publish``), and records what it saw, as raw data, in ``observations.json``.
++``judge`` reads only that file, evaluates each named check, writes ``report.md`` and
++``report.json``, and exits 0 only if every check passes. It needs no network, so it can be
++re-run on a saved ``observations.json``. ``teardown`` deletes the repository (``--keep``
++leaves it), and only a repository whose name starts with ``pdca-live-stack-``.
++
++``setup`` records the repository in the work directory's ``state.json`` as soon as it
++exists. A ``setup`` that fails after that (a refused push, say) exits 1 and leaves the
++repository to ``teardown``, which deletes it; ``run`` refuses that work directory.
++
++A ``run`` that cannot drive the scenario to its end stops, says why on stderr and in
++``observations.json``, and exits 1: a run of the flow that raises (run 2 included), that
++leaves a bundle of run 1, 3 or 4 unfinished, or that finishes a bundle without opening its
++PR; a merge or branch delete GitHub refuses. A ``run`` that reaches the end without a value
++a check needs (a PR's file list that never settled, a commit git could not place) exits 1
++too. ``judge`` reports either as INCOMPLETE, which blocks accept: it is a problem with the
++run, not a stack-mode finding. A FAIL is a finding, and ``judge`` reports one only on a
++complete observation. Run 2's own outcome is what ``E3`` checks, so a hold or a stop there
++is a finding; a raise is not, because the flow was never driven.
++
++GitHub recomputes a PR's file list in the background after its base or head moves, so
++``run`` polls it: from ``--settle`` seconds after the merge or update (default 15), every
++few seconds, until two reads in a row agree on a list that differs from the list before the
++change, or ``--settle-max`` seconds have passed (default 180). The stop rule never looks at
++the list a check expects, so a list that stays wrong is recorded as it is. Every read goes
++into ``observations.json``; ``judge`` takes the last one, and a list whose last two reads
++differ is not observed.
++
++Cost: one private repository created and deleted, seven PRs, several minutes of wall time
++(most of it waiting for GitHub to recompute PR diffs), no model calls. Needs an
++authenticated ``gh`` whose token has the ``repo`` and ``delete_repo`` scopes.
++
++The scenario and the checks are described in ``CONTRIBUTING.md`` ("Checking stack mode on
++real GitHub").
++"""
++
++from __future__ import annotations
++
++import argparse
++import datetime
++import io
++import json
++import re
++import shutil
++import subprocess
++import sys
++import time
++import traceback
++from contextlib import ExitStack, redirect_stderr, redirect_stdout
++from pathlib import Path
++from unittest import mock
++
++REPO_ROOT = Path(__file__).resolve().parents[2]
++TEMPLATE_SRC = REPO_ROOT / "template" / "src"
++TEMPLATES = REPO_ROOT / "template" / "templates"
++PREFIX = "pdca-live-stack-"
++BASE = "main"
++
++# The scenario. Each id adds one file of its own; ``DEPS`` is its `Depends on`.
++IDS = ("A", "B", "C", "D", "P", "Q", "S")
++FILES = {iid: [f"{iid.lower()}.txt"] for iid in IDS}
++DEPS = {"B": "A, C", "D": "B", "Q": "P"}
++RUNS = {
++    "run1": ["A", "C", "B"],         # A, C wave 0; B on both, wave 1
++    "run2": ["A", "B", "C", "D"],    # all four named; A, C merged, their branches deleted
++    "run3": ["P", "Q"],              # the plain-chain control
++    "run4": ["S"],                   # the squash shape
++}
++CHECK_IDS = ["E0", "E1", "E1b", "E2", "E3", "E4", "E5"]
++COMPLETE = "COMPLETE"   # state.COMPLETE (template/src/pdca_harness/state.py:27)
++POLL = 5.0              # seconds between two reads of a PR's file list
++
++
++class Incomplete(RuntimeError):
++    """The scenario cannot reach its next step: a ``run`` that cannot drive the flow, which
++    blocks accept. Never a stack-mode finding."""
++
++
++# -- shared -------------------------------------------------------------------------------
++
++def _sh(args: list[str], *, cwd: Path | None = None, check: bool = True,
++        timeout: float = 600) -> subprocess.CompletedProcess:
++    r = subprocess.run(args, cwd=cwd, capture_output=True, text=True, timeout=timeout)
++    if check and r.returncode != 0:
++        raise RuntimeError(f"{' '.join(args)} failed (rc {r.returncode}): "
++                           f"{(r.stderr or r.stdout).strip()}")
++    return r
++
++
++def _read_state(workdir: Path) -> dict | None:
++    """The work directory's ``state.json``; None when it is missing or unreadable."""
++    try:
++        s = json.loads((workdir / "state.json").read_text(encoding="utf-8"))
++    except (OSError, ValueError):
++        return None
++    return s if isinstance(s, dict) else None
++
++
++def _write_state(workdir: Path, state: dict) -> None:
++    """Write ``state.json`` whole or not at all (a temp file renamed over it), so a write
++    cut short never loses the repository name ``teardown`` reads."""
++    tmp = workdir / "state.json.tmp"
++    tmp.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
++    tmp.replace(workdir / "state.json")
++
++
++def _state(workdir: Path, *, ready: bool = False) -> dict:
++    """``state.json``. ``setup`` writes it as soon as the repository exists and sets
++    ``ready`` once every step has finished; ``teardown`` sets ``deleted``. With ``ready``,
++    anything but a finished setup whose repository still exists is refused: ``run`` drives
++    only that."""
++    s = _read_state(workdir)
++    if not s or not s.get("repo"):
++        raise SystemExit(f"stack_mode_live: no readable {workdir / 'state.json'} naming a "
++                         f"repository — run `setup` first")
++    if ready and s.get("deleted"):
++        raise SystemExit(f"stack_mode_live: teardown deleted {s['repo']} — run `setup` in a "
++                         f"fresh --workdir")
++    if ready and s.get("ready") is not True:
++        raise SystemExit(f"stack_mode_live: the setup in {workdir} did not finish — "
++                         f"`teardown --workdir {workdir}` deletes {s['repo']}; then run "
++                         f"`setup` in a fresh --workdir")
++    return s
++
++
++def _brief_text(iid: str, repo: str) -> str:
++    """A brief with the fields the offline fixture's ``_brief`` writes
++    (template/tests/test_integrate_stack_bases.py:90-94), plus its `Depends on`."""
++    text = (f"- **Slug:** live-{iid.lower()}\n"
++            f"- **Repo + branch target:** {repo} @ {BASE}\n")
++    if iid in DEPS:
++        text += f"- **Depends on:** {DEPS[iid]}\n"
++    return text
++
++
++# -- setup --------------------------------------------------------------------------------
++
++def cmd_setup(a: argparse.Namespace) -> int:
++    workdir = Path(a.workdir).resolve()
++    if (workdir / "state.json").exists() or (workdir / "checkout").exists():
++        s = _read_state(workdir) or {}
++        left = ""
++        if s.get("repo") and not s.get("ready") and not s.get("deleted"):
++            left = (f"; an earlier setup there did not finish and left {s['repo']}, which "
++                    f"`teardown --workdir {workdir}` deletes")
++        print(f"setup: {workdir} already holds a setup — use a fresh --workdir{left}",
++              file=sys.stderr)
++        return 2
++    name = a.repo or PREFIX + datetime.datetime.now(datetime.timezone.utc).strftime(
++        "%Y%m%d-%H%M%S")
++    if not name.startswith(PREFIX):
++        print(f"setup: refusing a repository name without the {PREFIX!r} prefix "
++              f"(teardown deletes only such repositories): {name}", file=sys.stderr)
++        return 2
++    workdir.mkdir(parents=True, exist_ok=True)
++    owner = a.owner or _sh(["gh", "api", "user", "--jq", ".login"]).stdout.strip()
++    repo = f"{owner}/{name}"
++    exists = _sh(["gh", "repo", "view", repo, "--json", "name"], check=False).returncode == 0
++    if exists and not a.reuse:
++        print(f"setup: {repo} already exists — pass --reuse to use it (it must hold no PR "
++              f"or branch of an earlier run)", file=sys.stderr)
++        return 2
++    if not exists:
++        try:
++            _sh(["gh", "repo", "create", repo, "--private",
++                 "--description", "Disposable: pdca-harness stack-mode live check (#625)"])
++        except (RuntimeError, subprocess.SubprocessError) as exc:
++            # GitHub may have made it anyway (an answer lost on the way back). This setup
++            # cannot tell its own repository from another's here, so it names it rather
++            # than record it for `teardown` to delete.
++            print(f"setup: could not create {repo}: {exc}\n"
++                  f"setup: if it exists anyway (`gh repo view {repo}`), delete it with "
++                  f"`gh repo delete {repo} --yes`", file=sys.stderr)
++            return 1
++    # `teardown` deletes the repository state.json names, so it is recorded before any step
++    # that can fail: a setup that stops part-way leaves it to `teardown`, never orphaned.
++    try:
++        _write_state(workdir, {"repo": repo, "base": BASE, "ready": False})
++        paths = _prepare(workdir, repo)
++    except Exception as exc:  # noqa: BLE001 — reported with how to delete the repository
++        how = (f"python3 {Path(__file__).resolve()} teardown --workdir {workdir}"
++               if _read_state(workdir) else f"gh repo delete {repo} --yes")
++        print(f"setup: did not finish: {exc}\n"
++              f"setup: {repo} is left on GitHub; delete it with `{how}`", file=sys.stderr)
++        return 1
++    _write_state(workdir, {"repo": repo, "base": BASE, **paths, "ready": True})
++    print(f"setup: {repo} ready; checkout {paths['checkout']}; bundles "
++          f"{paths['project']}/results")
++    return 0
++
++
++def _prepare(workdir: Path, repo: str) -> dict[str, str]:
++    """``setup`` once the repository exists: its merge settings, a base commit pushed from a
++    fresh checkout, the briefs and the bundle root. Returns the paths for state.json."""
++    # The tool deletes each merged branch itself, so it sees the delete succeed.
++    _sh(["gh", "api", "-X", "PATCH", f"repos/{repo}", "-F", "allow_merge_commit=true",
++         "-F", "allow_squash_merge=true", "-F", "delete_branch_on_merge=false"])
++
++    checkout = workdir / "checkout"
++    checkout.mkdir()
++    git = lambda *x: _sh(["git", "-C", str(checkout), *x])  # noqa: E731
++    git("init", "-q", "-b", BASE)
++    # Let plain `git push` (as publish runs it) authenticate through gh.
++    git("config", "credential.https://github.com.helper", "")
++    git("config", "--add", "credential.https://github.com.helper", "!gh auth git-credential")
++    git("config", "commit.gpgsign", "false")
++    email = _sh(["git", "-C", str(checkout), "config", "user.email"], check=False)
++    if not email.stdout.strip():
++        git("config", "user.email", "pdca-live@example.invalid")
++        git("config", "user.name", "pdca live check")
++    (checkout / "base.txt").write_text("base\n", encoding="utf-8")
++    git("add", "--all")
++    git("commit", "-q", "-m", "base")
++    git("remote", "add", "origin", f"https://github.com/{repo}.git")
++    git("push", "-q", "--force", "-u", "origin", BASE)
++
++    briefs = workdir / "briefs"
++    briefs.mkdir(exist_ok=True)
++    for iid in IDS:
++        (briefs / f"{iid}.md").write_text(_brief_text(iid, repo), encoding="utf-8")
++    project = workdir / "project"
++    (project / "results").mkdir(parents=True, exist_ok=True)
++    (project / "process").mkdir(exist_ok=True)
++    return {"checkout": str(checkout), "project": str(project), "briefs": str(briefs)}
++
++
++# -- run ----------------------------------------------------------------------------------
++
++class Live:
++    """Drives the scenario. Only the model leaves are replaced: ``flow._drive_wave`` writes
++    a fixed patch and accepts (as template/tests/test_flow_same_wave_conflict.py:119-129
++    does), and ``publish.draft_texts`` returns True (as at :156), the texts written here
++    first. ``git``, ``gh`` and ``flow._publish_bundle`` → ``publish.publish`` are real."""
++
++    def __init__(self, workdir: Path, settle: float, settle_max: float) -> None:
++        sys.path.insert(0, str(TEMPLATE_SRC))
++        from pdca_harness import cli, flow, publish, signoff  # noqa: PLC0415
++        from pdca_harness.config import Config, LeafConfig  # noqa: PLC0415
++        self.cli, self.flow, self.publish, self.signoff = cli, flow, publish, signoff
++        # The window always holds two reads: one read alone can never settle (`_stable`).
++        self.workdir, self.settle = workdir, settle
++        self.settle_max = max(settle + POLL, settle_max)
++        s = _state(workdir, ready=True)
++        self.repo, self.base = s["repo"], s["base"]
++        self.checkout, self.briefs = Path(s["checkout"]), Path(s["briefs"])
++        project = Path(s["project"])
++        self.cfg = Config(
++            root=project, bundle_root=project / "results", process_dir=project / "process",
++            templates_dir=TEMPLATES, default_branch=self.base, tracker_system="github",
++            tracker_url="", issue_id_example="#1",
++            builder=LeafConfig(mode="stub"), reviewer=LeafConfig(mode="stub"),
++            publisher=LeafConfig(mode="command", interactive=True), gates_checks=[],
++            base_remote="origin", repo_checkouts={self.repo: str(self.checkout)})
++        self.today = datetime.date.today().isoformat()
++        self.built_on: dict[str, str] = {}
++        self.obs: dict = {"repo": self.repo, "base": self.base, "files": FILES,
++                          "prs": {}, "runs": {}, "merged": {}, "errors": [],
++                          "finished": False}
++
++    # helpers ------------------------------------------------------------------------------
++
++    def _git(self, *args: str, check: bool = True) -> subprocess.CompletedProcess:
++        return _sh(["git", "-C", str(self.checkout), *args], check=check)
++
++    def _fetch(self) -> None:
++        self._git("fetch", "-q", "--prune", "origin")
++
++    def _is_ancestor(self, commit: str | None, of: str) -> bool | None:
++        """``git merge-base --is-ancestor``: exit 0 → True, exit 1 → False. Anything else —
++        128 for a commit this clone does not have, or a ref that does not resolve — is None:
++        not observed, never "not on it"."""
++        if not commit or not of:
++            return None
++        rc = self._git("merge-base", "--is-ancestor", commit, of, check=False).returncode
++        return True if rc == 0 else False if rc == 1 else None
++
++    def _on_base(self, oid: str | None) -> bool | None:
++        """Whether ``oid`` is on origin's base, read after a fetch (see ``_is_ancestor``)."""
++        return self._is_ancestor(oid, f"origin/{self.base}")
++
++    def _patch(self, iid: str) -> str:
++        return "".join(f"diff --git a/{name} b/{name}\nnew file mode 100644\n"
++                       f"--- /dev/null\n+++ b/{name}\n@@ -0,0 +1 @@\n+{iid}\n"
++                       for name in FILES[iid])
++
++    def _accept(self, d: Path) -> None:
++        """Accept ``d`` as the fixture's ``_accept`` does
++        (template/tests/test_integrate_stack_bases.py:102-106), then write the two texts
++        publish needs, so no publisher leaf runs."""
++        (d / "check-gates.json").write_text("{}", encoding="utf-8")
++        shutil.copyfile(TEMPLATES / "SUMMARY.md.tpl", d / "SUMMARY.md")
++        self.signoff.record(d / "SUMMARY.md", action="accept", by="live", date=self.today)
++        iid = d.name.removeprefix("issue_")
++        (d / self.publish.COMMIT_MSG).write_text(
++            f"live check: add {', '.join(FILES[iid])}\n\n"
++            "Fixed patch of the stack-mode live check (#625).\n", encoding="utf-8")
++        (d / self.publish.PR_BODY).write_text(
++            "## Summary\n\nFixed patch of the pdca-harness stack-mode live check.\n",
++            encoding="utf-8")
++
++    def _drive_wave(self, cfg, wave: list[Path], **_kw) -> int:
++        for d in wave:
++            iid = d.name.removeprefix("issue_")
++            self.built_on[iid] = self.publish.read_stack_base_tip(d) or ""
++            (d / "patch.diff").write_text(self._patch(iid), encoding="utf-8")
++            self._accept(d)
++        return 1
++
++    def _pr_view(self, url: str, fields: str) -> dict:
++        info = json.loads(_sh(["gh", "pr", "view", url, "--json", fields]).stdout or "{}")
++        return info if isinstance(info, dict) else {}
++
++    def _read_files(self, url: str) -> list[str] | None:
++        """One read of a PR's file list; None when ``gh`` fails or answers no list, so a
++        blip is one more read for the poll, never the end of the scenario."""
++        try:
++            files = self._pr_view(url, "files").get("files")
++        except (RuntimeError, ValueError, subprocess.SubprocessError):
++            return None
++        if not isinstance(files, list):
++            return None
++        return sorted(str(f.get("path", "")) for f in files if isinstance(f, dict))
++
++    def _files(self, iid: str, before: list[str] | None = None) -> dict:
++        """``iid``'s PR file list, polled until GitHub has settled it. GitHub recomputes a
++        PR's diff in the background after its base or head moves, so one read can still
++        return the list from before the move. From ``settle`` seconds on, read every
++        ``POLL`` seconds until ``_settled``: two reads in a row agree on a list that
++        differs from ``before`` (the list read before the merge or update; None for a
++        first read). Or until ``settle_max`` seconds have passed: a list that never changes
++        is read to the end of that window and recorded as it is. The rule never looks at
++        the list a check expects, so a wrong list cannot be polled into a right one.
++        Returns every read for ``judge`` (``_settled_files``)."""
++        url = self.obs["prs"][iid]["url"]
++        start = time.monotonic()
++        time.sleep(self.settle)
++        reads: list[list[str] | None] = []
++        while True:
++            reads.append(self._read_files(url))
++            if _settled(reads, before) or time.monotonic() - start >= self.settle_max:
++                break
++            time.sleep(POLL)
++        return {"before": before, "reads": reads, "window": self.settle_max,
++                "seconds": round(time.monotonic() - start, 1)}
++
++    def _drive(self, name: str) -> dict:
++        """One run of the flow, as ``pdca flow <ids>`` drives it: ``flow.flow_ids`` with the
++        ids as asked for (cli.py:667-669). It skips an id an earlier run finished and drives
++        the rest through ``flow._drive_and_act`` with every id as the batch
++        (flow.py:3446-3501), so a finished id is a finished NAMED id, which the pre-wave
++        carry judges (``flow._finished_named``, flow.py:1270; ``_carry_finished``, :1425).
++        Whatever it does is recorded, a raise included; ``_require`` (runs 1, 3, 4) or
++        ``_require_driven`` (run 2) decides whether the scenario can go on."""
++        ids = RUNS[name]
++        for iid in ids:
++            d = self.cfg.bundle(iid)
++            if not (d / "brief.md").is_file():
++                d.mkdir(parents=True, exist_ok=True)
++                shutil.copyfile(self.briefs / f"{iid}.md", d / "brief.md")
++        err, out = io.StringIO(), io.StringIO()
++        holds: dict[str, str] = {}
++        results: dict[str, str] = {}
++        raised = ""
++        with ExitStack() as stack:
++            stack.enter_context(mock.patch.object(self.flow, "_drive_wave", self._drive_wave))
++            stack.enter_context(mock.patch.object(self.publish, "draft_texts",
++                                                  lambda *a, **k: True))
++            stack.enter_context(redirect_stdout(out))
++            stack.enter_context(redirect_stderr(err))
++            try:
++                results = self.flow.flow_ids(self.cfg, list(ids), do_publish=True,
++                                             do_act=False, by="live", today=self.today,
++                                             holds=holds)
++            except Exception:  # noqa: BLE001 — recorded; `_require` / E3 judge it
++                raised = traceback.format_exc()
++        rc = None if raised else self.cli._results_rc(results, holds=holds)
++        sys.stderr.write(err.getvalue())
++        if raised:
++            sys.stderr.write(raised)
++        self._fetch()
++        for iid in ids:
++            self._record_pr(iid)
++        return {"ids": ids, "rc": rc, "raised": raised,
++                "results": {k: str(v) for k, v in results.items()},
++                "holds": dict(holds), "stderr": err.getvalue(), "stdout": out.getvalue()}
++
++    def _require(self, name: str) -> None:
++        """Go on only if run ``name`` finished every id it was asked for, held none, exited
++        0 and opened a PR for each: the steps after it merge those PRs."""
++        rec = self.obs["runs"][name]
++        why = _run_problems(rec, RUNS[name])
++        why += [f"{iid} has no PR" for iid in RUNS[name] if iid not in self.obs["prs"]]
++        if why:
++            raise Incomplete(f"{name} ({' '.join(RUNS[name])}) did not finish: "
++                             f"{'; '.join(why)} — see runs.{name} in observations.json")
++
++    def _require_driven(self, name: str) -> None:
++        """Go on only if run ``name`` drove the flow: run 2, whose outcome ``E3`` judges. A
++        hold, a stop or an unfinished D is the flow's own answer, so it is recorded and
++        the scenario goes on. A raise is no answer — ``flow_ids`` did not return — and a
++        D that finished with no PR (its publish did not complete) leaves ``E0`` nothing to
++        read: either way the run has no complete observation to go on with, so it stops
++        (``judge``: INCOMPLETE, not FAIL)."""
++        rec = self.obs["runs"][name]
++        why = []
++        if rec.get("raised"):
++            why.append(f"raised {_last_line(rec['raised'])}, so the flow was not driven")
++        why += [f"{iid} is {COMPLETE} but has no PR (its publish did not complete)"
++                for iid in RUNS[name]
++                if rec["results"].get(iid) == COMPLETE and iid not in self.obs["prs"]]
++        if why:
++            raise Incomplete(f"{name} ({' '.join(RUNS[name])}): {'; '.join(why)} — see "
++                             f"runs.{name} in observations.json")
++
++    def _record_pr(self, iid: str) -> None:
++        if iid in self.obs["prs"]:
++            return
++        rec = self.publish._publish_record(self.cfg.bundle(iid)) or {}
++        url = rec.get("pr_url")
++        if not url:
++            return
++        info = self._pr_view(url, "number,url,baseRefName,headRefName,headRefOid")
++        ls = self._git("ls-remote", "origin", f"refs/heads/{info.get('headRefName')}",
++                       check=False).stdout.split()
++        info["pushed_head"] = ls[0] if ls else ""
++        self.obs["prs"][iid] = info
++
++    def _pr_state(self, url: str) -> str:
++        return str(self._pr_view(url, "state").get("state") or "")
++
++    def _merge(self, iid: str, how: str) -> None:
++        """Merge ``iid``'s PR on GitHub (``--merge`` / ``--squash``), check it reads MERGED,
++        then delete its branch (``_delete_branch``). Recorded in ``merged``."""
++        pr = self.obs["prs"][iid]
++        url = pr["url"]
++        _sh(["gh", "pr", "ready", url], check=False)    # publish opens drafts
++        r = None
++        tries = 6
++        for attempt in range(tries):
++            r = _sh(["gh", "pr", "merge", url, f"--{how}"], check=False)
++            if r.returncode == 0 or self._pr_state(url) == "MERGED":
++                break
++            if attempt + 1 < tries:
++                time.sleep(5 * (attempt + 1))   # GitHub may still be computing mergeability
++        state = self._pr_state(url)
++        if state != "MERGED":
++            raise Incomplete(f"{iid}'s PR {url} reads {state or 'no state'} after "
++                             f"`gh pr merge --{how}`: {(r.stderr or r.stdout).strip()}")
++        merged = self.obs["merged"][iid] = {"method": how, "branch": pr["headRefName"],
++                                            "branch_gone": False}
++        merged.update(self._delete_branch(iid, pr["headRefName"]))
++        self._fetch()
++
++    def _delete_branch(self, iid: str, branch: str) -> dict:
++        """Delete ``branch`` on GitHub and confirm with ``git ls-remote`` that it is gone. A
++        422 "Reference does not exist" counts as gone (GitHub deleted it on merge). Any
++        other failure, or a branch still listed, stops the scenario: everything after it
++        is read "after the delete"."""
++        r = _sh(["gh", "api", "-X", "DELETE",
++                 f"repos/{self.repo}/git/refs/heads/{branch}"], check=False)
++        said = " ".join((r.stderr + " " + r.stdout).split())
++        if r.returncode != 0 and "Reference does not exist" not in said:
++            raise Incomplete(f"could not delete {iid}'s branch {branch} after its merge: "
++                             f"{said or f'rc {r.returncode}'}")
++        for attempt in range(5):
++            ls = self._git("ls-remote", "--exit-code", "origin", f"refs/heads/{branch}",
++                           check=False)
++            if ls.returncode == 2:       # --exit-code: no ref matched
++                break
++            time.sleep(2 * (attempt + 1))
++        else:
++            raise Incomplete(f"{iid}'s branch {branch} is still on origin after the delete "
++                             f"(git ls-remote --exit-code: rc {ls.returncode}"
++                             f"{', ' + ls.stdout.strip() if ls.stdout.strip() else ''})")
++        return {"delete": "deleted" if r.returncode == 0 else "already gone",
++                "branch_gone": True}
++
++    def _update_branch(self, iid: str) -> dict:
++        """GitHub's "Update branch" on ``iid``'s PR, then wait for its head to move (the
++        update can land after the call returns)."""
++        url = self.obs["prs"][iid]["url"]
++        before = self._pr_view(url, "headRefOid").get("headRefOid")
++        _sh(["gh", "pr", "update-branch", url])
++        after = before
++        for _ in range(20):
++            after = self._pr_view(url, "headRefOid").get("headRefOid")
++            if after and after != before:
++                break
++            time.sleep(3)
++        else:
++            raise Incomplete(f"`gh pr update-branch` did not move {iid}'s PR head off "
++                             f"{before} within a minute")
++        return {"head_before": before, "head_after": after, "moved": True}
++
++    def _after_merge(self, iid: str) -> dict:
++        view = self._pr_view(self.obs["prs"][iid]["url"], "state,headRefOid,mergeCommit")
++        self._fetch()
++        mc = view.get("mergeCommit")
++        return {"view": view,
++                "on_base": {"headRefOid": self._on_base(view.get("headRefOid")),
++                            "mergeCommit": self._on_base(mc.get("oid")
++                                                         if isinstance(mc, dict) else None)}}
++
++    def _holds(self, at: str, *ids: str) -> dict[str, bool | None]:
++        """Whether commit ``at`` holds each of ``ids``' pushed heads (see ``_is_ancestor``)."""
++        return {i: self._is_ancestor(self.obs["prs"].get(i, {}).get("pushed_head"), at)
++                for i in ids}
++
++    def _files_on_base(self, *ids: str) -> dict[str, bool | None]:
++        """Whether origin's base has each id's files with the content its patch wrote;
++        None for all when the base does not resolve here."""
++        ref = f"origin/{self.base}"
++        if self._git("rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}",
++                     check=False).returncode != 0:
++            return {i: None for i in ids}
++        return {iid: all(self._git("show", f"{ref}:{n}", check=False).stdout == f"{iid}\n"
++                         for n in FILES[iid]) for iid in ids}
++
++    # the scenario -------------------------------------------------------------------------
++
++    def scenario(self) -> None:
++        obs, runs = self.obs, self.obs["runs"]
++        runs["run1"] = self._drive("run1")
++        self._require("run1")
++        # B's file list at each step: each read waits for the list to move off the one
++        # before it (``_files``), so the read before "Update branch" is GitHub's answer
++        # after both merges, not after A's alone.
++        obs["B_files_opened"] = self._files("B")
++        self._merge("A", "merge")
++        obs["B_files_after_A_merge"] = self._files("B", _last_read(obs["B_files_opened"]))
++        self._merge("C", "merge")
++        obs["B_files_before_update"] = self._files(
++            "B", _last_read(obs["B_files_after_A_merge"]))
++        obs["B_update_branch"] = self._update_branch("B")
++        obs["B_files_after_update"] = self._files(
++            "B", _last_read(obs["B_files_before_update"]))
++        obs["A_after_merge"] = self._after_merge("A")
++
++        # Run 2's outcome is what E3 judges: a hold or a stop is recorded, not required.
++        # A run that did not drive the flow at all stops the scenario.
++        runs["run2"] = self._drive("run2")
++        obs["D_built_on"] = self.built_on.get("D", "")
++        obs["D_built_on_holds"] = self._holds(obs["D_built_on"], "A", "C")
++        self._require_driven("run2")
++
++        runs["run3"] = self._drive("run3")
++        self._require("run3")
++        obs["Q_files_opened"] = self._files("Q")
++        self._merge("P", "merge")
++        obs["Q_files_after_P_merge"] = self._files("Q", _last_read(obs["Q_files_opened"]))
++
++        self._merge("B", "merge")
++        obs["after_B_merge"] = {"on_base": self._files_on_base("A", "B", "C")}
++
++        runs["run4"] = self._drive("run4")
++        self._require("run4")
++        self._merge("S", "squash")
++        obs["S_after_squash"] = self._after_merge("S")
++        obs["finished"] = True
++
++
++def cmd_run(a: argparse.Namespace) -> int:
++    workdir = Path(a.workdir).resolve()
++    project = Path(_state(workdir, ready=True)["project"])
++    if any((project / "results").glob("issue_*")) or (workdir / "observations.json").exists():
++        print(f"run: {workdir} already holds an earlier run's bundles or observations — run "
++              f"`setup` in a fresh --workdir", file=sys.stderr)
++        return 2
++    live = Live(workdir, a.settle, a.settle_max)
++    try:
++        live.scenario()
++    except Incomplete as exc:
++        live.obs["errors"].append(f"Incomplete: {exc}")
++        print(f"run: could not drive the scenario: {exc}", file=sys.stderr)
++    except Exception as exc:  # noqa: BLE001 — record what was seen, then fail loudly
++        live.obs["errors"].append(traceback.format_exc())
++        print(f"run: could not drive the scenario: {type(exc).__name__}: {exc}",
++              file=sys.stderr)
++    finally:
++        (workdir / "observations.json").write_text(json.dumps(live.obs, indent=2) + "\n",
++                                                   encoding="utf-8")
++        print(f"run: observations written to {workdir / 'observations.json'}")
++    # The exit code is `judge`'s own completeness rule, so `run` exits 1 exactly when the
++    # report will read INCOMPLETE: a stopped scenario, or a value a check needs not read.
++    why = _incomplete(live.obs, judge(live.obs)[0])
++    if why:
++        print("run: the observations are incomplete, so `judge` reports INCOMPLETE (this "
++              "blocks accept; re-run in a fresh --workdir):", file=sys.stderr)
++        for w in why:
++            print(f"  - {w}", file=sys.stderr)
++        return 1
++    return 0
++
++
++# -- judge (offline) ----------------------------------------------------------------------
++
++def _obj(d: dict, key: str) -> dict:
++    """``d[key]`` when it is an object, else {}: a hand-edited or truncated observations
++    file reads as "not observed", never as a crash."""
++    v = d.get(key)
++    return v if isinstance(v, dict) else {}
++
++
++def _run_problems(rec: object, ids: list[str]) -> list[str]:
++    """Why a recorded run of the flow did not finish ``ids`` cleanly, or [] — it did: it
++    raised nothing, exited 0 (``cli._results_rc``) with no holds, and each id is COMPLETE."""
++    if not isinstance(rec, dict):
++        return ["not recorded"]
++    why = []
++    if rec.get("raised"):
++        why.append("raised " + str(rec["raised"]).strip().splitlines()[-1])
++    if rec.get("rc") != 0:
++        why.append(f"exit code {rec.get('rc')}")
++    if rec.get("holds"):
++        why.append(f"held {json.dumps(rec.get('holds'), sort_keys=True)}")
++    results = _obj(rec, "results")
++    why += [f"{iid} is {results.get(iid) or 'not in its results'}"
++            for iid in ids if results.get(iid) != COMPLETE]
++    return why
++
++
++def _run_ok(runs: dict, name: str) -> str:
++    """"" when run ``name`` finished every id it drove; else what did not happen."""
++    why = _run_problems(runs.get(name), RUNS[name])
++    return f"{name} did not finish ({'; '.join(why)})" if why else ""
++
++
++def _merged_ok(merged: dict, iid: str, method: str, *, deleted: bool) -> str:
++    """"" when ``iid``'s PR is recorded merged with ``method`` (and, with ``deleted``, its
++    branch confirmed gone after); else what was not observed."""
++    m = merged.get(iid)
++    if not isinstance(m, dict):
++        return f"{iid}'s merge was not recorded"
++    if m.get("method") != method:
++        return f"{iid} was merged with {m.get('method')!r}, not {method!r}"
++    if deleted and m.get("branch_gone") is not True:
++        return f"{iid}'s branch was not confirmed deleted after its merge"
++    return ""
++
++
++def _outcome(runs: dict, iid: str) -> str:
++    """What the last recorded run that drove ``iid`` left it as, e.g. ``run2: PLANNED``."""
++    for name in reversed(list(RUNS)):
++        rec = runs.get(name)
++        if iid in RUNS[name] and isinstance(rec, dict):
++            return f"{name}: {_obj(rec, 'results').get(iid) or 'not in its results'}"
++    return "no run of it recorded"
++
++
++def _last_line(text: object) -> str:
++    """The last non-empty line of ``text``: a traceback's exception line."""
++    lines = str(text or "").strip().splitlines()
++    return lines[-1].strip() if lines else ""
++
++
++def _last_read(rec: object) -> list[str] | None:
++    """The last file list a ``Live._files`` record read; None for no read or a failed one."""
++    reads = rec.get("reads") if isinstance(rec, dict) else None
++    last = reads[-1] if isinstance(reads, list) and reads else None
++    return [str(f) for f in last] if isinstance(last, list) else None
++
++
++def _stable(reads: list) -> bool:
++    """The last two reads agree on one non-empty list. Every PR of the scenario adds a file
++    of its own, so an empty list is never GitHub's settled answer."""
++    return (len(reads) >= 2 and isinstance(reads[-1], list) and bool(reads[-1])
++            and reads[-1] == reads[-2])
++
++
++def _settled(reads: list, before: list[str] | None) -> bool:
++    """Whether ``Live._files`` can stop polling a PR's file list before ``--settle-max``:
++    the list is stable and has moved off ``before``, the list read before the merge or
++    update (None for a first read). A list that does not move is polled to the end of the
++    window. The list a check expects plays no part."""
++    return _stable(reads) and (before is None or reads[-1] != before)
++
++
++def _settled_files(obs: dict, key: str, what: str) -> tuple[list[str] | None, str, dict]:
++    """``(files, missing, observed)`` for the ``Live._files`` record ``obs[key]``: the last
++    read when the last two agree, else None and why it is not observed. ``observed`` has
++    the reads behind it: how many, over how long, and whether the list moved off the one
++    read before the merge or update."""
++    rec = _obj(obs, key)
++    reads = rec.get("reads") if isinstance(rec.get("reads"), list) else []
++    before, last = rec.get("before"), _last_read(rec)
++    seen = {"files": last, "reads": len(reads), "seconds": rec.get("seconds"),
++            "changed": None if before is None or last is None else last != before}
++    if not reads:
++        return None, f"{what} not read", seen
++    if not _stable(reads):
++        return None, (f"{what} did not settle: the last two of {len(reads)} read(s) over "
++                      f"{rec.get('seconds')} s are not the same list"), seen
++    return list(reads[-1]), "", seen
++
++
++def _placed(on: dict, key: str, oid: object, what: str) -> str:
++    """"" unless ``oid`` was read but git could not tell whether the base has it
++    (``Live._is_ancestor`` gave None: a commit the clone lacks, a ref that does not
++    resolve). That is not observed, never "not on the base"."""
++    if oid and on.get(key) not in (True, False):
++        return f"whether the base has {what} {str(oid)[:12]}: git could not tell"
++    return ""
++
++
++def _needs_pr(runs: dict, iid: str) -> bool:
++    """Whether ``E0`` needs a PR for ``iid``: yes for every id, except D when run 2 drove
++    the flow and did not finish D. That hold or stop is ``E3``'s finding, and D, never
++    built, has no PR. D still needs one when run 2 finished it, or when run 2 raised."""
++    rec = runs.get("run2")
++    return not (iid == "D" and isinstance(rec, dict) and not rec.get("raised")
++                and _obj(rec, "results").get("D") != COMPLETE)
++
++
++def _gone_and_merged(stderr: str, iid: str, branch: str, base_ref: str) -> str | None:
++    """How run 2's fold took ``iid``'s deleted branch, read off the line
++    ``integrate._gone_branch`` prints when it goes on (template/src/pdca_harness/
++    integrate.py:1434-1436, the line already carries the merged head; :1509-1511, the
++    merged work reaches the line through the base). None when neither names it. The
++    refusals at :1443, :1449, :1491 and :1503 begin with the same words, but they are
++    raised, never printed as an ``integrate:`` line: on the carry path the flow names them
++    in a "not carried" line instead (flow.py:1575-1578)."""
++    if not branch:
++        return None
++    head = (rf"integrate: issue_{re.escape(iid)}'s branch origin/{re.escape(branch)} is gone "
++            rf"and its PR merged at [0-9a-f]+")
++    for line in stderr.splitlines():
++        if re.fullmatch(head + r" — \S+ already carries that commit; skipped\.", line):
++            return "the line already carries its merged head (skipped)"
++        if re.fullmatch(head + r", which \S+ did not have — the merged work reaches \S+ "
++                        rf"through {re.escape(base_ref)}\.", line):
++            return "its merged work reaches the line through the base"
++    return None
++
++
++def judge(obs: dict) -> tuple[list[dict], list[dict]]:
++    """``(checks, info)`` for one observations document. Reads nothing else.
++
++    A check PASSes only on what was observed: a step it depends on that was not observed
++    (a run that did not finish or raised, a merge or branch delete not recorded, a value
++    not read, a file list that never settled, a commit git could not place) makes it FAIL
++    with ``"not observed"`` naming the step, never PASS — and makes the report INCOMPLETE
++    (``_incomplete``), so such a FAIL is never filed as a finding."""
++    base = obs.get("base") or BASE
++    prs, runs, merged = _obj(obs, "prs"), _obj(obs, "runs"), _obj(obs, "merged")
++    checks: list[dict] = []
++    info: list[dict] = []
++
++    def add(cid: str, missing: list[str], ok: bool, expected: str, observed: dict) -> None:
++        missing = [m for m in missing if m]
++        if missing:
++            observed = {"not observed": missing, **observed}
++        checks.append({"id": cid, "result": "PASS" if ok and not missing else "FAIL",
++                       "expected": expected, "observed": observed})
++
++    have = {iid: pr for iid, pr in prs.items() if iid in IDS and isinstance(pr, dict)}
++    bases = {iid: have[iid].get("baseRefName") for iid in IDS if iid in have}
++    excused = [f"{iid} ({_outcome(runs, iid)}; E3 judges it)" for iid in IDS
++               if iid not in have and not _needs_pr(runs, iid)]
++    add("E0", [f"{iid} has no PR ({_outcome(runs, iid)})" for iid in IDS
++               if iid not in have and _needs_pr(runs, iid)],
++        all(b == base for b in bases.values()),
++        f"each of the scenario's PRs ({', '.join(IDS)}) opened with baseRefName {base!r}, "
++        f"none against the integration line (no PR for D if run 2 held or stopped it)",
++        {"baseRefName": bases, **({"not published": excused} if excused else {})})
++
++    for key, iid, note in (
++            ("B_files_opened", "B-opened", "B's PR files when it opened"),
++            ("B_files_after_A_merge", "B-after-A", "B's PR files after A merged"),
++            ("B_files_before_update", "E1-pre",
++             "B's PR files after A and C merged, before Update branch; informational: run "
++             "1's line is no plain chain, docs/07-crosscutting.md:658-661"),
++            ("Q_files_opened", "Q-opened", "Q's PR files when it opened, before P merged")):
++        if key in obs:
++            info.append({"id": iid, "observed": _settled_files(obs, key, key)[2],
++                         "note": note})
++
++    # E1 trusts the read after Update branch only if every read before it settled: each
++    # one is the list the next read had to move off (`Live._files`).
++    b_reads = [_settled_files(obs, key, what) for key, what in (
++        ("B_files_opened", "B's files when its PR opened"),
++        ("B_files_after_A_merge", "B's files after A's merge"),
++        ("B_files_before_update", "B's files before Update branch"),
++        ("B_files_after_update", "B's files after Update branch"))]
++    after, _why, seen = b_reads[-1]
++    update = _obj(obs, "B_update_branch")
++    add("E1", [_run_ok(runs, "run1"),
++               _merged_ok(merged, "A", "merge", deleted=False),
++               _merged_ok(merged, "C", "merge", deleted=False),
++               "" if update.get("moved") is True else "Update branch did not move B's head"]
++        + [why for _files, why, _seen in b_reads],
++        after is not None and sorted(after) == FILES["B"],
++        f"after A and C merge (merge commits) and Update branch, B's PR files are exactly "
++        f"{FILES['B']}", {**seen, "Update branch": update or None})
++
++    q_reads = [_settled_files(obs, key, what) for key, what in (
++        ("Q_files_opened", "Q's files when its PR opened"),
++        ("Q_files_after_P_merge", "Q's files after P's merge"))]
++    q, _why, seen = q_reads[-1]
++    add("E1b", [_run_ok(runs, "run3"), _merged_ok(merged, "P", "merge", deleted=False)]
++        + [why for _files, why, _seen in q_reads],
++        q is not None and sorted(q) == FILES["Q"],
++        f"plain chain: after P merges (merge commit), with no Update branch, Q's PR files "
++        f"are exactly {FILES['Q']}", seen)
++
++    a = _obj(obs, "A_after_merge")
++    view, on = _obj(a, "view"), _obj(a, "on_base")
++    mc = _obj(view, "mergeCommit")
++    pushed = (have.get("A") or {}).get("pushed_head")
++    add("E2", [_run_ok(runs, "run1"), _merged_ok(merged, "A", "merge", deleted=True),
++               "" if view else "A's gh pr view after the merge not read",
++               "" if pushed else "the head the run pushed for A not read",
++               _placed(on, "mergeCommit", mc.get("oid"), "A's mergeCommit")],
++        view.get("state") == "MERGED" and view.get("headRefOid") == pushed
++        and bool(mc.get("oid")) and on.get("mergeCommit") is True,
++        f"A after merge (merge commit) + branch delete: state MERGED, headRefOid == the "
++        f"head the run pushed ({pushed or '?'}), mergeCommit.oid present and on the base",
++        {"state": view.get("state"), "headRefOid": view.get("headRefOid"),
++         "headRefOid on base": on.get("headRefOid"), "mergeCommit.oid": mc.get("oid"),
++         "mergeCommit on base": on.get("mergeCommit")})
++
++    # Run 2's own answer — a hold, a stop, an unfinished D — is E3's finding. A raise is
++    # no answer: `flow_ids` did not return, so the flow was not driven (not observed).
++    rec2 = runs.get("run2")
++    run2 = rec2 if isinstance(rec2, dict) else {}
++    err = str(run2.get("stderr") or "")
++    branch = {iid: str((have.get(iid) or {}).get("headRefName") or "") for iid in ("A", "C")}
++    took = {iid: _gone_and_merged(err, iid, branch[iid], f"origin/{base}") for iid in branch}
++    refused = [iid for iid in ("A", "B", "C") if re.search(
++        rf"^flow: issue_{re.escape(iid)} \(finished in an earlier run\) is not carried", err,
++        re.M)]
++    holds = _obj(obs, "D_built_on_holds")
++    built_on = str(obs.get("D_built_on") or "")
++    d_done = _obj(run2, "results").get("D") == COMPLETE
++    finished = _run_problems(run2, RUNS["run2"]) if run2 else []
++    unread = [f"whether D's base {built_on[:12]} holds {i}'s pushed head: git could not tell"
++              for i in ("A", "C") if d_done and built_on and holds.get(i) not in (True, False)]
++    add("E3", ["" if run2 else "run2 was not recorded",
++               f"run2 raised {_last_line(run2['raised'])}: `flow_ids` did not return, so the "
++               f"flow was not driven" if run2.get("raised") else "",
++               _merged_ok(merged, "A", "merge", deleted=True),
++               _merged_ok(merged, "C", "merge", deleted=True)] + unread,
++        not finished and all(took.values()) and not refused and d_done and bool(built_on)
++        and holds.get("A") is True and holds.get("C") is True,
++        "run 2 (A B C D named; A and C merged, their branches deleted): the fold names A's "
++        "and C's branches gone and merged and goes on (integrate.py:1434 / :1509), no "
++        "finished id is refused, the run exits 0 with no holds and D COMPLETE, and D is "
++        "built on a line holding A's and C's pushed heads",
++        {"gone and merged": took, "not carried": refused, "not finished": finished,
++         "rc": run2.get("rc"), "holds": run2.get("holds"),
++         "D": _obj(run2, "results").get("D"),
++         "D built on": built_on or None, "D's base holds": holds})
++
++    s = _obj(obs, "S_after_squash")
++    sview, son = _obj(s, "view"), _obj(s, "on_base")
++    smc = _obj(sview, "mergeCommit")
++    add("E4", [_run_ok(runs, "run4"), _merged_ok(merged, "S", "squash", deleted=True),
++               "" if sview else "S's gh pr view after the squash not read",
++               _placed(son, "headRefOid", sview.get("headRefOid"), "S's headRefOid"),
++               _placed(son, "mergeCommit", smc.get("oid"), "S's mergeCommit")],
++        sview.get("state") == "MERGED" and bool(smc.get("oid"))
++        and son.get("mergeCommit") is True and son.get("headRefOid") is False,
++        "S after squash + branch delete: mergeCommit.oid on the base, headRefOid NOT on it",
++        {"state": sview.get("state"), "headRefOid": sview.get("headRefOid"),
++         "headRefOid on base": son.get("headRefOid"), "mergeCommit.oid": smc.get("oid"),
++         "mergeCommit on base": son.get("mergeCommit")})
++
++    landed = _obj(obs, "after_B_merge").get("on_base")
++    add("E5", [_run_ok(runs, "run1")] + [_merged_ok(merged, i, "merge", deleted=False)
++                                         for i in "ACB"]
++        + ([f"whether the base has {i}'s change: not read" for i in "ABC"
++            if landed.get(i) not in (True, False)] if isinstance(landed, dict)
++           else ["the base after B's merge not read"]),
++        isinstance(landed, dict) and all(landed.get(i) is True for i in "ABC"),
++        "after A, C, then B merge with merge commits, A's, B's and C's changes are all on "
++        "the base", {"on base": landed})
++    return checks, info
++
++
++def _incomplete(obs: dict, checks: list[dict]) -> list[str]:
++    """Why ``obs`` is not a complete observation of the scenario, or [] — it is: an error
++    ``run`` recorded, a scenario it did not finish, a value a check needed and did not get
++    (that check's ``not observed``). A FAIL is a stack-mode finding only on a complete
++    observation; otherwise the report is INCOMPLETE, which blocks accept. ``run`` exits 1
++    on the same rule, so its exit code and the report never disagree."""
++    why = [f"run error: {_last_line(e) or '?'}" for e in obs.get("errors") or []]
++    if obs.get("finished") is not True:
++        why.append("run did not reach the end of the scenario")
++    for c in checks:
++        why += [f"{c['id']} not observed: {m}"
++                for m in _obj(c, "observed").get("not observed") or []]
++    return why
++
++
++def _verdict(obs: dict, checks: list[dict]) -> str:
++    """INCOMPLETE (``_incomplete``), else PASS when every check passes, else FAIL."""
++    if _incomplete(obs, checks):
++        return "INCOMPLETE"
++    return "PASS" if all(c["result"] == "PASS" for c in checks) else "FAIL"
++
++
++def _report_md(obs: dict, checks: list[dict], info: list[dict]) -> str:
++    verdict = _verdict(obs, checks)
++    lines = ["# Stack mode on real GitHub — live check report", "",
++             f"- Repository: `{obs.get('repo', '?')}` @ `{obs.get('base', BASE)}`",
++             f"- Result: **{verdict}**"]
++    if verdict == "INCOMPLETE":
++        lines.append("- The observations are incomplete, so no FAIL below is a stack-mode "
++                     "finding: fix the run and re-run it in a fresh work directory. Why:")
++        lines += [f"  - {w}" for w in _incomplete(obs, checks)]
++    lines += ["", "| Check | Result | Expected | Observed |", "|---|---|---|---|"]
++    for c in checks:
++        observed = json.dumps(c["observed"], sort_keys=True).replace("|", "\\|")
++        lines.append(f"| {c['id']} | {c['result']} | {c['expected']} | `{observed}` |")
++    for i in info:
++        lines += ["", f"- {i['id']} ({i['note']}): `{json.dumps(i['observed'])}`"]
++    for e in obs.get("errors") or []:
++        lines += ["", "- run error:", "", "```", str(e).rstrip(), "```"]
++    return "\n".join(lines) + "\n"
++
++
++def cmd_judge(a: argparse.Namespace) -> int:
++    workdir = Path(a.workdir).resolve()
++    src = Path(a.observations).resolve() if a.observations else workdir / "observations.json"
++    try:
++        obs = json.loads(src.read_text(encoding="utf-8"))
++    except (OSError, ValueError) as exc:
++        print(f"judge: cannot read {src}: {exc}", file=sys.stderr)
++        return 2
++    if not isinstance(obs, dict):
++        print(f"judge: {src} is not an observations document", file=sys.stderr)
++        return 2
++    checks, info = judge(obs)
++    verdict = _verdict(obs, checks)
++    workdir.mkdir(parents=True, exist_ok=True)
++    (workdir / "report.json").write_text(json.dumps(
++        {"result": verdict, "passed": verdict == "PASS", "complete": verdict != "INCOMPLETE",
++         "incomplete": _incomplete(obs, checks), "checks": checks, "info": info,
++         "errors": obs.get("errors") or []},
++        indent=2) + "\n", encoding="utf-8")
++    (workdir / "report.md").write_text(_report_md(obs, checks, info), encoding="utf-8")
++    for c in checks:
++        print(f"{c['id']}: {c['result']}")
++    print(f"judge: {verdict} — report in {workdir / 'report.md'}")
++    return 0 if verdict == "PASS" else 1
++
++
++# -- teardown -----------------------------------------------------------------------------
++
++def cmd_teardown(a: argparse.Namespace) -> int:
++    """Delete the repository state.json names — also one a ``setup`` that did not finish
++    left there."""
++    workdir = Path(a.workdir).resolve()
++    s = _state(workdir)
++    repo = str(s["repo"])
++    if a.keep:
++        print(f"teardown: --keep, leaving {repo}")
++        return 0
++    if s.get("deleted"):
++        print(f"teardown: {repo} was already deleted")
++        return 0
++    if not repo.split("/")[-1].startswith(PREFIX):
++        print(f"teardown: refusing to delete {repo}: its name lacks the {PREFIX!r} prefix",
++              file=sys.stderr)
++        return 2
++    r = _sh(["gh", "repo", "delete", repo, "--yes"], check=False)
++    if r.returncode != 0:
++        print(f"teardown: could not delete {repo}: {(r.stderr or r.stdout).strip()} — a "
++              f"token without the delete_repo scope is the usual cause (`gh auth refresh -s "
++              f"delete_repo`); {workdir / 'state.json'} still names it, so run teardown "
++              f"again", file=sys.stderr)
++        return 1
++    _write_state(workdir, {**s, "deleted": True})
++    print(f"teardown: deleted {repo}")
++    return 0
++
++
++def main(argv: list[str] | None = None) -> int:
++    p = argparse.ArgumentParser(prog="stack_mode_live.py", description=__doc__.split("\n")[0])
++    sub = p.add_subparsers(dest="cmd", required=True)
++    s = sub.add_parser("setup", help="create the disposable repository and the scenario")
++    s.add_argument("--workdir", required=True)
++    s.add_argument("--owner", default="")
++    s.add_argument("--repo", default="", help=f"repository name (must start {PREFIX!r})")
++    s.add_argument("--reuse", action="store_true",
++                   help="use an existing repository that holds no earlier run")
++    s.set_defaults(fn=cmd_setup)
++    r = sub.add_parser("run", help="drive the scenario and record observations.json")
++    r.add_argument("--workdir", required=True)
++    r.add_argument("--settle", type=float, default=15.0,
++                   help="seconds after a merge or update before the first read of a PR's "
++                        "files (default 15)")
++    r.add_argument("--settle-max", type=float, default=180.0,
++                   help="seconds after a merge or update to keep reading a PR's files "
++                        "until two reads agree on a list that moved (default 180)")
++    r.set_defaults(fn=cmd_run)
++    j = sub.add_parser("judge", help="evaluate observations.json; write report.md/json")
++    j.add_argument("--workdir", required=True)
++    j.add_argument("--observations", default="")
++    j.set_defaults(fn=cmd_judge)
++    t = sub.add_parser("teardown", help="delete the disposable repository")
++    t.add_argument("--workdir", required=True)
++    t.add_argument("--keep", action="store_true")
++    t.set_defaults(fn=cmd_teardown)
++    a = p.parse_args(argv)
++    return a.fn(a)
++
++
++if __name__ == "__main__":
++    sys.exit(main())

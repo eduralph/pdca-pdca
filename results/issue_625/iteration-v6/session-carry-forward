@@ -1,0 +1,6 @@
+Live run 2026-10-25 on eduralph/pdca-stack-sandbox (run base live-20261025-214452): E0, E1, E2, E3, E4, E5 PASS; E1b INCOMPLETE, which blocks accept.
+Cause: GitHub never moves an open PR's base SHA or file list when the base advances without a push to the PR. Q (#6) stayed on base 6215b88 with files p.txt + q.txt 20+ min after P merged (base tip 7317e69 and later), even after mergeable=clean; compare base...head showed q.txt only. The "B after A" reads show the same stuck base.
+E1b's settle rule requires baseRefOid == the new base tip, so it can never settle and always ends INCOMPLETE. Raising settle_max will not help.
+Fix: for reads with no push to the PR (E1b, and the recorded-only "B after A" read), settle on head unchanged + mergeability recomputed, not on baseRefOid; also record the compare-API (base...head) file list next to the PR files.
+Expected outcome after the fix: E1b FAILs (the PR still lists P's file, contradicting the plain-chain claim in docs/07-crosscutting.md:655-661). File that as its own bug. Do not treat it as a tool defect.
+Evidence kept at ~/pdca/live-runs/issue_625-20261025-213712/ (report.md, observations.json). Policy-wording and scope §6 items deferred to the next sign-off.

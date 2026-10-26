@@ -1,0 +1,10 @@
+Rejected: the stranded-partner check decides "the move is part of the clash" at FILE level
+(integrate.py:1996-2002, `not set(files) - set(after)`), so the same situation holds when it
+spans two files but STOPs when it sits in one file (A edits shared.txt lines 2 and 8, main edits
+line 8 after fold 1, W edits line 2 -> STOPPING; the a.txt + shared.txt version is held with the
+right two-step advice). That one-file vs two-file split is not acceptable.
+Next: Plan specifies a hunk-level design for "the base move causes the clash" (compare the
+conflict hunks before/after rebuilding the partner, not file names) — define what counts as the
+same hunk and how partial overlaps are treated — and adds the one-file case as a success-criterion
+test that must be held with the same advice as the two-file case. Keep the rest of the built
+behaviour as the starting point.

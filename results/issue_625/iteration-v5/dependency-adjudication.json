@@ -1,0 +1,14 @@
+{
+  "halted": false,
+  "verdicts": [
+    {
+      "dependency": "draft pull requests on the private sandbox",
+      "verdict": "unconfirmed",
+      "source": "",
+      "cmd": "",
+      "exit_code": null,
+      "hint": "",
+      "detail": "no registered [[doctor.checks]] row and no parseable proposed row names it"
+    }
+  ]
+}

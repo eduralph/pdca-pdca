@@ -1,0 +1,492 @@
+diff --git a/docs/07-crosscutting.md b/docs/07-crosscutting.md
+index 35bb1c3..2803866 100644
+--- a/docs/07-crosscutting.md
++++ b/docs/07-crosscutting.md
+@@ -884,6 +884,14 @@ wave builds on, via `[driver].wave_mode`:
+   refuses a merge if the base moves after the driver's last read.
+   `[driver].merge_requires = "required"` opts back into host-config-only
+   semantics, and skips the behind check and the update too.
++  Under either setting, before it readies a PR the driver reads the PR's base on
++  the host and compares it with the bundle's own target base (the `Repo + branch
++  target` publish used). If they differ, the driver retargets the PR
++  (`gh pr edit --base <target>`) and reads the base again. It goes on only if
++  the host now reports the target base; otherwise the run stops, naming both
++  branches, with the PR left a draft (or ready) just as it was. A target base
++  that another bundle of the batch produced stops the run before any retarget
++  (see below).
+ 
+ In merge mode the merge is unattended, so **publish refuses to open a PR against
+ any branch this run produced** — the work must land on a base that exists
+@@ -894,7 +902,12 @@ fix branch or a recorded integration branch), and a brief whose `Repo + branch
+ target` itself names a branch another bundle in the batch produced — the
+ chained-brief practice that is right under `"stack"` and wrong here, where wave
+ order already carries the dependency. Fix the brief's target (or go back to
+-`"stack"`) and re-publish; the harness never retargets a PR for you.
++`"stack"`) and re-publish. The same two rules are checked again at merge time, for
++a PR that never went through this publish check (opened by an earlier run, or
++whose base was edited on the host since): a PR on another base is retargeted to
++its bundle's target base before it is merged, and a target base another bundle
++produced stops the run. The driver retargets only a PR it is about to merge in
++merge mode; it never changes a brief's target.
+ 
+ `[driver].regate_between_waves` (default `false`) optionally re-runs your
+ repo-scoped gates over each folded integration tip before the next wave builds
+diff --git a/template/src/pdca_harness/merge.py b/template/src/pdca_harness/merge.py
+index a6c9795..ff41a1f 100644
+--- a/template/src/pdca_harness/merge.py
++++ b/template/src/pdca_harness/merge.py
+@@ -460,6 +460,57 @@ def _refuse(d: Path, pr_url: str, why: str) -> int:
+     return 1
+ 
+ 
++def _target_base_refusal(cfg: Config, d: Path, pr_url: str) -> str:
++    """Why ``d``'s PR may not be merged into the base it carries, or "" once it targets the
++    bundle's resolved target base (issue #500). The merge-time half of the #411 rule
++    (``publish._merge_base_refusal``), for a PR that rule never saw: one opened by an
++    earlier run, or whose base was edited on the host since.
++
++    The target is ``publish._resolve_target``'s, the one parse publish uses. A target that
++    is a branch another bundle of this batch produced (#411 route 2,
++    ``publish._batch_branch_producer``) is refused before the host is asked anything. A PR
++    the host reports on another base is retargeted (``gh pr edit --base``) and its base read
++    again; only a re-read that reports the target lets the merge go on. Called before the
++    ready-mark, so every refusal here leaves the PR's draft/ready state as it found it."""
++    if not (d / "brief.md").is_file():
++        return ("it has no brief.md, so there is no target base to check its PR's base "
++                "against")
++    repo_spec, target = publish._resolve_target(d)[:2]
++    if not repo_spec or not target:
++        return (f"its brief has no usable `Repo + branch target` (got repo={repo_spec!r} "
++                f"base={target!r}), so there is no target base to check its PR's base "
++                "against")
++    fix = ('`[driver].wave_mode = "merge"` merges this PR into whatever it targets, '
++           "unattended — so it may only target a base that exists independently of this "
++           "run. Point the brief's `Repo + branch target` at the shared base, or use the "
++           'default wave_mode = "stack", where chaining onto a predecessor is correct')
++    producer = publish._batch_branch_producer(cfg, d, repo_spec, target)
++    if producer:
++        return (f"its target base `{target}` is the branch {producer} produced in this "
++                f"batch, not a shared base. {fix}")
++    _, base, why = _pr_head(pr_url)
++    if not base:
++        return f"its base could not be checked against its target base `{target}`: {why}"
++    if base == target:
++        return ""
++    print(f"   PR base `{base}` is not its target base `{target}` — retargeting")
++    print(f"→ gh pr edit {pr_url} --base {target}")
++    edit = subprocess.run(["gh", "pr", "edit", pr_url, "--base", target],
++                          capture_output=True, text=True)
++    if edit.returncode != 0:
++        print((edit.stderr or edit.stdout).strip(), file=sys.stderr)
++        return (f"its PR targets `{base}`, not its target base `{target}`, and could not "
++                f"be retargeted (`gh pr edit --base {target}` failed). {fix}")
++    _, now, why = _pr_head(pr_url)
++    if now != target:
++        seen = f"`{now}`" if now else f"unreadable ({why})"
++        return (f"its PR targeted `{base}`, not its target base `{target}`, and after "
++                f"`gh pr edit --base {target}` the host still reports its base as {seen}. "
++                f"{fix}")
++    print(f"   retargeted {pr_url} from `{base}` to `{target}`")
++    return ""
++
++
+ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
+                fetched: set[str]) -> int:
+     """Merge one bundle's recorded PR (idempotent, fail-closed). ``fetched`` dedupes the
+@@ -509,6 +560,16 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
+               f"{cfg.expected_checks_error}. STOP: later waves are NOT run; fix the setting "
+               "in pdca.toml, then re-run (the run resumes idempotently).\n", file=sys.stderr)
+         return 1
++    # Issue #500: merge only into the bundle's own resolved target base, and only when that
++    # base exists independently of this run (#411) — never into whatever base the PR
++    # carries. Under either merge_requires value, and before the ready-mark, so a refusal
++    # here (not `_refuse`) has no ready-mark to undo.
++    why = _target_base_refusal(cfg, d, str(pr_url))
++    if why:
++        print(f"\n!!! merge: {d.name} ({pr_url}) was NOT merged — {why}. STOP: later waves "
++              "are NOT run; resolve at the PR or the brief, then re-run (the run resumes "
++              "idempotently).\n", file=sys.stderr)
++        return 1
+ 
+     # The publisher opens every PR as a draft (STOP discipline), but `gh pr merge` refuses a
+     # draft — so in merge mode a non-final wave's PRs must be readied before they can advance
+diff --git a/template/src/pdca_harness/publish.py b/template/src/pdca_harness/publish.py
+index 36b3b42..38a3dba 100644
+--- a/template/src/pdca_harness/publish.py
++++ b/template/src/pdca_harness/publish.py
+@@ -285,11 +285,13 @@ def publish(
+     # base" (merge.py:32-33), unattended, mid-flow — whatever base that PR happens to carry.
+     # So a PR opened against a branch THIS run produced silently lands the fix in another
+     # bundle's branch instead of the shared target, and the wave still reports success.
+-    # Refuse here rather than at merge time: the publisher is an interactive step with a
+-    # human present, and a PR never opened against a run-produced branch leaves the merge
+-    # nothing wrong to merge. Same shape as the `Stacks on` refusal above (stderr, return 1,
+-    # nothing pushed). Stack mode — the default — is untouched: chaining onto a predecessor
+-    # is correct there, because nothing is ever merged for you.
++    # Refuse here first: the publisher is an interactive step with a human present, and a
++    # PR never opened against a run-produced branch leaves the merge nothing wrong to
++    # merge. Merge time checks again (`merge._target_base_refusal`, issue #500) for a PR
++    # this guard never saw — opened by an earlier run, or whose base was edited on the host
++    # since — and retargets it to `base` or refuses. Same shape as the `Stacks on` refusal
++    # above (stderr, return 1, nothing pushed). Stack mode — the default — is untouched:
++    # chaining onto a predecessor is correct there, because nothing is ever merged for you.
+     if cfg.wave_mode == "merge":
+         refusal = _merge_base_refusal(cfg, d, repo_spec, pr_base, base)
+         if refusal:
+diff --git a/template/tests/test_merge.py b/template/tests/test_merge.py
+index b78df60..53fd145 100644
+--- a/template/tests/test_merge.py
++++ b/template/tests/test_merge.py
+@@ -118,6 +118,8 @@ class MergeWave(unittest.TestCase):
+                 patch: str | None = "diff\n", repo: str = "org/repo") -> Path:
+         d = self.cfg.bundle(iid)
+         d.mkdir(parents=True)
++        (d / "brief.md").write_text(  # issue #500: the target merge checks
++            "- **Repo + branch target:** org/repo @ main\n", encoding="utf-8")
+         if patch is not None:
+             (d / "patch.diff").write_text(patch, encoding="utf-8")
+         if pr_url is not None:
+@@ -212,7 +214,9 @@ class MergeWave(unittest.TestCase):
+             rc = merge.merge_wave(self.cfg, [b], method="merge")
+         self.assertEqual(rc, 0)
+         gh = [c for c in runs if c[:2] == ["gh", "pr"]]
+-        self.assertEqual(gh[0], ["gh", "pr", "ready", "https://gh/pr/1"])
++        # Issue #500: the PR's base is read against its target base before the ready-mark.
++        self.assertEqual(gh[0][:3], ["gh", "pr", "view"])
++        self.assertEqual(gh[1], ["gh", "pr", "ready", "https://gh/pr/1"])
+         self.assertEqual(gh[-1], ["gh", "pr", "merge", "https://gh/pr/1", "--merge",
+                                   "--match-head-commit", HEAD])
+ 
+@@ -224,7 +228,8 @@ class MergeWave(unittest.TestCase):
+         def fail_ready(cmd, **kw):
+             runs.append(cmd)
+             rc = 1 if cmd[:3] == ["gh", "pr", "ready"] else 0
+-            return SimpleNamespace(returncode=rc, stdout="", stderr="cannot ready")
++            return (_up_to_date(cmd)
++                    or SimpleNamespace(returncode=rc, stdout="", stderr="cannot ready"))
+ 
+         with mock.patch("pdca_harness.merge.subprocess.run", side_effect=fail_ready), \
+                 mock.patch.object(merge.state, "state", return_value=state.COMPLETE), \
+@@ -373,7 +378,9 @@ class MergeWave(unittest.TestCase):
+         # Rollup read AFTER ready; issue #582: read twice — the green is confirmed once.
+         # Issue #531: the head is read before and after the rollup wait; no update for a
+         # PR that is not behind its base.
+-        self.assertEqual(gh, [["gh", "pr", "ready"], ["gh", "pr", "view"],
++        # Issue #500: the base is first read against the target, before the ready-mark.
++        self.assertEqual(gh, [["gh", "pr", "view"], ["gh", "pr", "ready"],
++                              ["gh", "pr", "view"],
+                               ["gh", "pr", "checks"], ["gh", "pr", "checks"],
+                               ["gh", "pr", "view"], ["gh", "pr", "merge"]])
+ 
+@@ -535,7 +542,8 @@ class MergeWave(unittest.TestCase):
+         self.assertEqual(rc, 0)
+         self.assertTrue(self._merged(calls))
+         gh = [c[:3] for c in calls if c[:2] == ["gh", "pr"]]
+-        self.assertEqual(gh, [["gh", "pr", "ready"], ["gh", "pr", "view"]]
++        self.assertEqual(gh, [["gh", "pr", "view"], ["gh", "pr", "ready"],
++                              ["gh", "pr", "view"]]
+                          + [["gh", "pr", "checks"]] * 4
+                          + [["gh", "pr", "view"], ["gh", "pr", "merge"]])  # after read 4
+         self.assertNotIn(["gh", "pr", "ready", "https://gh/pr/1", "--undo"], calls)
+@@ -905,6 +913,8 @@ class MergeAgainstCurrentBase(unittest.TestCase):
+             self._n += 1
+             d = cfg.bundle(f"S{self._n}")
+             d.mkdir(parents=True)
++            (d / "brief.md").write_text(  # issue #500: the target merge checks
++                "- **Repo + branch target:** org/repo @ main\n", encoding="utf-8")
+             (d / "patch.diff").write_text("diff\n", encoding="utf-8")
+             (d / "publish.json").write_text(
+                 json.dumps({"pr_url": url, "repo": "org/repo"}), encoding="utf-8")
+@@ -990,16 +1000,19 @@ class MergeAgainstCurrentBase(unittest.TestCase):
+ 
+     def test_merge_requires_required_call_log_is_unchanged(self) -> None:
+         # (c): "trust the host's protection" — no base read, no update, no rollup read, no
+-        # pin: exactly the call log this setting produced before #531, stale merge included.
++        # pin: exactly the call log this setting produced before #531, stale merge included,
++        # plus the one read of each PR's base against its target base (issue #500).
+         host = _Host(PR_A, PR_B)
+         cfg = _cfg(self.tmp, merge_requires="required")
+         rc, err = self._run(host, [PR_A, PR_B], cfg)
+         self.assertEqual(rc, 0, err)
+         repo = str(merge.publish._checkout_path(cfg, "org/repo"))
+         self.assertEqual(host.calls, [
++            ["gh", "pr", "view", PR_A, "--json", "headRefOid,baseRefName"],
+             ["gh", "pr", "ready", PR_A],
+             ["gh", "pr", "merge", PR_A, "--merge"],
+             ["git", "-C", repo, "fetch", "origin"],
++            ["gh", "pr", "view", PR_B, "--json", "headRefOid,baseRefName"],
+             ["gh", "pr", "ready", PR_B],
+             ["gh", "pr", "merge", PR_B, "--merge"],
+         ])
+@@ -1015,10 +1028,10 @@ class MergeAgainstCurrentBase(unittest.TestCase):
+         self.assertEqual(rc, 0, err)
+         self.assertIn(PR_B, host.updated)
+         b_updated = host.updated[PR_B]
+-        # Read before the update, twice while it had not landed, once when it had, and
+-        # once more after the rollup wait.
++        # Read against its target base (issue #500), before the update, twice while it had
++        # not landed, once when it had, and once more after the rollup wait.
+         self.assertEqual([h for u, h in host.views if u == PR_B],
+-                         [b_reviewed, b_reviewed, b_reviewed, b_updated, b_updated])
++                         [b_reviewed] * 4 + [b_updated, b_updated])
+         update = self._at(host, ["gh", "pr", "update-branch", PR_B])
+         first_read = self._at(host, ["gh", "pr", "checks", PR_B])
+         self.assertTrue(any(c[0] == "sleep" for c in host.calls[update:first_read]))
+@@ -1197,6 +1210,8 @@ class MergeConfirmRequiresCompleteRollup(unittest.TestCase):
+         Returns the exit code, every command shelled, and stderr."""
+         d = cfg.bundle("621")
+         d.mkdir(parents=True)
++        (d / "brief.md").write_text(  # issue #500: the target merge checks
++            "- **Repo + branch target:** org/repo @ main\n", encoding="utf-8")
+         (d / "patch.diff").write_text("diff\n", encoding="utf-8")
+         (d / "publish.json").write_text(json.dumps({"pr_url": self.URL, "repo": "org/repo"}),
+                                         encoding="utf-8")
+diff --git a/template/tests/test_merge_onto_branch.py b/template/tests/test_merge_onto_branch.py
+index 3601050..a5f2866 100644
+--- a/template/tests/test_merge_onto_branch.py
++++ b/template/tests/test_merge_onto_branch.py
+@@ -71,6 +71,8 @@ class OntoBranchRecordInMergeMode(unittest.TestCase):
+     def _bundle(self, iid: str, record: dict) -> Path:
+         d = self.cfg.bundle(iid)
+         d.mkdir(parents=True)
++        (d / "brief.md").write_text(  # issue #500: the target merge checks
++            "- **Repo + branch target:** org/repo @ main\n", encoding="utf-8")
+         (d / "patch.diff").write_text("diff\n", encoding="utf-8")
+         (d / "publish.json").write_text(json.dumps(record), encoding="utf-8")
+         return d
+@@ -165,7 +167,8 @@ class OntoBranchRecordInMergeMode(unittest.TestCase):
+                 rc, calls, out, err = self._wave(self._bundle(iid, record))
+                 self.assertEqual(rc, 0, err)
+                 gh = [c for c in calls if c[:2] == ["gh", "pr"]]
+-                self.assertEqual(gh[0], ["gh", "pr", "ready", PR])
++                self.assertEqual(gh[0][:3], ["gh", "pr", "view"])  # issue #500
++                self.assertEqual(gh[1], ["gh", "pr", "ready", PR])
+                 self.assertEqual(gh[-1], ["gh", "pr", "merge", PR, "--merge",
+                                           "--match-head-commit", HEAD])
+ 
+diff --git a/template/tests/test_merge_retarget.py b/template/tests/test_merge_retarget.py
+new file mode 100644
+index 0000000..9e39d76
+--- /dev/null
++++ b/template/tests/test_merge_retarget.py
+@@ -0,0 +1,207 @@
++"""Merge mode merges a PR only into its bundle's own target base (issue #500).
++
++#411 refuses, at publish, a merge-mode PR opened against a branch this run produced. A PR
++that never passes through that guard again — one an earlier run opened, or one whose base
++was edited on the host since — used to be readied and merged into whatever base it
++carried. `merge._merge_one` now reads the PR's base on the host before the ready-mark and
++compares it with the bundle's resolved target base (`publish._resolve_target`, the one
++parse publish uses):
++
++- equal: no `gh pr edit`, the merge goes on as before;
++- different: `gh pr edit --base <target>`, then a second read; the merge goes on only if
++  the host now reports the target. A failed edit, or a base that did not change, refuses
++  naming both branches — with no `gh pr ready` (nor `--undo`) at all for that PR;
++- a target that is a branch a sibling bundle of the batch published (#411 route 2) is
++  refused before any `gh pr edit`, whatever base the host reports.
++
++Both `merge_requires` values are covered: `"required"` skips the rollup and the behind
++check, not this. A malformed `expected_checks` is still refused first (no `gh pr edit`).
++`gh` and git are stubbed in front of `subprocess.run`, as `test_merge.py` does — offline.
++Run from the template root:
++    PYTHONPATH=src python -m unittest tests.test_merge_retarget
++"""
++
++from __future__ import annotations
++
++import io
++import json
++import shutil
++import tempfile
++import unittest
++from contextlib import redirect_stderr, redirect_stdout
++from pathlib import Path
++from types import SimpleNamespace
++from unittest import mock
++
++from pdca_harness import merge, merged, publish, state
++from pdca_harness.config import Config, LeafConfig
++
++PR = "https://github.com/org/repo/pull/7"
++HEAD = "1" * 40
++BASE_TIP = "b" * 40
++REQUIRES = ("all", "required")
++
++
++def _cfg(root: Path, **overrides: object) -> Config:
++    return Config(
++        root=root, bundle_root=root / "results", process_dir=root / "process",
++        templates_dir=root / "templates", default_branch="main", tracker_system="github",
++        tracker_url="", issue_id_example="#1",
++        builder=LeafConfig(mode="stub"), reviewer=LeafConfig(mode="stub"),
++        base_remote="origin", repo_checkouts={"org/repo": str(root / "repo")},
++        wave_mode="merge", merge_wait_secs=0, **overrides)
++
++
++def _res(code: int = 0, out: str = "", err: str = "") -> SimpleNamespace:
++    return SimpleNamespace(returncode=code, stdout=out, stderr=err)
++
++
++class _Host:
++    """A fake `gh` + git for one PR whose base the host reports as ``base``. ``gh pr edit
++    --base X`` fails when ``edit_fails``; otherwise it moves the base to X unless
++    ``edit_ignored`` (the host accepts the edit but keeps reporting the old base). The
++    rollup is green and the head up to date with its base, so a PR that gets past the
++    base check merges."""
++
++    def __init__(self, base: str, *, edit_fails: bool = False,
++                 edit_ignored: bool = False) -> None:
++        self.base = base
++        self.edit_fails = edit_fails
++        self.edit_ignored = edit_ignored
++        self.calls: list[list[str]] = []
++
++    def __call__(self, cmd: list[str], **kw) -> SimpleNamespace:
++        self.calls.append(list(cmd))
++        if cmd[:3] == ["gh", "pr", "view"]:
++            return _res(out=json.dumps({"headRefOid": HEAD, "baseRefName": self.base}))
++        if cmd[:3] == ["gh", "pr", "edit"]:
++            if self.edit_fails:
++                return _res(1, err="GraphQL: Proposed base branch was not found")
++            if not self.edit_ignored:
++                self.base = cmd[cmd.index("--base") + 1]
++            return _res()
++        if cmd[:3] == ["gh", "pr", "checks"]:
++            return _res(out=json.dumps([{"name": "ci", "bucket": "pass"}]))
++        if cmd[:1] == ["git"] and "rev-parse" in cmd:
++            return _res(out=BASE_TIP + "\n")
++        return _res()                       # ready, merge, fetch, cat-file, merge-base
++
++
++def _index(calls: list[list[str]], prefix: list[str]) -> int:
++    return next((i for i, c in enumerate(calls) if c[:len(prefix)] == prefix), -1)
++
++
++class MergeRetargetsToTheTargetBase(unittest.TestCase):
++    def setUp(self) -> None:
++        self.tmp = Path(tempfile.mkdtemp())
++        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
++
++    def _bundle(self, cfg: Config, iid: str, *, target: str = "main",
++                record: dict | None = None) -> Path:
++        d = cfg.bundle(iid)
++        d.mkdir(parents=True)
++        (d / "brief.md").write_text(f"- **Repo + branch target:** org/repo @ {target}\n",
++                                    encoding="utf-8")
++        (d / "patch.diff").write_text("diff\n", encoding="utf-8")
++        (d / "publish.json").write_text(
++            json.dumps(record or {"pr_url": PR, "repo": "org/repo"}), encoding="utf-8")
++        return d
++
++    def _run(self, cfg: Config, host: _Host, d: Path) -> tuple[int, str]:
++        # `is_merged` is patched for the bundle under test only: the sibling of the route-2
++        # case is never merged by this run either way.
++        with mock.patch("pdca_harness.merge.subprocess.run", side_effect=host), \
++                mock.patch.object(merge, "_sleep"), \
++                mock.patch.object(state, "state", return_value=state.COMPLETE), \
++                mock.patch.object(merged, "is_merged", return_value=False), \
++                redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()) as err:
++            rc = merge.merge_wave(cfg, [d], method="merge")
++        return rc, err.getvalue()
++
++    def _assert_untouched(self, host: _Host) -> None:
++        """No `gh pr ready` (and so no `--undo`) and no `gh pr merge` for the PR."""
++        self.assertEqual(_index(host.calls, ["gh", "pr", "ready"]), -1, host.calls)
++        self.assertEqual(_index(host.calls, ["gh", "pr", "merge"]), -1, host.calls)
++
++    # (a) — a wrong base that the edit fixes is merged, into the target, after the edit.
++    def test_wrong_base_is_retargeted_then_merged(self) -> None:
++        for requires in REQUIRES:
++            with self.subTest(merge_requires=requires):
++                cfg = _cfg(self.tmp / requires, merge_requires=requires)
++                host = _Host("fix/old-parent")
++                rc, err = self._run(cfg, host, self._bundle(cfg, "500"))
++                self.assertEqual(rc, 0, err)
++                edit = _index(host.calls, ["gh", "pr", "edit", PR, "--base", "main"])
++                ready = _index(host.calls, ["gh", "pr", "ready", PR])
++                merge_at = _index(host.calls, ["gh", "pr", "merge", PR])
++                self.assertNotEqual(edit, -1, host.calls)
++                self.assertNotEqual(merge_at, -1, host.calls)
++                self.assertLess(edit, ready)
++                self.assertLess(ready, merge_at)
++                self.assertEqual(host.base, "main")
++                # The base is read again after the edit, before the ready-mark.
++                self.assertTrue(any(c[:3] == ["gh", "pr", "view"]
++                                    for c in host.calls[edit + 1:ready]), host.calls)
++
++    # (b) — an edit that fails, or one the host ignores, stops the run with the PR as found.
++    def test_retarget_that_fails_or_does_not_take_refuses(self) -> None:
++        for how in ("edit_fails", "edit_ignored"):
++            for requires in REQUIRES:
++                with self.subTest(how=how, merge_requires=requires):
++                    cfg = _cfg(self.tmp / how / requires, merge_requires=requires)
++                    host = _Host("fix/old-parent", **{how: True})
++                    rc, err = self._run(cfg, host, self._bundle(cfg, "500"))
++                    self.assertEqual(rc, 1)
++                    self.assertNotEqual(
++                        _index(host.calls, ["gh", "pr", "edit", PR, "--base", "main"]), -1)
++                    self._assert_untouched(host)
++                    self.assertIn("`fix/old-parent`", err)
++                    self.assertIn("`main`", err)
++                    self.assertIn("NOT merged", err)
++
++    # (d) — a PR already on its target base makes no edit.
++    def test_right_base_makes_no_edit(self) -> None:
++        for requires in REQUIRES:
++            with self.subTest(merge_requires=requires):
++                cfg = _cfg(self.tmp / requires, merge_requires=requires)
++                host = _Host("main")
++                rc, err = self._run(cfg, host, self._bundle(cfg, "500"))
++                self.assertEqual(rc, 0, err)
++                self.assertEqual(_index(host.calls, ["gh", "pr", "edit"]), -1, host.calls)
++                self.assertNotEqual(_index(host.calls, ["gh", "pr", "merge", PR]), -1)
++
++    # (e) — a target that a sibling bundle of this batch produced is refused (#411 route 2),
++    # whether or not the host already reports it as the PR's base.
++    def test_batch_produced_target_is_refused_before_any_edit(self) -> None:
++        for host_base in ("feat/sibling", "main"):
++            for requires in REQUIRES:
++                with self.subTest(host_base=host_base, merge_requires=requires):
++                    cfg = _cfg(self.tmp / host_base.replace("/", "_") / requires,
++                               merge_requires=requires)
++                    self._bundle(cfg, "499", record={
++                        "pr_url": "https://github.com/org/repo/pull/6", "repo": "org/repo",
++                        "branch": "feat/sibling"})
++                    d = self._bundle(cfg, "500", target="feat/sibling")
++                    self.assertEqual(publish._resolve_target(d)[1], "feat/sibling")
++                    host = _Host(host_base)
++                    rc, err = self._run(cfg, host, d)
++                    self.assertEqual(rc, 1)
++                    self.assertEqual(_index(host.calls, ["gh", "pr", "edit"]), -1,
++                                     host.calls)
++                    self._assert_untouched(host)
++                    self.assertIn("issue_499", err)
++                    self.assertIn("`feat/sibling`", err)
++
++    # (f) — a malformed expected_checks is refused first: no edit for a wrong-based PR.
++    def test_expected_checks_error_is_refused_before_the_retarget(self) -> None:
++        cfg = _cfg(self.tmp, expected_checks_error="[driver].expected_checks is not a list")
++        host = _Host("fix/old-parent")
++        rc, err = self._run(cfg, host, self._bundle(cfg, "500"))
++        self.assertEqual(rc, 1)
++        self.assertIn("expected_checks is not a list", err)
++        self.assertEqual(_index(host.calls, ["gh", "pr", "edit"]), -1, host.calls)
++        self._assert_untouched(host)
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/template/tests/test_merge_third_remote.py b/template/tests/test_merge_third_remote.py
+index 9ee03c1..965e546 100644
+--- a/template/tests/test_merge_third_remote.py
++++ b/template/tests/test_merge_third_remote.py
+@@ -112,6 +112,8 @@ class ThirdRemoteHead(unittest.TestCase):
+     def _bundle(self, record: dict) -> Path:
+         d = self.cfg.bundle("650")
+         d.mkdir(parents=True, exist_ok=True)
++        (d / "brief.md").write_text(  # issue #500: the target merge checks
++            "- **Repo + branch target:** org/repo @ main\n", encoding="utf-8")
+         (d / "patch.diff").write_text("diff\n", encoding="utf-8")
+         (d / "publish.json").write_text(
+             json.dumps({"pr_url": PR, "repo": "org/repo", **record}), encoding="utf-8")

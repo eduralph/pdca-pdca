@@ -1,0 +1,14 @@
+{
+  "band": "watch",
+  "independent_outcomes": [
+    "The stack-mode live-check tool (preflight/setup/run/judge/teardown + offline test + CONTRIBUTING how-to), whose sign-off run on the sandbox produces the report that closes #625. Iteration 6's settle-rule fix for no-push reads (E1b, 'B after A') is part of this outcome, not a separate one: without it the live run cannot finish and #625 cannot close.",
+    "Arguably separate: the AGENTS.md / CONTRIBUTING.md STOP-discipline exception wording. It is a policy change with its own sign-off item (\u00a76) and its own accept/reject decision. It has no test and closes nothing alone, but it could be reviewed and merged on its own track."
+  ],
+  "proposed_seams": [
+    "Policy wording vs tool: move the AGENTS.md STOP-exception line (and its CONTRIBUTING twin) into its own small doc PR. Reason: the brief already treats it as a separate \u00a76 decision, and rejecting the wording should not force a rebuild of the tool. Against it: the exception names the tool's path and repo guard, so it only makes sense once the tool lands. Ship order would be tool first, then wording, or both together.",
+    "Not recommended: judge + offline test as one PR and the live half (setup/run/teardown) as another. The human already rejected this in Alternatives: judge alone closes nothing, and the live half carries the actual #625 outcome.",
+    "Already outside the bundle, and should stay that way: the expected E1b FAIL (the plain-chain claim in docs/07-crosscutting.md:655-661 does not hold on real GitHub) gets filed as its own bug, not fixed here. Do not let that docs/driver fix creep into this bundle."
+  ],
+  "confidence": "medium",
+  "brief_sha": "e6e2fab06707a7bb"
+}
