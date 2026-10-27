@@ -1,0 +1,11 @@
+{
+  "mode": "new-pr",
+  "branch": "enhancement/500-merge-mode-retarget-wrong-based-pr",
+  "pr_url": "https://github.com/eduralph/pdca-harness/pull/784",
+  "base": "main",
+  "repo": "eduralph/pdca-harness",
+  "by": "Eduard Ralph",
+  "date": "2026-10-23",
+  "id_pending": false,
+  "host_ci_base": "a6af7f36186a10f25f3e32be974f3ef6c577d5cc"
+}
