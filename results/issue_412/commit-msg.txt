@@ -1,0 +1,27 @@
+waves: add a Merges with field and refuse such groups in merge mode
+
+A brief had no way to say "these bundles must not land on the base
+separately". Under wave_mode = "merge" the driver merges each non-final
+wave's PRs one at a time, so one half of a caller-first pair could land
+on the base alone, and nothing warned anyone.
+
+Briefs can now declare `- **Merges with:** <id>[, <id>...]`, parsed like
+`Conflicts with`. Either side's declaration binds both. The field adds
+no wave edge, and stack mode (the default) is unchanged: the human
+merges the stacked PRs and can take a group together.
+
+Merge mode cannot yet merge a group as one unit, so it now builds no
+group member the run can see. `pdca flow <ids>` exits 2 before any
+build and names the group and the two ways out: set wave_mode =
+"stack", or fold the group into one bundle. The --from-csv sweep holds
+the group and its dependents and drives the rest. Bare `pdca waves`
+reports the group as unschedulable, as it already does for an
+unresolved `Depends on`.
+
+This is a fail-safe, not the hold-and-merge-together the issue asks
+for. That, chained pairs, groups declared only by a bundle outside the
+run, and carrying the field to split children are tracked in
+eduralph/pdca-harness#778. The brief template and docs 03/07 describe
+the field and these limits.
+
+Refs #412

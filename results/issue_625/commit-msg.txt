@@ -1,0 +1,28 @@
+tools: add a live check of stack mode on a real GitHub sandbox
+
+Stack mode's handling of merged prerequisites was only ever tested
+against a local bare origin and a stand-in gh. Nobody had seen what
+real GitHub shows for a dependent PR once its prerequisites merge, or
+what `gh pr view` returns for a PR whose branch was deleted after the
+merge, which the driver relies on.
+
+tools/live/stack_mode_live.py runs that scenario on the private
+sandbox repo eduralph/pdca-stack-sandbox with a dedicated token. It
+uses the real driver with fixed patches in place of the model steps,
+opens and merges real PRs on a fresh live-<stamp> base branch, records
+what GitHub reports, and writes a report of seven named checks
+(PASS, FAIL or INCOMPLETE). `judge` reads the saved observations
+offline, so the expectations are tested without the network.
+`preflight`, `setup`, `run` and `teardown` refuse any repo other than
+the sandbox before calling gh, and teardown never touches the
+sandbox's main branch, the repo or its settings.
+
+The issue asked for a throwaway repo. The sandbox token cannot create
+repos, so each run gets its own base branch on a persistent private
+repo instead.
+
+AGENTS.md and CONTRIBUTING.md gain one narrow exception to the
+never-merge rule: the merges and ready-marks this tool makes itself,
+started by a human, on a repo that passes its guard.
+
+Fixes #625

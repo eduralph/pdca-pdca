@@ -1,0 +1,35 @@
+merge: merge a PR only into its bundle's own target base
+
+With wave_mode = "merge", the driver readied and merged each PR into
+whatever base the PR carried on the host. Publish refuses to open a PR
+against a branch the run itself produced (commit
+1e647bedacffec224741026cb4c8165fe2de9d8f, #411), but a PR opened by an
+earlier run, or one whose base was edited on the host later, never went
+through that check again. Such a PR was merged into the wrong branch,
+and the wave still reported success.
+
+Before it readies a PR, merge mode now reads the PR's base on the host
+and compares it with the bundle's target base (the brief's "Repo + branch
+target", resolved by the same parser publish uses). This runs under both
+merge_requires values:
+
+- Same base: nothing changes.
+- Different base: the driver runs `gh pr edit --base <target>`, reads the
+  base again, and goes on only if the host now reports the target.
+- The edit fails or does not take: the run stops. The message names both
+  branches and says to retarget the PR on the host. The PR is left draft
+  or ready, as it was.
+- The target base is a branch another bundle of the batch produced: the
+  run stops before any gh call, with the same advice publish gives.
+- No brief, or no usable target in it: the run stops.
+
+Under merge_requires = "all", each later read of the base (after the
+ready-mark, and after the rollup wait) must still find the target base.
+If the base was edited on the host in between, the run stops and the
+ready-mark is undone, so the PR is never merged into the new base.
+
+The hint text publish gives for #411 is now one shared constant, so the
+two messages stay the same. The docs and the #411 code comment no longer
+say that the harness never retargets a PR.
+
+Fixes #500
