@@ -1,0 +1,2149 @@
+diff --git a/template/src/pdca_harness/flow.py b/template/src/pdca_harness/flow.py
+index 5f464ec..c6e41d2 100644
+--- a/template/src/pdca_harness/flow.py
++++ b/template/src/pdca_harness/flow.py
+@@ -24,7 +24,7 @@ import datetime
+ import re
+ import sys
+ import threading
+-from collections.abc import Collection, Mapping
++from collections.abc import Collection, Mapping, Sequence
+ from pathlib import Path
+ 
+ from . import (act, assemble, autoiterate, brief, drive_claim, driver, gates, integrate, lane,
+@@ -685,7 +685,6 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
+               unpushed: Collection[str] = frozenset(),
+               conflicts: Mapping[str, Collection[str]] | None = None,
+               conflict_held: Mapping[str, Collection[str]] | None = None,
+-              lines: Mapping[tuple[str, str], tuple[str, str | None]] | None = None
+               ) -> list[Path]:
+     """Drop a wave bundle whose declared prerequisite isn't ready to build on top of.
+ 
+@@ -732,20 +731,13 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
+     completes, so its own dependents fall out of later waves the same way (the skip
+     cascades).
+ 
+-    ``lines`` maps a target ``(repo, base)`` to the run's line for it — ``(branch, the tip
+-    the run recorded)`` — once the run has folded (or carried) that target: a dependent of
+-    it is cut from that line, not from the freshly fetched base (#655), and the line does
+-    not follow the base. So an out-of-batch prerequisite judged merged into d's base above
+-    counts only when the line has its work: the commit its PR merge put on the base, or
+-    the PR's head, which the carry may have put on the line (:func:`_line_lacks_merge`).
+-    Else d is held, named on ONE stderr line with the line's tip and the way out — once
+-    the run ends, delete the line on origin, then re-run: a re-run whose carry finds the
+-    line continues it, and holds d again. A target with no line (or no recorded tip: a
+-    dry-run) is judged as before."""
++    An out-of-batch prerequisite judged merged into d's base above (``merged.merged_into``)
++    is ready for every bundle (#655, #463): no bundle is cut from the run's line, which
++    does not follow the base. d is built on the real base, or on a base of its own that
++    starts from the base as fetched when d's wave is driven (:func:`_bundle_bases`), and
++    either has the merge."""
+     asked = set(requested) if requested is not None else set(batch_names)
+     unpushed_set = set(unpushed)
+-    views: dict[str, Path | str] = {}   # repo → its fetched checkout, or why not (#655)
+-    lacks: dict[tuple[str, str, str], tuple[str, bool] | None] = {}  # (prereq, target)
+     runnable: list[Path] = []
+     for d in wave:
+         # A `Conflicts with` partner the fold left out (#629): its work is on no line.
+@@ -764,7 +756,6 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
+         targeted = bool(repo and base)
+         unmet: list[str] = []
+         unmerged: list[str] = []   # COMPLETE, but not merged into d's base: wait (#647)
+-        off_line: list[tuple[str, str, bool]] = []  # merged, not on d's line (#655)
+         carryable: list[str] = []  # … of those, ones a line of d's target would carry
+         for dep in deps:
+             p = cfg.find_bundle(dep)
+@@ -782,18 +773,7 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
+                 # #647 for the plain edge above). With no target of d's own, #186's answer
+                 # and its "not ready" line stand.
+                 if merged.merged_into(cfg, dep, repo, base):
+-                    # … and when d is cut from this run's line, that line must have it too
+-                    # (#655). A close/no-fix prereq merged nothing.
+-                    line = (lines or {}).get((repo, base)) if targeted else None
+-                    if line is None or line[1] is None or not integrate._has_patch(p):
+-                        continue
+-                    key = (p.name, repo, base)
+-                    if key not in lacks:
+-                        lacks[key] = _line_lacks_merge(cfg, dep, repo, line, views)
+-                    lack = lacks[key]
+-                    if lack is not None:
+-                        off_line.append((p.name, *lack))
+-                    continue
++                    continue    # on every base d is built on (#655, #463: see above)
+                 if not targeted:
+                     unmet.append(dep)
+                     continue
+@@ -811,18 +791,6 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
+                   f"into {base} ({repo}), and no line of this run carries them; not built "
+                   f"on a base missing them. To build it, {todo} until their PR merges into "
+                   f"{base}, then re-run.", file=sys.stderr)
+-        if off_line:
+-            branch, tip = (lines or {})[(repo, base)]  # off_line: only when d has one
+-            has = ("does not have" if all(known for _n, _w, known in off_line)
+-                   else "is not known to have")
+-            print(f"flow: {d.name} held — prerequisite(s) "
+-                  f"{', '.join(f'{n} ({why})' for n, why, _k in off_line)}: their PR merged "
+-                  f"into {base} ({repo}), but the line {d.name} would build on, {branch} at "
+-                  f"{(tip or '')[:12]}, {has} that merge; not built on a base missing them. "
+-                  f"To build it, once this run ends delete {branch} on origin, then re-run: "
+-                  f"a re-run that finds the line on origin may continue it and hold "
+-                  f"{d.name} again, and one that does not starts from {base}, which has the "
+-                  f"merge.", file=sys.stderr)
+         if unmet:
+             print(f"flow: {d.name} skipped — prerequisite(s) not ready "
+                   f"({', '.join(unmet)}); not built on a base missing them.", file=sys.stderr)
+@@ -842,74 +810,128 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
+                   f"work; not built on a base missing it. To build it, wait until {p} is "
+                   f"rebuilt on a base that holds {', '.join(conflict_held[p])} and its PR "
+                   f"merges{into}, then re-run.", file=sys.stderr)
+-        if not unmet and not unmerged and not off_line and not partners and not clashed:
++        if not unmet and not unmerged and not partners and not clashed:
+             runnable.append(d)
+     return runnable
+ 
+ 
+-def _line_lacks_merge(cfg: Config, dep: str, repo_spec: str, line: tuple[str, str | None],
+-                      views: dict[str, Path | str]) -> tuple[str, bool] | None:
+-    """Why the run's ``line`` — ``(branch, recorded tip)`` on ``repo_spec`` — lacks the work
+-    of prerequisite ``dep``'s merged PR, or ``None`` when the tip has it (#655). The reason
+-    comes with whether it is KNOWN to lack it (True) or could not be checked (False).
+-
+-    The tip has the work when it has the commit the PR merge put on the base, or the PR's
+-    head (:func:`merged.merge_and_head`). The merge commit — one for a merge, squash or
+-    rebase merge alike — is on a line started from a base that has it; the head is on a
+-    line a fold or the pre-wave carry (:func:`_carry_finished`) put the PR's branch on.
+-    Both are asked of ``repo_spec``'s checkout as the carry reads it
+-    (``integrate.carry_view``: fetched first, read-only, so no integration lock); ``views``
+-    caches that checkout — or why it could not be fetched — per repo for one
+-    :func:`_runnable` call. Fail-closed: a failed fetch, a merge commit that cannot be read
+-    (a head not on the line cannot rule out a squash or rebase merge that is) or a git
+-    failure is a reason, never "on the line". A commit the clone lacks is not on the line
+-    (``integrate._carries``)."""
+-    branch, tip = line
+-    if repo_spec not in views:
+-        try:
+-            views[repo_spec] = integrate.carry_view(cfg, repo_spec, branch)[0]
+-        except integrate.IntegrationError as exc:
+-            views[repo_spec] = f"its checkout could not be fetched to check: {exc}"
+-    view = views[repo_spec]
+-    if isinstance(view, str):
+-        return view, False
+-    found = merged.merge_and_head(cfg, dep)
+-    oid, head = found or ("", "")
+-    try:
+-        if any(c and integrate._carries(view, c, f"{dep}'s PR {what} {c[:12]}", branch,
+-                                        of=str(tip))
+-               for c, what in ((oid, "merge commit"), (head, "head"))):
+-            return None
+-    except integrate.IntegrationError as exc:
+-        return str(exc), False
+-    if not oid:
+-        return "its PR's merge commit could not be read", False
+-    return f"merge commit {oid[:12]}", True
+-
+-
+-def _point_at_integration(integ: dict[tuple[str, str], str], runnable: list[Path],
+-                          tips: Mapping[tuple[str, str], str | None] | None = None) -> None:
++def _point_at_integration(integ: Mapping[str | tuple[str, str], str], runnable: list[Path],
++                          tips: Mapping[str | tuple[str, str], str | None] | None = None
++                          ) -> None:
+     """Reconcile each runnable bundle's stack base with THIS run's integration state (#187).
+ 
+-    ``integ`` maps each integrated target to its run-scoped integration branch. A bundle is
+-    pointed at the branch for **its own** ``(repo, base)`` target only — never a sibling
+-    target's, which is absent on that repo or carries unrelated patches. A bundle whose target
+-    wasn't integrated this run has any **stale** stack base (left by a prior/resumed run)
+-    cleared, so it builds off its own target base rather than an old integration branch.
+-
+-    ``tips`` maps a target to the line commit the run's last fold pushed (#593; ``None`` in
+-    a dry-run): the commit the bundle is built on. It is recorded beside the branch
+-    (``stack-base-tip``), so publish cuts the PR branch from it even after later waves have
+-    grown the line (a held bundle published late)."""
++    ``integ`` maps what a bundle is built on to its branch, keyed by the bundle's name (the
++    flow's use since #463: a base of the bundle's own, :func:`_bundle_bases`) or by a
++    target ``(repo, base)``, for a caller that builds every bundle of a target on one
++    branch. A bundle is pointed at the branch for its name, else for **its own**
++    ``(repo, base)`` target only — never a sibling target's, which is absent on that repo
++    or carries unrelated patches. A bundle with neither has any **stale** stack base (left
++    by a prior/resumed run) cleared, so it builds off its own target base rather than an
++    old integration branch.
++
++    ``tips`` maps the same keys to the commit the bundle is built on (#593; ``None`` in a
++    dry-run): the tip pushed when that branch was built. It is recorded beside the branch
++    (``stack-base-tip``), so publish cuts the PR branch from it even if the branch moves
++    later (a held bundle published late)."""
+     for d in runnable:
+-        target = publish._resolve_target(d)[:2]
+-        branch = integ.get(target)
++        key = d.name if d.name in integ else publish._resolve_target(d)[:2]
++        branch = integ.get(key)
+         if branch:
+-            publish.write_stack_base(d, branch, (tips or {}).get(target))
++            publish.write_stack_base(d, branch, (tips or {}).get(key))
+         else:
+             publish.clear_stack_base(d)
+ 
+ 
++def _closure(cfg: Config, d: Path, *, waves_of: Mapping[str, int],
++             paths: Mapping[str, Path], conflicts: Mapping[str, Collection[str]]) -> set[str]:
++    """The names of the bundles ``d`` is ordered after by a declared edge, transitively: the
++    bundles whose work its base carries (#463). ``waves_of`` maps each bundle of the run's
++    schedule to its wave; ``paths`` maps each bundle of the run — those, and the finished
++    ids the pre-wave carry carried (:func:`_carry_finished`, #646), which come before every
++    wave — to its directory. From ``d``, and from each bundle reached, an edge is followed
++    when it is
++
++    * a plain ``Depends on`` or a legacy ``Stacks on``, to a bundle of ``paths``;
++    * a ``Depends on (merged)``, to a bundle of the schedule. One outside it is ready only
++      once merged into the dependent's base (:func:`_runnable`, #186), so its work is on
++      the real base; one inside it is ordered before the dependent and merged nowhere;
++    * a ``Conflicts with`` (``conflicts``: either side declared it, among the run's live
++      bundles), to a bundle of the schedule in an earlier wave than the one it is
++      followed from.
++
++    Following each bundle reached matters: a member's branch was cut from a base holding
++    ITS closure, so a base without that work would hold commits that are no member's own
++    (``integrate.build_bundle_base`` refuses one). Which of them have work to carry is
++    :func:`_bundle_bases`' to judge."""
++    found: set[str] = set()
++    todo = [d]
++    while todo:
++        m = todo.pop()
++        bp = m / "brief.md"
++        edges: list[str] = []
++        if bp.exists():
++            edges += [n for n in (cfg.bundle(x).name
++                                  for x in brief.depends_on(bp) + brief.stacks_on(bp))
++                      if n in paths]
++            edges += [n for n in (cfg.bundle(x).name for x in brief.depends_on_merged(bp))
++                      if n in waves_of]
++        if m.name in waves_of:
++            edges += [n for n in conflicts.get(m.name, ())
++                      if n in waves_of and waves_of[n] < waves_of[m.name]]
++        for n in edges:
++            if n != d.name and n not in found:
++                found.add(n)
++                todo.append(paths[n])
++    return found
++
++
++def _bundle_bases(cfg: Config, runnable: list[Path], *, wave_list: list[list[Path]],
++                  bundles: list[Path], carried: Sequence[Path], accepted: Sequence[Path],
++                  held: Collection[str], heads: Mapping[str, str],
++                  batch: list[str]) -> tuple[dict[str, str], dict[str, str | None]]:
++    """Build the base each bundle of ``runnable`` is built on (#463): ``(bases, tips)``,
++    the branch and the commit it was pushed at, by bundle name, for each one whose
++    closure (:func:`_closure`) has work to carry on its own target. Its members are the
++    bundles of the closure that are carried before wave 0 (``carried``, first, in the order
++    asked for) or accepted this run (``accepted``, in wave then name order), that are not in
++    ``held`` and that the fold carries (:func:`integrate._fold_candidates`: a patch and a
++    target) on the bundle's own ``(repo, base)``. A held one already holds its dependents
++    (:func:`_runnable`); a patchless one, or one on another target, adds nothing.
++
++    The base is :func:`integrate.build_bundle_base` of those members, started fresh from
++    the base as fetched. ``heads`` (name → the head a fold of this run, or the carry, put on
++    the run's line) is passed as its ``carried``, so a member's branch rewritten since is
++    refused (#633), and as its ``excluded``, so a commit no member owns is named by the
++    bundle of the run that has it. A bundle with no members, or no usable target, gets
++    nothing: it is built on the real base. Every base of the wave is built before any is
++    returned; an :class:`integrate.IntegrationError` names the bundle and its members and
++    propagates, so the caller stops the run before the wave builds and records nothing."""
++    waves_of = {b.name: i for i, w in enumerate(wave_list) for b in w}
++    conflicts = waves.conflict_map(cfg, bundles)
++    paths = {b.name: b for w in wave_list for b in w} | {b.name: b for b in carried}
++    order = list({b.name: b for b in [*carried, *accepted] if b.name not in held}.values())
++    cands = {b.name: (b, (repo, base))
++             for b, repo, base, _slug, _ref in integrate._fold_candidates(order)}
++    bases: dict[str, str] = {}
++    tips: dict[str, str | None] = {}
++    for d in runnable:
++        target = publish._resolve_target(d)[:2]
++        if not all(target):
++            continue
++        closure = _closure(cfg, d, waves_of=waves_of, paths=paths, conflicts=conflicts)
++        members = [b for n, (b, t) in cands.items() if n in closure and t == target]
++        if not members:
++            continue
++        try:
++            bases[d.name], tips[d.name] = integrate.build_bundle_base(
++                cfg, d, members, batch=batch, carried=heads, excluded=heads)
++        except integrate.IntegrationError as exc:
++            raise integrate.IntegrationError(
++                f"could not build {d.name}'s base from {', '.join(b.name for b in members)}: "
++                f"{exc}", cause=exc.cause) from exc
++    return bases, tips
++
++
+ def _fold_lines(cfg: Config, bundles: list[Path], *, dry: bool,
+                 folded_this_run: Mapping[tuple[str, str], str | None], batch: list[str],
+                 skipped: dict[str, str] | None = None,
+@@ -930,10 +952,12 @@ def _fold_lines(cfg: Config, bundles: list[Path], *, dry: bool,
+     ``carried`` is the run's record of the head each bundle's branch had when a fold of
+     this run put it on the line (:func:`integrate.fold`, #633): the in-run folds pass the
+     run's one mapping, so a carried branch rewritten mid-run stops the fold; the carry
+-    passes none. ``held_out`` / ``wave`` (#674): the in-run folds pass the wave just
+-    published, so a bundle of it whose branch conflicts with ones of its own wave merged
+-    before it (and not with the line as the wave found it) is left out and recorded in
+-    ``held_out``, not stopped on; the carry passes none. ``pr_heads`` / ``holds`` (#672):
++    passes an empty one of its own, which checks nothing and gets back the heads the line
++    took from the finished ids, for their dependents' bases (#463). ``held_out`` / ``wave``
++    (#674): the in-run folds pass the wave just published, so a bundle of it whose branch
++    conflicts with ones of its own wave merged before it (and not with the line as the
++    wave found it) is left out and recorded in ``held_out``, not stopped on; the carry
++    passes none. ``pr_heads`` / ``holds`` (#672):
+     the carry passes each finished id's PR head, so a skipped id's work counts from it
+     too, and gets back, for each id left out for holding a skipped id's work, that id;
+     the in-run folds pass neither. ``clashes`` (#694): the carry gets back what each id
+@@ -1089,8 +1113,8 @@ def _cascade_not_clean(cfg: Config, ids: list[Path],
+ 
+ 
+ def _carry_finished(cfg: Config, bundles: list[Path], finished: list[Path], *,
+-                    batch: list[str], integ: dict[tuple[str, str], str],
+-                    folded_tips: dict[tuple[str, str], str | None], held: set[str]) -> None:
++                    batch: list[str], folded_tips: dict[tuple[str, str], str | None],
++                    held: set[str], carried: dict[str, str | None] | None = None) -> None:
+     """Before wave 0, put a re-issued run's finished named ids on its line (#646).
+ 
+     ``finished`` (:func:`_finished_named`) are ids the run was asked for that an earlier run
+@@ -1101,8 +1125,11 @@ def _carry_finished(cfg: Config, bundles: list[Path], finished: list[Path], *,
+     (:func:`integrate.foreign_commit`), merged without error, re-gate not red — it is folded
+     by ONE fold per target (:func:`_fold_lines`), which continues origin's line from the
+     tip checked here (no force; refused if it moved) or starts it when absent. The target
+-    is then seeded into ``integ`` / ``folded_tips``: wave 0 is pointed at the line and every
+-    later fold continues it. Any other finished id goes into ``held``, so its plain
++    is then seeded into ``folded_tips``, so every later fold continues the line, and each id
++    carried goes into ``carried`` (in the order asked for) with the head the line took from
++    its branch — None for a gone branch the fold judged by its merge: it is a member of the
++    base of every bundle ordered after it (:func:`_bundle_bases`, #463), which refuses that
++    branch once rewritten (#633). Any other finished id goes into ``held``, so its plain
+     ``Depends on`` dependents wait (:func:`_runnable`), named with its reason on ONE stderr
+     line; the run goes on. One judged not clean BEFORE the fold, from its PR state and head,
+     makes every finished id built on it not clean too — its plain ``Depends on`` names it,
+@@ -1178,17 +1205,18 @@ def _carry_finished(cfg: Config, bundles: list[Path], finished: list[Path], *,
+             holds: dict[str, str] = {}      # left out for a skipped id's work → that id
+             # skipped for a textual conflict → (kind, partners, files) (#694)
+             clashes: dict[str, tuple[str, dict[str, list[str]], list[str]]] = {}
++            took: dict[str, str] = {}       # the head the pushed line took from each (#463)
+             try:
+                 folded, tips, red = _fold_lines(cfg, clean, dry=False, batch=batch,
+                                                 folded_this_run={tgt: tip} if tip else {},
+-                                                skipped=skipped, pr_heads=heads, holds=holds,
+-                                                clashes=clashes)
++                                                skipped=skipped, carried=took, pr_heads=heads,
++                                                holds=holds, clashes=clashes)
+             except integrate.IntegrationError as exc:
+                 folded, tips, red = {}, {}, None
+                 skipped.update({d.name: str(exc) for d in clean})
+                 holds.clear()
+                 clashes.clear()
+-            carried = [d.name for d in clean if d.name not in skipped]
++            done = [d.name for d in clean if d.name not in skipped]
+             why.update({name: (msg, "open") for name, msg in skipped.items()})
+             # One whose branch conflicts with the line (#694): named with what it conflicts
+             # with — finished ids of the batch the line carries, or ones it does not, the
+@@ -1203,12 +1231,15 @@ def _carry_finished(cfg: Config, bundles: list[Path], finished: list[Path], *,
+             causes.update(holds)
+             if red:
+                 why.update({name: (f"the re-gate of {line} carrying it is red", "open")
+-                            for name in carried})
++                            for name in done})
+             elif tgt in folded:
+-                integ[tgt], folded_tips[tgt] = folded[tgt][0], tips[tgt]
+-                print(f"flow: carried {', '.join(carried)} (finished in an earlier run) onto "
+-                      f"{line} at {tips[tgt]} before wave 0 — this run's {tgt[0]} @ {tgt[1]} "
+-                      f"bundles build on it.", file=sys.stderr)
++                folded_tips[tgt] = tips[tgt]
++                if carried is not None:
++                    carried.update({n: took.get(n) for n in done})
++                print(f"flow: carried {', '.join(done)} (finished in an earlier run) onto "
++                      f"{line} at {tips[tgt]} before wave 0 — each {tgt[0]} @ {tgt[1]} bundle "
++                      f"of this run ordered after them is built on a base that holds them.",
++                      file=sys.stderr)
+         for d in ids:
+             if d.name in why:
+                 held.add(d.name)
+@@ -2403,7 +2434,6 @@ def _drive_and_act(
+     # `_runnable`, as `held_unpushed`'s are.
+     held_conflict: dict[str, tuple[list[str], list[str]]] = {}
+     accepted: list[Path] = []        # cumulative COMPLETE bundles, wave then name order
+-    integ: dict[tuple[str, str], str] = {}  # per-target (repo, base) → integration branch (#187)
+     # Per-target (repo, base) → the tip this run's last fold pushed (None in a dry-run), so
+     # each later fold continues THIS run's line, append-only (`integrate.fold`, #593).
+     folded_tips: dict[tuple[str, str], str | None] = {}
+@@ -2466,13 +2496,19 @@ def _drive_and_act(
+             # `skipped` map, which is what the caller reports.
+             return {}
+     # A re-issued run's finished named ids (#646): carried onto the line before wave 0 when
+-    # clean, else named in `held_finished`, which holds only their plain `Depends on`
+-    # dependents. Only where a fold would run: stack mode, publishing on.
++    # clean — each then a member of the base of every bundle ordered after it (#463), with
++    # the head the line took from it in `carry_heads` — else named in `held_finished`, which
++    # holds only their plain `Depends on` dependents. Only where a fold would run: stack
++    # mode, publishing on.
+     held_finished: set[str] = set()
++    carry_took: dict[str, str | None] = {}
++    carried_finished: list[Path] = []
+     if do_publish and cfg.wave_mode != "merge":
+-        _carry_finished(cfg, bundles, _finished_named(cfg, batch, batch_names),
+-                        batch=run_batch, integ=integ, folded_tips=folded_tips,
+-                        held=held_finished)
++        finished = _finished_named(cfg, batch, batch_names)
++        _carry_finished(cfg, bundles, finished, batch=run_batch, folded_tips=folded_tips,
++                        held=held_finished, carried=carry_took)
++        carried_finished = [d for d in finished if d.name in carry_took]
++    carry_heads = {n: h for n, h in carry_took.items() if h}
+     # `wave_list` is iterated by a LIST iterator on purpose (#469): adoption splices the
+     # recomputed remainder into `wave_list[k+1:]` after wave k drives, and the iterator —
+     # which simply indexes forward — picks the new tail up. So "how many waves are left" is
+@@ -2484,6 +2520,10 @@ def _drive_and_act(
+     # and holds nothing. The ids asked for are normalised as `_finished_named` does.
+     hold_unmerged = (do_publish and cfg.wave_mode != "merge"
+                      and cfg.publisher.mode != "stub")
++    # Where a bundle can get a base of its own (#463): where the line folds for real — stack
++    # mode, publishing on, not a dry-run (which pushes nothing). Elsewhere every bundle is
++    # built on its real base, as it was before #463 too.
++    build_bases = hold_unmerged
+     requested = set(named) | {cfg.bundle(str(i).removeprefix("issue_")).name
+                               for i in (batch or ())}
+     # The loop stopped on a fold error or a red re-gate: that run already ends non-zero, and
+@@ -2499,10 +2539,7 @@ def _drive_and_act(
+                              unpushed=held_unpushed,
+                              conflicts=(waves.conflict_map(cfg, bundles)
+                                         if held_unpushed or held_conflict else None),
+-                             conflict_held={n: ps for n, (ps, _paths) in held_conflict.items()},
+-                             # The line each target's bundles are cut from, if any (#655).
+-                             lines={tgt: (branch, folded_tips.get(tgt))
+-                                    for tgt, branch in integ.items()})
++                             conflict_held={n: ps for n, (ps, _paths) in held_conflict.items()})
+         if not runnable:
+             continue
+         # The pool, read off the schedule as it stands NOW — so a splice below has already
+@@ -2541,12 +2578,30 @@ def _drive_and_act(
+                 raise PreflightError(
+                     f"lane preflight failed for a lanes={cfg.lanes} batch — not fanning out "
+                     "(fix the per-lane resources above, then re-run)")
+-        # Reconcile each runnable bundle's stack base with this run's integration state:
+-        # point it at its OWN (repo, base) target's branch, and the line commit it builds on
+-        # (#593), or clear a stale marker a prior/resumed run left so it builds off its own
+-        # base (#187). Unconditional — the stale-clear must run even before any wave has
+-        # folded (integ still empty).
+-        _point_at_integration(integ, runnable, folded_tips)
++        # What each runnable bundle is built on (#463): a base of its own holding exactly the
++        # accepted work of the bundles it is ordered after by a declared edge
++        # (`_bundle_bases`), or the real base when none of them has work to carry — never
++        # the run's line, which holds every bundle the run accepted or carried. A base that
++        # cannot be built stops the run before the wave builds, as a fold of the line does,
++        # and no bundle of the wave is pointed at anything.
++        bases: dict[str, str] = {}
++        base_tips: dict[str, str | None] = {}
++        if build_bases:
++            try:
++                bases, base_tips = _bundle_bases(
++                    cfg, runnable, wave_list=wave_list, bundles=bundles,
++                    carried=carried_finished, accepted=accepted,
++                    held=held_unpushed | held_finished | set(held_conflict),
++                    heads={**carry_heads, **carried_heads}, batch=run_batch)
++            except integrate.IntegrationError as exc:
++                print(f"flow: wave {k} — {exc}; STOPPING — wave {k} and later waves not run.",
++                      file=sys.stderr)
++                line_stopped = True
++                break
++        # Point each bundle at its base and the commit it is built on (#593), or clear a
++        # stale marker a prior/resumed run left so it builds off its own base (#187).
++        # Unconditional — the stale-clear must run for every bundle given no base.
++        _point_at_integration(bases, runnable, base_tips)
+         # This wave's allowance is its own cap AND what is left of the run's pool, whichever
+         # is smaller — the second term is the admission rule again, applied to the wave that
+         # was let in (#469); with the pool covering the live schedule (#473) it can only bite
+@@ -2602,11 +2657,12 @@ def _drive_and_act(
+                           f"{d.name.removeprefix('issue_')}`.", file=sys.stderr)
+                 published.add(d.name)
+         accepted += complete
+-        # Carry this wave's accepted work to the NEXT wave's base (skipped on the final
+-        # wave, and by --no-publish). Default "stack": fold onto a run-scoped integration
+-        # branch the next wave builds on (fork-safe, no merge). Opt-in "merge": gh-merge the
+-        # wave's PRs so the next wave builds on the genuinely-merged base. Dry-run (stubbed
+-        # publisher: offline rehearse / CI) prints the plan and changes nothing.
++        # Carry this wave's accepted work forward (skipped on the final wave, and by
++        # --no-publish). Default "stack": fold onto the run's integration line (fork-safe,
++        # no merge), the check of the combined work; a later bundle's own base is built from
++        # the published branches it declared (#463). Opt-in "merge": gh-merge the wave's PRs
++        # so the next wave builds on the genuinely-merged base. Dry-run (stubbed publisher:
++        # offline rehearse / CI) prints the plan and changes nothing.
+         if k < len(wave_list) - 1 and do_publish:
+             dry = cfg.publisher.mode == "stub"
+             if cfg.wave_mode == "merge":
+@@ -2655,9 +2711,6 @@ def _drive_and_act(
+                 # The next fold continues from exactly each pushed tip and refuses a line
+                 # another run moved (#593). A dry-run pushes nothing (None).
+                 folded_tips.update(tips)
+-                if folded and not dry:
+-                    # Update, not replace: a target only the carry folded keeps its line.
+-                    integ.update({tgt: branch for tgt, (branch, _wt) in folded.items()})
+                 # Optional re-gate (#wave-model): EACH folded combination is validated over
+                 # its integration tip before the next wave builds on it; any red ⇒ STOP.
+                 if red:
+diff --git a/template/src/pdca_harness/integrate.py b/template/src/pdca_harness/integrate.py
+index 26dbb05..785758d 100644
+--- a/template/src/pdca_harness/integrate.py
++++ b/template/src/pdca_harness/integrate.py
+@@ -446,7 +446,8 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
+     more. The tip read for that check is the commit merged: the branch is not read again,
+     so a fetch for another target in the same checkout, or a push from it, cannot swap in
+     a commit that was never checked. A gone branch is left to :func:`_gone_branch`.
+-    ``None`` (the pre-wave carry, a direct caller) checks and records nothing; a dry-run
++    An empty mapping (the flow's pre-wave carry, #463) checks nothing and records what the
++    fold put on the line. ``None`` (a direct caller) checks and records nothing; a dry-run
+     does neither.
+ 
+     ``held_out`` (#674, the flow's in-run folds) with ``wave``, the names of the bundles of
+diff --git a/template/src/pdca_harness/merged.py b/template/src/pdca_harness/merged.py
+index a48f0fc..c09acd3 100644
+--- a/template/src/pdca_harness/merged.py
++++ b/template/src/pdca_harness/merged.py
+@@ -21,9 +21,6 @@ open, merged or closed, and at which head commit?
+ :func:`merged_into` answers the flow's readiness question for a prerequisite no line of the
+ run carries (#647): is it merged into the DEPENDENT's target base — that repo and branch,
+ not just some branch?
+-:func:`merge_and_head` answers the follow-up when the dependent is cut from the run's line
+-for that base (#655): which commit did the merge put on the base, and which head did it
+-merge — so the flow can ask whether the line has either?
+ """
+ 
+ from __future__ import annotations
+@@ -146,29 +143,6 @@ def merged_head(cfg: Config, dep_id: str) -> str | None:
+     return head if isinstance(head, str) and head else None
+ 
+ 
+-def merge_and_head(cfg: Config, dep_id: str) -> tuple[str, str] | None:
+-    """``(merge commit, head)`` of bundle ``dep_id``'s recorded PR once it has merged, or
+-    ``None`` (#655): the commits a line can hold that show the merged work is on it.
+-
+-    Asks ``gh pr view <pr_url> --json state,headRefOid,mergeCommit`` for the PR in
+-    ``publish.json``, and answers only when ``state`` is ``MERGED``. The merge commit
+-    (``mergeCommit.oid``) is the commit the merge put on the base, for a merge, squash or
+-    rebase merge alike. The head (``headRefOid``, as :func:`merged_head` reads it) is on
+-    the base only after a merge with a merge commit, but it is on any line a fold carried
+-    the PR's branch onto. Either is "" when ``gh`` reports none. Fail-closed and silent, as
+-    :func:`pr_state` is: no recorded PR, a PR not merged, a ``gh`` failure (``gh`` missing
+-    included) or output it cannot parse all return ``None``; ``flow._runnable`` names the
+-    bundle and the reason."""
+-    rec = _publish_record(cfg.find_bundle(dep_id))
+-    pr_url = rec.get("pr_url") if isinstance(rec, dict) else None
+-    info = _pr_view(str(pr_url), "state,headRefOid,mergeCommit") if pr_url else None
+-    if info is None or info.get("state") != "MERGED":
+-        return None
+-    mc, head = info.get("mergeCommit"), info.get("headRefOid")
+-    oid = mc.get("oid") if isinstance(mc, dict) else None
+-    return (oid if isinstance(oid, str) else "", head if isinstance(head, str) else "")
+-
+-
+ def pr_state(pr_url: str) -> tuple[str, str] | None:
+     """``(state, head)`` of the PR at ``pr_url`` (``gh pr view --json state,headRefOid``):
+     ``OPEN`` / ``CLOSED`` / ``MERGED`` and its head commit ("" when none is reported), or
+@@ -185,7 +159,8 @@ def pr_state(pr_url: str) -> tuple[str, str] | None:
+ def _pr_view(pr_url: str, fields: str) -> dict | None:
+     """``gh pr view <pr_url> --json <fields>`` read as a JSON object, or ``None`` when it
+     cannot be: ``gh`` missing (``OSError``), ``gh`` failing, or output that is not a JSON
+-    object. Silent — :func:`pr_state` and :func:`merge_and_head` share it (#655)."""
++    object. Silent — :func:`pr_state` reads it, and its caller names the bundle and the
++    reason."""
+     try:
+         r = subprocess.run(["gh", "pr", "view", pr_url, "--json", fields],
+                            capture_output=True, text=True)
+diff --git a/template/tests/test_flow_conflict_partner_hold.py b/template/tests/test_flow_conflict_partner_hold.py
+index ac016f9..2e04e44 100644
+--- a/template/tests/test_flow_conflict_partner_hold.py
++++ b/template/tests/test_flow_conflict_partner_hold.py
+@@ -148,9 +148,12 @@ class ConflictPartnerHold(unittest.TestCase):
+             stack.enter_context(mock.patch.object(flow, "_publish_bundle", self._publish))
+             if stub_fold:
+                 # A pushed branch would make the REAL fold look for a git checkout, and there
+-                # is none in the temp dir: the fold folds nothing here, and stops nothing.
++                # is none in the temp dir: the fold folds nothing here, and stops nothing —
++                # the line's, nor a bundle's own base (#463; ``create=True``: absent before).
+                 stack.enter_context(mock.patch.object(flow, "_fold_lines",
+                                                       lambda *a, **k: ({}, {}, None)))
++                stack.enter_context(mock.patch.object(flow, "_bundle_bases",
++                                                      lambda *a, **k: ({}, {}), create=True))
+             stack.enter_context(mock.patch.object(publish, "draft_texts",
+                                                   lambda *a, **k: True))
+             stack.enter_context(mock.patch.object(leaves, "do_plan_batch",
+diff --git a/template/tests/test_flow_merged_prereq_on_line.py b/template/tests/test_flow_merged_prereq_on_line.py
+index e9cd059..5a99383 100644
+--- a/template/tests/test_flow_merged_prereq_on_line.py
++++ b/template/tests/test_flow_merged_prereq_on_line.py
+@@ -1,15 +1,14 @@
+-"""A prerequisite merged into the base counts only when the run's line has its work (#655).
++"""A prerequisite merged into the base is on the base its dependent is built on (#655, #463).
+ 
+ In stack mode a dependent of an out-of-batch prerequisite ``P`` — a ``Depends on (merged):
+ P``, or a plain ``Depends on: P`` the run was not asked for (#647) — waits until ``P``'s PR
+-merges into the dependent's own target base. Once the run has a line for that target, the
+-dependent is cut from the line, not from the base, and the line does not follow the base.
+-So a merge after the line was started may not be on it, and the dependent must be held,
+-named, with a way out that works: a re-run whose carry (#646) finds the line on origin
+-continues it and holds the dependent again, so the line is deleted on origin first. The
+-line has ``P``'s work when it has the commit the merge put on the base (``mergeCommit``,
+-which a squash merge has and ``headRefOid`` does not) or ``P``'s PR head (which the carry
+-puts on a line it carries ``P`` onto).
++merges into the dependent's own target base. The run's line does not follow the base, so a
++merge after the line was started may not be on it. Before #463 the dependent was cut from
++that line, so it was held until the line had ``P``'s work (#655). Since #463 no bundle is
++built on the line: the dependent is built on the real base, or on a base of its own that
++starts from the base as its wave finds it, and either has the merge. These cases pin that
++the dependent is built, on a base with the merge, where it used to be held; and that a base
++of its own that cannot be fetched stops the run before the dependent is built on it.
+ 
+ These cases drive ``flow._drive_and_act`` against real git: the ``StackFoldGit`` fixture of
+ tests/test_integrate_stack_bases.py (a bare ``origin``, a primary checkout and a scratch
+@@ -60,6 +59,8 @@ class MergedPrereqOnTheLine(unittest.TestCase):
+         self.merge_oid: dict[str, str] = {}   # id → the commit its PR merge put on main
+         self.gh_fail_merge_commit = False     # `gh … --json …mergeCommit` exits 1
+         self.seen: dict[str, tuple[str, str]] = {}   # bundle → (stack base, recorded tip)
++        # bundle → (origin's tip of its stack base, origin's main) when its wave was driven
++        self.base_at: dict[str, tuple[str | None, str]] = {}
+         self.after_first_fold = None          # run once, after the run's first fold
+         self._real_run = subprocess.run
+ 
+@@ -117,7 +118,10 @@ class MergedPrereqOnTheLine(unittest.TestCase):
+     def _drive_wave(self, cfg, wave: list[Path], **_kw) -> int:
+         """Build and accept each bundle, recording what it was built on."""
+         for d in wave:
+-            self.seen[d.name] = (publish.read_stack_base(d), publish.read_stack_base_tip(d))
++            base = publish.read_stack_base(d)
++            self.seen[d.name] = (base, publish.read_stack_base_tip(d))
++            self.base_at[d.name] = (self.fx._tip(base) if base and self.fx._has(base) else None,
++                                    self.fx._tip("main"))
+             (d / "patch.diff").write_text(sb._new_file_patch(f"{d.name}.txt", d.name),
+                                           encoding="utf-8")
+             sb._accept(d)
+@@ -128,8 +132,9 @@ class MergedPrereqOnTheLine(unittest.TestCase):
+         sb._git(self.fx.primary, "remote", "set-url", "origin", str(url))
+ 
+     def _publish_bundle(self, cfg, d: Path, **_kw) -> bool:
+-        """What publish does: cut the PR branch from the recorded line tip (else the base),
+-        push it, record it. Origin is reachable again for it: only the gate's fetch fails."""
++        """What publish does: cut the PR branch from the recorded stack base tip (else the
++        base), push it, record it. Origin is reachable again for it: only the gate's fetch
++        fails."""
+         self._origin(self.fx.origin)
+         tip, line = publish.read_stack_base_tip(d), publish.read_stack_base(d)
+         self.fx._publish(d.name.removeprefix("issue_"), {f"{d.name}.txt": d.name + "\n"},
+@@ -139,7 +144,9 @@ class MergedPrereqOnTheLine(unittest.TestCase):
+     def _run(self, drive: list[Path], batch: list[str]) -> None:
+         """One run: drive ``drive`` with the run asked for ``batch``."""
+         self.line = integrate.integration_branch(self.cfg, "main", batch)
++        self.batch = list(batch)
+         self.seen = {}
++        self.base_at = {}
+         real_fold = integrate.fold
+ 
+         def fold(*a, **kw):
+@@ -171,51 +178,61 @@ class MergedPrereqOnTheLine(unittest.TestCase):
+ 
+     # -- assertions ------------------------------------------------------------------------
+ 
+-    def _held(self, *parts: str) -> str:
+-        """D was never built and is left PLANNED, and ONE stderr line names issue_D,
+-        issue_P, main, the line and its short tip, and the way out. Returns that line."""
+-        self.assertNotIn("issue_D", self.seen, self.err)
+-        self.assertEqual(self.results["D"], state.PLANNED)
+-        lines = [x for x in self.err.splitlines() if "issue_D" in x and "issue_P" in x]
+-        self.assertEqual(len(lines), 1, self.err)
+-        line = lines[0]
+-        tip = self.fx._tip(self.line)
+-        for part in ("merged into main", self.line, tip[:12],
+-                     f"delete {self.line} on origin, then re-run", *parts):
+-            self.assertIn(part, line)
+-        # The line may have been continued by an earlier run's carry (#646), not cut.
+-        self.assertNotIn("this run cut", line)
+-        self.assertNotIn("was cut", line)
+-        return line
+-
+-    def _built_on_line(self) -> str:
+-        """D was built, on the run's line; returns the tip it was built on."""
+-        self.assertIn("issue_D", self.seen, self.err)
+-        base, tip = self.seen["issue_D"]
+-        self.assertEqual(base, self.line, self.err)
+-        self.assertTrue(tip)
+-        self.assertEqual(self.results["D"], state.COMPLETE)
++    def _built_on(self, iid: str, *closure: str) -> str:
++        """``iid`` was built on its recorded base and is COMPLETE; returns the commit it was
++        built on: its recorded tip, which is origin's tip of that base when its wave was
++        driven. That commit holds the tip of each bundle of ``closure`` (the ones it is
++        ordered after, #463) and no commit of any other bundle of the run's branch; beyond
++        origin's main as it was then and those tips it holds only the merge commits made
++        building it."""
++        self.assertIn(f"issue_{iid}", self.seen, self.err)
++        base, tip = self.seen[f"issue_{iid}"]
++        at, main = self.base_at[f"issue_{iid}"]
++        self.assertTrue(base, self.err)
++        self.assertIsNotNone(at, self.err)
++        self.assertEqual(tip, at, self.err)
++        heads = [self.fx._tip(f"fix/{c}") for c in closure]
++        for c, h in zip(closure, heads):
++            self.assertTrue(self.fx._ancestor(h, tip), (iid, c, self.err))
++        for other in self.batch:
++            if other != iid and other not in closure:
++                own = self.fx._own(other, base=main, beside=heads)
++                self.assertEqual([c for c in own if self.fx._ancestor(c, tip)], [],
++                                 (iid, other, self.err))
++        self.assertEqual(self.fx._beyond(tip, main, heads), [], (iid, self.err))
++        self.assertEqual(self.results[iid], state.COMPLETE)
+         return tip
+ 
++    def _not_held(self) -> None:
++        """No stderr line holds D for its prerequisite P (#655)."""
++        self.assertEqual([x for x in self.err.splitlines()
++                          if "issue_D held" in x and "issue_P" in x], [], self.err)
++
+     # -- (1)/(2): merged after the line was started -----------------------------------------
+ 
+-    def test_a_merge_after_the_line_was_started_holds_a_depends_on_merged_dependent(self):
+-        # (1) Pre-fix: D passes the gate and is built on a line without P's merge.
++    def test_a_merge_after_the_line_was_started_builds_a_depends_on_merged_dependent(self):
++        # (1) The line does not follow the base, and no bundle is built on it (#463): D's
++        # own base starts from main as its wave finds it, which has P's merge. Before #463,
++        # D was held (#655): it would have been cut from the line.
+         self._prereq()
+         self.after_first_fold = self._merge
+         self._run(self._wd(MERGED_EDGE), ["W", "D"])
+         self.assertEqual(self.results["W"], state.COMPLETE)
+         self.assertFalse(self.fx._ancestor(self.merge_oid["P"], self.line))
+         self.assertFalse(self.fx._ancestor(self.fx._tip("fix/P"), self.line))
+-        self._held("does not have that merge", self.merge_oid["P"][:12])
++        self._not_held()
++        tip = self._built_on("D", "W")
++        self.assertTrue(self.fx._ancestor(self.merge_oid["P"], tip))
+ 
+-    def test_a_merge_after_the_line_was_started_holds_a_plain_depends_on_dependent(self):
+-        # (2) The #647 edge: a plain `Depends on: P`, P not requested.
++    def test_a_merge_after_the_line_was_started_builds_a_plain_depends_on_dependent(self):
++        # (2) The #647 edge: a plain `Depends on: P`, P not requested. As (1).
+         self._prereq()
+         self.after_first_fold = self._merge
+         self._run(self._wd(PLAIN_EDGE), ["W", "D"])
+         self.assertEqual(self.results["W"], state.COMPLETE)
+-        self._held("does not have that merge")
++        self._not_held()
++        tip = self._built_on("D", "W")
++        self.assertTrue(self.fx._ancestor(self.merge_oid["P"], tip))
+ 
+     # -- (3)/(4): merged before the line was started ----------------------------------------
+ 
+@@ -224,7 +241,7 @@ class MergedPrereqOnTheLine(unittest.TestCase):
+         self._prereq()
+         self._merge()
+         self._run(self._wd(MERGED_EDGE), ["W", "D"])
+-        tip = self._built_on_line()
++        tip = self._built_on("D", "W")
+         self.assertTrue(self.fx._ancestor(self.merge_oid["P"], tip))
+ 
+     def test_a_squash_merge_already_on_the_line_builds_the_dependent_on_it(self):
+@@ -232,27 +249,38 @@ class MergedPrereqOnTheLine(unittest.TestCase):
+         self._prereq()
+         self._squash()
+         self._run(self._wd(MERGED_EDGE), ["W", "D"])
+-        tip = self._built_on_line()
++        tip = self._built_on("D", "W")
+         self.assertTrue(self.fx._ancestor(self.merge_oid["P"], tip))
+         self.assertFalse(self.fx._ancestor(self.fx._tip("fix/P"), tip))
+ 
+     # -- (5): unreadable, and no line -------------------------------------------------------
+ 
+-    def test_an_unreadable_merge_commit_holds_the_dependent(self):
+-        # (5) Fail-closed: the PR reads MERGED, but its merge commit cannot be read.
++    def test_an_unreadable_merge_commit_no_longer_holds_the_dependent(self):
++        # (5) The PR reads MERGED, but its merge commit cannot be read. Only a check of the
++        # line needed it (#655), and nothing is built on the line (#463): D is built on a
++        # base of its own, from main, which has the merge.
+         self._prereq()
+         self._merge()
+         self.gh_fail_merge_commit = True
+         self._run(self._wd(MERGED_EDGE), ["W", "D"])
+-        self._held("is not known to have that merge", "could not be read")
++        self._not_held()
++        tip = self._built_on("D", "W")
++        self.assertTrue(self.fx._ancestor(self.merge_oid["P"], tip))
+ 
+-    def test_a_checkout_that_cannot_be_fetched_holds_the_dependent(self):
+-        # (5) Fail-closed: after wave 0's fold the checkout's origin is unreachable.
++    def test_a_checkout_that_cannot_be_fetched_stops_the_run_before_the_dependent(self):
++        # (5) Fail-closed: after wave 0's fold the checkout's origin is unreachable, so D's
++        # own base (#463) cannot be fetched and built: D is never built on a base no fetch
++        # checked, and the run stops before its wave, naming D and why.
+         self._prereq()
+         self._merge()
+         self.after_first_fold = lambda: self._origin(self.fx.tmp / "gone.git")
+         self._run(self._wd(MERGED_EDGE), ["W", "D"])
+-        self._held("is not known to have that merge", "could not be fetched")
++        self.assertNotIn("issue_D", self.seen, self.err)
++        self.assertEqual(self.results["D"], state.PLANNED)
++        self.assertEqual(publish.read_stack_base(self.cfg.bundle("D")), "")
++        lines = [x for x in self.err.splitlines() if "issue_D" in x and "STOPPING" in x]
++        self.assertEqual(len(lines), 1, self.err)
++        self.assertIn("could not fetch origin", lines[0])
+ 
+     def test_a_target_with_no_line_builds_the_dependent_from_the_base(self):
+         # (5) No fold of D's target this run: D is cut from the fetched base, as today.
+@@ -282,35 +310,30 @@ class MergedPrereqOnTheLine(unittest.TestCase):
+         self._merge()
+         self._run([d, e], batch)
+         self.assertIn("carried issue_P", self.err)
+-        tip = self._built_on_line()
+-        self.assertEqual(tip, old)
+-        self.assertTrue(self.fx._ancestor(self.fx._tip("fix/P"), tip))
+-        self.assertFalse(self.fx._ancestor(self.merge_oid["P"], tip))
+-        self.assertEqual(self.results["E"], state.COMPLETE)
++        self.assertEqual(self.fx._tip(self.line), old)       # continued, at the same tip
++        self.assertTrue(self.fx._ancestor(self.fx._tip("fix/P"), self.line))
++        self.assertFalse(self.fx._ancestor(self.merge_oid["P"], self.line))
++        # D's `Depends on (merged)` names an id the run does not schedule: it is merged
++        # into main, so D is ordered after nothing of the run and is built on the real base,
++        # which has P's merge (#463). E's plain edge puts the carried P's branch on its base.
++        self.assertEqual(self.seen["issue_D"], ("", ""), self.err)
++        self.assertEqual(self.results["D"], state.COMPLETE)
++        self._built_on("E", "P")
+ 
+     # -- the way out the held line gives, followed ------------------------------------------
+ 
+-    def test_the_way_out_is_to_delete_the_line_then_re_run(self):
+-        # D is held as in (1). W is finished, so a re-run of the same batch drives D alone,
+-        # and its carry (#646) puts W on the line: while origin has the line, the carry
+-        # continues it at the same tip and D is held again. Once the line is deleted on
+-        # origin, the carry starts it from main, which has P's merge, and D is built on it.
++    def test_no_way_out_is_needed_the_dependent_is_built_in_the_first_run(self):
++        # Before #463, D was held as in (1), and the way out was to delete the line on
++        # origin and re-run. D is now built in the first run, on a base that has P's merge
++        # and W's work and is not the line, and nothing tells the human to delete it.
+         self._prereq()
+         self.after_first_fold = self._merge
+-        w, d = self._wd(MERGED_EDGE)
+-        self._run([w, d], ["W", "D"])
+-        self._held("does not have that merge")
+-        old = self.fx._tip(self.line)
+-        self._run([d], ["W", "D"])                   # a re-run, the line still on origin
+-        self.assertEqual(self.fx._tip(self.line), old)
+-        self._held("does not have that merge", "may continue it")
+-        self.fx._delete(self.line)                   # the way out
+-        self._run([d], ["W", "D"])
+-        self.assertIn("carried issue_W", self.err)
+-        tip = self._built_on_line()
+-        self.assertNotEqual(tip, old)
++        self._run(self._wd(MERGED_EDGE), ["W", "D"])
++        tip = self._built_on("D", "W")
++        self.assertNotEqual(tip, self.fx._tip(self.line))
+         self.assertTrue(self.fx._ancestor(self.merge_oid["P"], tip))
+         self.assertTrue(self.fx._ancestor(self.fx._tip("fix/W"), tip))
++        self.assertNotIn(f"delete {self.line} on origin", self.err)
+ 
+ 
+ if __name__ == "__main__":
+diff --git a/template/tests/test_flow_reissue_after_conflict_hold.py b/template/tests/test_flow_reissue_after_conflict_hold.py
+index 5fc288e..6780045 100644
+--- a/template/tests/test_flow_reissue_after_conflict_hold.py
++++ b/template/tests/test_flow_reissue_after_conflict_hold.py
+@@ -57,6 +57,7 @@ class ReissueAfterConflictHold(unittest.TestCase):
+     _plan = swc.SameWaveConflict._plan
+     _drive_wave = swc.SameWaveConflict._drive_wave
+     _head = swc.SameWaveConflict._head
++    _built_on = swc.SameWaveConflict._built_on
+ 
+     # -- stubs -----------------------------------------------------------------------------
+ 
+@@ -147,19 +148,21 @@ class ReissueAfterConflictHold(unittest.TestCase):
+         self.assertEqual(len(lines), 1, self.err)
+         return lines[0]
+ 
+-    def _held_for_10(self, ids: list[str], twenty_one: dict[str, str] | None = None) -> str:
++    def _held_for_10(self, ids: list[str], twenty_one: dict[str, str] | None = None,
++                     twenty_one_on: str = "12") -> str:
+         """Run 1 of criterion (1), asked for ``ids``: on a base where ``shared.txt`` is
+         ``x``, 10 and 11 change its line two ways, 12 adds a file, 20 depends on 11 and 21
+-        (``twenty_one``: its files, a file of its own by default) on 12. The wave-0 fold
+-        holds 11 for its clash with 10 (#674), so 20 is never built; 10, 11, 12 and 21
+-        finish with their PRs open, 21 built on the line and on no line itself. Returns the
+-        step the end of the run gave for 11."""
++        (``twenty_one``: its files, a file of its own by default) on ``twenty_one_on`` (its
++        ``Depends on``, which is what it is built on, #463). The wave-0 fold holds 11 for
++        its clash with 10 (#674), so 20 is never built; 10, 11, 12 and 21 finish with their
++        PRs open, 21 built on a base of its own and on no line itself. Returns the step the
++        end of the run gave for 11."""
+         self._on_base({"shared.txt": "x\n"})
+         self._plan("10", {"shared.txt": "ten\n"})
+         self._plan("11", {"shared.txt": "eleven\n"})        # same line, other text
+         self._plan("12", {"twelve.txt": "twelve\n"})
+         self._plan("20", {"twenty.txt": "twenty\n"}, "11")
+-        self._plan("21", twenty_one or {"twenty-one.txt": "twenty-one\n"}, "12")
++        self._plan("21", twenty_one or {"twenty-one.txt": "twenty-one\n"}, twenty_one_on)
+         self._run(ids, ids)
+         held = [x for x in self.err.splitlines()
+                 if "issue_11 held out of the integration fold" in x]
+@@ -238,10 +241,11 @@ class ReissueAfterConflictHold(unittest.TestCase):
+         self._carried_but_11()
+ 
+     def test_one_the_fold_merges_after_it_is_named_too(self):
+-        # 21's own change sets shared.txt's line as well (on top of 10's). It is on no line
++        # 21's own change sets shared.txt's line as well (on top of 10's: it declares it is
++        # built on 10, which since #463 is what puts 10's work under it). It is on no line
+         # after run 1, and the re-issue's fold merges it after it skips 11: 21 is on the line
+         # the fold pushes, so it is named beside 10, with its file.
+-        self._held_for_10(ORDER, {"shared.txt": "twenty-one\n"})
++        self._held_for_10(ORDER, {"shared.txt": "twenty-one\n"}, "12, 10")
+         self._reissue(ORDER)
+         said = self._not_carried("11")
+         self.assertIn("its change conflicts with issue_10's (shared.txt), issue_21's "
+@@ -292,11 +296,11 @@ class ReissueAfterConflictHold(unittest.TestCase):
+ 
+     def _stacked_on_10(self, base: dict[str, str], files: dict[str, dict[str, str]], *,
+                        cut_12_from: str = "") -> str:
+-        """10 changes the base; 12 (``Depends on: 10``) is built on the line holding 10 (or
+-        cut from ``cut_12_from``); 11 conflicts with 10, so run 1 holds it and never builds
+-        20 (``Depends on: 11``). Run 2 re-issues the batch driving 20, with 10 and 12 on the
+-        line before 11 is tried. ``files``: each id's files, written in full where it is
+-        cut. Returns 11's line."""
++        """10 changes the base; 12 (``Depends on: 10``) is built on a base holding 10 and
++        nothing else of the run (#463; or cut from ``cut_12_from``); 11 conflicts with 10,
++        so run 1 holds it and never builds 20 (``Depends on: 11``). Run 2 re-issues the
++        batch driving 20, with 10 and 12 on the line before 11 is tried. ``files``: each
++        id's files, written in full where it is cut. Returns 11's line."""
+         self._on_base(base)
+         self._plan("10", files["10"])
+         self._plan("12", files["12"], "10")
+@@ -307,8 +311,7 @@ class ReissueAfterConflictHold(unittest.TestCase):
+         ids = ["10", "12", "11", "20"]
+         self._run(ids, ids)
+         self.assertEqual(self.results["20"], state.PLANNED, self.err)
+-        self.assertEqual(self.seen["issue_12"][0], self.line, self.err)    # its stack base
+-        self.line_under_12 = self.seen["issue_12"][1]       # the line tip 12 was built on
++        self.line_under_12 = self._built_on("12", "10")     # the commit 12 was built on
+         for iid in ("10", "11", "12"):
+             self._finished_open(iid)
+         self.assertTrue(self.fx._ancestor(self._head("10"), self._head("12")))
+diff --git a/template/tests/test_flow_resume_stack_prereqs.py b/template/tests/test_flow_resume_stack_prereqs.py
+index 33e33bb..7571e06 100644
+--- a/template/tests/test_flow_resume_stack_prereqs.py
++++ b/template/tests/test_flow_resume_stack_prereqs.py
+@@ -59,6 +59,8 @@ class ResumeStackPrereqs(unittest.TestCase):
+         self.events: list[str] = []
+         # bundle → (stack base, recorded tip, origin's line tip) when its wave was driven
+         self.seen: dict[str, tuple[str, str, str | None]] = {}
++        # bundle → (origin's tip of its stack base, origin's main) when its wave was driven
++        self.base_at: dict[str, tuple[str | None, str]] = {}
+         self._real_run = subprocess.run
+ 
+     # -- fixture ---------------------------------------------------------------------------
+@@ -111,8 +113,10 @@ class ResumeStackPrereqs(unittest.TestCase):
+         """Build and accept each bundle, recording what it was built on."""
+         for d in wave:
+             line = self.fx._tip(self.line) if self.fx._has(self.line) else None
+-            self.seen[d.name] = (publish.read_stack_base(d), publish.read_stack_base_tip(d),
+-                                 line)
++            base = publish.read_stack_base(d)
++            self.seen[d.name] = (base, publish.read_stack_base_tip(d), line)
++            self.base_at[d.name] = (self.fx._tip(base) if base and self.fx._has(base) else None,
++                                    self.fx._tip("main"))
+             self.events.append(f"wave:{d.name}")
+             (d / "patch.diff").write_text(sb._new_file_patch(f"{d.name}.txt", d.name),
+                                           encoding="utf-8")
+@@ -120,16 +124,20 @@ class ResumeStackPrereqs(unittest.TestCase):
+         return 1
+ 
+     def _publish_bundle(self, cfg, d: Path, **_kw) -> bool:
+-        """What publish does: cut the PR branch from the recorded line tip (else the line,
+-        else the base), push it, record it."""
++        """What publish does: cut the PR branch from the recorded stack base tip (else that
++        branch, else the base), push it, record it. The run's brief is kept as it was, as
++        publish keeps it: a later bundle's base follows its edges (#463)."""
+         tip, line = publish.read_stack_base_tip(d), publish.read_stack_base(d)
++        brief = (d / "brief.md").read_text(encoding="utf-8")
+         self.fx._publish(d.name.removeprefix("issue_"), {f"{d.name}.txt": d.name + "\n"},
+                          cut_from=tip or (f"origin/{line}" if line else "origin/main"))
++        (d / "brief.md").write_text(brief, encoding="utf-8")
+         return True
+ 
+     def _run(self, drive: list[Path], batch: list[str], *, regate=None) -> None:
+         """The re-issued run: drive ``drive`` with the run asked for ``batch``."""
+         self.line = self._line(batch)
++        self.batch = list(batch)
+         real_fold = integrate.fold
+ 
+         def fold(*a, **kw):
+@@ -178,6 +186,34 @@ class ResumeStackPrereqs(unittest.TestCase):
+         self.assertEqual(self._built(iid)[:2], ("", ""), self.err)
+         self.assertEqual(self.results[iid], state.COMPLETE)
+ 
++    def _built_on(self, iid: str, *closure: str) -> str:
++        """``iid`` was built on its recorded base and is COMPLETE; returns the commit it was
++        built on: its recorded tip, which is origin's tip of that base when its wave was
++        driven. That commit holds the tip of each bundle of ``closure`` (``fix/<id>``: the
++        ones it is ordered after, a carried finished prerequisite included, #463, #646) and
++        no commit of any other bundle of the run's branch; beyond origin's main as it was
++        then and those tips it holds only the merge commits made building it."""
++        base, tip, _line = self._built(iid)
++        at, main = self.base_at[f"issue_{iid}"]
++        self.assertTrue(base, self.err)
++        self.assertIsNotNone(at, self.err)
++        self.assertEqual(tip, at, self.err)
++        heads = [self.fx._tip(f"fix/{c}") for c in closure]
++        for c, h in zip(closure, heads):
++            self.assertTrue(self.fx._ancestor(h, tip), (iid, c, self.err))
++        for other in self.batch:
++            if other != iid and other not in closure:
++                own = self.fx._own(other, base=main, beside=heads)
++                self.assertEqual([c for c in own if self.fx._ancestor(c, tip)], [],
++                                 (iid, other, self.err))
++        self.assertEqual(self.fx._beyond(tip, main, heads), [], (iid, self.err))
++        self.assertEqual(self.results[iid], state.COMPLETE)
++        return tip
++
++    def _line_pushes(self, pushes: list[list[str]]) -> list[list[str]]:
++        """The pushes of ``pushes`` that push the run's line — not a bundle's own base."""
++        return [x for x in pushes if x[-1] == self.line]
++
+     # -- (1)-(3): a clean finished prerequisite is carried ----------------------------------
+ 
+     def test_a_clean_finished_prerequisite_is_on_the_line_its_dependent_builds_on(self):
+@@ -185,12 +221,8 @@ class ResumeStackPrereqs(unittest.TestCase):
+         self._finished("P", {"p.txt": "p\n"})
+         d = self._planned("D", "P")
+         self._run([d], ["P", "D"])
+-        base, tip, line_tip = self._built("D")
+-        self.assertEqual(base, self._line(["P", "D"]), self.err)
+-        self.assertIsNotNone(line_tip)
+-        self.assertEqual(tip, line_tip)
+-        self.assertTrue(self.fx._ancestor(self.fx._tip("fix/P"), line_tip))
+-        self.assertEqual(self.results["D"], state.COMPLETE)
++        self._built_on("D", "P")
++        self.assertTrue(self.fx._ancestor(self.fx._tip("fix/P"), self._line(["P", "D"])))
+ 
+     def test_an_earlier_runs_line_is_continued_never_replaced(self):
+         # (2) The earlier run's line holds P on the base. Origin refuses non-fast-forwards:
+@@ -204,7 +236,9 @@ class ResumeStackPrereqs(unittest.TestCase):
+         old = self.fx._tip(line)
+         sb._git(self.fx.origin, "config", "receive.denyNonFastForwards", "true")
+         pushes = self.fx._pushes(lambda: self._run([d], ["P", "D"]))
+-        self.assertEqual(self._built("D")[:2], (line, old), self.err)
++        self.assertEqual(self._built("D")[2], old, self.err)      # the line, continued
++        self.assertEqual(self.fx._tip(line), old, self.err)
++        self._built_on("D", "P")
+         self.assertTrue(self.fx._ancestor(old, line))
+         self.assertTrue(pushes)
+         self.assertEqual([x for x in pushes if "--force" in x], [], pushes)
+@@ -218,15 +252,16 @@ class ResumeStackPrereqs(unittest.TestCase):
+         line = self._line(["P", "D", "E"])
+         pushes = self.fx._pushes(lambda: self._run([d, e], ["P", "D", "E"]))
+         self.assertNotIn("did not integrate", self.err)
+-        d_base, d_tip, carried = self._built("D")
+-        self.assertEqual((d_base, d_tip), (line, carried), self.err)
++        carried = self._built("D")[2]                   # the line as the carry pushed it
++        self.assertIsNotNone(carried, self.err)
++        self._built_on("D", "P")
++        pushes = self._line_pushes(pushes)
+         self.assertEqual(len(pushes), 2, pushes)        # the carry, then the wave-0 fold
+         self.assertNotIn("--force", pushes[1])
+-        e_base, e_tip, e_line = self._built("E")
+-        self.assertEqual((e_base, e_tip), (line, e_line))
++        e_line = self._built("E")[2]                    # the line after the wave-0 fold
++        self._built_on("E", "D", "P")
+         for commit in (carried, self.fx._tip("fix/P"), self.fx._tip("fix/D")):
+             self.assertTrue(self.fx._ancestor(commit, e_line), commit)
+-        self.assertEqual(self.results["E"], state.COMPLETE)
+ 
+     # -- (4): not clean ⇒ hold only its dependents; the run goes on -------------------------
+ 
+@@ -258,11 +293,9 @@ class ResumeStackPrereqs(unittest.TestCase):
+         a, b = self._planned("A", "P"), self._planned("B", "Q")
+         self._run([a, b], ["Q", "P", "A", "B"])
+         self._held("P", "A", "conflict")
+-        base, tip, line_tip = self._built("B")
+-        self.assertEqual((base, tip), (self.line, line_tip), self.err)
+-        self.assertTrue(self.fx._ancestor(self.fx._tip("fix/Q"), line_tip))
++        self._built_on("B", "Q")
++        self.assertTrue(self.fx._ancestor(self.fx._tip("fix/Q"), self.line))
+         self.assertFalse(self.fx._ancestor(self.fx._tip("fix/P"), self.line))
+-        self.assertEqual(self.results["B"], state.COMPLETE)
+ 
+     # -- (5): an untrusted line is not built on, and the run's first fold replaces it -------
+ 
+@@ -278,10 +311,8 @@ class ResumeStackPrereqs(unittest.TestCase):
+         self._on_base("U")
+         self.assertEqual(self._built("U")[2], rejected)        # the carry pushed nothing
+         self.assertFalse(self.fx._ancestor(rejected, line))    # the wave-0 fold replaced it
+-        w_base, w_tip, w_line = self._built("W")
+-        self.assertEqual((w_base, w_tip), (line, w_line))
+-        self.assertFalse(self.fx._ancestor(rejected, w_line))
+-        self.assertEqual(self.results["W"], state.COMPLETE)
++        w_tip = self._built_on("W", "U")
++        self.assertFalse(self.fx._ancestor(rejected, w_tip))
+ 
+     # -- (6): the trigger -------------------------------------------------------------------
+ 
+@@ -314,7 +345,7 @@ class ResumeStackPrereqs(unittest.TestCase):
+         self._on_base("D")                                   # the stale stack base cleared
+         self.assertEqual(self.events, ["wave:issue_D", "fold", "wave:issue_E"])
+         self.assertEqual(self.gh_calls, [])
+-        self.assertEqual(self._built("E")[0], self.line)
++        self._built_on("E", "D")
+ 
+     def test_a_dry_run_asks_no_host_holds_nothing_and_prints_the_plan(self):
+         self._finished("P", {"p.txt": "p\n"})
+@@ -344,10 +375,8 @@ class ResumeStackPrereqs(unittest.TestCase):
+         self._held("P", "D", "re-gate")
+         self._on_base("U")
+         self.assertNotIn("STOPPING", self.err)
+-        w_base, w_tip, w_line = self._built("W")
+-        self.assertEqual((w_base, w_tip), (self.line, w_line))
+-        self.assertFalse(self.fx._ancestor(p_head, w_line))
+-        self.assertEqual(self.results["W"], state.COMPLETE)
++        w_tip = self._built_on("W", "U")
++        self.assertFalse(self.fx._ancestor(p_head, w_tip))
+ 
+     # -- fold(skipped=…) ----------------------------------------------------------------------
+ 
+@@ -444,13 +473,11 @@ class ResumeStackPrereqs(unittest.TestCase):
+         self._held("Q", "D", "issue_P", "built on")
+         self.assertIn("flow: carried issue_X (finished", self.err)
+         self.assertTrue(self.fx._has(self.line), self.err)
+-        for iid in ("E", "U"):
+-            base, tip, line_tip = self._built(iid)
+-            self.assertEqual((base, tip), (self.line, line_tip), self.err)
+-            self.assertTrue(self.fx._ancestor(self.fx._tip("fix/X"), tip))
+-            for gone in ("P", "Q"):
+-                self.assertFalse(self.fx._ancestor(self.fx._tip(f"fix/{gone}"), tip), gone)
+-            self.assertEqual(self.results[iid], state.COMPLETE)
++        tip = self._built_on("E", "X")
++        for gone in ("P", "Q"):
++            self.assertFalse(self.fx._ancestor(self.fx._tip(f"fix/{gone}"), tip), gone)
++        self._on_base("U")                       # U declared nothing: the real base (#463)
++        self.assertTrue(self.fx._ancestor(self.fx._tip("fix/X"), self.line))
+         for gone in ("P", "Q"):
+             self.assertFalse(self.fx._ancestor(self.fx._tip(f"fix/{gone}"), self.line), gone)
+ 
+@@ -472,11 +499,10 @@ class ResumeStackPrereqs(unittest.TestCase):
+         self._held("X", "E", line, "delete")
+         self._on_base("U")
+         self.assertEqual(self._built("U")[2], old)              # the carry pushed nothing
+-        w_base, w_tip, w_line = self._built("W")
+-        self.assertEqual((w_base, w_tip), (line, w_line))
++        w_tip = self._built_on("W", "U")
+         for gone in ("P", "Q"):
+-            self.assertFalse(self.fx._ancestor(self.fx._tip(f"fix/{gone}"), w_line), gone)
+-        self.assertEqual(self.results["W"], state.COMPLETE)
++            self.assertFalse(self.fx._ancestor(self.fx._tip(f"fix/{gone}"), w_tip), gone)
++            self.assertFalse(self.fx._ancestor(self.fx._tip(f"fix/{gone}"), line), gone)
+ 
+     # -- (10): a skip in the carry's fold holds the finished ids holding its work (#672) ----
+ 
+@@ -527,18 +553,16 @@ class ResumeStackPrereqs(unittest.TestCase):
+ 
+     def _carried_beside(self, drive: list[Path], batch: list[str]) -> str:
+         """Run with finished X and planned E (``Depends on: X``) beside the others: X is
+-        carried, E is built on the line and COMPLETE, and the run pushes exactly once — no
+-        push, then a fix-up. Returns the line tip E was built on."""
++        carried onto the line, E is built on a base holding X and nothing else of the run
++        (#463) and is COMPLETE, and the run pushes its line exactly once — no push, then a
++        fix-up. Returns the commit E was built on."""
+         pushes = self.fx._pushes(lambda: self._run(drive, batch))
+-        self.assertEqual(len(pushes), 1, pushes)
++        self.assertEqual(len(self._line_pushes(pushes)), 1, pushes)
+         carried = [x for x in self.err.splitlines() if x.startswith("flow: carried ")]
+         self.assertEqual(len(carried), 1, self.err)
+         self.assertIn("issue_X", carried[0])
+-        base, tip, line_tip = self._built("E")
+-        self.assertEqual((base, tip), (self.line, line_tip), self.err)
+-        self.assertTrue(self.fx._ancestor(self.fx._tip("fix/X"), tip))
+-        self.assertEqual(self.results["E"], state.COMPLETE)
+-        return tip
++        self.assertTrue(self.fx._ancestor(self.fx._tip("fix/X"), self.line))
++        return self._built_on("E", "X")
+ 
+     def _off_the_line(self, commit: str, e_tip: str) -> None:
+         """``commit`` is on neither the carried line nor the tip E was built on."""
+diff --git a/template/tests/test_flow_same_wave_conflict.py b/template/tests/test_flow_same_wave_conflict.py
+index 22bd122..76497f2 100644
+--- a/template/tests/test_flow_same_wave_conflict.py
++++ b/template/tests/test_flow_same_wave_conflict.py
+@@ -9,8 +9,8 @@ tests/test_integrate_stack_bases.py (a bare ``origin`` and a primary checkout),
+ path and used as a helper object, exactly as tests/test_flow_resume_stack_prereqs.py does.
+ The build and sign-off leaves are stubbed (the build writes a ``patch.diff`` naming the
+ files it changes), ``flow._publish_bundle`` cuts and pushes the PR branch from the recorded
+-line tip, and ``gh`` is answered by a stub in front of ``subprocess.run``. The publisher is
+-NOT a stub (a stub turns every fold into a dry-run).
++stack base tip, and ``gh`` is answered by a stub in front of ``subprocess.run``. The
++publisher is NOT a stub (a stub turns every fold into a dry-run).
+ 
+ Only modules are imported (never a symbol the fix adds), so with the production change
+ reverted these cases still load and run — and fail on their assertions.
+@@ -67,6 +67,8 @@ class SameWaveConflict(unittest.TestCase):
+         self.gh_calls: list[list[str]] = []
+         # bundle → (stack base, recorded tip, origin's line tip) when its wave was driven
+         self.seen: dict[str, tuple[str, str, str | None]] = {}
++        # bundle → (origin's tip of its stack base, origin's main) when its wave was driven
++        self.base_at: dict[str, tuple[str | None, str]] = {}
+         self.err_at: dict[str, str] = {}             # bundle → stderr so far when it was built
+         self._real_run = subprocess.run
+ 
+@@ -120,8 +122,10 @@ class SameWaveConflict(unittest.TestCase):
+         """Build and accept each bundle, recording what it was built on."""
+         for d in wave:
+             line = self.fx._tip(self.line) if self.fx._has(self.line) else None
+-            self.seen[d.name] = (publish.read_stack_base(d), publish.read_stack_base_tip(d),
+-                                 line)
++            base = publish.read_stack_base(d)
++            self.seen[d.name] = (base, publish.read_stack_base_tip(d), line)
++            self.base_at[d.name] = (self.fx._tip(base) if base and self.fx._has(base) else None,
++                                    self.fx._tip("main"))
+             self.err_at[d.name] = self._err.getvalue()
+             (d / "patch.diff").write_text(
+                 self._patch(self.changes[d.name.removeprefix("issue_")]), encoding="utf-8")
+@@ -129,8 +133,8 @@ class SameWaveConflict(unittest.TestCase):
+         return 1
+ 
+     def _publish_bundle(self, cfg, d: Path, **_kw) -> bool:
+-        """What publish does: cut the PR branch from the recorded line tip (else the line,
+-        else the base), push it, record it. The run's brief is kept as it was. Then what
++        """What publish does: cut the PR branch from the recorded stack base tip (else that
++        branch, else the base), push it, record it. The run's brief is kept as it was. Then what
+         ``after_publish`` names for it happens (the world moving before the fold)."""
+         iid = d.name.removeprefix("issue_")
+         tip, line = publish.read_stack_base_tip(d), publish.read_stack_base(d)
+@@ -166,14 +170,28 @@ class SameWaveConflict(unittest.TestCase):
+     def _head(self, iid: str) -> str:
+         return self.fx._tip(f"fix/{iid}")
+ 
+-    def _built_on_line(self, iid: str) -> str:
+-        """``iid`` was built on the run's line and is COMPLETE; returns the line commit it
+-        was built on (its recorded tip, which is origin's line tip at the time)."""
++    def _built_on(self, iid: str, *closure: str) -> str:
++        """``iid`` was built on its recorded base and is COMPLETE; returns the commit it was
++        built on: its recorded tip, which is origin's tip of that base when its wave was
++        driven. That commit holds the tip of each bundle of ``closure`` (the ones it is
++        ordered after, #463) and no commit of any other bundle of the run's branch; beyond
++        origin's main as it was then and those tips it holds only the merge commits made
++        building it."""
+         self.assertIn(f"issue_{iid}", self.seen, self.err)
+-        base, tip, line_tip = self.seen[f"issue_{iid}"]
+-        self.assertEqual(base, self.line, self.err)
+-        self.assertIsNotNone(line_tip, self.err)
+-        self.assertEqual(tip, line_tip, self.err)
++        base, tip, _line_tip = self.seen[f"issue_{iid}"]
++        at, main = self.base_at[f"issue_{iid}"]
++        self.assertTrue(base, self.err)
++        self.assertIsNotNone(at, self.err)
++        self.assertEqual(tip, at, self.err)
++        heads = [self._head(c) for c in closure]
++        for c, h in zip(closure, heads):
++            self.assertTrue(self.fx._ancestor(h, tip), (iid, c, self.err))
++        for other in self.changes:
++            if other != iid and other not in closure:
++                own = self.fx._own(other, base=main, beside=heads)
++                self.assertEqual([c for c in own if self.fx._ancestor(c, tip)], [],
++                                 (iid, other, self.err))
++        self.assertEqual(self.fx._beyond(tip, main, heads), [], (iid, self.err))
+         self.assertEqual(self.results[iid], state.COMPLETE, self.err)
+         return tip
+ 
+@@ -205,17 +223,15 @@ class SameWaveConflict(unittest.TestCase):
+         # (1) Held, not stopped.
+         self.assertNotIn("did not integrate", self.err)
+         self.assertNotIn("STOPPING", self.err)
+-        on21 = self._built_on_line("21")
+-        for iid in ("10", "12"):
+-            self.assertTrue(self.fx._ancestor(self._head(iid), on21), iid)
++        on21 = self._built_on("21", "12")
+         self.assertFalse(self.fx._ancestor(self._head("11"), on21))
+         self.assertNotIn("issue_20", self.seen, self.err)        # its prerequisite is held
+         self.assertEqual(self.results["20"], state.PLANNED)
+         # The wave-1 fold leaves 11 out too: the hold lasts the whole run.
+-        on30 = self._built_on_line("30")
+-        for iid in ("10", "12", "21"):
+-            self.assertTrue(self.fx._ancestor(self._head(iid), on30), iid)
++        on30 = self._built_on("30", "21", "12")
+         self.assertFalse(self.fx._ancestor(self._head("11"), on30))
++        for iid in ("10", "12", "21"):
++            self.assertTrue(self.fx._ancestor(self._head(iid), self.line), iid)
+         self.assertFalse(self.fx._ancestor(self._head("11"), self.fx._tip(self.line)))
+ 
+         # (2) Named by pair and file, before the next wave builds.
+@@ -250,11 +266,11 @@ class SameWaveConflict(unittest.TestCase):
+ 
+         self.assertNotIn("did not integrate", self.err)
+         self.assertNotIn("held", self.err)
+-        for iid in ("20", "21"):
+-            on = self._built_on_line(iid)
+-            for prereq in ("10", "11", "12"):
+-                self.assertTrue(self.fx._ancestor(self._head(prereq), on), (iid, prereq))
+-        self._built_on_line("30")
++        self._built_on("20", "11")
++        self._built_on("21", "12")
++        for prereq in ("10", "11", "12"):
++            self.assertTrue(self.fx._ancestor(self._head(prereq), self.line), prereq)
++        self._built_on("30", "21", "12")
+         # Nothing new on stderr about the pair beyond the overlap audit's warning.
+         about = [x for x in self.err.splitlines() if "issue_11" in x]
+         self.assertEqual(len(about), 1, self.err)
+@@ -272,10 +288,11 @@ class SameWaveConflict(unittest.TestCase):
+         self._run(ids)
+ 
+         self.assertNotIn("did not integrate", self.err)
+-        on50 = self._built_on_line("50")
+-        for iid in ("40", "42"):
+-            self.assertTrue(self.fx._ancestor(self._head(iid), on50), iid)
++        on50 = self._built_on("50", "42")
+         self.assertFalse(self.fx._ancestor(self._head("41"), on50))
++        for iid in ("40", "42"):
++            self.assertTrue(self.fx._ancestor(self._head(iid), self.line), iid)
++        self.assertFalse(self.fx._ancestor(self._head("41"), self.line))
+         held = self._holds("41")
+         self.assertEqual(len(held), 1, self.err)
+         self.assertIn("conflicts with issue_40's", held[0])
+@@ -306,7 +323,7 @@ class SameWaveConflict(unittest.TestCase):
+         self._run(ids)
+ 
+         self.assertNotIn("did not integrate", self.err)
+-        on21 = self._built_on_line("21")
++        on21 = self._built_on("21", "12")
+         self.assertFalse(self.fx._ancestor(self._head("11"), on21))
+         for iid in ("25", "26"):
+             self.assertNotIn(f"issue_{iid}", self.seen, self.err)      # never built
+@@ -422,9 +439,10 @@ class SameWaveConflict(unittest.TestCase):
+         self.assertIn("conflicts with issue_20's", held[0])
+         self.assertIn("(conflicts in shared.txt)", held[0])
+         self.assertNotIn("issue_21", held[0])
+-        on30 = self._built_on_line("30")
+-        self.assertTrue(self.fx._ancestor(self._head("20"), on30))
++        on30 = self._built_on("30", "20", "10")
+         self.assertFalse(self.fx._ancestor(self._head("22"), on30))
++        self.assertTrue(self.fx._ancestor(self._head("20"), self.line))
++        self.assertFalse(self.fx._ancestor(self._head("22"), self.line))
+         self.assertIn("`Conflicts with: 20`", self.err)
+         self._briefs_unchanged(ids)
+ 
+diff --git a/template/tests/test_flow_slice.py b/template/tests/test_flow_slice.py
+index 1dbf358..9247ad5 100644
+--- a/template/tests/test_flow_slice.py
++++ b/template/tests/test_flow_slice.py
+@@ -1335,7 +1335,8 @@ class StackModeFlow(unittest.TestCase):
+         """Patches for a NON-dry run: a non-stub publisher, the text pre-pass spied (no
+         leaf; ``fail_texts`` bundle names fail it, as a failed draft/T4 does), publish spied
+         (``fail_publish`` ids fail: rc 1, nothing recorded — the real path's failure
+-        shape), and optionally the fold."""
++        shape), and optionally the fold — and with it the other git step that folds, a
++        bundle's own base (#463), answered with a branch named for the bundle."""
+         self.cfg.publisher = LeafConfig(mode="command", family="claude", interactive=True)
+         real_publish = flow.publish.publish
+ 
+@@ -1358,6 +1359,9 @@ class StackModeFlow(unittest.TestCase):
+         stack.enter_context(mock.patch.object(flow.publish, "publish", fake_publish))
+         if fold is not None:
+             stack.enter_context(mock.patch.object(flow.integrate, "fold", fold))
++            stack.enter_context(mock.patch.object(
++                flow.integrate, "build_bundle_base",
++                lambda cfg, d, members, **kw: (f"pdca-integration/main-b{d.name}", "0" * 40)))
+         return stack
+ 
+     def test_each_later_fold_continues_the_tip_the_runs_last_fold_pushed(self) -> None:
+@@ -1556,6 +1560,24 @@ class StackModeFlow(unittest.TestCase):
+         return subprocess.run(["git", "-C", str(self.origin), "merge-base", "--is-ancestor",
+                                commit, of]).returncode == 0
+ 
++    def _built_on(self, iid: str, *closure: str) -> None:
++        """``issue_<iid>`` was cut from a base of its own holding the work of exactly the
++        bundles of ``closure`` (#463): each one's branch tip, and, beyond ``main``, only the
++        merge commits on the base's own first-parent chain — no other bundle's commit."""
++        ref = self.cut_from[f"issue_{iid}"].removeprefix("origin/")
++        self.assertNotEqual(ref, "main")
++        heads = [self._origin_rev(f"fix/issue_{c}") for c in closure]
++        for c, h in zip(closure, heads):
++            self.assertTrue(self._ancestor(h, ref), (iid, c))
++
++        def revs(*args: str) -> list[str]:
++            return subprocess.run(["git", "-C", str(self.origin), "rev-list", *args],
++                                  check=True, capture_output=True, text=True).stdout.split()
++
++        chain = revs("--first-parent", "--min-parents=2", ref, "--not", "main")
++        self.assertEqual([c for c in revs(ref, "--not", "main", *heads) if c not in chain],
++                         [], (iid, ref))
++
+     def _diff(self, base: str, head: str) -> list[str]:
+         """What the PR view shows: the three-dot diff of ``head`` against ``base``."""
+         return subprocess.run(["git", "-C", str(self.origin), "diff", "--name-only",
+@@ -1569,14 +1591,6 @@ class StackModeFlow(unittest.TestCase):
+         self._git("merge", "-q", "--no-ff", "--no-edit", f"origin/{branch}")
+         self._git("push", "-q", "origin", "main")
+ 
+-    def _update_from_main(self, branch: str) -> None:
+-        """GitHub's "Update branch": merge main into ``branch``."""
+-        self._git("fetch", "-q", "origin")
+-        self._git("checkout", "-q", "-B", branch, f"origin/{branch}")
+-        self._git("merge", "-q", "--no-ff", "--no-edit", "origin/main")
+-        self._git("push", "-q", "origin", branch)
+-        self._git("checkout", "-q", "main")
+-
+     def test_a_three_wave_run_folds_append_only_onto_a_real_origin(self) -> None:
+         # Origin refuses non-fast-forwards; the second fold must continue the line and carry
+         # both PR branches' own commits. A REBUILT line passes that too (fix/issue_EB
+@@ -1588,6 +1602,7 @@ class StackModeFlow(unittest.TestCase):
+             self._brief(iid, depends_on=dep)
+         self.line = self._line("EA", "EB", "EC")
+         pushes: list[list[str]] = []
++        tips: list[str] = []                # the line's tip after each fold of it
+         real_fold, real_git = flow.integrate.fold, flow.integrate._git
+         clock = iter(range(1_790_000_000, 1_800_000_000, 60))
+ 
+@@ -1595,7 +1610,9 @@ class StackModeFlow(unittest.TestCase):
+             stamp = f"@{next(clock)} +0000"
+             with mock.patch.dict(os.environ, {"GIT_AUTHOR_DATE": stamp,
+                                               "GIT_COMMITTER_DATE": stamp}):
+-                return real_fold(cfg, accepted, **kwargs)
++                out = real_fold(cfg, accepted, **kwargs)
++            tips.append(self._origin_rev(self.line))
++            return out
+ 
+         def spy_git(repo: Path, *args: str) -> int:
+             if args[:1] == ("push",):
+@@ -1612,25 +1629,32 @@ class StackModeFlow(unittest.TestCase):
+         self.assertNotIn("STOPPING", err.getvalue())
+         self.assertEqual(results, {"EA": state.COMPLETE, "EB": state.COMPLETE,
+                                    "EC": state.COMPLETE})
+-        self.assertEqual(self.cut_from["issue_EB"], f"origin/{self.line}")
++        self._built_on("EB", "EA")          # B's base holds A's work, nothing else (#463)
++        self._built_on("EC", "EB", "EA")
+         self.assertTrue(self._in_line(self._origin_rev("fix/issue_EA")))   # A's own commit
+         self.assertTrue(self._in_line(self._origin_rev("fix/issue_EB")))   # B's own commit
+-        # B was cut from the first fold's tip, and that tip is still in the line.
+-        self.assertTrue(self._in_line(self._origin_rev("fix/issue_EB~1")))
++        # The first fold's tip is still in the line: it was appended to, never rebuilt.
++        self.assertTrue(self._in_line(tips[0]))
++        # The line's own folds merged EA once: the merges on its first-parent chain (EB's
++        # branch brings the merge of EA its own base made, #463).
+         merges = subprocess.run(
+-            ["git", "-C", str(self.origin), "log", "--merges", "--format=%s",
+-             self.line], check=True, capture_output=True,
++            ["git", "-C", str(self.origin), "log", "--merges", "--first-parent",
++             "--format=%s", self.line], check=True, capture_output=True,
+             text=True).stdout.splitlines()
+         self.assertEqual(merges.count("pdca-integrate: issue_EA"), 1, merges)
++        pushes = [x for x in pushes if x[-1] == self.line]  # the line's, not the bundles' bases
+         self.assertEqual(len(pushes), 2, pushes)            # a fold after waves 0 and 1
+         self.assertIn("--force", pushes[0])                 # the run's first fold only
+         self.assertEqual([x for x in pushes[1] if x.startswith("--force")], [], pushes[1])
+ 
+-    def test_a_dependent_carries_every_earlier_wave_branch_not_only_its_prerequisite(
++    def test_a_dependent_carries_only_its_prerequisite_not_every_earlier_wave_branch(
+             self) -> None:
+-        # Wave 0 = {ZA, ZZ}; ZB depends on ZA alone, yet carries ZZ too (the line holds every
+-        # published branch) and shows its change until ZZ merges. Once both merge, the fold
+-        # commit joining them never reaches main: two merge bases, until "Update branch".
++        # Wave 0 = {ZA, ZZ}; ZB depends on ZA alone, so it carries ZA alone (#463): its base
++        # is built from ZA's branch, never the line, which holds every published branch.
++        # Before #463 it carried ZZ too and showed ZZ's change until ZZ merged; once both
++        # merged, the fold commit joining them never reached main (two merge bases, until
++        # "Update branch"). Now its diff is its own change as soon as ZA merges, and ZZ's
++        # merge changes nothing.
+         self._real_origin()
+         self._brief("ZA")
+         self._brief("ZZ")
+@@ -1642,22 +1666,20 @@ class StackModeFlow(unittest.TestCase):
+                                     today="2026-10-02")
+         self.assertEqual(results, {"ZA": state.COMPLETE, "ZZ": state.COMPLETE,
+                                    "ZB": state.COMPLETE}, err.getvalue())
+-        self.assertEqual(self.cut_from["issue_ZB"],
+-                         f"origin/{self._line('ZA', 'ZZ', 'ZB')}")
++        self._built_on("ZB", "ZA")
+         za, zz = self._origin_rev("fix/issue_ZA"), self._origin_rev("fix/issue_ZZ")
+         self.assertTrue(self._ancestor(za, "fix/issue_ZB"))
+-        self.assertTrue(self._ancestor(zz, "fix/issue_ZB"))   # though ZB never named ZZ
++        self.assertFalse(self._ancestor(zz, "fix/issue_ZB"))  # ZB never named ZZ
+         self.assertEqual(self._diff("main", "fix/issue_ZB"),
+-                         ["issue_ZA.txt", "issue_ZB.txt", "issue_ZZ.txt"])
++                         ["issue_ZA.txt", "issue_ZB.txt"])
+         self._merge_into_main("fix/issue_ZA")
+         self.assertEqual(self._diff("main", "fix/issue_ZB"),
+-                         ["issue_ZB.txt", "issue_ZZ.txt"])     # ZZ rides until it merges
++                         ["issue_ZB.txt"])                    # its own change, at once
+         self._merge_into_main("fix/issue_ZZ")
+         bases = subprocess.run(
+             ["git", "-C", str(self.origin), "merge-base", "--all", "main", "fix/issue_ZB"],
+             check=True, capture_output=True, text=True).stdout.split()
+-        self.assertEqual(sorted(bases), sorted([za, zz]))
+-        self._update_from_main("fix/issue_ZB")
++        self.assertEqual(bases, [za])                         # one merge base: no update
+         self.assertEqual(self._diff("main", "fix/issue_ZB"), ["issue_ZB.txt"])
+ 
+     def test_a_failed_re_publish_is_held_though_an_earlier_record_survives(self) -> None:
+diff --git a/template/tests/test_integrate_carried_rewrite_late.py b/template/tests/test_integrate_carried_rewrite_late.py
+index 88913cc..53c86db 100644
+--- a/template/tests/test_integrate_carried_rewrite_late.py
++++ b/template/tests/test_integrate_carried_rewrite_late.py
+@@ -153,9 +153,9 @@ class LateRewrite(unittest.TestCase):
+         return 1
+ 
+     def _publish_bundle(self, cfg, d: Path, **_kw) -> bool:
+-        """What publish does: cut the PR branch from the recorded line tip (else the line,
+-        else the base), push it, record it — except for an id in ``no_push``, whose publish
+-        fails before its push."""
++        """What publish does: cut the PR branch from the recorded stack base tip (else that
++        branch, else the base), push it, record it — except for an id in ``no_push``, whose
++        publish fails before its push."""
+         iid = d.name.removeprefix("issue_")
+         if iid in self.no_push:
+             return False
+@@ -257,18 +257,19 @@ class LateRewrite(unittest.TestCase):
+ 
+     def test_a_rewrite_during_the_last_fold_is_reported_and_exits_1(self):
+         ids = self._two_waves()
++        line = integrate.integration_branch(self.cfg, "main", ids)
+         real, rewrote = integrate._git, []
+ 
+         def racing(repo: Path, *args: str) -> int:
+-            # The fold after wave 0 has merged fix/A's head; just before it pushes the line,
+-            # fix/A is rewritten.
+-            if args[:1] == ("push",) and not rewrote:
++            # The run's last fold that reads fix/A — B's own base, built before wave 1, after
++            # the line's fold after wave 0 (#463) — has merged fix/A's head; just before it
++            # pushes, fix/A is rewritten.
++            if args[:1] == ("push",) and args[-1] != line and not rewrote:
+                 rewrote.append(self._rewrite())
+             return real(repo, *args)
+ 
+         rc = self._flow(ids, git=racing)
+         self.assertEqual(len(rewrote), 1, self.err)
+-        line = integrate.integration_branch(self.cfg, "main", ids)
+         self.assertTrue(self.fx._ancestor(self.heads["A"], self.fx._tip(line)))
+         self.assertFalse(self.fx._ancestor(rewrote[0], self.fx._tip(line)))
+         self._assert_reported()
+@@ -277,21 +278,23 @@ class LateRewrite(unittest.TestCase):
+     # -- the end-of-run check cannot judge a branch → named, exit 1 ------------------------
+ 
+     def test_an_end_of_run_check_that_cannot_fetch_is_named_and_exits_1(self):
+-        # Once the run's one fold (after wave 0) has pushed, every fetch fails — so the
+-        # check at the end of the run cannot see fix/A. fix/A was not rewritten: the run
+-        # must not report a rewrite, and must not end as a success either. It names A's
+-        # branch with the commit the line took from it, to check by hand, says the fetch
+-        # failed — not that a fold cannot see its branches — and exits 1.
++        # Once the run's last fold has pushed — B's own base, built before wave 1 after the
++        # line's one fold, after wave 0 (#463) — every fetch fails, so the check at the end
++        # of the run cannot see fix/A. fix/A was not rewritten: the run must not report a
++        # rewrite, and must not end as a success either. It names A's branch with the
++        # commit the line took from it, to check by hand, says the fetch failed — not that
++        # a fold cannot see its branches — and exits 1.
+         ids = self._two_waves()
+-        real, pushed, failed = integrate._git, [], []
++        line = integrate.integration_branch(self.cfg, "main", ids)
++        real, pushed, armed, failed = integrate._git, [], [], []
+ 
+         def flaky(repo: Path, *args: str) -> int:
+-            if args[:1] == ("fetch",) and pushed:
++            if args[:1] == ("fetch",) and armed:
+                 failed.append(args)
+                 return 1
+             rc = real(repo, *args)
+-            if args[:1] == ("push",):
+-                pushed.append(args)
++            if args[:1] == ("push",):       # the line's pushes; B's base arms the failure
++                (pushed if args[-1] == line else armed).append(args)
+             return rc
+ 
+         rc = self._flow(ids, git=flaky)
+@@ -302,7 +305,8 @@ class LateRewrite(unittest.TestCase):
+         self.assertNotIn("was rewritten after this run folded", self.err)
+         self.assertNotIn("STOPPING", self.err)
+         self.assertEqual(rc, 1, self.err)
+-        self.assertEqual(len(pushed), 1, self.err)    # the fold after wave 0: the run's last
++        self.assertEqual(len(pushed), 1, self.err)    # the line's one fold, after wave 0
++        self.assertEqual(len(armed), 1, self.err)     # B's base: the run's last push
+         self.assertEqual(len(failed), 2, failed)      # the check's fetch, tried twice
+ 
+     def _a_rewrite_and_a_target_that_cannot_be_fetched(self, other: str) -> None:
+diff --git a/template/tests/test_integrate_stack_bases.py b/template/tests/test_integrate_stack_bases.py
+index 4d40d85..455476d 100644
+--- a/template/tests/test_integrate_stack_bases.py
++++ b/template/tests/test_integrate_stack_bases.py
+@@ -216,6 +216,27 @@ class StackFoldGit(unittest.TestCase):
+     def _show(self, rev: str, path: str) -> str:
+         return _git(self.origin, "show", f"{rev}:{path}")
+ 
++    def _beyond(self, tip: str, base: str, heads: list[str]) -> list[str]:
++        """The commits ``tip`` holds that neither ``base`` nor any of ``heads`` has, other
++        than the merge commits on ``tip``'s own first-parent chain above ``base`` — the
++        merges made building it (#463). Empty: ``tip`` is ``base`` plus the work of
++        ``heads`` and nothing else, so no other branch's own commit is on it (a commit it
++        shares with one of ``heads`` is that head's work)."""
++        extra = _git(self.origin, "rev-list", tip, "--not", base, *heads).split()
++        chain = _git(self.origin, "rev-list", "--first-parent", "--min-parents=2", tip,
++                     "--not", base).split()
++        return [c for c in extra if c not in chain]
++
++    def _own(self, iid: str, *, base: str, beside: list[str]) -> list[str]:
++        """Bundle ``iid``'s own work on origin: the commits of ``fix/<iid>`` that neither
++        ``base``, nor the commit its branch was cut from (its recorded ``stack-base-tip``,
++        when it has one), nor any of ``beside`` has. Empty when it has no branch."""
++        if not self._has(f"fix/{iid}"):
++            return []
++        cut = publish.read_stack_base_tip(self.cfg.bundle(iid))
++        return _git(self.origin, "rev-list", f"fix/{iid}", "--not", base, *beside,
++                    *([cut] if cut else [])).split()
++
+     def _diff_files(self, base: str, head: str) -> list[str]:
+         """What the PR view shows: the three-dot diff of ``head`` against ``base``."""
+         return _git(self.origin, "diff", "--name-only", f"{base}...{head}").split()
+diff --git a/template/tests/test_flow_dependency_scoped_bases.py b/template/tests/test_flow_dependency_scoped_bases.py
+new file mode 100644
+index 0000000..3f27f1c
+--- /dev/null
++++ b/template/tests/test_flow_dependency_scoped_bases.py
+@@ -0,0 +1,551 @@
++"""In stack mode a bundle is built on what it declares, not on when it was scheduled (#463).
++
++Before #463 every runnable bundle of a run was pointed at the run's one integration line,
++which holds every bundle an earlier wave accepted: ``B`` (``Depends on: A``) was cut from a
++line that also held ``Z``, a bundle of the same earlier wave it has nothing to do with, so
++``B``'s PR carried ``Z``'s commits, and merging it landed ``Z`` even after ``Z``'s own PR
++was closed (#630). Now each bundle's base carries exactly the accepted work of the bundles
++it is ordered after by a declared edge — ``Depends on`` and an in-batch ``Depends on
++(merged)``, transitively; an earlier-wave ``Conflicts with`` partner; a finished
++prerequisite the run carried (#646) — built by ``integrate.build_bundle_base`` (#723), and a
++bundle with none of those is built on the real base. The run's line is still folded after
++each wave, as the run's check of the combined work. A base that cannot be built stops the
++run before the wave, with #723's error: a carried prerequisite whose branch holds work of a
++bundle the dependent does not build on, and a carried branch rewritten since the run took
++it. And an out-of-batch prerequisite merged into the base is judged by that merge alone: the
++dependent is no longer cut from a line that does not follow the base (#655).
++
++These cases drive ``flow._drive_and_act`` through real folds on the ``StackFoldGit`` fixture
++of tests/test_integrate_stack_bases.py (a bare ``origin``, a primary checkout and a scratch
++clone), loaded by path and used as a helper object, as tests/test_flow_same_wave_conflict.py
++does. The build and sign-off leaves are stubbed (the build writes a ``patch.diff`` and
++accepts; a close disposition writes the close marker instead), ``flow._publish_bundle`` cuts
++the PR branch from the recorded stack-base tip (else the base), makes each of the bundle's
++commits and pushes it, and ``gh`` is answered by a stub in front of ``subprocess.run``. The
++publisher is NOT a stub (a stub turns every fold into a dry-run). The carried cases drive
++the carry fixture of tests/test_flow_resume_stack_prereqs.py, and the #655 case the fixture
++of tests/test_flow_merged_prereq_on_line.py, loaded the same way.
++
++Only modules are imported (never a symbol the fix adds), so with the production change
++reverted these cases still load and run — and fail on their assertions.
++    cd template && PYTHONPATH=src python3 -m unittest tests.test_flow_dependency_scoped_bases
++"""
++
++from __future__ import annotations
++
++import dataclasses
++import importlib.util
++import io
++import json
++import subprocess
++import unittest
++from collections.abc import Callable
++from contextlib import ExitStack, redirect_stderr, redirect_stdout
++from pathlib import Path
++from unittest import mock
++
++from pdca_harness import flow, integrate, publish, state
++
++
++def _load(name: str, file: str):
++    spec = importlib.util.spec_from_file_location(name, Path(__file__).with_name(file))
++    module = importlib.util.module_from_spec(spec)
++    spec.loader.exec_module(module)
++    return module
++
++
++sb = _load("stack_bases_fixture", "test_integrate_stack_bases.py")
++rs = _load("resume_stack_prereqs_fixture", "test_flow_resume_stack_prereqs.py")
++mp = _load("merged_prereq_fixture", "test_flow_merged_prereq_on_line.py")
++
++TODAY = "2026-10-17"
++TWO = "two commits"
++
++
++def _helper(case: unittest.TestCase, cls: type) -> unittest.TestCase:
++    """A fixture TestCase used as a helper object: set up, and torn down with ``case``."""
++    helper = cls()
++    helper.setUp()
++    case.addCleanup(helper.doCleanups)
++    return helper
++
++
++class DependencyScopedBases(unittest.TestCase):
++
++    def setUp(self) -> None:
++        self.fx = sb.StackFoldGit()          # the fixture's real-git setUp/tearDown and helpers
++        self.fx.setUp()
++        self.addCleanup(self.fx.tearDown)
++        self.cfg = self.fx.cfg
++        self.cfg.publisher = dataclasses.replace(self.cfg.publisher, mode="command")
++        self.commits: dict[str, list[dict[str, str]]] = {}   # id → its commits' new files
++        self.close: set[str] = set()                         # ids closed with no patch
++        # bundle → (stack base, recorded tip, origin's tip of that base, origin's main) when
++        # its wave was driven
++        self.seen: dict[str, tuple[str, str, str | None, str]] = {}
++        self.order: list[str] = []                           # ids, in the order built
++        self.cut: dict[str, str] = {}                        # id → where its branch was cut
++        self.after_line_fold: Callable[[], None] | None = None   # run once, after a fold
++        self._real_run = subprocess.run
++
++    # -- fixture ---------------------------------------------------------------------------
++
++    def _plan(self, iid: str, commits: list[dict[str, str]] | str | None = None, *,
++              depends_on: str = "", merged: str = "", conflicts_with: str = "") -> Path:
++        """Bundle ``iid``'s brief with the edges given, and what its build commits:
++        ``commits`` a list of commits (each the new files it adds), ``TWO`` for two commits
++        of files of its own, None for one. A bundle in ``self.close`` commits nothing."""
++        d = self.cfg.bundle(iid)
++        sb._brief(d, extra=(f"- **Depends on:** {depends_on}\n" if depends_on else "")
++                  + (f"- **Depends on (merged):** {merged}\n" if merged else "")
++                  + (f"- **Conflicts with:** {conflicts_with}\n" if conflicts_with else ""))
++        low = iid.lower()
++        self.commits[iid] = ([{f"{low}1.txt": f"{iid} one\n"}, {f"{low}2.txt": f"{iid} two\n"}]
++                             if commits == TWO else commits or [{f"{low}.txt": f"{iid}\n"}])
++        return d
++
++    # -- stubs -----------------------------------------------------------------------------
++
++    def _gh_stub(self, args, *a, **kw):
++        """Any ``gh`` call is answered OPEN with the PR's head, its branch's tip on origin;
++        everything else runs for real."""
++        if not (isinstance(args, list) and args[:1] == ["gh"]):
++            return self._real_run(args, *a, **kw)
++        iid = str(args[3]).rsplit("/", 1)[-1]
++        head = self.fx._tip(f"fix/{iid}") if self.fx._has(f"fix/{iid}") else ""
++        return subprocess.CompletedProcess(args, 0, json.dumps(
++            {"state": "OPEN", "headRefOid": head}), "")
++
++    def _drive_wave(self, cfg, wave: list[Path], **_kw) -> int:
++        """Build and accept each bundle, recording what it was built on. A bundle in
++        ``self.close`` is accepted with a close disposition: no patch."""
++        for d in wave:
++            iid = d.name.removeprefix("issue_")
++            base = publish.read_stack_base(d)
++            self.seen[d.name] = (base, publish.read_stack_base_tip(d),
++                                 self.fx._tip(base) if base and self.fx._has(base) else None,
++                                 self.fx._tip("main"))
++            self.order.append(iid)
++            if iid in self.close:
++                (d / state.CLOSE_MARKER).write_text("likely-close\n", encoding="utf-8")
++            else:
++                (d / "patch.diff").write_text("".join(
++                    sb._new_file_patch(n, t.rstrip("\n"))
++                    for c in self.commits[iid] for n, t in c.items()), encoding="utf-8")
++            sb._accept(d)
++        return 1
++
++    def _publish_bundle(self, cfg, d: Path, **_kw) -> bool:
++        """What publish does: cut ``fix/<iid>`` from the recorded stack-base tip (else the
++        recorded base, else the base), make each of the bundle's commits on it, signed off,
++        push it and record it — ``stacked-pr`` when cut from a stack base. The brief is not
++        touched. A closed bundle publishes nothing."""
++        iid = d.name.removeprefix("issue_")
++        if iid in self.close:
++            return False
++        tip, base = publish.read_stack_base_tip(d), publish.read_stack_base(d)
++        cut = tip or (f"origin/{base}" if base else "origin/main")
++        repo, branch = self.fx.primary, f"fix/{iid}"
++        sb._git(repo, "fetch", "-q", "origin")
++        sb._git(repo, "checkout", "-q", "-B", branch, cut)
++        self.cut[iid] = sb._git(repo, "rev-parse", "HEAD").strip()
++        for i, files in enumerate(self.commits[iid], 1):
++            for name, text in files.items():
++                (repo / name).write_text(text, encoding="utf-8")
++            sb._git(repo, "add", "--all")
++            sb._git(repo, "commit", "-q", "-s", "-m", f"fix {iid} ({i})")
++        sb._git(repo, "push", "-q", "origin", branch)
++        sb._git(repo, "checkout", "-q", "main")
++        (d / "publish.json").write_text(json.dumps(
++            {"mode": "stacked-pr" if base else "new-pr", "branch": branch, "base": "main",
++             "repo": "org/repo", "pr_url": f"https://example.test/pr/{iid}"}),
++            encoding="utf-8")
++        return True
++
++    def _run(self, ids: list[str]) -> None:
++        """One stack-mode run asked for ``ids``, driving all of them."""
++        self.ids = list(ids)
++        self.line = integrate.integration_branch(self.cfg, "main", ids)
++        real_fold = integrate.fold
++
++        def fold(*a, **kw):
++            out = real_fold(*a, **kw)
++            if self.after_line_fold is not None:
++                hook, self.after_line_fold = self.after_line_fold, None
++                hook()
++            return out
++
++        err, out = io.StringIO(), io.StringIO()
++        with ExitStack() as stack:
++            stack.enter_context(mock.patch.object(subprocess, "run", self._gh_stub))
++            stack.enter_context(mock.patch.object(flow, "_drive_wave", self._drive_wave))
++            stack.enter_context(mock.patch.object(flow, "_publish_bundle",
++                                                  self._publish_bundle))
++            stack.enter_context(mock.patch.object(publish, "draft_texts",
++                                                  lambda *a, **k: True))
++            stack.enter_context(mock.patch.object(integrate, "fold", fold))
++            stack.enter_context(redirect_stdout(out))
++            stack.enter_context(redirect_stderr(err))
++            self.results = flow._drive_and_act(self.cfg, [self.cfg.bundle(i) for i in ids],
++                                               do_publish=True, do_act=False, by="T",
++                                               today=TODAY, batch=ids)
++        self.err = err.getvalue()
++        self.assertNotIn("Traceback", self.err)
++
++    # -- helpers ---------------------------------------------------------------------------
++
++    def _head(self, iid: str) -> str:
++        return self.fx._tip(f"fix/{iid}")
++
++    def _work(self, iid: str) -> list[str]:
++        """Every commit of ``origin/main..fix/<iid>``."""
++        return sb._git(self.fx.origin, "rev-list", f"main..fix/{iid}").split()
++
++    def _reach(self, rev: str) -> set[str]:
++        return set(sb._git(self.fx.origin, "rev-list", rev).split())
++
++    def _all_of(self, rev: str, iid: str) -> None:
++        """``rev`` holds every commit of ``origin/main..fix/<iid>``."""
++        work = self._work(iid)
++        self.assertTrue(work, iid)
++        self.assertEqual([c for c in work if c not in self._reach(rev)], [], (rev, iid))
++
++    def _none_of(self, rev: str, iid: str) -> None:
++        """``rev`` holds no commit of ``origin/main..fix/<iid>`` — not one, so a partial
++        carry fails too."""
++        work = self._work(iid)
++        self.assertTrue(work, iid)
++        self.assertEqual([c for c in work if c in self._reach(rev)], [], (rev, iid))
++
++    def _built_on(self, iid: str, *closure: str) -> str:
++        """``iid`` was built on a base of its own holding exactly the work of ``closure``,
++        and its PR branch was cut from that commit; returns it. Its recorded stack base is a
++        branch on origin and its recorded tip is that branch's tip when its wave was driven
++        (the commit it was built on). The tip holds each of their branches; no commit of
++        another bundle of the run's own work; and, beyond the base it started from and
++        them, only the merge commits made building it."""
++        self.assertIn(f"issue_{iid}", self.seen, self.err)
++        base, tip, at, main = self.seen[f"issue_{iid}"]
++        self.assertTrue(base, self.err)
++        heads = [self._head(c) for c in closure]
++        for c, h in zip(closure, heads):
++            self.assertTrue(self.fx._ancestor(h, tip), (iid, c, self.err))
++        for other in self.ids:
++            if other != iid and other not in closure:
++                own = self.fx._own(other, base=main, beside=heads)
++                self.assertEqual([c for c in own if self.fx._ancestor(c, tip)], [],
++                                 (iid, other, self.err))
++        self.assertEqual(self.fx._beyond(tip, main, heads), [], (iid, self.err))
++        self.assertIsNotNone(at, self.err)
++        self.assertEqual(tip, at, self.err)
++        self.assertNotEqual(base, self.line, self.err)        # never the run's line
++        self.assertEqual(self.cut[iid], tip)                  # its PR branch is cut from it
++        self.assertEqual(self.results[iid], state.COMPLETE, self.err)
++        return tip
++
++    def _stop(self) -> str:
++        """The ONE stderr line that stops the run."""
++        stop = [x for x in self.err.splitlines() if "STOPPING" in x]
++        self.assertEqual(len(stop), 1, self.err)
++        return stop[0]
++
++    # -- (1) the #630 case: B carries A, and nothing of Z -----------------------------------
++
++    def test_a_dependent_carries_its_prerequisite_and_nothing_of_an_unrelated_bundle(self):
++        self._plan("A", TWO)
++        self._plan("Z", TWO)
++        self._plan("B", depends_on="A")
++        self._run(["A", "Z", "B"])
++
++        self.assertNotIn("STOPPING", self.err)
++        for iid in ("A", "Z", "B"):
++            self.assertEqual(self.results[iid], state.COMPLETE, self.err)
++        self.assertEqual(len(self._work("A")), 2)
++        self.assertEqual(len(self._work("Z")), 2)
++        self._all_of("fix/B", "A")
++        self._none_of("fix/B", "Z")
++        # B's recorded stack base: a branch on origin holding fix/A's tip and not fix/Z's,
++        # the commit B was built on and its PR branch cut from.
++        base, tip, _at, _main = self.seen["issue_B"]
++        self.assertTrue(self.fx._has(base), self.err)
++        self.assertTrue(self.fx._ancestor(self._head("A"), base))
++        self.assertFalse(self.fx._ancestor(self._head("Z"), base))
++        self.assertEqual(self._built_on("B", "A"), tip)
++        # The run's line still folds every accepted bundle: the check of the combined work.
++        for iid in ("A", "Z"):
++            self._all_of(self.line, iid)
++
++    # -- (2) transitive: C carries B and A, and nothing of Z --------------------------------
++
++    def test_the_base_carries_every_prerequisite_reached_through_another(self):
++        self._plan("A", TWO)
++        self._plan("Z", TWO)
++        self._plan("B", depends_on="A")
++        self._plan("C", depends_on="B")
++        self._run(["A", "Z", "B", "C"])
++
++        self.assertNotIn("STOPPING", self.err)
++        self.assertEqual(self.order.index("C"), 3, self.order)         # wave 2
++        for iid in ("A", "B"):
++            self._all_of("fix/C", iid)
++        self._none_of("fix/C", "Z")
++        self._built_on("C", "B", "A")
++        self._built_on("B", "A")
++
++    # -- (3) an earlier-wave `Conflicts with` partner is on the base ------------------------
++
++    def test_an_earlier_wave_conflicts_with_partner_is_on_the_base(self):
++        # The scheduler puts the name-higher id of a conflicting pair in the later wave.
++        self._plan("A", TWO)
++        self._plan("Z", TWO)
++        self._plan("E", conflicts_with="A")
++        self._run(["A", "Z", "E"])
++
++        self.assertNotIn("STOPPING", self.err)
++        self.assertLess(self.order.index("A"), self.order.index("E"))   # a later wave
++        self.assertLess(self.order.index("Z"), self.order.index("E"))
++        self._all_of("fix/E", "A")
++        self._none_of("fix/E", "Z")
++        self._built_on("E", "A")
++
++    # -- (4) an in-batch `Depends on (merged)` prerequisite is merged nowhere: carried ------
++
++    def test_an_in_batch_depends_on_merged_prerequisite_is_on_the_base(self):
++        # In batch, the field orders G after A like `Depends on`, and A's PR is merged
++        # nowhere this run, so only G's base can bring A's work.
++        self._plan("A", TWO)
++        self._plan("Z", TWO)
++        self._plan("G", merged="A")
++        self._run(["A", "Z", "G"])
++
++        self.assertNotIn("STOPPING", self.err)
++        self._all_of("fix/G", "A")
++        self._none_of("fix/G", "Z")
++        self._built_on("G", "A")
++
++    # -- (5) no prerequisite with work to carry → the real base -----------------------------
++
++    def test_a_bundle_whose_only_prerequisite_has_no_patch_is_built_on_the_real_base(self):
++        self._plan("A", TWO)
++        self._plan("Z", TWO)
++        self._plan("N")
++        self.close.add("N")                                  # closed: nothing of it to carry
++        self._plan("H", depends_on="N")
++        self._run(["A", "N", "Z", "H"])
++
++        self.assertNotIn("STOPPING", self.err)
++        self.assertLess(self.order.index("N"), self.order.index("H"))   # a later wave
++        for iid in ("A", "N", "Z", "H"):
++            self.assertEqual(self.results[iid], state.COMPLETE, self.err)
++        base, tip, _at, main = self.seen["issue_H"]
++        self.assertEqual((base, tip), ("", ""), self.err)                # cleared
++        self.assertEqual(publish.read_stack_base(self.cfg.bundle("H")), "")
++        self.assertEqual(self.cut["H"], main)                # cut from the base it found
++        self._none_of("fix/H", "A")
++        self._none_of("fix/H", "Z")
++        self._all_of(self.line, "A")                         # the line still has both
++        self._all_of(self.line, "Z")
++
++    # -- a branch the line carried, rewritten before a dependent's base is built (#633) -----
++
++    def test_a_branch_the_line_carried_rewritten_before_a_dependents_base_stops_the_run(self):
++        # After the line's fold after wave 0 took fix/A, fix/A is rewritten (re-published
++        # from the base). B's base is built from fix/A next: the head the fold took reaches
++        # its #633 check, so the run stops there, before B is built on commits the line
++        # does not hold.
++        self._plan("A")
++        self._plan("B", depends_on="A")
++        took: list[str] = []
++        rebuilt: list[str] = []
++
++        def rewrite_a() -> None:
++            took.append(self._head("A"))
++            rebuilt.append(self.fx._push_from_human({"a-rebuilt.txt": "A, rebuilt\n"},
++                                                    to="fix/A", force=True))
++
++        self.after_line_fold = rewrite_a
++        self._run(["A", "B"])
++
++        self.assertEqual(len(took), 1, self.err)
++        self.assertFalse(self.fx._ancestor(took[0], rebuilt[0]))         # a rewrite
++        self.assertNotIn("issue_B", self.seen, self.err)                  # never built
++        self.assertEqual(self.results["B"], state.PLANNED, self.err)
++        self.assertEqual(publish.read_stack_base(self.cfg.bundle("B")), "")
++        facts = integrate._carried_rewrite(self.fx.origin, "issue_A", "origin/fix/A",
++                                           took[0], rebuilt[0], self.line)
++        self.assertIsNotNone(facts)
++        stop = self._stop()
++        for part in ("issue_B", facts):
++            self.assertIn(part, stop)
++
++
++class CarriedPrerequisiteBases(unittest.TestCase):
++    """The carried cases (#646): the carry fixture of tests/test_flow_resume_stack_prereqs.py,
++    whose run is a re-issue that finds finished ids to carry before wave 0."""
++
++    def setUp(self) -> None:
++        self.c = _helper(self, rs.ResumeStackPrereqs)
++        self.fx, self.cfg = self.c.fx, self.c.cfg
++
++    def _work(self, iid: str) -> list[str]:
++        return sb._git(self.fx.origin, "rev-list", f"main..fix/{iid}").split()
++
++    def _holds_none_of(self, tip: str, iid: str) -> None:
++        work = self._work(iid)
++        self.assertTrue(work, iid)
++        self.assertEqual([c for c in work if self.fx._ancestor(c, tip)], [], (tip, iid))
++
++    def _built_on_carried(self, iid: str, has: str, lacks: str) -> str:
++        """``iid`` was built on its recorded base — origin's tip of it when its wave was
++        driven — which holds ``fix/<has>``'s tip and no commit of ``fix/<lacks>``, and is
++        COMPLETE. Returns that commit."""
++        c = self.c
++        base, tip, _line = c._built(iid)
++        at, _main = c.base_at[f"issue_{iid}"]
++        self.assertTrue(base, c.err)
++        self.assertTrue(self.fx._ancestor(self.fx._tip(f"fix/{has}"), tip), (iid, c.err))
++        self._holds_none_of(tip, lacks)
++        self.assertEqual(tip, at, c.err)
++        self.assertNotEqual(base, c.line, c.err)             # never the run's line
++        self.assertEqual(c.results[iid], state.COMPLETE, c.err)
++        return tip
++
++    def _stop(self) -> str:
++        stop = [x for x in self.c.err.splitlines() if "STOPPING" in x]
++        self.assertEqual(len(stop), 1, self.c.err)
++        return stop[0]
++
++    def _never_built(self, iid: str) -> None:
++        """``iid`` was never built: PLANNED, and no stack base recorded for it."""
++        c = self.c
++        self.assertNotIn(f"issue_{iid}", c.seen, c.err)
++        self.assertEqual(c.results[iid], state.PLANNED, c.err)
++        self.assertEqual(publish.read_stack_base(self.cfg.bundle(iid)), "")
++        self.assertEqual(publish.read_stack_base_tip(self.cfg.bundle(iid)), "")
++
++    # -- (6) each carried prerequisite is on its own dependents' bases alone ----------------
++
++    def test_a_carried_finished_prerequisite_is_on_its_dependents_base_alone(self):
++        c = self.c
++        c._finished("P", {"p.txt": "p\n"})
++        c._finished("X", {"x.txt": "x\n"})
++        d, e = c._planned("D", "P"), c._planned("E", "X")
++        c._run([d, e], ["P", "X", "D", "E"])
++
++        self.assertIn("flow: carried issue_P, issue_X", c.err)
++        self.assertNotIn("STOPPING", c.err)
++        self._built_on_carried("D", has="P", lacks="X")
++        self._built_on_carried("E", has="X", lacks="P")
++        for iid in ("P", "X"):                       # the line still carries both
++            self.assertTrue(self.fx._ancestor(self.fx._tip(f"fix/{iid}"), c.line), iid)
++
++    # -- (7) a carried prerequisite whose branch holds another carried bundle's work --------
++
++    def test_a_carried_prerequisite_cut_from_a_line_holding_another_stops_the_run(self):
++        # An earlier run's line held X, and P was cut from it, recording it as its stack
++        # base — but P's brief names no edge to X. Both finish, both are carried; D depends
++        # on P alone, so a base of P without X cannot be built: P's branch brings X's
++        # commit from below the cut point P recorded.
++        c = self.c
++        x = c._finished("X", {"x.txt": "x\n"})
++        old = integrate.integration_branch(self.cfg, "main", ["X", "P"])   # the earlier run
++        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
++            integrate.fold(self.cfg, [x], folded_this_run={}, batch=["X", "P"])
++        old_tip = self.fx._tip(old)
++        p = self.fx._publish("P", {"p.txt": "p\n"}, cut_from=f"origin/{old}")
++        sb._accept(p)
++        publish.write_stack_base(p, old, old_tip)
++        c.gh["P"] = "OPEN"
++        self.assertEqual(state.state(p), state.COMPLETE)
++        self.assertTrue(self.fx._ancestor(self.fx._tip("fix/X"), self.fx._tip("fix/P")))
++        d = c._planned("D", "P")
++        batch = ["X", "P", "D"]
++        c._run([d], batch)
++
++        self.assertIn("flow: carried issue_X, issue_P", c.err)          # both carried
++        self._never_built("D")
++        stop = self._stop()
++        for part in ("issue_D", "issue_P", "issue_X"):
++            self.assertIn(part, stop)
++        # Nothing was pushed for D, and no branch holding X's commits is recorded as the
++        # stack base of any bundle of this run; P's record is the earlier run's, untouched.
++        self.assertFalse(self.fx._has(
++            integrate.bundle_base_branch(self.cfg, "main", batch, "issue_D")))
++        self.assertEqual((publish.read_stack_base(p), publish.read_stack_base_tip(p)),
++                         (old, old_tip))
++        for iid in ("X", "D"):
++            b = self.cfg.bundle(iid)
++            tip = publish.read_stack_base_tip(b)
++            self.assertEqual((publish.read_stack_base(b), tip), ("", ""), iid)
++
++    # -- (8) a carried prerequisite rewritten after the carry (#633) ------------------------
++
++    def test_a_carried_prerequisite_rewritten_after_the_carry_stops_the_run(self):
++        c = self.c
++        c._finished("P", {"p.txt": "p\n"})
++        d = c._planned("D", "P")
++        took = self.fx._tip("fix/P")
++        rebuilt: list[str] = []
++        given: list[dict] = []                     # what each base build was handed
++        real_carry, real_build = flow._carry_finished, integrate.build_bundle_base
++
++        def carry_then_rewrite(*a, **kw):
++            out = real_carry(*a, **kw)
++            rebuilt.append(self.fx._push_from_human({"p2.txt": "p, rebuilt\n"}, to="fix/P",
++                                                    force=True))
++            return out
++
++        def build(*a, **kw):
++            given.append(dict(kw))
++            return real_build(*a, **kw)
++
++        with mock.patch.object(flow, "_carry_finished", carry_then_rewrite), \
++                mock.patch.object(integrate, "build_bundle_base", build):
++            c._run([d], ["P", "D"])
++
++        self.assertIn("flow: carried issue_P", c.err)
++        self.assertEqual(len(rebuilt), 1, c.err)
++        self.assertFalse(self.fx._ancestor(took, rebuilt[0]))           # a rewrite
++        self._never_built("D")
++        # The carry's head for P reached the base build's `carried`, and it refused there.
++        self.assertEqual(len(given), 1, c.err)
++        self.assertEqual(given[0]["carried"].get("issue_P"), took, given)
++        facts = integrate._carried_rewrite(self.fx.origin, "issue_P", "origin/fix/P", took,
++                                           rebuilt[0], c.line)
++        self.assertIsNotNone(facts)
++        stop = self._stop()
++        for part in ("issue_D", "issue_P", facts):
++            self.assertIn(part, stop)
++
++
++class MergedPrerequisiteJudgedOnTheBase(unittest.TestCase):
++    """(9) #655 judged on the base the dependent gets: the fixture of
++    tests/test_flow_merged_prereq_on_line.py, where out-of-batch P's PR merges into main
++    after the run's first fold, so the line lacks the merge but main has it."""
++
++    def _merged_after_the_first_fold(self, edge: str) -> None:
++        m = _helper(self, mp.MergedPrereqOnTheLine)
++        m._prereq()
++        m.after_first_fold = m._merge
++        m._run(m._wd(edge), ["W", "D"])
++        fx = m.fx
++        self.assertFalse(fx._ancestor(m.merge_oid["P"], m.line))      # the line lacks it
++        self.assertEqual([x for x in m.err.splitlines() if "issue_D held" in x], [], m.err)
++        self.assertNotIn("STOPPING", m.err)
++        self.assertIn("issue_D", m.seen, m.err)
++        base, tip = m.seen["issue_D"]
++        self.assertTrue(base, m.err)
++        self.assertEqual(m.results["D"], state.COMPLETE, m.err)
++        self.assertTrue(fx._ancestor(m.merge_oid["P"], tip))          # its base has it
++        self.assertTrue(fx._ancestor(fx._tip("fix/W"), tip))
++        self.assertTrue(fx._ancestor(m.merge_oid["P"], fx._tip("fix/D")))
++
++    def test_a_plain_depends_on_dependent_is_built_on_a_base_with_the_merge(self):
++        self._merged_after_the_first_fold(mp.PLAIN_EDGE)
++
++    def test_a_depends_on_merged_dependent_is_built_on_a_base_with_the_merge(self):
++        self._merged_after_the_first_fold(mp.MERGED_EDGE)
++
++
++if __name__ == "__main__":
++    unittest.main()

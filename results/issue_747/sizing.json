@@ -1,0 +1,14 @@
+{
+  "band": "watch",
+  "independent_outcomes": [
+    "Core: a cross-wave clash at the in-run fold that in-batch partners on the line fully explain (rules a-e) holds the bundle, names the partners, and keeps the run going, worded as 'already on the line from an earlier wave', with the rebuild-on-it step (never 'Conflicts with') when the partner is the held bundle's own prerequisite. Covers cases (1), (3) and the flip (4).",
+    "Arguably separate: carried finished bundles count as partners. _carry_finished records the heads it carried, and _fold_lines/fold take a new classification-only keyword argument, so a clash with a finished bundle carried onto the line is held naming it instead of stopping. This is case (2)."
+  ],
+  "proposed_seams": [
+    "Possible cut between case (2) and the rest. The carried-head route (record heads in _carry_finished, pass them through _fold_lines into fold as extra partner candidates) is its own plumbing, its own defect ('no bundle's own change accounts for \u2026' when the partner is a carried finished head), and its own test. Cases (1), (3) and (4) pass without it, and it would build on the core as a small follow-up. I lean against forcing the cut: case (2) reuses the same classifier and hold path, and the brief is already a child of the #739 split with siblings #748/#749 pinned to build on it, so another split adds ordering cost for a modest gain.",
+    "No seam between the hold and the prerequisite-partner wording (flip case 4). Shipping the hold without that wording would propose 'Conflicts with: 10' for a bundle's own prerequisite, which is wrong advice. They have to ship together.",
+    "Uncertain surface, not a seam: two rounds already failed on rule (e) edge cases (a rest bundle built on a partner; mixed prerequisite and non-prerequisite partners). That is depth inside one outcome, not a second outcome, but it is why this is 'watch' rather than 'ok'."
+  ],
+  "confidence": "medium",
+  "brief_sha": "0784e6c7729dadb0"
+}

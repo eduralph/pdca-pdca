@@ -1,0 +1,14 @@
+{
+  "band": "watch",
+  "independent_outcomes": [
+    "A failure building one bundle's own base holds that bundle (and its Depends-on / Conflicts-with dependents) instead of stopping the run, with a per-cause stderr line and exit code 3/1 per the 2026-10-18 contract. Cases (1)-(8) and the three iteration-5 carry-forward fixes are all facets of this one change: same catch site in _bundle_bases / the wave loop, same held set, same _results_rc exemption, same test file."
+  ],
+  "proposed_seams": [
+    "Weak seam, not recommended: the rewrite-cause wording (case 2c 'next fold' warning and carry-forward fix 1) could ship as a follow-up that refines the hold line. It cannot ship first, though, since it needs the hold to exist, and shipping without it would break the brief's own rule that a hold message never promises more than the run does. So it stays here.",
+    "Weak seam, not recommended: the Conflicts-with partner propagation (case 5, _runnable sees the base-held set) could be its own PR after the core hold. Leaving it out would let X build on a plain base next to a held B, a known-wrong state, so it belongs with the core change.",
+    "No seam in the cli._results_rc exemption: without it a base-held PLANNED bundle would give exit 1 instead of 3, so the hold and the exit code have to land together.",
+    "Why watch and not ok: one outcome, but a wide surface that is still uncertain. There are many interacting cases (rewrite vs. #695 end-of-run check, IntegrationTreeError/_LineBroken still stopping, held-then-stop ordering), and this is the sixth attempt. v4 and v5 both passed the gates and were sent back on edge cases. The brief is already one of three children split from #725, and splitting further would cut through a single code path."
+  ],
+  "confidence": "medium",
+  "brief_sha": "bdb0166ca99a2249"
+}

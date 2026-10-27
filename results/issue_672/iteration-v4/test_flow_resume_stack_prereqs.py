@@ -1,0 +1,913 @@
+"""A re-issued stack-mode run carries its finished prerequisites onto its line (#646).
+
+The recovery for a stack-mode run that stopped part-way is to re-issue the same
+`pdca flow <ids>`. The ids the earlier run finished are skipped as terminal, so they never
+reached the run's fold, and a dependent of one was cut from the plain base without it —
+built, verified and published, with nothing said. These cases drive
+``flow._drive_and_act(cfg, [<drive set>], batch=[<all requested ids>])`` — the shape
+``flow_ids`` produces when finished ids are skipped — against real git: the ``StackFoldGit``
+fixture of tests/test_integrate_stack_bases.py (a bare ``origin`` and a primary checkout),
+loaded by path and used as a helper object, so its own cases are not collected here. The
+build and sign-off leaves are stubbed, ``flow._publish_bundle`` is the fixture's
+``_publish``, and ``gh`` is answered by a stub in front of ``subprocess.run``. The publisher
+is NOT a stub (a stub turns every fold into a dry-run), except in the dry-run case.
+
+Only modules are imported (never a symbol the fix adds), so with the production change
+reverted these cases still load and run — and fail on their assertions.
+    cd template && PYTHONPATH=src python3 -m unittest tests.test_flow_resume_stack_prereqs
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import importlib.util
+import inspect
+import io
+import json
+import os
+import subprocess
+import unittest
+from contextlib import ExitStack, redirect_stderr, redirect_stdout
+from pathlib import Path
+from unittest import mock
+
+from pdca_harness import flow, gates, integrate, publish, state
+
+_SPEC = importlib.util.spec_from_file_location(
+    "stack_bases_fixture", Path(__file__).with_name("test_integrate_stack_bases.py"))
+sb = importlib.util.module_from_spec(_SPEC)
+_SPEC.loader.exec_module(sb)
+
+TODAY = "2026-10-08"
+
+
+class ResumeStackPrereqs(unittest.TestCase):
+
+    def setUp(self) -> None:
+        self.fx = sb.StackFoldGit()          # the fixture's real-git setUp/tearDown and helpers
+        self.fx.setUp()
+        self.addCleanup(self.fx.tearDown)
+        self.cfg = self.fx.cfg
+        self.cfg.publisher = dataclasses.replace(self.cfg.publisher, mode="command")
+        self.gh: dict[str, str] | None = {}   # PR state by id; None: `gh` is not installed
+        self.gh_calls: list[list[str]] = []
+        self.events: list[str] = []
+        # bundle → (stack base, recorded tip, origin's line tip) when its wave was driven
+        self.seen: dict[str, tuple[str, str, str | None]] = {}
+        self._real_run = subprocess.run
+
+    # -- fixture ---------------------------------------------------------------------------
+
+    def _finished(self, iid: str, files: dict[str, str] | None, *, pr: str = "OPEN",
+                  patch: str | None = "") -> Path:
+        """``iid`` finished in an earlier run: accepted at sign-off, then published (its
+        branch pushed, ``publish.json`` written after the accept) with its PR in state
+        ``pr``. ``files`` None: no change at all — ``patch`` is then its patch.diff text, or
+        None for none (a close disposition, whose marker stands in for it)."""
+        d = self.cfg.bundle(iid)
+        sb._brief(d)
+        sb._accept(d)
+        if files is None:
+            name, text = ((state.CLOSE_MARKER, "likely-close\n") if patch is None
+                          else ("patch.diff", patch))
+            (d / name).write_text(text, encoding="utf-8")
+        else:
+            self.fx._publish(iid, files)
+        self.assertEqual(state.state(d), state.COMPLETE)
+        self.gh[iid] = pr
+        return d
+
+    def _planned(self, iid: str, depends_on: str = "") -> Path:
+        d = self.cfg.bundle(iid)
+        sb._brief(d, extra=f"- **Depends on:** {depends_on}\n" if depends_on else "")
+        return d
+
+    def _line(self, batch: list[str]) -> str:
+        return integrate.integration_branch(self.cfg, "main", batch)
+
+    # -- stubs -----------------------------------------------------------------------------
+
+    def _gh_stub(self, args, *a, **kw):
+        """``gh pr view <url> --json state,headRefOid`` answered from ``self.gh``; the PR head
+        is the branch's tip on origin. Everything else runs for real."""
+        if not (isinstance(args, list) and args[:1] == ["gh"]):
+            return self._real_run(args, *a, **kw)
+        self.gh_calls.append(list(args))
+        if self.gh is None:
+            raise FileNotFoundError(2, "No such file or directory", "gh")
+        iid = str(args[3]).rsplit("/", 1)[-1]
+        head = self.fx._tip(f"fix/{iid}") if self.fx._has(f"fix/{iid}") else ""
+        out = json.dumps({"state": self.gh.get(iid, "OPEN"), "headRefOid": head})
+        return subprocess.CompletedProcess(args, 0, out, "")
+
+    def _drive_wave(self, cfg, wave: list[Path], **_kw) -> int:
+        """Build and accept each bundle, recording what it was built on."""
+        for d in wave:
+            line = self.fx._tip(self.line) if self.fx._has(self.line) else None
+            self.seen[d.name] = (publish.read_stack_base(d), publish.read_stack_base_tip(d),
+                                 line)
+            self.events.append(f"wave:{d.name}")
+            (d / "patch.diff").write_text(sb._new_file_patch(f"{d.name}.txt", d.name),
+                                          encoding="utf-8")
+            sb._accept(d)
+        return 1
+
+    def _publish_bundle(self, cfg, d: Path, **_kw) -> bool:
+        """What publish does: cut the PR branch from the recorded line tip (else the line,
+        else the base), push it, record it."""
+        tip, line = publish.read_stack_base_tip(d), publish.read_stack_base(d)
+        self.fx._publish(d.name.removeprefix("issue_"), {f"{d.name}.txt": d.name + "\n"},
+                         cut_from=tip or (f"origin/{line}" if line else "origin/main"))
+        return True
+
+    def _run(self, drive: list[Path], batch: list[str], *, regate=None) -> None:
+        """The re-issued run: drive ``drive`` with the run asked for ``batch``."""
+        self.line = self._line(batch)
+        real_fold = integrate.fold
+
+        def fold(*a, **kw):
+            self.events.append("fold")
+            return real_fold(*a, **kw)
+
+        err, out = io.StringIO(), io.StringIO()
+        with ExitStack() as stack:
+            stack.enter_context(mock.patch.object(subprocess, "run", self._gh_stub))
+            stack.enter_context(mock.patch.object(flow, "_drive_wave", self._drive_wave))
+            stack.enter_context(mock.patch.object(flow, "_publish_bundle",
+                                                  self._publish_bundle))
+            stack.enter_context(mock.patch.object(publish, "draft_texts",
+                                                  lambda *a, **k: True))
+            stack.enter_context(mock.patch.object(integrate, "fold", fold))
+            if regate is not None:
+                stack.enter_context(mock.patch.object(gates, "run_integration", regate))
+            stack.enter_context(redirect_stdout(out))
+            stack.enter_context(redirect_stderr(err))
+            self.results = flow._drive_and_act(self.cfg, drive, do_publish=True,
+                                               do_act=False, by="T", today=TODAY,
+                                               batch=batch)
+        self.err, self.out = err.getvalue(), out.getvalue()
+        self.assertNotIn("Traceback", self.err)
+
+    def _held(self, prereq: str, dependent: str, *reason: str) -> str:
+        """``dependent`` was never built and is left PLANNED, and ONE stderr line names
+        ``prereq``, ``dependent`` and the reason. Returns that line."""
+        self.assertNotIn(f"issue_{dependent}", self.seen, self.err)
+        self.assertEqual(self.results[dependent], state.PLANNED)
+        lines = [x for x in self.err.splitlines()
+                 if f"issue_{prereq}" in x and f"issue_{dependent}" in x]
+        self.assertEqual(len(lines), 1, self.err)
+        for part in reason:
+            self.assertIn(part, lines[0])
+        return lines[0]
+
+    def _built(self, iid: str) -> tuple[str, str, str | None]:
+        """What ``iid`` was built on — (stack base, recorded tip, origin's line tip) — once
+        it is checked that it was built at all."""
+        self.assertIn(f"issue_{iid}", self.seen, self.err)
+        return self.seen[f"issue_{iid}"]
+
+    def _on_base(self, iid: str) -> None:
+        """``iid`` was built, on the plain base."""
+        self.assertEqual(self._built(iid)[:2], ("", ""), self.err)
+        self.assertEqual(self.results[iid], state.COMPLETE)
+
+    # -- (1)-(3): a clean finished prerequisite is carried ----------------------------------
+
+    def test_a_clean_finished_prerequisite_is_on_the_line_its_dependent_builds_on(self):
+        # (1) Before #646 D's stale-clear left it on the plain base, and no line held P.
+        self._finished("P", {"p.txt": "p\n"})
+        d = self._planned("D", "P")
+        self._run([d], ["P", "D"])
+        base, tip, line_tip = self._built("D")
+        self.assertEqual(base, self._line(["P", "D"]), self.err)
+        self.assertIsNotNone(line_tip)
+        self.assertEqual(tip, line_tip)
+        self.assertTrue(self.fx._ancestor(self.fx._tip("fix/P"), line_tip))
+        self.assertEqual(self.results["D"], state.COMPLETE)
+
+    def test_an_earlier_runs_line_is_continued_never_replaced(self):
+        # (2) The earlier run's line holds P on the base. Origin refuses non-fast-forwards:
+        # a rebuilt line (its merge commit dated differently) could not land.
+        p = self._finished("P", {"p.txt": "p\n"})
+        d = self._planned("D", "P")
+        line = self._line(["P", "D"])
+        with mock.patch.dict(os.environ, {"GIT_AUTHOR_DATE": "@1700000000 +0000",
+                                          "GIT_COMMITTER_DATE": "@1700000000 +0000"}):
+            integrate.fold(self.cfg, [p], folded_this_run={}, batch=["P", "D"])
+        old = self.fx._tip(line)
+        sb._git(self.fx.origin, "config", "receive.denyNonFastForwards", "true")
+        pushes = self.fx._pushes(lambda: self._run([d], ["P", "D"]))
+        self.assertEqual(self._built("D")[:2], (line, old), self.err)
+        self.assertTrue(self.fx._ancestor(old, line))
+        self.assertTrue(pushes)
+        self.assertEqual([x for x in pushes if "--force" in x], [], pushes)
+        self.assertEqual(self.results["D"], state.COMPLETE)
+
+    def test_the_fold_after_wave_0_continues_the_carried_line(self):
+        # (3) E depends on D: the fold after wave 0 continues the carried line — no force,
+        # no IntegrationError — and E builds on a line holding P and D.
+        self._finished("P", {"p.txt": "p\n"})
+        d, e = self._planned("D", "P"), self._planned("E", "D")
+        line = self._line(["P", "D", "E"])
+        pushes = self.fx._pushes(lambda: self._run([d, e], ["P", "D", "E"]))
+        self.assertNotIn("did not integrate", self.err)
+        d_base, d_tip, carried = self._built("D")
+        self.assertEqual((d_base, d_tip), (line, carried), self.err)
+        self.assertEqual(len(pushes), 2, pushes)        # the carry, then the wave-0 fold
+        self.assertNotIn("--force", pushes[1])
+        e_base, e_tip, e_line = self._built("E")
+        self.assertEqual((e_base, e_tip), (line, e_line))
+        for commit in (carried, self.fx._tip("fix/P"), self.fx._tip("fix/D")):
+            self.assertTrue(self.fx._ancestor(commit, e_line), commit)
+        self.assertEqual(self.results["E"], state.COMPLETE)
+
+    # -- (4): not clean ⇒ hold only its dependents; the run goes on -------------------------
+
+    def test_a_closed_prerequisite_holds_only_its_dependents(self):
+        # (4a)
+        self._finished("P", {"p.txt": "p\n"}, pr="CLOSED")
+        d, u = self._planned("D", "P"), self._planned("U")
+        self._run([d, u], ["P", "D", "U"])
+        self._held("P", "D", "CLOSED", "re-issue")
+        self._on_base("U")
+        self.assertFalse(self.fx._has(self.line))
+
+    def test_an_unreadable_pr_state_holds_only_its_dependents(self):
+        # (4b) `gh` is not installed: an OSError, never a traceback.
+        self._finished("P", {"p.txt": "p\n"})
+        d, u = self._planned("D", "P"), self._planned("U")
+        self.gh = None
+        self._run([d, u], ["P", "D", "U"])
+        self._held("P", "D", "could not be read")
+        self.assertTrue(self.gh_calls)
+        self._on_base("U")
+        self.assertFalse(self.fx._has(self.line))
+
+    def test_of_two_conflicting_prerequisites_the_one_asked_for_first_is_carried(self):
+        # (4c) Q is asked for before P (not name order): Q is carried, P conflicts with it,
+        # so P's dependent A is held and Q's dependent B builds on the line.
+        self._finished("P", {"c.txt": "p\n"})
+        self._finished("Q", {"c.txt": "q\n"})
+        a, b = self._planned("A", "P"), self._planned("B", "Q")
+        self._run([a, b], ["Q", "P", "A", "B"])
+        self._held("P", "A", "conflict")
+        base, tip, line_tip = self._built("B")
+        self.assertEqual((base, tip), (self.line, line_tip), self.err)
+        self.assertTrue(self.fx._ancestor(self.fx._tip("fix/Q"), line_tip))
+        self.assertFalse(self.fx._ancestor(self.fx._tip("fix/P"), self.line))
+        self.assertEqual(self.results["B"], state.COMPLETE)
+
+    # -- (5): an untrusted line is not built on, and the run's first fold replaces it -------
+
+    def test_an_untrusted_line_holds_the_carry_and_the_first_fold_replaces_it(self):
+        self._finished("P", {"p.txt": "p\n"})
+        d, u, w = self._planned("D", "P"), self._planned("U"), self._planned("W", "U")
+        batch = ["P", "D", "U", "W"]
+        line = self._line(batch)
+        rejected = self.fx._push_from_human({"old.txt": "rejected\n"}, to=line)
+        self._run([d, u, w], batch)
+        held = self._held("P", "D", line, "delete")
+        self.assertIn("re-issue", held)
+        self._on_base("U")
+        self.assertEqual(self._built("U")[2], rejected)        # the carry pushed nothing
+        self.assertFalse(self.fx._ancestor(rejected, line))    # the wave-0 fold replaced it
+        w_base, w_tip, w_line = self._built("W")
+        self.assertEqual((w_base, w_tip), (line, w_line))
+        self.assertFalse(self.fx._ancestor(rejected, w_line))
+        self.assertEqual(self.results["W"], state.COMPLETE)
+
+    # -- (6): the trigger -------------------------------------------------------------------
+
+    def test_a_prerequisite_without_a_patch_carries_nothing(self):
+        self._finished("P", None, patch=None)        # COMPLETE, no patch.diff at all
+        d = self._planned("D", "P")
+        self._run([d], ["P", "D"])
+        self._on_base("D")
+        self.assertNotIn("fold", self.events)
+        self.assertEqual(self.gh_calls, [])
+        self.assertFalse(self.fx._has(self.line))
+
+    def test_an_unrelated_carryable_prerequisite_is_not_carried(self):
+        self._finished("P", None, patch="")          # COMPLETE, empty patch.diff
+        self._finished("Q", {"q.txt": "q\n"})       # carryable, but nothing depends on it
+        d = self._planned("D", "P")
+        self._run([d], ["P", "Q", "D"])
+        self._on_base("D")
+        self.assertNotIn("fold", self.events)
+        self.assertEqual(self.gh_calls, [])
+        self.assertFalse(self.fx._has(self.line))
+        self.assertNotIn("issue_Q", self.err)
+
+    # -- (7): unchanged without a trigger; a dry-run only prints -----------------------------
+
+    def test_without_a_finished_prerequisite_the_run_is_unchanged(self):
+        d, e = self._planned("D"), self._planned("E", "D")
+        publish.write_stack_base(d, "pdca-integration/main-rstale", sb.ABSENT)   # stale
+        self._run([d, e], ["D", "E"])
+        self._on_base("D")                                   # the stale stack base cleared
+        self.assertEqual(self.events, ["wave:issue_D", "fold", "wave:issue_E"])
+        self.assertEqual(self.gh_calls, [])
+        self.assertEqual(self._built("E")[0], self.line)
+
+    def test_a_dry_run_asks_no_host_holds_nothing_and_prints_the_plan(self):
+        self._finished("P", {"p.txt": "p\n"})
+        d = self._planned("D", "P")
+        self.cfg.publisher = dataclasses.replace(self.cfg.publisher, mode="stub")
+        self._run([d], ["P", "D"])
+        self.assertEqual(self.gh_calls, [])
+        self._on_base("D")
+        self.assertNotIn("not carried", self.err)
+        self.assertIn(f"fold 1 patch(es) onto {self.line}", self.out)
+        self.assertIn("(issue_P)", self.out)
+        self.assertFalse(self.fx._has(self.line))
+
+    # -- (8): a red re-gate of the carried line ----------------------------------------------
+
+    def test_a_red_regate_of_the_carried_line_holds_and_the_run_goes_on(self):
+        self.cfg.regate_between_waves = True
+        self._finished("P", {"p.txt": "p\n"})
+        d, u, w = self._planned("D", "P"), self._planned("U"), self._planned("W", "U")
+        p_head = self.fx._tip("fix/P")
+
+        def regate(cfg, wt, *, hold_lock=True):              # red for a line holding P
+            red = sb._run(wt, "merge-base", "--is-ancestor", p_head, "HEAD").returncode == 0
+            return {"overall": "fail" if red else "pass"}
+
+        self._run([d, u, w], ["P", "D", "U", "W"], regate=regate)
+        self._held("P", "D", "re-gate")
+        self._on_base("U")
+        self.assertNotIn("STOPPING", self.err)
+        w_base, w_tip, w_line = self._built("W")
+        self.assertEqual((w_base, w_tip), (self.line, w_line))
+        self.assertFalse(self.fx._ancestor(p_head, w_line))
+        self.assertEqual(self.results["W"], state.COMPLETE)
+
+    # -- fold(skipped=…) ----------------------------------------------------------------------
+
+    def test_a_fold_given_skipped_passes_over_only_the_bundle_that_fails(self):
+        self.assertIn("skipped", inspect.signature(integrate.fold).parameters)
+        p = self.fx._publish("P", {"c.txt": "p\n"})
+        q = self.fx._publish("Q", {"c.txt": "q\n"})          # conflicts with P
+        r = self.fx._publish("R", {"r.txt": "r\n"})
+        skipped: dict[str, str] = {}
+        folded = integrate.fold(self.cfg, [p, q, r], folded_this_run={}, batch=["X"],
+                                skipped=skipped)
+        line = folded[sb.TARGET][0]
+        self.assertEqual(list(skipped), ["issue_Q"])
+        self.assertIn("conflict", skipped["issue_Q"])
+        self.assertTrue(self.fx._ancestor(self.fx._tip("fix/P"), line))
+        self.assertTrue(self.fx._ancestor(self.fx._tip("fix/R"), line))  # after the abort
+        self.assertFalse(self.fx._ancestor(self.fx._tip("fix/Q"), line))
+        # Every bundle of a target skipped: nothing pushed, no entry.
+        s = self.fx._publish("S", {"s.txt": "s\n"})
+        self.fx._delete("fix/S")
+        skipped = {}
+        with sb._merged_heads({}):
+            pushes = self.fx._pushes(lambda: self.assertEqual(integrate.fold(
+                self.cfg, [s], folded_this_run={}, batch=["Y"], skipped=skipped), {}))
+        self.assertEqual((list(skipped), pushes), (["issue_S"], []))
+        self.assertFalse(self.fx._has(self._line(["Y"])))
+
+    # -- (9): not clean spreads to the finished ids built on it (#652, #624) -----------------
+
+    def _finished_on(self, iid: str, prereq: str, *, pr: str = "OPEN") -> Path:
+        """``iid`` finished in an earlier run, built on finished ``prereq``: its brief says
+        ``Depends on: <prereq>`` and its branch is cut from ``origin/fix/<prereq>``, so it
+        holds ``prereq``'s commit."""
+        d = self.fx._publish(iid, {f"{iid.lower()}.txt": f"{iid}\n"},
+                             cut_from=f"origin/fix/{prereq}")
+        sb._brief(d, extra=f"- **Depends on:** {prereq}\n")   # after: _publish rewrites it
+        sb._accept(d)
+        self.assertEqual(state.state(d), state.COMPLETE)
+        self.assertTrue(self.fx._ancestor(self.fx._tip(f"fix/{prereq}"),
+                                          self.fx._tip(f"fix/{iid}")))
+        self.gh[iid] = pr
+        return d
+
+    def _not_carried(self, iid: str) -> str:
+        """The ONE stderr line saying finished ``iid`` is not carried."""
+        lines = [x for x in self.err.splitlines()
+                 if x.startswith(f"flow: issue_{iid} (finished in an earlier run) is not")]
+        self.assertEqual(len(lines), 1, self.err)
+        return lines[0]
+
+    def test_a_finished_id_built_on_a_closed_one_is_not_carried(self):
+        # Q's PR is open, but its branch holds P's closed work. Before: Q was carried, and D
+        # was built on a line holding P.
+        self._finished("P", {"p.txt": "p\n"}, pr="CLOSED")
+        self._finished_on("Q", "P")
+        d, u = self._planned("D", "Q"), self._planned("U")
+        self._run([d, u], ["P", "Q", "D", "U"])
+        held = self._held("Q", "D", "issue_P", "built on")
+        self.assertNotIn("get issue_Q's PR open", held)         # not the `open` hint
+        self.assertIn("get issue_P carried, or re-drive issue_Q on a base without it", held)
+        self.assertIn("CLOSED", self._not_carried("P"))
+        self.assertNotIn("flow: carried", self.err)
+        self.assertFalse(self.fx._has(self.line))               # no line holds anything
+        self._on_base("U")
+
+    def test_a_hold_cascades_through_a_dependent_finished_before_the_run(self):
+        # (#624) U is held; D finished before the run (`Depends on: U`); E depends on D.
+        self._finished("U", {"u.txt": "u\n"}, pr="CLOSED")
+        self._finished_on("D", "U")
+        e = self._planned("E", "D")
+        self._run([e], ["U", "D", "E"])
+        self._held("D", "E", "issue_U")
+        self.assertFalse(self.fx._has(self.line))
+
+    def test_not_clean_spreads_through_a_chain_of_finished_ids(self):
+        # P (CLOSED) ← Q ← R ← D, asked for from the far end: any length, in any order.
+        self._finished("P", {"p.txt": "p\n"}, pr="CLOSED")
+        self._finished_on("Q", "P")
+        self._finished_on("R", "Q")
+        d = self._planned("D", "R")
+        self._run([d], ["R", "Q", "P", "D"])
+        self._held("R", "D", "issue_Q", "built on")
+        self.assertIn("issue_P", self._not_carried("Q"))
+        self.assertFalse(self.fx._has(self.line))
+
+    def test_a_clean_finished_id_beside_them_is_still_carried(self):
+        # X is clean, so it is carried: the line exists and is built on, and it holds
+        # nothing of P's or Q's.
+        self._finished("P", {"p.txt": "p\n"}, pr="CLOSED")
+        self._finished_on("Q", "P")
+        self._finished("X", {"x.txt": "x\n"})
+        d, e, u = self._planned("D", "Q"), self._planned("E", "X"), self._planned("U")
+        self._run([d, e, u], ["P", "Q", "X", "D", "E", "U"])
+        self._held("Q", "D", "issue_P", "built on")
+        self.assertIn("flow: carried issue_X (finished", self.err)
+        self.assertTrue(self.fx._has(self.line), self.err)
+        for iid in ("E", "U"):
+            base, tip, line_tip = self._built(iid)
+            self.assertEqual((base, tip), (self.line, line_tip), self.err)
+            self.assertTrue(self.fx._ancestor(self.fx._tip("fix/X"), tip))
+            for gone in ("P", "Q"):
+                self.assertFalse(self.fx._ancestor(self.fx._tip(f"fix/{gone}"), tip), gone)
+            self.assertEqual(self.results[iid], state.COMPLETE)
+        for gone in ("P", "Q"):
+            self.assertFalse(self.fx._ancestor(self.fx._tip(f"fix/{gone}"), self.line), gone)
+
+    def test_a_held_ids_head_does_not_vouch_for_an_old_line(self):
+        # An earlier run's line holds P and Q, and P's PR was closed since. Q is not clean,
+        # so its head accounts for nothing on that line: nothing is carried onto it (X
+        # neither), and the run's first fold replaces it.
+        p = self._finished("P", {"p.txt": "p\n"}, pr="CLOSED")
+        q = self._finished_on("Q", "P")
+        self._finished("X", {"x.txt": "x\n"})
+        d, e = self._planned("D", "Q"), self._planned("E", "X")
+        u, w = self._planned("U"), self._planned("W", "U")
+        batch = ["P", "Q", "X", "D", "E", "U", "W"]
+        line = self._line(batch)
+        integrate.fold(self.cfg, [p, q], folded_this_run={}, batch=batch)   # the earlier run
+        old = self.fx._tip(line)
+        self._run([d, e, u, w], batch)
+        self._held("Q", "D", line, "delete")
+        self._held("X", "E", line, "delete")
+        self._on_base("U")
+        self.assertEqual(self._built("U")[2], old)              # the carry pushed nothing
+        w_base, w_tip, w_line = self._built("W")
+        self.assertEqual((w_base, w_tip), (line, w_line))
+        for gone in ("P", "Q"):
+            self.assertFalse(self.fx._ancestor(self.fx._tip(f"fix/{gone}"), w_line), gone)
+        self.assertEqual(self.results["W"], state.COMPLETE)
+
+    # -- (10): work the fold skipped stays off the line, whatever branch holds it (#672) -------
+
+    def _on_the_line_without(self, iid: str, *gone: str) -> str:
+        """``iid`` was built, COMPLETE, on the carried line, and neither that line nor the tip
+        recorded for ``iid`` holds any of the commits ``gone``. Returns the recorded tip."""
+        self.assertTrue(self.fx._has(self.line), self.err)
+        base, tip, line_tip = self._built(iid)
+        self.assertEqual((base, tip), (self.line, line_tip), self.err)
+        self.assertEqual(self.results[iid], state.COMPLETE)
+        for commit in gone:
+            self.assertFalse(self.fx._ancestor(commit, self.line), commit)
+            self.assertFalse(self.fx._ancestor(commit, tip), commit)
+        return tip
+
+    def _update_keeping_ours(self, iid: str) -> str:
+        """``fix/<iid>``'s author updates it from the base, resolving a conflict in the
+        branch's favour (``git merge -X ours``), and pushes it. Returns its new tip."""
+        human = self.fx.human
+        sb._git(human, "fetch", "-q", "origin")
+        sb._git(human, "checkout", "-q", "-B", f"fix/{iid}", f"origin/fix/{iid}")
+        sb._git(human, "merge", "-q", "-X", "ours", "--no-edit", "origin/main")
+        sb._git(human, "push", "-q", "origin", f"fix/{iid}")
+        return self.fx._tip(f"fix/{iid}")
+
+    def _q_resolves_what_p_does_not(self, *, declared: bool = True) -> tuple[str, str]:
+        """P and Q (cut from ``fix/P``) finished with open PRs, X beside them. Then the base
+        got a change that conflicts with P's; Q's author updated ``fix/Q`` from the base,
+        resolving it in Q's favour, and P's author did not. ``declared``: Q's brief says
+        ``Depends on: P``; else it names no edge, its branch holding P's commit all the same.
+        Returns P's and Q's branch tips."""
+        self._finished("P", {"base.txt": "p\n"})
+        self._finished_on("Q", "P")
+        if not declared:
+            sb._brief(self.cfg.bundle("Q"))                   # no `Depends on: P`
+            sb._accept(self.cfg.bundle("Q"))
+        self._finished("X", {"x.txt": "x\n"})
+        self.fx._push_from_human({"base.txt": "r\n"}, to="main")
+        p_head, q_head = self.fx._tip("fix/P"), self._update_keeping_ours("Q")
+        self.assertTrue(self.fx._ancestor(p_head, q_head))
+        self.assertTrue(self.fx._ancestor(self.fx._tip("main"), q_head))
+        return p_head, q_head
+
+    def _q_is_held_for_p(self, **setup: bool) -> None:
+        """The carry's fold, from the base, skips P (it conflicts), while Q would merge
+        cleanly with P's commit: Q is held with P as the cause, so D (on Q) waits, and E (on
+        X) is built on a line holding none of P's or Q's commits, pushed once."""
+        p_head, q_head = self._q_resolves_what_p_does_not(**setup)
+        d, e = self._planned("D", "Q"), self._planned("E", "X")
+        pushes = self.fx._pushes(lambda: self._run([d, e], ["P", "Q", "X", "D", "E"]))
+        held = self._held("Q", "D", "issue_P")
+        self.assertIn("get issue_P carried, or re-drive issue_Q on a base without them", held)
+        self.assertIn("conflict", self._not_carried("P"))
+        self.assertIn("holding no bundle", self._not_carried("P"))
+        self.assertIn("flow: carried issue_X (finished", self.err)
+        tip = self._on_the_line_without("E", p_head, q_head)
+        self.assertTrue(self.fx._ancestor(self.fx._tip("fix/X"), tip))
+        self.assertEqual(len(pushes), 1, pushes)              # the carry's, never redone
+
+    def test_a_finished_id_built_on_one_the_fold_skipped_is_held(self):
+        # (1) Before: Q was carried with P's commit, and D was built on that line.
+        self._q_is_held_for_p(declared=True)
+
+    def test_a_branch_holding_a_skipped_ids_work_is_held_without_a_declared_edge(self):
+        # (2) By what its branch holds, not by what its brief declares.
+        self._q_is_held_for_p(declared=False)
+
+    def test_a_depends_on_never_vouches_for_a_skipped_ids_work(self):
+        # P's brief names Q, wrongly: Q was cut from P's first commit, and P moved on with a
+        # change the base then conflicts with, so P's merge fails. An edge in a brief never
+        # makes a commit of the skipped branch someone else's: Q, which holds P's first
+        # commit, is held. Before (and with a rule that trusted P's `Depends on`): Q was
+        # carried with that commit, and D was built on it.
+        self._finished("P", {"p-first.txt": "p\n"})
+        first = self.fx._tip("fix/P")
+        self._finished_on("Q", "P")
+        sb._brief(self.cfg.bundle("Q"))                       # Q names no edge …
+        sb._accept(self.cfg.bundle("Q"))
+        sb._brief(self.cfg.bundle("P"), extra="- **Depends on:** Q\n")      # … P names Q
+        sb._accept(self.cfg.bundle("P"))
+        later = self.fx._push_from_human({"base.txt": "p\n"}, to="fix/P", off="origin/fix/P")
+        self.fx._push_from_human({"base.txt": "r\n"}, to="main")
+        self._finished("X", {"x.txt": "x\n"})
+        d, e = self._planned("D", "Q"), self._planned("E", "X")
+        pushes = self.fx._pushes(lambda: self._run([d, e], ["P", "Q", "X", "D", "E"]))
+        self._held("Q", "D", "issue_P")
+        self.assertIn("conflict", self._not_carried("P"))
+        self.assertIn("flow: carried issue_X (finished", self.err)
+        self._on_the_line_without("E", first, later, self.fx._tip("fix/Q"))
+        self.assertEqual(len(pushes), 1, pushes)
+
+    def test_a_branch_folded_before_the_one_it_holds_whole_carries_both(self):
+        # Unchanged: Q, asked for before P, merges first with all of P's branch, so P's
+        # merge is a no-op. Nothing failed, and both are carried.
+        _p_head, q_head = self._q_resolves_what_p_does_not()
+        d = self._planned("D", "Q")
+        self._run([d], ["Q", "P", "X", "D"])
+        self.assertIn("flow: carried issue_Q, issue_P, issue_X (finished", self.err)
+        self.assertNotIn("is not carried", self.err)
+        base, tip, line_tip = self._built("D")
+        self.assertEqual((base, tip), (self.line, line_tip), self.err)
+        self.assertTrue(self.fx._ancestor(q_head, tip))
+        self.assertEqual(self.results["D"], state.COMPLETE)
+
+    def test_work_a_skipped_id_took_back_from_its_dependent_stays_off_the_line(self):
+        # P published p1 and Q was cut from it; then P's author merged Q's branch back into
+        # P and added a change the base later conflicts with. P's merge fails. P's branch
+        # holds all of Q's, but Q's holds p1, P's own first commit: Q is held, and p1 stays
+        # off the line. Before (and with a rule that gave Q's whole branch to Q): Q was
+        # carried with p1, and D was built on it.
+        self._finished("P", {"p.txt": "p\n"})
+        first = self.fx._tip("fix/P")
+        self._finished_on("Q", "P")
+        human = self.fx.human
+        sb._git(human, "fetch", "-q", "origin")
+        sb._git(human, "checkout", "-q", "-B", "fix/P", "origin/fix/P")
+        sb._git(human, "merge", "-q", "--no-ff", "--no-edit", "origin/fix/Q")
+        (human / "base.txt").write_text("p\n", encoding="utf-8")
+        sb._git(human, "commit", "-q", "-a", "-s", "-m", "P's later change")
+        sb._git(human, "push", "-q", "origin", "fix/P")
+        p_head, q_head = self.fx._tip("fix/P"), self.fx._tip("fix/Q")
+        self.assertTrue(self.fx._ancestor(q_head, p_head))
+        self.fx._push_from_human({"base.txt": "r\n"}, to="main")
+        self._finished("X", {"x.txt": "x\n"})
+        d, e = self._planned("D", "Q"), self._planned("E", "X")
+        pushes = self.fx._pushes(lambda: self._run([d, e], ["P", "Q", "X", "D", "E"]))
+        self._held("Q", "D", "issue_P")
+        self.assertIn("conflict", self._not_carried("P"))
+        self.assertIn("flow: carried issue_X (finished", self.err)
+        self._on_the_line_without("E", first, q_head, p_head)
+        self.assertEqual(len(pushes), 1, pushes)
+
+    def test_a_branch_merged_before_the_skip_with_part_of_its_work_is_left_out(self):
+        # Q, cut from P's first commit, is asked for first and merges; P's later commit then
+        # conflicts with the base, so P is skipped. Before: the pushed line kept Q, and with
+        # it P's first commit, and D was built on it. Now the line is folded again without Q
+        # before its one push.
+        self._finished("P", {"p-first.txt": "p\n"})
+        first = self.fx._tip("fix/P")
+        self._finished_on("Q", "P")
+        later = self.fx._push_from_human({"base.txt": "p\n"}, to="fix/P", off="origin/fix/P")
+        self.fx._push_from_human({"base.txt": "r\n"}, to="main")
+        self._finished("X", {"x.txt": "x\n"})
+        d, e = self._planned("D", "Q"), self._planned("E", "X")
+        pushes = self.fx._pushes(lambda: self._run([d, e], ["Q", "P", "X", "D", "E"]))
+        held = self._held("Q", "D", "issue_P")
+        self.assertIn("get issue_P carried", held)          # P is still not carried
+        self.assertIn("conflict", self._not_carried("P"))
+        self.assertIn("flow: carried issue_X (finished", self.err)
+        self._on_the_line_without("E", first, later, self.fx._tip("fix/Q"))
+        self.assertEqual(len(pushes), 1, pushes)
+
+    def test_work_a_skipped_id_did_in_a_merge_commit_stays_off_the_line(self):
+        # P's only change of its own is in a merge commit: its author merged the base in and
+        # edited base.txt while merging. The base then changed base.txt too, so P's merge
+        # fails. Q, cut from P and updated from the base keeping its own side, merges
+        # cleanly, its branch holding that merge commit. Before: Q was carried with it (the
+        # line got P's base.txt), and D was built on it.
+        cut = self.fx._tip("main")
+        self._finished("P", {"p.txt": "p\n"})                 # its branch is replaced below
+        self.fx._push_from_human({"n.txt": "n\n"}, to="main")
+        human = self.fx.human
+        sb._git(human, "fetch", "-q", "origin")
+        sb._git(human, "checkout", "-q", "-B", "fix/P", cut)
+        sb._git(human, "merge", "-q", "--no-ff", "--no-commit", "origin/main")
+        (human / "base.txt").write_text("p\n", encoding="utf-8")
+        sb._git(human, "commit", "-q", "-a", "-s", "--no-edit")
+        sb._git(human, "push", "-q", "--force", "origin", "fix/P")
+        p_head = self.fx._tip("fix/P")
+        self.assertEqual(sb._git(self.fx.origin, "rev-list", "--no-merges", p_head, "--not",
+                                 "refs/heads/main").split(), [])
+        self.fx._push_from_human({"base.txt": "r\n"}, to="main")
+        self._finished_on("Q", "P")
+        q_head = self._update_keeping_ours("Q")
+        self._finished("X", {"x.txt": "x\n"})
+        d, e = self._planned("D", "Q"), self._planned("E", "X")
+        pushes = self.fx._pushes(lambda: self._run([d, e], ["X", "P", "Q", "D", "E"]))
+        self._held("Q", "D", "issue_P")
+        self.assertIn("conflict", self._not_carried("P"))
+        self.assertIn("flow: carried issue_X (finished", self.err)
+        self._on_the_line_without("E", p_head, q_head)
+        self.assertEqual(self.fx._show(self.line, "base.txt"), "r\n")      # not P's edit
+        self.assertEqual(len(pushes), 1, pushes)
+
+    def test_base_history_two_branches_share_is_no_skipped_ids_work(self):
+        # The carry continues an earlier run's line, which is behind the base. P and Y were
+        # both updated from the newer base, so its commit is history they share; P conflicts
+        # with X on that line and is skipped. Y holds none of P's work: it is carried.
+        x = self._finished("X", {"c.txt": "x\n"})
+        self._finished("P", {"c.txt": "p\n"})
+        self._finished("Y", {"y.txt": "y\n"})
+        batch = ["X", "P", "Y", "D", "E"]
+        integrate.fold(self.cfg, [x], folded_this_run={}, batch=batch)    # the earlier run
+        old = self.fx._tip(self._line(batch))
+        self.fx._push_from_human({"n.txt": "n\n"}, to="main")
+        for iid in ("P", "Y"):
+            self.fx._update_branch(iid)
+        d, e = self._planned("D", "P"), self._planned("E", "Y")
+        pushes = self.fx._pushes(lambda: self._run([d, e], batch))
+        self._held("P", "D", "conflict")
+        self.assertIn("flow: carried issue_X, issue_Y (finished", self.err)
+        tip = self._on_the_line_without("E", self.fx._tip("fix/P"))
+        self.assertTrue(self.fx._ancestor(old, tip))                     # continued
+        self.assertTrue(self.fx._ancestor(self.fx._tip("fix/Y"), tip))
+        self.assertEqual(len(pushes), 1, pushes)
+        self.assertNotIn("--force", pushes[0])
+
+    def test_a_skip_that_starting_over_makes_stale_is_merged_again(self):
+        # Asked for as Q, Y, P: Q (cut from P's first commit) merges; Y adds the file Q adds,
+        # so it conflicts and is skipped; P's later commit conflicts with the base, so P is
+        # skipped, and Q, which holds P's first commit, is left out. The fold starts over
+        # without Q and tries Y again: it merges now, and E is built on it.
+        self._finished("P", {"p-first.txt": "p\n"})
+        first = self.fx._tip("fix/P")
+        self._finished_on("Q", "P")                           # adds q.txt
+        self._finished("Y", {"q.txt": "y\n"})                 # adds it too
+        later = self.fx._push_from_human({"base.txt": "p\n"}, to="fix/P", off="origin/fix/P")
+        self.fx._push_from_human({"base.txt": "r\n"}, to="main")
+        d, e = self._planned("D", "Q"), self._planned("E", "Y")
+        pushes = self.fx._pushes(lambda: self._run([d, e], ["Q", "Y", "P", "D", "E"]))
+        self._held("Q", "D", "issue_P")
+        self.assertIn("conflict", self._not_carried("P"))
+        self.assertIn("flow: carried issue_Y (finished", self.err)
+        tip = self._on_the_line_without("E", first, later, self.fx._tip("fix/Q"))
+        self.assertTrue(self.fx._ancestor(self.fx._tip("fix/Y"), tip))
+        self.assertEqual(len(pushes), 1, pushes)
+
+    def test_one_held_only_while_its_cause_was_skipped_is_carried_once_that_merges(self):
+        # Asked for as A, C, H, G. A (cut from G's first commit) merges; C's later commit
+        # adds the file A adds, so C conflicts and is skipped; H, cut from C's first commit,
+        # holds C's work, so it is held; G's later commit conflicts with the base, so G is
+        # skipped, and A, which holds G's first commit, is left out. The fold starts over
+        # without A: C merges now, and H with it, so D is built on them. A is held for G.
+        self._finished("G", {"g-first.txt": "g\n"})
+        g_first = self.fx._tip("fix/G")
+        a = self.fx._publish("A", {"z.txt": "a\n"}, cut_from="origin/fix/G")
+        sb._accept(a)
+        self._finished("C", {"c-first.txt": "c\n"})
+        self._finished_on("H", "C")
+        self.fx._push_from_human({"z.txt": "c\n"}, to="fix/C", off="origin/fix/C")
+        self.fx._push_from_human({"base.txt": "g\n"}, to="fix/G", off="origin/fix/G")
+        self.fx._push_from_human({"base.txt": "r\n"}, to="main")
+        d, e = self._planned("D", "H"), self._planned("E", "A")
+        pushes = self.fx._pushes(lambda: self._run([d, e], ["A", "C", "H", "G", "D", "E"]))
+        self._held("A", "E", "issue_G")
+        self.assertIn("conflict", self._not_carried("G"))
+        self.assertIn("flow: carried issue_C, issue_H (finished", self.err)
+        tip = self._on_the_line_without("D", g_first, self.fx._tip("fix/A"))
+        for iid in ("C", "H"):
+            self.assertTrue(self.fx._ancestor(self.fx._tip(f"fix/{iid}"), tip), iid)
+        self.assertEqual(len(pushes), 1, pushes)
+
+    def _cut_from_the_line(self, iid: str, files: dict[str, str], line: str, at: str) -> Path:
+        """``iid`` finished in an earlier run as one of its wave 1: built on ``line`` at
+        commit ``at`` — recorded with its stack base, as the run records it — and its PR
+        branch cut from that commit, as publish cuts it. Its brief names no ``Depends on``."""
+        b = self.fx._publish(iid, files, cut_from=at)
+        sb._accept(b)
+        publish.write_stack_base(b, line, at)
+        self.assertEqual(publish.read_stack_base_tip(b), at)
+        return b
+
+    def test_a_sibling_cut_from_the_same_line_is_still_carried(self):
+        # P and Z were built on an earlier run's line holding X (its wave 1), so both their
+        # branches hold that line's merge commit; the line is gone since, so the carry starts
+        # a new one. P conflicts with the base and is skipped. What lies under the line
+        # commit P was built on is not P's work, so X and Z are carried.
+        x = self._finished("X", {"x.txt": "x\n"})
+        batch = ["X", "P", "Z", "D", "E"]
+        line = self._line(batch)
+        integrate.fold(self.cfg, [x], folded_this_run={}, batch=batch)    # the earlier run
+        at = self.fx._tip(line)
+        for iid in ("P", "Z"):
+            self._cut_from_the_line(iid, {f"{iid.lower()}.txt": f"{iid}\n"}, line, at)
+        self.fx._delete(line)
+        self.fx._push_from_human({"p.txt": "r\n"}, to="main")     # P adds p.txt as well
+        d, e = self._planned("D", "P"), self._planned("E", "Z")
+        pushes = self.fx._pushes(lambda: self._run([d, e], batch))
+        self._held("P", "D", "conflict")
+        self.assertIn("flow: carried issue_X, issue_Z (finished", self.err)
+        tip = self._on_the_line_without("E", self.fx._tip("fix/P"))
+        self.assertTrue(self.fx._ancestor(self.fx._tip("fix/Z"), tip))
+        self.assertEqual(len(pushes), 1, pushes)
+
+    def test_a_later_wave_built_on_a_line_holding_a_skipped_ids_work_is_held(self):
+        # An earlier run built X (wave 0), then P and Z on its line (wave 1), folded them,
+        # and built R (`Depends on: Z`) on that line (wave 2), so R's branch holds P's
+        # commit; then it stopped. P's branch got a fixup since that conflicts with the
+        # base, and the line is gone, so the carry starts a new one: P is skipped, and R is
+        # held with P as the cause. Before: R was carried with P's commit, and D built on
+        # it. Z, built beside P, is carried: the line it was built on is no work of P's.
+        batch = ["X", "P", "Z", "R", "D", "E"]
+        x, p, z = self._planned("X"), self._planned("P", "X"), self._planned("Z", "X")
+        self._run([x, p, z, self._planned("R", "Z")], batch)       # the earlier run
+        for iid in ("X", "P", "Z", "R"):
+            self.assertEqual(self.results[iid], state.COMPLETE, self.err)
+        first = self.fx._tip("fix/P")
+        self.assertTrue(self.fx._ancestor(first, self.fx._tip("fix/R")))
+        self.fx._delete(self.line)
+        later = self.fx._push_from_human({"fixup.txt": "p\n"}, to="fix/P", off="origin/fix/P")
+        self.fx._push_from_human({"fixup.txt": "r\n"}, to="main")
+        d, e = self._planned("D", "R"), self._planned("E", "Z")
+        pushes = self.fx._pushes(lambda: self._run([d, e], batch))
+        self._held("R", "D", "a commit of issue_P's branch")
+        self.assertIn("conflict", self._not_carried("P"))
+        self.assertIn("flow: carried issue_X, issue_Z (finished", self.err)
+        self._on_the_line_without("E", first, later, self.fx._tip("fix/R"))
+        self.assertEqual(len(pushes), 1, pushes)
+
+    def test_a_line_holding_a_prerequisites_old_head_is_still_carried_onto(self):
+        # The earlier run's line holds X; P (its wave 1) was built on that line and names no
+        # `Depends on: X`. X's branch moved on since, with a fixup that conflicts with P's
+        # change, so the fold skips P. X's old commit on the line lies under the line commit
+        # P was built on, so it is no work of P's: X is carried onto that line, without
+        # force, and only P and D are held — not every bundle of the target.
+        x = self._finished("X", {"x.txt": "x\n"})
+        batch = ["X", "P", "D", "E"]
+        line = self._line(batch)
+        integrate.fold(self.cfg, [x], folded_this_run={}, batch=batch)    # the earlier run
+        old = self.fx._tip(line)
+        self._cut_from_the_line("P", {"x.txt": "p\n"}, line, old)
+        self.fx._push_from_human({"x.txt": "x2\n"}, to="fix/X", off="origin/fix/X")
+        d, e = self._planned("D", "P"), self._planned("E", "X")
+        pushes = self.fx._pushes(lambda: self._run([d, e], batch))
+        self._held("P", "D", "conflict")
+        self.assertIn("flow: carried issue_X (finished", self.err)
+        tip = self._on_the_line_without("E", self.fx._tip("fix/P"))
+        self.assertTrue(self.fx._ancestor(old, tip))                     # continued
+        self.assertTrue(self.fx._ancestor(self.fx._tip("fix/X"), tip))
+        self.assertEqual(len(pushes), 1, pushes)
+        self.assertNotIn("--force", pushes[0])
+
+    def test_a_line_already_holding_a_skipped_ids_work_is_not_carried_onto(self):
+        # The earlier run's line holds P and X. P's branch moved on since, with a commit that
+        # conflicts with X's, so the fold skips P; that line holds P's work, and a line is
+        # never rewritten, so nothing is carried onto it or pushed. Before: X was carried
+        # onto it, and E built on P's work.
+        p = self._finished("P", {"p.txt": "p\n"})
+        x = self._finished("X", {"c.txt": "x\n"})
+        batch = ["P", "X", "D", "E", "U"]
+        line = self._line(batch)
+        integrate.fold(self.cfg, [p, x], folded_this_run={}, batch=batch)  # the earlier run
+        old = self.fx._tip(line)
+        self.fx._push_from_human({"c.txt": "p\n"}, to="fix/P", off="origin/fix/P")
+        d, e, u = self._planned("D", "P"), self._planned("E", "X"), self._planned("U")
+        pushes = self.fx._pushes(lambda: self._run([d, e, u], batch))
+        self._held("P", "D", line, "delete")
+        self._held("X", "E", line, "delete")
+        self._on_base("U")
+        self.assertEqual(pushes, [])
+        self.assertEqual(self.fx._tip(line), old)
+
+    def test_a_prerequisite_cut_from_by_hand_is_held_with_the_one_that_fails(self):
+        # The documented limit: P was cut by hand from X's branch, so the run did not build
+        # it on its line and recorded no commit it was built on. When P's merge fails, git
+        # cannot tell whether the commit their branches share is X's, or P's with X cut from
+        # it, so X is held too, named with P as the cause; Z, beside them, is carried.
+        self._finished("X", {"x.txt": "x\n"})
+        self._finished_on("P", "X")
+        self._finished("Z", {"z.txt": "z\n"})
+        self.fx._push_from_human({"p.txt": "r\n"}, to="main")     # P adds p.txt as well
+        d, e, f = self._planned("D", "P"), self._planned("E", "X"), self._planned("F", "Z")
+        pushes = self.fx._pushes(lambda: self._run([d, e, f], ["X", "P", "Z", "D", "E", "F"]))
+        self._held("P", "D", "conflict")
+        held = self._held("X", "E", "issue_P")
+        self.assertIn("issue_X's branch holds commits of issue_P's branch", held)
+        self.assertIn("flow: carried issue_Z (finished", self.err)
+        self._on_the_line_without("F", self.fx._tip("fix/X"), self.fx._tip("fix/P"))
+        self.assertEqual(len(pushes), 1, pushes)
+
+    def test_a_shared_commit_the_run_cannot_give_to_either_holds_both_and_the_old_line(self):
+        # The same limit on a line the carry continues: P was cut by hand from X's branch and
+        # names no `Depends on: X`; X's branch moved on since. When P's merge fails, their
+        # shared commit counts as work of each, and the earlier run's line holds it, so
+        # nothing is carried onto it or pushed. Every finished prerequisite of the target
+        # is held; U is not.
+        x = self._finished("X", {"x.txt": "x\n"})
+        batch = ["X", "P", "D", "E", "U"]
+        line = self._line(batch)
+        integrate.fold(self.cfg, [x], folded_this_run={}, batch=batch)    # the earlier run
+        old = self.fx._tip(line)
+        self._finished_on("P", "X")
+        sb._brief(self.cfg.bundle("P"))                         # no `Depends on: X`
+        sb._accept(self.cfg.bundle("P"))
+        self.fx._push_from_human({"p.txt": "x2\n"}, to="fix/X", off="origin/fix/X")
+        d, e, u = self._planned("D", "P"), self._planned("E", "X"), self._planned("U")
+        pushes = self.fx._pushes(lambda: self._run([d, e, u], batch))
+        self._held("P", "D", line, "delete")
+        self._held("X", "E", line, "delete")
+        self._on_base("U")
+        self.assertEqual(pushes, [])
+        self.assertEqual(self.fx._tip(line), old)
+
+    def test_one_holding_a_later_ones_commit_is_held_when_they_conflict(self):
+        # Q was built on an earlier run's line holding P (its stack base records that line
+        # commit) and is asked for before P; P's branch got a commit since whose change
+        # conflicts with Q's. Merged first, Q makes P's merge fail while holding P's commit,
+        # so the fold starts over without Q: P merges, and is carried, and Q is held, the
+        # reason saying so. Before: Q was carried and P skipped, with P's commit on the line.
+        p = self._finished("P", {"p.txt": "p\n"})
+        batch = ["Q", "P", "D", "E"]
+        line = self._line(batch)
+        integrate.fold(self.cfg, [p], folded_this_run={}, batch=batch)    # the earlier run
+        at = self.fx._tip(line)
+        self._cut_from_the_line("Q", {"c.txt": "q\n"}, line, at)
+        later = self.fx._push_from_human({"c.txt": "p\n"}, to="fix/P", off="origin/fix/P")
+        d, e = self._planned("D", "Q"), self._planned("E", "P")
+        pushes = self.fx._pushes(lambda: self._run([d, e], batch))
+        held = self._held("Q", "D", "issue_P", "without issue_Q it is")
+        self.assertIn("re-drive issue_Q", held)
+        self.assertIn("flow: carried issue_P (finished", self.err)
+        tip = self._on_the_line_without("E", self.fx._tip("fix/Q"))
+        self.assertTrue(self.fx._ancestor(later, tip))
+        self.assertEqual(len(pushes), 1, pushes)
+        self.assertNotIn("--force", pushes[0])
+
+    def test_a_branch_gone_while_the_carry_folds_holds_its_target(self):
+        # P's branch is deleted after the carry judged its PR open, before its fold fetched:
+        # the fold cannot read P's work, so it pushes nothing rather than let Q, cut from P,
+        # put P's commit on the line. Before: Q was carried with it, and D built on it.
+        self._finished("P", {"p.txt": "p\n"})
+        self._finished_on("Q", "P")
+        d = self._planned("D", "Q")
+        real, gone = flow._fold_lines, []
+
+        def fold_lines(*a, **kw):
+            if not gone:
+                gone.append(self.fx._tip("fix/P"))
+                self.fx._delete("fix/P")
+            return real(*a, **kw)
+
+        with mock.patch.object(flow, "_fold_lines", fold_lines):
+            pushes = self.fx._pushes(lambda: self._run([d], ["P", "Q", "D"]))
+        self.assertTrue(gone)
+        self._held("Q", "D", "the branch of issue_P is gone")
+        self.assertEqual(pushes, [])
+        self.assertFalse(self.fx._has(self.line))
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,0 +1,625 @@
+diff --git a/template/src/pdca_harness/integrate.py b/template/src/pdca_harness/integrate.py
+index 9586be4..73feb57 100644
+--- a/template/src/pdca_harness/integrate.py
++++ b/template/src/pdca_harness/integrate.py
+@@ -142,6 +142,19 @@ def integration_branch(cfg: Config, base: str, batch: Iterable[str] | None = Non
+     return name if batch is None else f"{name}-r{batch_key(batch)}"
+ 
+ 
++def bundle_base_branch(cfg: Config, base: str, batch: Iterable[str] | None, name: str) -> str:
++    """The branch :func:`build_bundle_base` builds for bundle ``name`` of a run (#723): the
++    run's line for ``base`` (:func:`integration_branch`, scoped to ``batch``), then ``-b``
++    and the bundle's id (``issue_`` dropped), flattened as the base is
++    (:func:`_flatten_base`). ``-b`` never appears in a flattened base or id (each ``-`` there
++    is ``-h`` or ``-s``) nor in a batch key (hex), so the first ``-b`` ends the line's part
++    and the name decodes to one (base, batch, bundle). A flattened id has no ``/``, so the
++    name is one segment under ``pdca-integration/``: never a ref-path prefix of the line or
++    of another bundle's base, nor under one (git refuses a branch ``x`` beside ``x/y``)."""
++    iid = str(name).removeprefix("issue_")
++    return f"{integration_branch(cfg, base, batch)}-b{_flatten_base(iid)}"
++
++
+ def batch_key(names: Iterable[str]) -> str:
+     """A short, deterministic key for a batch of bundles (#591): the names normalised to
+     bundle names (``500`` and ``issue_500`` are one bundle), de-duplicated and sorted — so
+@@ -565,14 +578,7 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
+             _reset_tree(wt, "HEAD")
+             if _git(wt, "checkout", "-B", branch, start_ref) != 0:
+                 raise IntegrationError(f"could not start {branch} off {start_ref}")
+-            # Who a path the base would undo belongs to (#623): this fold's bundles, then
+-            # the rest of the run's batch (folded earlier, absent from this call), found by
+-            # id as the flow finds them — an archived one too (`find_bundle`) — and each
+-            # listed once, by name.
+-            owners: dict[str, Path] = {}
+-            for o in [*bundles, *(cfg.find_bundle(str(n).removeprefix("issue_"))
+-                                  for n in batch or ())]:
+-                owners.setdefault(o.name, o)
++            owners = _owners(cfg, bundles, batch)
+             read: dict[str, str | None] = {}   # each branch's tip, read once (#633)
+             dropped: set[str] = set()          # left out of the line: never tried again (#672)
+             failed: list[str] = []             # the bundles skipped: their merge raised (#672)
+@@ -694,6 +700,234 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
+     return result
+ 
+ 
++def _owners(cfg: Config, bundles: Iterable[Path],
++            batch: Collection[str] | None) -> dict[str, Path]:
++    """Who a path the base, or a branch, would undo belongs to (#623, #673): ``bundles``
++    (the ones being folded), then the rest of the run's ``batch`` (folded earlier, absent
++    from this call), found by id as the flow finds them — an archived one too
++    (``find_bundle``) — and each listed once, by name. Shared by :func:`fold` and
++    :func:`build_bundle_base`."""
++    owners: dict[str, Path] = {}
++    for o in [*bundles, *(cfg.find_bundle(str(n).removeprefix("issue_"))
++                          for n in batch or ())]:
++        owners.setdefault(o.name, o)
++    return owners
++
++
++def build_bundle_base(cfg: Config, d: Path, members: Sequence[Path], *,
++                      batch: Collection[str] | None, carried: Mapping[str, str],
++                      excluded: Mapping[str, str]) -> tuple[str, str]:
++    """Build bundle ``d``'s own base (#723, for #463's dependency-scoped bases): a branch
++    on ``origin`` holding exactly the fetched ``<base_remote>/<base>`` plus the published
++    branches of ``members`` (bundle paths, merged in that order), and nothing else of the
++    run. Returns ``(branch, pushed tip)``. The branch is :func:`bundle_base_branch` for
++    ``d``'s target; the run's line, and whatever the caller recorded for it (``carried``
++    included), are never written.
++
++    A sibling of :func:`fold`, sharing its merge path (:func:`_merge_published`, so
++    :func:`_gone_branch`, :func:`_take_in_base` and the #623/#673 revert check), its
++    per-target lock (:func:`integ_lock`) and worktree (:func:`_prepare_worktree`), and its
++    tree reset (:func:`_reset_tree`). It always starts fresh from the base as just fetched.
++    A member with no patch adds nothing (as in a fold). One with a patch but no usable
++    target, on another target than ``d``, or with no published branch raises before any
++    git step: the base is never built without a member the caller named.
++
++    Refused with :class:`IntegrationError`, before anything is pushed:
++
++    * ``carried`` (member name → the head a fold of this run recorded for it, #633): a
++      member whose branch no longer holds that head was rewritten, judged as a fold judges
++      it (:func:`_carried_rewrite`), before anything is merged. Each member's tip is read
++      once, after the fetch, and that commit is the one checked and merged.
++    * A member that does not merge cleanly. When it does not merge onto the fetched base
++      alone, the clash is with the base: the message names ``<remote>/<base>`` and says to
++      rebuild the member's branch on it. Otherwise it names the members merged before it
++      that it clashes with (each tried on its own, as :func:`_held_by` does; all of them
++      when only their combination clashes).
++    * ``excluded`` (name → published head of each bundle of the run that is NOT a member):
++      a head this clone does not have after the fetch, before anything is merged, since
++      whether a member brings that bundle's work in cannot be told without it; and a result
++      that would hold work of one of them (:func:`_foreign_work`), named with the member
++      that brought it in. A name that is also a member's is a member, not excluded.
++
++    Push: origin without the branch gets a plain push (no force, so an origin with
++    ``receive.denyNonFastForwards`` takes it); origin with it (``d`` built again) gets a
++    force leased on the tip just fetched. A refused push raises, naming the branch and the
++    remedy."""
++    repo_spec, base, _slug = publish._resolve_target(d)
++    if not (repo_spec and base):
++        raise IntegrationError(f"{d.name} has no usable target (Repo + branch target), so "
++                               f"there is no base to build its own base on")
++    branch = bundle_base_branch(cfg, base, batch, d.name)
++    found = _fold_candidates(members)
++    targeted = {c[0] for c in found}
++    lost = [m.name for m in members if _has_patch(m) and m not in targeted]
++    if lost:
++        raise IntegrationError(
++            f"{', '.join(lost)} has a patch but no usable target (Repo + branch target), so "
++            f"none of its work can be part of {branch}: fix its brief, or leave it out of "
++            f"{d.name}'s members, then re-run")
++    refs: dict[str, tuple[str, str, bool]] = {}
++    mine: list[Path] = []
++    for m, m_repo, m_base, _s, ref in found:
++        if (m_repo, m_base) != (repo_spec, base):
++            raise IntegrationError(
++                f"{m.name} targets {m_repo} @ {m_base}, but {d.name} targets {repo_spec} @ "
++                f"{base}: one branch holds one target's work, so {m.name} cannot be part of "
++                f"{branch}")
++        if ref is None:
++            raise IntegrationError(
++                f"{m.name} accepted but not published (no publish.json branch) — there is "
++                f"nothing of it to put on {branch}; publish it, then re-run")
++        refs[m.name] = ref
++        mine.append(m)
++    base_remote = cfg.base_remote
++    base_ref = f"{base_remote}/{base}"
++    line = integration_branch(cfg, base, batch)   # where the run's folds recorded ``carried``
++    others = {n: h for n, h in excluded.items() if n not in refs}
++    repo = publish._checkout_path(cfg, repo_spec)
++    with integ_lock(_integ_worktree(repo, base)) as locked:
++        if not locked:
++            raise IntegrationError(
++                f"could not take the integration lock next to "
++                f"{_integ_worktree(repo, base).name} — fix the checkout's parent "
++                f"directory (permissions?), then re-run")
++        wt = _prepare_worktree(repo, base_remote, base, remotes=[r[0] for r in refs.values()])
++        # Each member's tip, read once (#633): a carried one must still hold the recorded head.
++        heads: dict[str, str | None] = {m.name: _rev(wt, refs[m.name][1]) for m in mine}
++        for m in mine:
++            ref, tip, took = refs[m.name][1], heads[m.name], carried.get(m.name)
++            facts = _carried_rewrite(wt, m.name, ref, took, tip, line) if tip and took else None
++            if facts is not None:
++                raise IntegrationError(
++                    f"{facts} Only commits that extend a carried branch reach a bundle's own "
++                    f"base: merging {tip[:12]} would put the old and the rewritten commits on "
++                    f"{branch} together. Nothing was merged or pushed. Restore {ref} to "
++                    f"{took[:12]} or a commit that contains it, then re-run")
++        unseen = [f"{n}'s published head {h[:12] if h else '(none given)'}"
++                  for n, h in sorted(others.items())
++                  if not (h and _git(wt, "cat-file", "-e", f"{h}^{{commit}}") == 0)]
++        if unseen:
++            raise IntegrationError(
++                f"cannot tell whether {branch} would hold work of a bundle {d.name} does not "
++                f"build on: {repo} does not have {' or '.join(unseen)}, even after fetching, "
++                f"and without a bundle's head its work cannot be told from a member's. "
++                f"Nothing was merged or pushed. Fetch each missing head into {repo} (from the "
++                f"remote its branch is published on), then re-run")
++        existing = _rev(wt, f"origin/{branch}")   # origin's copy, as just fetched
++        _reset_tree(wt, "HEAD")
++        if _git(wt, "checkout", "-B", branch, base_ref) != 0:
++            raise IntegrationError(f"could not start {branch} off {base_ref}")
++        owners = tuple(_owners(cfg, mine, batch).values())
++        merged_in: list[tuple[str, str]] = []   # (member name, head on the branch), in order
++        for m in mine:
++            head = heads[m.name]
++            try:
++                _merge_published(cfg, wt, m, refs[m.name], head, branch=branch, base=base,
++                                 owners=owners)
++            except _Conflict as exc:
++                raise _member_clash(wt, branch, base_ref, m.name, refs[m.name][1], head,
++                                    merged_in, exc) from exc
++            if head is not None:
++                merged_in.append((m.name, head))
++        tip = pushed_tip(wt)
++        recorded = [(n, h) for n, h in carried.items() if n in refs and h
++                    and _git(wt, "cat-file", "-e", f"{h}^{{commit}}") == 0]
++        foreign = _foreign_work(wt, tip, base_ref, merged_in, recorded, others)
++        if foreign is not None:
++            name, commit, by = foreign
++            via = f"{by}'s branch {refs[by][1]}" if by else "a member's branch"
++            raise IntegrationError(
++                f"{branch} would hold {commit[:12]}, which is {name}'s work, and {name} is "
++                f"not one of the bundles {d.name} builds on: {via} brings it in (cut from, "
++                f"or updated from, a branch that holds it). Nothing was pushed. Rebuild that "
++                f"branch on {base_ref} without {name}'s work, or declare {d.name}'s "
++                f"dependency on {name}, then re-run")
++        push = (("push", "origin", branch) if existing is None else
++                ("push", f"--force-with-lease={branch}:{existing}", "origin", branch))
++        if _git(wt, *push) != 0:
++            why = (f"origin already has {branch} at {existing[:12]}, and building {d.name}'s "
++                   f"base again force-pushes over it: if origin refuses force-pushes, delete "
++                   f"{branch} there or allow force-pushes on pdca-integration/*; or another "
++                   f"run moved it since this build fetched it" if existing is not None else
++                   f"a plain push creating it was refused: check origin's rules for "
++                   f"pdca-integration/*")
++            raise IntegrationError(f"could not push {branch} to origin ({why}) — {d.name} "
++                                   f"cannot be built on it")
++    return branch, tip
++
++
++def _member_clash(wt: Path, branch: str, base_ref: str, name: str, ref: str,
++                  head: str | None, merged_in: Sequence[tuple[str, str]],
++                  exc: _Conflict) -> IntegrationError:
++    """The error for member ``name`` (branch ``ref`` at ``head``) not merging cleanly onto
++    the bundle base ``branch`` (#723). Its trial merges run on a detached HEAD under the
++    caller's lock and leave ``branch`` where it was (:func:`_trial`). A head that does not
++    merge onto ``base_ref`` alone clashes with the base itself: no bundle is to blame, the
++    branch needs rebuilding on the base. Else the members of ``merged_in`` (merged before
++    it) that it clashes with, each tried on its own after the base; all of them when only
++    their combination clashes. ``exc`` itself when there is none to name, which a branch
++    started from the base never meets: with no member merged, it is the base."""
++    files = ", ".join(exc.paths)
++    if head is None:
++        return exc
++    at, found = _trial(wt, branch, base_ref, [head])
++    if at is not None:
++        return IntegrationError(
++            f"{name}'s branch {ref} does not merge cleanly onto {base_ref} itself (conflicts "
++            f"in {', '.join(found)}): {base_ref} changed those files since {name}'s branch "
++            f"was cut, so {branch} cannot be built from {base_ref}. Rebuild {name}'s branch "
++            f"on the new {base_ref} (update it from {base_ref} and resolve the conflict), "
++            f"then re-run")
++    partners = [n for n, its in merged_in if _trial(wt, branch, base_ref, [its, head])[0] == 1]
++    partners = partners or [n for n, _its in merged_in]
++    if not partners:
++        return exc
++    return IntegrationError(
++        f"{name}'s branch {ref} does not merge cleanly onto {branch} after "
++        f"{', '.join(partners)} (conflicts in {files}) — an undeclared overlap between "
++        f"{name} and {', '.join(partners)}; declare the conflict / re-order, then re-run")
++
++
++def _foreign_work(wt: Path, tip: str, base_ref: str, members: Sequence[tuple[str, str]],
++                  recorded: Sequence[tuple[str, str]], excluded: Mapping[str, str]
++                  ) -> tuple[str, str, str | None] | None:
++    """Whether a bundle base built at ``tip`` holds work of a bundle outside its set (#723):
++    ``(excluded bundle, commit, member that brings it)`` for the first such commit, None
++    when there is none. ``members``: each member's name and the head merged; ``recorded``:
++    a member's name and a head a fold of the run recorded for it (#633), an older commit of
++    the same branch when it moved on since; ``excluded``: name → head, each one in the clone
++    (the caller refuses a build with a head it lacks).
++
++    An excluded bundle's work is :func:`foreign_commit`'s rule turned round: the non-merge
++    commits reachable from its head and from neither ``base_ref`` nor any head of another
++    bundle (member, recorded or excluded) that its own head holds. One cut from the run's
++    line, say, holds the members already on it, as the line took them, and their commits
++    are theirs, not its, though a member's branch moved on since: the head the line took
++    from it is a recorded one. A commit two heads share while neither holds the other
++    counts for both (git cannot tell which branch made it), so it is refused, never let
++    through. The member named is the first whose head reaches the commit (None: none does,
++    which the merges of a branch started from the base never leave). A git failure
++    raises."""
++    built = set(_out(wt, "rev-list", "--no-merges", tip, "--not", base_ref,
++                     what=f"the commits on {tip[:12]}").split())
++    if not built or not excluded:
++        return None
++    heads = list(dict.fromkeys([*members, *recorded, *excluded.items()]))
++    for name, head in sorted(excluded.items()):
++        under = dict.fromkeys(
++            h for n, h in heads if n != name and h != head
++            and _in_line(wt, h, f"{n}'s head {h[:12]}", f"{name}'s head", of=head))
++        work = _out(wt, "rev-list", "--no-merges", head, "--not", base_ref, *under,
++                    what=f"{name}'s work").split()
++        hit = next((c for c in work if c in built), None)
++        if hit is None:
++            continue
++        by = next((n for n, h in members
++                   if _in_line(wt, hit, hit[:12], f"{n}'s head", of=h)), None)
++        return name, hit, by
++    return None
++
++
+ def _carried_tips(cfg: Config, groups: Mapping[tuple[str, str], list[Path]],
+                   refs: Mapping[str, tuple[str, str, bool]], carried: Mapping[str, str],
+                   batch: Collection[str] | None) -> dict[str, str | None]:
+diff --git a/template/tests/test_integrate_bundle_base.py b/template/tests/test_integrate_bundle_base.py
+new file mode 100644
+index 0000000..6ab56b7
+--- /dev/null
++++ b/template/tests/test_integrate_bundle_base.py
+@@ -0,0 +1,344 @@
++"""A bundle's own base: exactly the fetched base plus a chosen set of bundles (#723).
++
++``integrate.fold`` could only fold onto the run's one line per target: it names its
++destination itself (``integration_branch``) and every accepted bundle of the target lands
++there. #463's dependency-scoped bases need a branch holding exactly the bundles one bundle
++builds on. These cases pin ``integrate.build_bundle_base``: what the branch holds, its name,
++how it is pushed, and that every safeguard of the run's fold applies to it, plus two more:
++a rewritten carried member (#633), and work of a bundle outside the set brought in by a
++member. Each refusal comes before anything is pushed.
++
++Work outside the set is judged by who made it. A bundle outside the set that was cut from
++the run's line holds the members on it, as the line took them, and their commits stay
++theirs after a member's branch moves on. A bundle outside the set whose head this clone
++does not have cannot be judged at all, so the build refuses rather than guess.
++
++Real git: the ``StackFoldGit`` fixture of tests/test_integrate_stack_bases.py (a bare
++``origin``, a primary checkout and a ``human`` clone), loaded by path and used as a helper
++object, as tests/test_integrate_revert_via_branch.py does. It is never subclassed, which
++would re-run that suite's tests here. Only modules are imported, and the new entry points
++are reached inside each test body, so with the production change reverted these cases
++still load and run, and fail.
++    cd template && PYTHONPATH=src python3 -m unittest tests.test_integrate_bundle_base
++"""
++
++from __future__ import annotations
++
++import importlib.util
++import io
++import subprocess
++import unittest
++from contextlib import redirect_stderr
++from pathlib import Path
++from unittest import mock
++
++from pdca_harness import integrate
++
++_SPEC = importlib.util.spec_from_file_location(
++    "stack_bases_fixture", Path(__file__).with_name("test_integrate_stack_bases.py"))
++sb = importlib.util.module_from_spec(_SPEC)
++_SPEC.loader.exec_module(sb)
++
++BATCH = ["A", "B", "C", "D", "P", "T", "X", "Y", "Z", "12"]
++
++
++class BundleBase(unittest.TestCase):
++
++    def setUp(self) -> None:
++        self.fx = sb.StackFoldGit()          # the fixture's real-git setUp/tearDown and helpers
++        self.fx.setUp()
++        self.addCleanup(self.fx.tearDown)
++        self.cfg = self.fx.cfg
++        self.line = integrate.integration_branch(self.cfg, "main", BATCH)
++
++    # -- helpers -------------------------------------------------------------------------
++
++    def _build(self, d: Path, members: list[Path], *, carried=None, excluded=None):
++        """``integrate.build_bundle_base``, looked up here, so a tree without it fails this
++        case, not the module's import."""
++        return integrate.build_bundle_base(self.cfg, d, members, batch=BATCH,
++                                           carried=carried or {}, excluded=excluded or {})
++
++    def _name(self, iid: str) -> str:
++        """The base branch of bundle ``iid`` (a plain id: nothing for the name to escape)."""
++        return f"{self.line}-b{iid}"
++
++    def _refused(self, d: Path, members: list[Path], **kw) -> tuple[str, list[str]]:
++        """The build of ``d``'s base raises ``IntegrationError`` and pushes nothing: no
++        ``git push`` ran and origin has no base for ``d``. Returns the message and every git
++        step the build ran through ``integrate._git``, the failed ones too."""
++        steps: list[str] = []
++        real = integrate._git
++
++        def spy(repo: Path, *args: str) -> int:
++            steps.append(args[0])
++            return real(repo, *args)
++
++        with mock.patch.object(integrate, "_git", spy), redirect_stderr(io.StringIO()), \
++                self.assertRaises(integrate.IntegrationError) as ctx:
++            self._build(d, members, **kw)
++        self.assertNotIn("push", steps, "the build pushed")
++        self.assertFalse(self.fx._has(self._name(d.name.removeprefix("issue_"))),
++                         "a refused base reached origin")
++        return str(ctx.exception), steps
++
++    def _publish2(self, iid: str, first: dict[str, str], second: dict[str, str], *,
++                  cut_from: str = "origin/main") -> Path:
++        """Publish ``fix/<iid>`` with TWO commits: ``first``, then ``second`` on top."""
++        d = self.fx._publish(iid, first, cut_from=cut_from)
++        self.fx._push_from_human(second, to=f"fix/{iid}", off=f"origin/fix/{iid}")
++        return d
++
++    def _dest(self, iid: str) -> Path:
++        """A bundle that will be built on the base (it needs only its brief's target)."""
++        d = self.cfg.bundle(iid)
++        sb._brief(d)
++        return d
++
++    def _commits(self, rng: str) -> list[str]:
++        return sb._git(self.fx.origin, "rev-list", rng).split()
++
++    def _wave0(self, carried: dict[str, str] | None = None) -> tuple[Path, Path, str]:
++        """Wave 0 = A, Z (unrelated, two commits each on their own files), folded onto the
++        run's line; ``carried`` gets the run's record of the heads the line took. Returns
++        (A, Z, the line tip)."""
++        a = self._publish2("A", {"a1.txt": "a1\n"}, {"a2.txt": "a2\n"})
++        z = self._publish2("Z", {"z1.txt": "z1\n"}, {"z2.txt": "z2\n"})
++        integrate.fold(self.cfg, [a, z], batch=BATCH, folded_this_run={},
++                       **({} if carried is None else {"carried": carried}))
++        return a, z, self.fx._tip(self.line)
++
++    def _on_human(self, *steps: tuple[str, ...]) -> None:
++        """Run git ``steps`` in the ``human`` clone, after fetching origin."""
++        sb._git(self.fx.human, "fetch", "-q", "origin")
++        for step in steps:
++            sb._git(self.fx.human, *step)
++
++    # -- (1) exact contents ----------------------------------------------------------------
++
++    def test_a_bundle_base_holds_its_members_and_nothing_else(self) -> None:
++        record: dict[str, str] = {}
++        a, _z, line_tip = self._wave0(record)
++        kept = dict(record)
++        b = self._dest("B")
++        branch, tip = self._build(b, [a], carried=record,
++                                  excluded={"issue_Z": self.fx._tip("fix/Z")})
++        self.assertEqual(branch, self._name("B"))
++        self.assertEqual(self.fx._tip(branch), tip, "the base was not pushed to origin")
++        a_commits = self._commits("refs/heads/main..refs/heads/fix/A")
++        z_commits = self._commits("refs/heads/main..refs/heads/fix/Z")
++        self.assertEqual(len(a_commits), 2)
++        self.assertEqual(len(z_commits), 2)
++        for c in a_commits:
++            self.assertTrue(self.fx._ancestor(c, tip), f"A's {c} is missing")
++        for c in z_commits:
++            self.assertFalse(self.fx._ancestor(c, tip), f"Z's {c} leaked in")
++        self.assertEqual(sb._git(self.fx.origin, "rev-parse", f"{tip}^1").strip(),
++                         self.fx._tip("main"), "the base does not start from origin/main")
++        self.assertEqual(self.fx._tip(self.line), line_tip, "the run's line moved")
++        self.assertEqual(record, kept, "the run's record of its line changed")
++
++    # -- (2) name ----------------------------------------------------------------------------
++
++    def test_the_name_is_the_line_plus_b_and_the_flattened_id(self) -> None:
++        a, _z, _t = self._wave0()
++        d = self._dest("12")
++        expect = f"pdca-integration/main-r{integrate.batch_key(BATCH)}-b12"
++        branch, _tip = self._build(d, [a])
++        self.assertEqual(branch, expect)
++        self.assertEqual(branch, self.line + "-b12")
++        self.assertTrue(self.fx._has(expect))
++        names = [integrate.bundle_base_branch(self.cfg, "main", BATCH, i)
++                 for i in ("12", "1-2", "1/2")]
++        self.assertEqual(names, [self.line + "-b12", self.line + "-b1-h2",
++                                 self.line + "-b1-s2"])
++        self.assertEqual(len(set(names)), 3, names)
++        self.assertEqual(integrate.bundle_base_branch(self.cfg, "main", BATCH, "issue_12"),
++                         expect)
++        for n in names:
++            self.assertNotIn("/", n.removeprefix("pdca-integration/"))
++
++    # -- (3) push rule -----------------------------------------------------------------------
++
++    def test_creating_pushes_without_force_and_rebuilding_starts_fresh_and_forces(
++            self) -> None:
++        a, _z, _t = self._wave0()
++        b = self._dest("B")
++        first = self.fx._pushes(lambda: self._build(b, [a]))
++        self.assertEqual(len(first), 1, first)
++        self.assertEqual([x for x in first[0] if x.startswith("--force")], [], first[0])
++        self.assertEqual([x for x in first[0] if x.startswith("+")], [], first[0])
++        # origin's copy moved on since (an earlier build, of other members): built again,
++        # the base starts from origin/main, not from that copy, so the push is forced.
++        old = self.fx._push_from_human({"old.txt": "old\n"}, to=self._name("B"), force=True)
++        again = self.fx._pushes(lambda: self._build(b, [a]))
++        self.assertEqual(len(again), 1, again)
++        self.assertTrue([x for x in again[0] if x.startswith("--force")], again[0])
++        tip = self.fx._tip(self._name("B"))
++        self.assertFalse(self.fx._ancestor(old, tip), "built on origin's old copy")
++        self.assertTrue(self.fx._ancestor(self.fx._tip("fix/A"), tip))
++
++    def test_a_refused_force_push_names_the_branch_and_the_remedy(self) -> None:
++        a, _z, _t = self._wave0()
++        b = self._dest("B")
++        name = self._name("B")
++        stale = self.fx._push_from_human({"stale.txt": "s\n"}, to=name)
++        sb._git(self.fx.origin, "config", "receive.denyNonFastForwards", "true")
++        with self.assertRaises(integrate.IntegrationError) as ctx:
++            self._build(b, [a])
++        msg = str(ctx.exception)
++        for part in (name, "delete", "pdca-integration/*"):
++            self.assertIn(part, msg)
++        self.assertEqual(self.fx._tip(name), stale)
++
++    # -- (4) every fold safeguard ------------------------------------------------------------
++
++    def test_two_members_that_clash_are_both_named(self) -> None:
++        a = self.fx._publish("A", {"c.txt": "from a\n"})
++        y = self.fx._publish("Y", {"c.txt": "from y\n"})
++        msg, _steps = self._refused(self._dest("D"), [a, y])
++        for part in ("issue_Y", "issue_A", "c.txt", "declare the conflict"):
++            self.assertIn(part, msg)
++
++    def test_a_clash_with_the_base_says_rebuild_not_reorder(self) -> None:
++        a = self.fx._publish("A", {"base.txt": "a's base\n"})
++        self.fx._push_from_human({"base.txt": "main moved\n"}, to="main")
++        msg, _steps = self._refused(self._dest("B"), [a])
++        for part in ("origin/main", "issue_A", "base.txt", "Rebuild"):
++            self.assertIn(part, msg)
++        self.assertNotIn("declare the conflict", msg)
++        self.assertNotIn("re-order", msg)
++
++    def test_a_gone_member_not_known_merged_stops_the_build(self) -> None:
++        a = self.fx._publish("A", {"a.txt": "a\n"})
++        self.fx._delete("fix/A")
++        with sb._merged_heads({}):
++            msg, _steps = self._refused(self._dest("B"), [a])
++        self.assertIn("issue_A's published branch origin/fix/A does not resolve", msg)
++
++    def test_a_member_that_brings_a_revert_of_an_earlier_members_work_stops_the_build(
++            self) -> None:
++        # #623 / #673. A adds a.txt. Another branch on origin, `next`, merges A's PR and
++        # then reverts it, and B's author updates fix/B from `next` (a merge commit on
++        # fix/B), which brings the revert along. Built fresh on main, A puts a.txt on D's
++        # base and B's merge would take it off again, by a change none of B's own commits
++        # makes. The build stops and pushes nothing, and so does the run's fresh fold of
++        # the same two bundles: one check, worded for the branch each was building.
++        sb._git(self.fx.origin, "branch", "next", "main")
++        a = self.fx._publish("A", {"a.txt": "a\n"})
++        b = self.fx._publish("B", {"b.txt": "b\n"})
++        self.fx._merge_pr("A", into="next")
++        self._on_human(("checkout", "-q", "-B", "next", "origin/next"),
++                       ("revert", "--no-edit", "-m", "1", "HEAD"),
++                       ("push", "-q", "origin", "next"))
++        self._on_human(("checkout", "-q", "-B", "fix/B", "origin/fix/B"),
++                       ("merge", "-q", "--no-ff", "--no-edit", "origin/next"),
++                       ("push", "-q", "origin", "fix/B"))
++        self.assertTrue(self.fx._ancestor(self.fx._tip("fix/A"), self.fx._tip("fix/B")))
++        msg, _steps = self._refused(self._dest("D"), [a, b])
++        for part in (f"merging issue_B's branch origin/fix/B would remove issue_A's work from "
++                     f"{self._name('D')}: a.txt (issue_A) would go back",
++                     "not one of issue_B's own commits"):
++            self.assertIn(part, msg)
++        with redirect_stderr(io.StringIO()), \
++                self.assertRaises(integrate.IntegrationError) as run:
++            integrate.fold(self.cfg, [a, b], batch=BATCH, folded_this_run={})
++        self.assertIn(f"merging issue_B's branch origin/fix/B would remove issue_A's work "
++                      f"from {self.line}: a.txt (issue_A) would go back", str(run.exception))
++        self.assertFalse(self.fx._has(self.line))
++
++    # -- (5) rewritten carried member ------------------------------------------------------
++
++    def test_a_rewritten_carried_member_stops_the_build_before_any_merge(self) -> None:
++        record: dict[str, str] = {}
++        a, _z, _t = self._wave0(record)
++        took = record["issue_A"]
++        self.assertEqual(took, self.fx._tip("fix/A"))
++        self.fx._push_from_human({"a1.txt": "rewritten\n"}, to="fix/A", force=True)
++        msg, steps = self._refused(self._dest("B"), [a], carried=record)
++        for part in ("issue_A's branch origin/fix/A was rewritten", took[:12],
++                     f"rewritten commits on {self._name('B')} together"):
++            self.assertIn(part, msg)
++        self.assertNotIn("merge", steps, "the build merged before it refused")
++
++    # -- (6) foreign ancestry ---------------------------------------------------------------
++
++    def test_a_member_cut_from_an_old_line_cannot_bring_an_excluded_bundle_in(self) -> None:
++        x = self.fx._publish("X", {"x.txt": "x\n"})
++        integrate.fold(self.cfg, [x], batch=BATCH, folded_this_run={})
++        p = self.fx._publish("P", {"p.txt": "p\n"}, cut_from=f"origin/{self.line}")
++        msg, _steps = self._refused(self._dest("D"), [p],
++                                    excluded={"issue_X": self.fx._tip("fix/X")})
++        for part in (f"{self.fx._tip('fix/X')[:12]}, which is issue_X's work",
++                     "issue_P's branch origin/fix/P brings it in", "Nothing was pushed"):
++            self.assertIn(part, msg)
++
++    def test_an_excluded_bundle_cut_from_the_line_does_not_claim_a_members_work(
++            self) -> None:
++        a, _z, _t = self._wave0()
++        self.fx._publish("C", {"c.txt": "c\n"}, cut_from=f"origin/{self.line}")
++        excluded = {"issue_C": self.fx._tip("fix/C"), "issue_Z": self.fx._tip("fix/Z")}
++        branch, tip = self._build(self._dest("B"), [a], excluded=excluded)
++        self.assertEqual(self.fx._tip(branch), tip)
++        self.assertTrue(self.fx._ancestor(self.fx._tip("fix/A"), tip))
++        self.assertFalse(self.fx._ancestor(self.fx._tip("fix/C"), tip))
++        self.assertFalse(self.fx._ancestor(self.fx._tip("fix/Z"), tip))
++
++    def test_a_member_that_moved_on_since_an_excluded_bundle_was_cut_keeps_its_work(
++            self) -> None:
++        # As above, then A gets one more commit (a fixup the next fold takes, #593). C holds
++        # A's head as the line took it, not A's new one, so only the run's record of that
++        # head says A's first two commits are A's, not C's. They are on B's base and must
++        # not be refused as C's work.
++        record: dict[str, str] = {}
++        a, _z, _t = self._wave0(record)
++        self.fx._publish("C", {"c.txt": "c\n"}, cut_from=f"origin/{self.line}")
++        a3 = self.fx._push_from_human({"a3.txt": "a3\n"}, to="fix/A", off="origin/fix/A")
++        self.assertFalse(self.fx._ancestor(a3, self.fx._tip("fix/C")))
++        excluded = {"issue_C": self.fx._tip("fix/C"), "issue_Z": self.fx._tip("fix/Z")}
++        branch, tip = self._build(self._dest("B"), [a], carried=record, excluded=excluded)
++        self.assertEqual(self.fx._tip(branch), tip)
++        for c in self._commits("refs/heads/main..refs/heads/fix/A"):
++            self.assertTrue(self.fx._ancestor(c, tip), f"A's {c} is missing")
++        self.assertFalse(self.fx._ancestor(self.fx._tip("fix/C"), tip))
++        self.assertFalse(self.fx._ancestor(self.fx._tip("fix/Z"), tip))
++
++    def test_an_excluded_head_this_clone_lacks_stops_the_build_before_any_merge(
++            self) -> None:
++        # P was cut from a line holding X's commit, and X's newer head is published where
++        # this checkout never fetches (another remote). Without that commit, X's work cannot
++        # be told from P's, so the build refuses instead of pushing a base that holds X's
++        # commit. Once the head is fetched, the same build is refused for that commit.
++        x = self.fx._publish("X", {"x.txt": "x\n"})
++        integrate.fold(self.cfg, [x], batch=BATCH, folded_this_run={})
++        x1 = self.fx._tip("fix/X")
++        p = self.fx._publish("P", {"p.txt": "p\n"}, cut_from=f"origin/{self.line}")
++        elsewhere = self.fx.tmp / "elsewhere.git"
++        subprocess.run(["git", "init", "--bare", "-q", str(elsewhere)], check=True)
++        x2 = self.fx._push_from_human({"x2.txt": "x2\n"}, to="fix/X", url=str(elsewhere),
++                                      off="origin/fix/X")
++        d = self._dest("D")
++        msg, steps = self._refused(d, [p], excluded={"issue_X": x2})
++        self.assertIn(f"does not have issue_X's published head {x2[:12]}", msg)
++        self.assertIn("Nothing was merged or pushed", msg)
++        self.assertNotIn("merge", steps, "the build merged before it refused")
++        sb._git(self.fx.primary, "fetch", "-q", str(elsewhere), "fix/X")
++        msg, _steps = self._refused(d, [p], excluded={"issue_X": x2})
++        self.assertIn(f"{x1[:12]}, which is issue_X's work", msg)
++        self.assertIn("issue_P's branch origin/fix/P brings it in", msg)
++
++    # -- the members are exactly the ones named ------------------------------------------
++
++    def test_a_member_with_a_patch_but_no_target_stops_the_build(self) -> None:
++        a = self.fx._publish("A", {"a.txt": "a\n"})
++        t = self.cfg.bundle("T")
++        t.mkdir(parents=True)
++        (t / "brief.md").write_text("- **Slug:** t\n", encoding="utf-8")
++        (t / "patch.diff").write_text(sb._new_file_patch("t.txt", "t"), encoding="utf-8")
++        msg, steps = self._refused(self._dest("B"), [a, t])
++        self.assertIn("issue_T has a patch but no usable target", msg)
++        self.assertEqual(steps, [], "the build ran git before it refused")
++
++
++if __name__ == "__main__":
++    unittest.main()

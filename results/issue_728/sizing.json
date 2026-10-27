@@ -1,0 +1,13 @@
+{
+  "band": "watch",
+  "independent_outcomes": [
+    "Carry through a patchless finished node: finished ids reached from a drive-set dependent through patchless finished ids get carried, so D is built on a line holding A (criteria 1, 1b, 4a, 4c).",
+    "Hold / not-clean through a patchless finished node: a not-clean cause reached through a patchless id holds the dependents and marks downstream finished ids not clean, so no closed-PR work is carried (criteria 2, 3)."
+  ],
+  "proposed_seams": [
+    "If a cut is wanted, it falls between defect (i) missing work (the dependents map at flow.py:1254-1259) and defect (ii) unvetted work (_cascade_not_clean at flow.py:1182-1209 plus the held loop at :1333-1345). Each has its own red tests and could ship alone: (i) alone does not make case (2) worse than today, since D is already built on the plain base when A is closed.",
+    "Against cutting: both halves are one invariant ('a patchless finished bundle is a node of the graph') applied through one walk rule in one function, _carry_finished. Splitting would likely write the same walk twice or ship a helper in the first PR that the second just reuses. The human already narrowed this bundle after four iterations and chose 'no split'. My advice is to keep it as one slice and treat 'watch' as a note that the cut exists, not as a request to make it."
+  ],
+  "confidence": "medium",
+  "brief_sha": "501113a6cbbe833e"
+}

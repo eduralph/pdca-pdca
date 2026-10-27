@@ -1,0 +1,30 @@
+Stop a fold when a bundle's branch brings in a revert of line work
+
+A stack-mode fold already stops before it pushes when taking the base in
+would remove work a bundle put on the integration line (#623). A bundle's
+own PR branch was merged with no such check. So a branch cut from the base
+after the maintainer reverted a merged PR there, or updated from that base
+with "Update branch", carried the revert along. Folding it silently removed
+the earlier bundle's files from the line, and the fold pushed that line for
+the next wave to build on.
+
+Every bundle-branch merge of a fold is now judged the same way as the base
+merge. If the merge would put a path the line changed back to how the base
+had it, and none of the branch's own commits made that change, the merge is
+undone and the run stops. The message names the file, the bundle whose work
+would go, and the bundle whose branch brings the change. Under the pre-wave
+carry, only that bundle is left out and the rest of the fold goes on. A
+change the branch's own commits make, such as a dependent that deletes or
+edits the file on purpose, is merged as before. The base-merge message is
+unchanged.
+
+When two bundles' branches share the commit that made the work, git cannot
+tell which branch made it, and the message says so instead of reading as
+if the incoming bundle removed its own work.
+
+Both checks compare each file with where the line leaves the base, so they
+do not see a partial revert inside a file the line also changed in other
+ways, nor a revert of work the base already has. This limit is now written
+down in docs/07-crosscutting.md and in the integrate module docstring.
+
+Fixes #673

@@ -1,0 +1,29 @@
+fix(flow): report a carried branch rewritten after the last fold
+
+In stack mode a run folds each wave's published branches onto one
+integration line and builds the next wave on top of it. Since
+acf9947a7864a4ad5ed367396e9d9780303ce19d (#633) a fold stops the run if
+a branch an earlier fold carried has been force-pushed with a rewrite,
+because the line would then hold commits no PR holds any more. That
+check only ran at the start of the next fold, so a rewrite during or
+after the run's last fold went unnoticed: every bundle ended COMPLETE
+and the run exited 0.
+
+The run now checks every branch it carried once more at the very end,
+after Act. Each rewritten branch gets one stderr line naming the bundle,
+the branch, and the commit the line took from it, with the same remedy
+the fold gives, and the run exits 1. This outranks a conflict hold
+(exit 3). If the check itself cannot run (a fetch or an ancestry test
+fails), it says so, names the branches to check by hand, and also exits
+1, without the fold's "re-run" advice, since the line is already pushed.
+A branch that was deleted is not judged here, and the check is skipped
+when the run already stopped on a fold error or a red re-gate, so a
+rewrite is never reported twice.
+
+Separately, the fetch made for the carried-branch check runs before the
+fold takes its lock, so another git process holding a ref lock in the
+same checkout could make it fail and stop the run for no reason tied to
+the bundles. That fetch is now retried once after a short pause; a
+second failure still stops the fold with "could not fetch".
+
+Fixes #695

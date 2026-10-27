@@ -1,0 +1,63 @@
+# Design proposal — issue 626 / stack-squash-rebase-merge-recognised-and-refused-up-front
+
+> The Plan artifact for a change that is a choice ("support it or refuse it up front").
+> The recommended option is written into the parsed fields below; the maintainer may pick
+> the other one at sign-off (see "Alternatives considered"). Do reads ONLY this file.
+
+- **Slug:** stack-squash-rebase-merge-recognised-and-refused-up-front
+- **Kind:** enhancement (design proposal)
+- **Goal:** Stack mode keeps requiring merge commits, but says so where it can still help, and recognises a squash or rebase merge by name when one happens: (1) publish warns about a repo that does not allow merge commits for EVERY stack-mode PR that a later wave or a dependent builds on (today only a wave>0 PR warns, so the prerequisite — the PR that actually gets squashed — never does); (2) the fold, meeting a gone branch whose PR merged by squash/rebase, says that is what happened and what to do, instead of the generic "merged somewhere other than <base>"; (3) the re-issue carry stops giving a finished dependent of a squash/rebase-merged prerequisite the `built_on` advice "get issue_P carried", which points the wrong way.
+- **Success criterion:** All hold on the offline fixture. "Stack mode" here means `cfg.wave_mode == "stack"` (the config value, default `"stack"`, config.py:363), not "has a stack base". "Another bundle depends on it" means some bundle dir under the results root (`cfg.bundle(iid).parent`, `issue_*/brief.md`) declares this id in `Depends on` / `Depends on (merged)` / `Stacks on`, read with `waves.declared_deps` (`template/src/pdca_harness/waves.py:39`). `publish.publish` does that scan itself, so standalone `pdca publish <id>` (cli.py:495), accept at sign-off (cli.py:1555) and the flow (flow.py:657) all behave the same, with no new parameter. (a) a stack-mode publish of a bundle that another bundle names in `Depends on` (wave 0, no stack base) prints the "does not allow merge commits" warning when `gh repo view` reports `mergeCommitAllowed: false`; (b) `integrate.fold` over a bundle whose branch is gone and whose PR is MERGED with a `mergeCommit` the base HAS but a `headRefOid` neither the base nor the line has, raises an `IntegrationError` whose message names a squash or rebase merge, gives the merge commit's oid, and does NOT contain "merged somewhere other than"; a gone-branch PR whose merge commit the base does NOT have keeps today's "merged somewhere other than" message; (c) in a re-issue, a finished P that is MERGED with its head on neither the base nor the line but its merge commit on the base, and a finished Q whose `Depends on` names P: **Q is still held** (refused, not carried), and Q's hold line names P as squash- or rebase-merged, says to rebuild or "Update branch" Q from the base, and does not contain "get issue_P carried"; P's own line names the squash/rebase merge and does not contain "remove the `Depends on:`" (the `edge` hint, flow.py:1319); (c2) a MERGED P whose merge commit is NOT on the base keeps today's `edge` reason and hint; (c3) when `mergeCommit` reads "" or cannot be read (`merged.merge_and_head`, merged.py:171), the fold keeps today's "merged somewhere other than" message and the carry keeps `edge` — fail closed, as `test_flow_merged_prereq_on_line.py:263` does for the build path; (d) a stack-mode publish of a wave-0 bundle with no stack base and no dependent prints no such warning (no new noise for an independent PR); (d2) a stack-mode publish of a PR cut from a stack base with no dependent still warns, as today (publish.py:370-371, #123); (e) a `wave_mode = "merge"` publish of a depended-on bundle prints no such warning (merge mode picks its own method).
+- **Falsifiability:** RED on the real-git fixture `StackFoldGit` (`template/tests/test_integrate_stack_bases.py`, bare `origin`, `gh` stubbed) — the same fixture `template/tests/test_flow_merged_prereq_on_line.py:252` (`test_a_squash_merge_already_on_the_line_builds_the_dependent_on_it`) already uses to produce a squash merge. Today: (a) no warning (publish.py:370-371 warns only when `stack_branch` is set); (b) the message is the generic one at integrate.py:1447-1453; (c) Q gets the `built_on` hint (flow.py:1322) through `_cascade_not_clean` (flow.py:1395). Each is a string the test can assert on, offline.
+- **Repo + branch target:** eduralph/pdca-harness @ main
+- **Depends on:** none
+- **Conflicts with:** 654, 464
+- **Ordering note:** 654 edits the same pre-wave carry (`flow.py:1283-1500`) and the stack-mode section of `docs/07-crosscutting.md`; 464 adds a wave mode that has to gate the same carry and publish paths. No build-on dependency either way.
+- **Surfaces:** data
+- **Difficulty:** high — three modules (`integrate.py`, `flow.py`, `publish.py`) plus the stack-mode docs, on the fold and carry paths every stack run goes through.
+- **Scope:** Recognise a squash/rebase merge of a stack prerequisite and report it by name at the fold and at the re-issue carry; stop the carry's cascade from giving the wrong advice for it; extend the existing merge-commit warning at publish to the PRs others build on; document the choice in `docs/07-crosscutting.md` (stack-mode bullet at :646-652, the gone-branch paragraph at :686-691, and the "Known limits" list at :809-811). / out of scope: actually supporting squash/rebase merges in stack mode (alternative A below); merge mode (`[driver].merge_method` already picks the method the driver itself uses); turning the publish warning into a refusal; reading the merge method of an already-merged PR from any source other than the `gh pr view --json mergeCommit,headRefOid` answer the code already reads (`merged.merge_and_head`, merged.py:151).
+- **External dependencies:** none
+- **Test file:** `template/tests/test_stack_squash_merge.py` (new). Import only modules (`from pdca_harness import flow, integrate, merged, publish, state`), never a symbol the change adds, so the red leg still imports and fails on assertions (the C4 gate, `template/engine/scripts/run-verify.sh`, treats an import failure as UNVERIFIABLE).
+- **Citations expected:** Do must cite path:line on the target branch for every change. Peer callsites: the fold's gone-branch decision `integrate._gone_branch` (`template/src/pdca_harness/integrate.py:1406-1455`); the carry's state check `flow._finished_head` (`template/src/pdca_harness/flow.py:1283-1305`, the `edge` case at :1303-1305) and its cascade `flow._cascade_not_clean` (flow.py:1395); the hints table `_CARRY_HINTS` (flow.py:1316-1330); reading the merge commit as #655 does with `merged.merge_and_head` (`template/src/pdca_harness/merged.py:151-171`); the warning `publish._warn_if_squash_only` (`template/src/pdca_harness/publish.py:820`) and its one caller (publish.py:370-371). Build the squash-merged prerequisite in the test the way `template/tests/test_flow_merged_prereq_on_line.py:252` does.
+- **Prior-art check (triage cycles):** `git -C ../pdca-harness log --oneline origin/main -n 30 -- template/src/pdca_harness/integrate.py template/src/pdca_harness/flow.py template/src/pdca_harness/publish.py template/src/pdca_harness/merged.py` → #593 (ancestry check), #652/#670 (cascade), #655 (`merge_and_head`); none handles squash/rebase by name. Closed-unmerged PRs on those paths: #637, #638, #639, #648, #649, #598, #599, #600 — all closed as carried byte-identical by #657/#615; none attempts this. `gh search prs "squash stack"`: none. Result: no prior art.
+- **Disposition hint:** new-feature
+
+## Motivation
+
+After #593 the fold checks that the base holds a gone branch's merged head by ancestry. A stack PR merged by squash or rebase leaves no such ancestor, so the next fold stops with "merged somewhere other than <base>" (integrate.py:1447-1453). The docs already say stack mode needs merge commits (docs/07-crosscutting.md:650-652). But:
+
+- the warning that should prevent it only fires for a PR with a stack base (publish.py:370-371). The PR most likely to be squashed — a wave-0 prerequisite — never gets it;
+- when it happens, the fold's message lists it as one of two guesses;
+- since #670 the re-issue carry treats such a P as `edge` (flow.py:1303-1305) and spreads "not clean" to every finished dependent, whose hold then says "get issue_P carried" (flow.py:1322). P was reviewed and merged; that advice is wrong (owner's comment on the issue, 2026-10-10).
+
+## Design
+
+**Recommended: refuse, but recognise and explain.**
+
+1. **Publish (up front).** In stack mode (`cfg.wave_mode == "stack"`), warn about a repo that does not allow merge commits for any PR that a later wave or another bundle of the batch builds on — not only for a PR cut from a stack base. Still a warning, still best-effort (any `gh` failure is silent, as today).
+2. **Fold.** A gone branch whose PR is MERGED, whose merge commit is on the base, and whose head is on neither the base nor the line, is a squash or rebase merge. Say so, with the merge commit, and give the step: update the dependent PRs' branches from the base ("Update branch") and re-issue, or re-drive the dependents on the base. A merged PR whose merge commit is not on the base keeps today's message (it merged into another branch).
+3. **Carry.** The same shape at `_finished_head` gets its own reason and hint (not `edge`), and the cascade to finished dependents carries advice that matches: P was squash/rebase-merged into the base; rebuild or update the dependent from the base. **The dependent stays held** (decided here, not left to Do): this is the "refuse" option, and it keeps the Known-limits line at docs/07-crosscutting.md:811 ("holds the dependents") true. To tell the shapes apart, `_finished_head` must also read `mergeCommit` through `merged.merge_and_head` (merged.py:151). Today it reads only `state,headRefOid` via `merged.pr_state` (flow.py:1293, merged.py:180). That costs one more `gh` call, made only for a MERGED P whose head is on neither the base nor the line. The fold's `_gone_branch` reads `merged.merged_head` (integrate.py:1427) and needs the same extra read. An unreadable or empty merge commit fails closed (criterion c3).
+4. **Docs.** The three docs edits state the chosen outcome: stack mode needs merge commits; a squash/rebase-merged prerequisite is named as such at the fold and the carry, and **holds** its dependents until they are updated from the base. The reviewer checks the docs against criteria (b)–(c).
+
+## Alternatives considered
+
+- **A — support squash/rebase merges.** When the base has P's merge commit, take the base into the line (as `_take_in_base` does for a merge commit). It usually merges cleanly because both sides make the same change, but it conflicts when a later wave edited the lines P touched, and every dependent PR keeps showing P's diff again until "Update branch". It also contradicts the documented rule (docs/07-crosscutting.md:650-652). Higher risk, more code; left for a later issue if squash-only repos become a real need.
+- **Refuse at publish (hard stop) when the repo disallows merge commits.** Would block repos that allow both methods but whose maintainer simply picks the wrong button; the warning plus a clear fold message is enough.
+
+## Impact & compatibility
+
+- New warnings on wave-0 PRs that others depend on, in repos without merge commits. No behaviour change for repos that allow merge commits.
+- Fold and carry messages change text; no state or file-format change.
+
+## Open questions
+
+- Maintainer: confirm "refuse, recognise and explain" over "support" (alternative A). If A is chosen, rewrite Goal / Success criterion before Do.
+- #625 (live GitHub validation) would confirm the real `mergeCommit` / `headRefOid` shapes after a squash. Not a prerequisite: the offline stub follows `merged.merge_and_head`'s documented contract (merged.py:151-162).
+
+## STOP discipline
+
+Draft only until Check sign-off. Pushing to a feature/draft branch and opening a
+draft PR MAY happen during the cycle (useful for CI feedback). The PR MUST NOT be
+marked ready before sign-off accepts.
+
+Plan-review response: Revised. (1) The batch view is now a results-root scan with `waves.declared_deps` inside `publish.publish`, so standalone `pdca publish` behaves the same. (2) "Stack mode" is `cfg.wave_mode == "stack"`, and leg (e) covers merge mode. (3) Leg (d) is narrowed, and (d2) pins the existing #123 warning. (4) The outcome is decided: Q stays held, with corrected advice. (5) P's own hint is pinned, with (c2) as the negative case. (6) The extra `mergeCommit` read is named at both sites, and an empty value fails closed (c3). (7) The docs are tied to the held outcome, and the reviewer checks them.

@@ -1,0 +1,12 @@
+{
+  "mode": "stacked-pr",
+  "branch": "fix/673-fold-stops-on-a-revert-brought-by-a-bundle-branch",
+  "pr_url": "https://github.com/eduralph/pdca-harness/pull/707",
+  "base": "main",
+  "repo": "eduralph/pdca-harness",
+  "by": "Eduard Ralph",
+  "date": "2026-10-15",
+  "id_pending": false,
+  "host_ci_base": "ebef78cdddcc42bf6b4513d6daade3327b3b53b8",
+  "stacks_on": []
+}

@@ -1,0 +1,29 @@
+integrate: build a bundle's own base from a chosen set of bundles
+
+Until now the harness could only fold accepted bundles onto the run's one
+shared line per target. Every accepted bundle of the target landed there, so a
+bundle that builds on only some of them had no branch of its own: it had to sit
+on top of everything the run accepted, including work it does not depend on.
+
+integrate.build_bundle_base builds, for one bundle, a branch holding exactly
+the base as just fetched plus the published branches of a given list of member
+bundles. The branch is named after the run's line with "-b<id>" added, so it
+never collides with the line or another bundle's base. It goes through the same
+checks as the run's fold: clean merges (a clash with the base itself is told
+apart from a clash between two members), gone branches, no revert of earlier
+work brought in by a member, and no rewritten carried member. Creating the
+branch is a plain push; building it again force-pushes with a lease.
+
+It refuses, and pushes nothing, when the result would hold work that is not
+the base's and not a member's own. A member's own work is counted above the
+commit its branch was cut from, as recorded when it was published, never from
+which integration branches happen to exist on origin. So rebuilding or moving
+any of those branches cannot change the answer. When that cut point cannot be
+trusted (a stack record with no tip, a tip the branch no longer holds, an
+"Onto branch" member, or a member published stacked with no record), the build
+refuses and names the member to re-publish.
+
+The run's own fold is unchanged, and nothing calls the new function yet; #724
+wires it in.
+
+Fixes #723

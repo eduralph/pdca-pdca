@@ -1,0 +1,5 @@
+Slice is oversized (patch 151 KB > 125 KB backstop, 12 files) and keeps producing new implementation-level findings each round (round 1: 5 findings, auto-rebuilt; round 2: 2 new ones). Split it in re-plan (pdca split), e.g.:
+- (a) dependency-scoped stack bases for in-batch bundles (criteria 1-5, 10);
+- (b) resume/carry handling (criteria 6-8): keep finished patchless bundles in the dependency graph so transitive edges survive (reviewer's two repros: D COMPLETE missing A; false foreign-work STOPPING), and fix the #633/#695 rewrite messages to name the bundle base that took the head and the PR to rebuild (no PR is cut from the line any more);
+- (c) the #655 merged-prerequisite rework (remove _line_lacks_merge / merge_and_head, flip hold tests, criterion 9) as its own child.
+Decide in plan: dependents of a legacy `Stacks on` or `Onto branch` prerequisite now stop the whole run (built pre-fix) — support them as base members, hold the dependent (#725), or refuse at plan time. Refresh stale plan-advisory items (#723 now on base; anchors; criterion 10 suite list) and attach the #463/#630 thread lines that criteria 7-8 rest on.

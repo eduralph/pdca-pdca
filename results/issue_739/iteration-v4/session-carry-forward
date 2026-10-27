@@ -1,0 +1,5 @@
+Slice is oversized (3 rounds spent; sizing.json band = oversized). The core hold behavior is right in every probe, but each round finds another wrong-advice edge case in the partner-naming/wording layer.
+Split along the sizing.json seams:
+1. Core cross-wave hold (cases 1, 2, 5 + case-5 flip): single-partner hold, carried finished heads in the partner set. A partner whose own head fails to merge onto the base stays a STOPPING line failure. Ship first.
+2. Joint ("together") attribution (case 4): leave-one-out naming next to _held_by, never naming unrelated line bundles. After core.
+3. Stranded-by-moved-base diagnosis (case 3): partner-aimed advice. Only this child needs Depends on: 738. Carry the iteration-4 adversary finding here: a prerequisite whose branch moved on (fast-forward fixup) is wrongly named as a partner because _rebuilt squashes head onto start; build the trial tip from head's own change only, and add that probe as a test.

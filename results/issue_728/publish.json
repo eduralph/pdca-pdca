@@ -1,0 +1,12 @@
+{
+  "mode": "stacked-pr",
+  "branch": "fix/728-flow-carry-through-patchless-finished-bundles",
+  "pr_url": "https://github.com/eduralph/pdca-harness/pull/736",
+  "base": "main",
+  "repo": "eduralph/pdca-harness",
+  "by": "Eduard Ralph",
+  "date": "2026-10-15",
+  "id_pending": false,
+  "host_ci_base": "c423f9dc3e7bdd77a61b3161d99516e8e4169e40",
+  "stacks_on": []
+}

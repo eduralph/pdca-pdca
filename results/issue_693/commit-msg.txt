@@ -1,0 +1,23 @@
+flow: exit 3 when a run held an accepted bundle out of its line
+
+In stack mode, a `pdca flow` run can hold an accepted bundle out of its
+integration line: either its publish pushed no branch (#593), or its branch
+conflicts with a bundle of the same wave merged before it (#674). The held
+bundle is still COMPLETE, so the run printed it as COMPLETE and exited 0. Its
+work is on no line of the run, and the only sign of that was a stderr line. A
+script or CI job could not tell such a run from a clean one.
+
+Such a run now exits 3 ("finished with holds"). The order is: a bundle that
+did not finish gives 1, which wins over 3; else any hold gives 3; else 0. This
+applies to every way of starting a run: several ids, `--from-csv` with no ids,
+and a single id (where a stop for sign-off still counts as finished).
+
+The drive fills an optional, keyword-only `holds` collector that the CLI passes
+down through `flow_ids` / `flow_batch`. Their return types and every existing
+caller stay the same. The exit codes are listed in `pdca flow --help` and in
+docs/07-crosscutting.md next to the hold paragraphs.
+
+Not covered: an accepted bundle in the last (or only) wave that pushed no
+branch. No fold runs after it, so the run never holds it.
+
+Fixes #693

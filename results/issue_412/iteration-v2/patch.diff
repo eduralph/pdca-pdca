@@ -1,0 +1,1441 @@
+diff --git a/docs/03-plan.md b/docs/03-plan.md
+index a3fb1bc..6b38d25 100644
+--- a/docs/03-plan.md
++++ b/docs/03-plan.md
+@@ -94,6 +94,16 @@ shape and the driver schedules it. Optional brief fields, set at Plan:
+   *why* the scheduling is set as it is (e.g. "depends-on 12 because both edit cache.py").
+   Not machine-parsed; it just keeps the human's reasoning next to the bare-id fields for
+   the next person (including future-you) reading the brief.
++- **`Merges with:`** — an *atomic merge group*: bundles that must not land on the base
++  separately (a producer that must never land without its consumer). Either side
++  declaring it binds both. Only `[driver].wave_mode = "merge"` acts on it: the driver
++  merges no member's PR until every member is COMPLETE, then merges the group together.
++  If the last member finishes in the run's final wave, whose PRs stay drafts, the run
++  tells you to merge the group's PRs together
++  ([waves in execution](07-crosscutting.md#waves-in-execution)). Members must not depend
++  on or `Conflicts with` each other, and must all be in the same run: merge mode refuses
++  such a batch before anything builds. Make such a pair one bundle, or run the batch in
++  `wave_mode = "stack"`, where you merge the stack yourself and the field changes nothing.
+ - **`Difficulty:` / `Do model:`** — route this bundle's Do to the right backend
+   ([step 04](04-do.md)): `Difficulty` feeds the `when` routing (and the iterate escalation
+   ladder); `Do model` pins a backend by name. So different bundles in one wave can build
+@@ -153,7 +163,7 @@ below for which ones sat this one out and why.
+ Fields from the field table in [How it works](#why-each-field-is-there) below
+ that **don't** appear here: `Falsifiability`, `Invariant to restore`,
+ `Onto branch`, `Surfaces`, `Difficulty`, `Do model`, `Depends on` /
+-`Conflicts with` / `Ordering note`, and `External dependencies`. All optional,
++`Conflicts with` / `Merges with` / `Ordering note`, and `External dependencies`. All optional,
+ and this bug didn't need any of them — it's a single, unbatched fix with no
+ scheduling constraints, no GUI/E2E surface split, no non-toolchain dependency,
+ and no ambiguity worth a routing override. You'll see `Depends on` and
+diff --git a/docs/07-crosscutting.md b/docs/07-crosscutting.md
+index 35bb1c3..bdfd025 100644
+--- a/docs/07-crosscutting.md
++++ b/docs/07-crosscutting.md
+@@ -885,6 +885,43 @@ wave builds on, via `[driver].wave_mode`:
+   `[driver].merge_requires = "required"` opts back into host-config-only
+   semantics, and skips the behind check and the update too.
+ 
++  A brief's `Merges with: <ids>` names an *atomic merge group*: bundles that must
++  not land on the base separately (either side declaring it binds both; a group is
++  every bundle connected that way). At a wave boundary the driver does not ready or
++  merge a COMPLETE member while its group cannot all merge: a member is not COMPLETE,
++  or a member has a publish record merge mode would refuse (no recorded PR because
++  its publish failed, say). It checks every member before it merges the first, so a
++  refusal the run can see coming never lands the group in part. A held member's PR
++  stays a draft, one line says what it waits for, and the run goes on. A bundle that
++  depends on a held member is not built this run, and is named with the group. At
++  the boundary where nothing blocks the group any more, it merges back to back,
++  earlier waves first, then by name, each through the same gates as any other PR. A
++  member that ends DISCONTINUED, or is not built, leaves the rest unmerged. The final
++  wave is the exception, as for every PR: its PRs stay drafts, so a group whose last
++  member finishes there, or that sits wholly in it, is not merged by the run. At its
++  end the run names each group it did not merge whole, with why and what to do; for
++  a group nothing blocks, that is "merge its PRs together", in the order given. A run
++  that held a member at a boundary exits 3 when every bundle finished; a group wholly
++  in the final wave was never held, so it does not change the exit code. GitHub
++  cannot merge two PRs at once: if the host refuses a member's merge after another
++  member merged, the run stops as for any refused merge and names which members
++  landed. Three group shapes cannot work in merge mode, and `pdca flow <ids>` refuses
++  them before anything builds (exit 2, with the ways out): a member that depends on
++  another, directly or through other bundles (it could only build after the other
++  merged, which the group forbids); members that `Conflicts with` each other (the
++  later one would be built on a base without the held earlier one, so landing it
++  would need an update across the declared overlap, which can stop the run with the
++  group half landed); and a `Merges with` id that is not one of the run's bundles
++  (the run only merges its own). Make such a group one bundle, or run the batch in
++  `wave_mode = "stack"`, where the field changes nothing: you merge the stack and can
++  take the group together. A `pdca flow --from-csv` sweep holds such a group instead,
++  and a group one of whose members it holds for any other reason, then what depends
++  on them, and drives the rest. A split during the run re-levels only what is left to
++  build, but a group member the run has already built still counts as one of its
++  bundles there. A bundle that `Conflicts with` a held member but is not in its group
++  is not held: it builds on a base without that member, and its merge can stop the
++  run once the group lands. Give it a `Depends on` the group member if it must wait.
++
+ In merge mode the merge is unattended, so **publish refuses to open a PR against
+ any branch this run produced** — the work must land on a base that exists
+ independently of the run, or the run stops and says so. Two shapes get refused,
+diff --git a/template/src/pdca_harness/brief.py b/template/src/pdca_harness/brief.py
+index 8726a64..b21a249 100644
+--- a/template/src/pdca_harness/brief.py
++++ b/template/src/pdca_harness/brief.py
+@@ -224,6 +224,16 @@ def conflicts_with(brief_path: Path) -> list[str]:
+     return _id_list(field(brief_path, "conflicts with", "conflicts_with"))
+ 
+ 
++def merges_with(brief_path: Path) -> list[str]:
++    """Issue ids this bundle must land on the base together with (issue #412).
++
++    The optional ``- **Merges with:** <id>[, <id>…]`` field: an atomic merge group, whose
++    members must not reach the base separately. Read symmetrically, as ``Conflicts with``
++    is (``waves.merge_groups``). Only ``wave_mode = "merge"`` acts on it. Absent ⇒ ``[]``.
++    """
++    return _id_list(field(brief_path, "merges with", "merges_with"))
++
++
+ def stacks_on(brief_path: Path) -> list[str]:
+     """Issue ids whose just-produced branch this bundle stacks on (issue #123).
+ 
+diff --git a/template/src/pdca_harness/cli.py b/template/src/pdca_harness/cli.py
+index 2c36431..e9aa57d 100644
+--- a/template/src/pdca_harness/cli.py
++++ b/template/src/pdca_harness/cli.py
+@@ -722,8 +722,10 @@ def _results_rc(results: dict[str, str], ok: tuple[str, ...] = _FLOW_OK,
+       line — it pushed no branch (#593, ``"unpushed"``) or its branch conflicts with a
+       same-wave bundle merged before it (#674, ``"conflict"``). Such a bundle is COMPLETE
+       in the map, so the map alone read it as success while its work is on no line of the
+-      run. Or a bundle was held before it was built, because its own base could not be
+-      built (#738, ``"base"``): it is not COMPLETE in the map (PLANNED, for one not built
++      run. So is one merge mode left unmerged for its ``Merges with`` group (#412,
++      ``"group"``): its PR is still a draft. Or a bundle was held before it was built,
++      because its own base could not be built (#738, ``"base"``): it is not COMPLETE in
++      the map (PLANNED, for one not built
+       yet), but held, with the cause and the fix named on stderr — not failed. 3 lets a
+       script or CI job tell that run from a clean one without parsing stderr. ``holds`` is
+       the collector ``_flow`` passes to :func:`flow.flow_ids` / :func:`flow.flow_batch`.
+diff --git a/template/src/pdca_harness/flow.py b/template/src/pdca_harness/flow.py
+index b92ef34..04b66f0 100644
+--- a/template/src/pdca_harness/flow.py
++++ b/template/src/pdca_harness/flow.py
+@@ -687,7 +687,8 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
+               conflict_held: Mapping[str, Collection[str]] | None = None,
+               lines: Mapping[tuple[str, str], tuple[str, str | None]] | None = None,
+               on_line: Collection[str] | None = None,
+-              unbuilt: Collection[str] = frozenset()
++              unbuilt: Collection[str] = frozenset(),
++              group_held: Mapping[str, Collection[str]] | None = None
+               ) -> list[Path]:
+     """Drop a wave bundle whose declared prerequisite isn't ready to build on top of.
+ 
+@@ -739,6 +740,12 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
+     fixed) and its PR merges into its own base. A skipped bundle never completes, so its
+     own dependents fall out of later waves the same way (the skip cascades).
+ 
++    ``group_held`` (#412) maps each bundle merge mode held unmerged at an earlier wave
++    boundary, for its ``Merges with`` group (``merge.merge_wave``), to the group's other
++    members. It is COMPLETE, but its PR is not merged, so the base later waves build on
++    lacks it: an in-batch prerequisite edge to it is not ready, and the dependent is named
++    on its own stderr line naming the group — not as a missing push (``held``, #593).
++
+     ``lines`` maps a target ``(repo, base)`` to the run's line for it — ``(branch, the tip
+     the run recorded)`` — once the run has folded (or carried) that target. ``on_line``
+     names the bundles built on that line — those a seam keeps there (#727, the answer
+@@ -784,12 +791,16 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
+         off_line: list[tuple[str, str, bool]] = []  # merged, not on d's line (#655)
+         off_base: list[tuple[str, str, bool]] = []  # merged, not on the base as fetched (#729)
+         carryable: list[str] = []  # … of those, ones a line of d's target would carry
++        grouped: list[str] = []    # in batch, COMPLETE, held unmerged for its group (#412)
+         for dep in deps:
+             p = cfg.find_bundle(dep)
+             out_of_batch = p.name not in batch_names
+             if state.state(p) != state.COMPLETE:  # archived prereq too (#171)
+                 unmet.append(dep)  # not ready, whichever field names it
+                 continue
++            if group_held and not out_of_batch and p.name in group_held:
++                grouped.append(p.name)  # its PR is a draft: the base lacks it (#412)
++                continue
+             # A plain `Depends on` prereq the run was not asked for, which a line would
+             # carry: no line of this run does (#647).
+             cand = (integrate._fold_candidates([p])
+@@ -886,8 +897,14 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
+                   f"no line or base of this run holds that work; not built on a base missing "
+                   f"it. To build it, wait until {p} is built, once what its hold line names is "
+                   f"fixed, and its PR merges{into}, then re-run.", file=sys.stderr)
++        for p in grouped:
++            print(f"flow: {d.name} held — its prerequisite {p} is held unmerged for its "
++                  f"`Merges with` group with {', '.join(sorted(group_held[p]))}, which must "
++                  f"land together and has not merged yet, so the base this run builds on "
++                  f"lacks {p}; not built on a base missing it. To build it, re-run once the "
++                  f"group's PRs have merged.", file=sys.stderr)
+         if (not unmet and not unmerged and not off_line and not off_base and not partners
+-                and not clashed and not unbuilt_partners):
++                and not clashed and not unbuilt_partners and not grouped):
+             runnable.append(d)
+     return runnable
+ 
+@@ -2161,7 +2178,8 @@ def _adoptable(cfg: Config, parent: Path, *, known: set[str],
+     return sorted(out, key=lambda p: p.name), sorted(walk, key=lambda p: p.name)
+ 
+ 
+-def _reschedule(cfg: Config, remaining: list[Path]) -> list[list[Path]] | None:
++def _reschedule(cfg: Config, remaining: list[Path], *,
++                in_run: Collection[str] = frozenset()) -> list[list[Path]] | None:
+     """Wave-order what is LEFT of the run together with the newly adopted children.
+ 
+     The resume path's TOLERANCE (:func:`waves.partition_schedulable` + the per-name
+@@ -2170,14 +2188,20 @@ def _reschedule(cfg: Config, remaining: list[Path]) -> list[list[Path]] | None:
+     and left in-flight while the run carries on. A split must never be able to abort the
+     flow that caused it. ``None`` iff not even that could be computed, which leaves the
+     caller with today's waves (and says so) rather than a half-spliced run.
++
++    ``in_run`` is the run's whole drive set (#412): ``remaining`` is only its un-driven
++    tail, and a merge-mode ``Merges with`` group whose other member this run already drove
++    (say, held unmerged at an earlier boundary) is not a group naming a bundle outside the
++    batch.
+     """
+     try:
+-        schedulable, held = waves.partition_schedulable(cfg, remaining)
++        schedulable, held = waves.partition_schedulable(cfg, remaining, in_run=in_run)
+         _report_held(held)
+         # partition_schedulable's contract: the remainder is a valid DAG compute_waves
+         # levels without raising. The try still covers it — adoption is an enhancement,
+         # and no enhancement may take down a run that is already producing results.
+-        return waves.compute_waves(cfg, schedulable) if schedulable else []
++        return (waves.compute_waves(cfg, schedulable, in_run=in_run)
++                if schedulable else [])
+     except Exception as exc:  # noqa: BLE001 — deliberately broad: never abort the run
+         print(f"flow: could not re-wave the run after a split "
+               f"({type(exc).__name__}: {exc})", file=sys.stderr)
+@@ -2367,7 +2391,7 @@ def _adopt_split_children(cfg: Config, candidates: list[Path], *, k: int,
+     if adopted:
+         children = [c for _parent, kids in adopted for c in kids]
+         remaining = [d for w in wave_list[k + 1:] for d in w]
+-        tail = _reschedule(cfg, remaining + children)
++        tail = _reschedule(cfg, remaining + children, in_run=batch_names)
+         if tail is None:
+             # Not spliced at all: this run drives none of them, and the line below hands
+             # the operator a `pdca flow <child-ids>` that must not be refused by it (#565).
+@@ -2776,8 +2800,12 @@ def _drive_and_act(
+     COMPLETE in the returned map, which therefore cannot say it was held.
+     ``"base"`` (#738) for one held before it was built, because its own base could not be
+     built (:func:`_bundle_bases`): not driven this run — PLANNED in the map, for one not
+-    built yet — and named on stderr with the cause and the fix. ``cli._flow`` reads this to
+-    exit 3 instead of 0 (``cli._results_rc``). It also names each bundle whose carried
++    built yet — and named on stderr with the cause and the fix. ``"group"`` (#412, merge
++    mode) for one a wave boundary held unmerged for its ``Merges with`` group and no later
++    one merged: COMPLETE, its PR a draft, named at the end of the run with why. A group
++    wholly in the final wave is named there too, but not held: its PRs are drafts as every
++    final-wave PR is. ``cli._flow`` reads this to exit 3 instead of 0
++    (``cli._results_rc``). It also names each bundle whose carried
+     branch was rewritten after the run's last fold read it (#695,
+     :func:`_report_late_rewrites`), a branch a base's refusal named included:
+     ``"rewritten"``, or ``"unchecked"`` for each carried branch that end-of-run check could
+@@ -2915,6 +2943,23 @@ def _drive_and_act(
+     # base refused as rewritten is judged there too (#695 wins: still carried at the end of
+     # the run, it fails the run). Only a broken shared worktree stops the loop at a base.
+     held_base: set[str] = set()
++    # Merge mode only (#412), the run's `Merges with` record. `held_group`: COMPLETE bundles
++    # `merge.merge_wave` held unmerged at a wave boundary — a member of their group was not
++    # COMPLETE, or had a record `_merge_one` would refuse — PR still a draft. Passed back
++    # into every later boundary's `merge_wave`, which merges the group together once
++    # nothing blocks it; their in-batch dependents are held by `_runnable`. Kept apart from
++    # `_runnable`'s `held` (no branch pushed this run, #593): another reason.
++    # `group_landed`: the members `merge_wave` merged. `group_pool`: every bundle the run
++    # has had in its drive set — the relation is read off all of them, so a split child a
++    # later reschedule drops again (`_adopt_split_children`) still holds the rest of its
++    # group: its one-sided declaration must not leave with it.
++    held_group: set[str] = set()
++    group_landed: set[str] = set()
++    group_pool: dict[str, Path] = {d.name: d for d in bundles}   # grown after each splice
++
++    def _groups() -> dict[str, set[str]]:
++        return waves.merge_groups(cfg, list(group_pool.values()))
++
+     for k, wave in enumerate(wave_list):
+         # What each bundle of the wave is built on (#727), asked once: `_bundle_bases` points
+         # it there below, and `_runnable` judges a merged prerequisite on the run's line for
+@@ -2927,7 +2972,9 @@ def _drive_and_act(
+                    if own_bases else None)
+         # `Conflicts with` partners of `held_unpushed` are held too (#629), and so are those
+         # of `held_conflict` (#674) and of `held_base` (#738). The relation is read off the
+-        # LIVE `bundles` each wave: an adopted split child adds its edges.
++        # LIVE `bundles` each wave: an adopted split child adds its edges. So is a group's
++        # (#412): a dependent of a bundle held for its group waits, naming the group.
++        in_group = _groups() if held_group else {}
+         runnable = _runnable(cfg, wave, batch_names,
+                              held=held_unpushed | held_finished | set(held_conflict)
+                              | held_base,
+@@ -2941,7 +2988,8 @@ def _drive_and_act(
+                              # and the bundles cut from it (#729).
+                              lines={tgt: (branch, folded_tips.get(tgt))
+                                     for tgt, branch in integ.items()},
+-                             on_line=on_line, unbuilt=held_base)
++                             on_line=on_line, unbuilt=held_base,
++                             group_held={n: in_group.get(n, set()) for n in held_group})
+         if not runnable:
+             continue
+         # The pool, read off the schedule as it stands NOW — so a splice below has already
+@@ -3028,6 +3076,7 @@ def _drive_and_act(
+         # here and never anywhere else — a bound, not a reset.
+         _adopt_split_children(cfg, runnable, k=k, wave_list=wave_list, bundles=bundles,
+                               batch_names=batch_names, named=named, claims=claims)
++        group_pool.update({d.name: d for d in bundles})   # a child adopted just now (#412)
+         complete = [d for d in sorted(runnable, key=lambda p: p.name)
+                     if state.state(d) == state.COMPLETE]
+         _audit_wave_overlap(complete)
+@@ -3078,7 +3127,15 @@ def _drive_and_act(
+         if k < len(wave_list) - 1 and do_publish:
+             dry = cfg.publisher.mode == "stub"
+             if cfg.wave_mode == "merge":
+-                if merge.merge_wave(cfg, complete, dry_run=dry, method=cfg.merge_method):
++                # A `Merges with` group lands together (#412): a member held at an earlier
++                # boundary comes back to this one, ahead of this wave's bundles, and
++                # `merge_wave` merges it with the rest of its group once nothing blocks the
++                # group — or holds it again, as it holds a member of this wave whose group
++                # cannot all merge yet.
++                again = [d for d in accepted if d.name in held_group]
++                if merge.merge_wave(cfg, again + complete, dry_run=dry,
++                                    method=cfg.merge_method, groups=_groups(),
++                                    held=held_group, landed=group_landed):
+                     print(f"flow: wave {k} did not merge; STOPPING — later waves not run.",
+                           file=sys.stderr)
+                     break
+@@ -3153,6 +3210,11 @@ def _drive_and_act(
+     _warn_stranded_split_children(cfg, bundles, adopt_seeds)
+     # Each bundle a fold held for a conflict, again, with the step to take (#674, #747).
+     _report_conflict_holds(cfg, held_conflict)
++    # Each `Merges with` group merge mode did not merge whole, and why (#412) — a group
++    # wholly in the final wave too, which no boundary held: the human merges it together.
++    if cfg.wave_mode == "merge" and do_publish:
++        _report_groups(cfg, _groups(), landed=group_landed, wave_of=wave_of,
++                       dry=cfg.publisher.mode == "stub")
+     # A carried branch rewritten after the run's last fold read it (#695) — after Act on
+     # purpose, so the window covers it too (Act never re-decides a bundle's disposition).
+     # Only where a fold ran: `carried_heads` is filled by a stack-mode fold that pushed, so
+@@ -3174,10 +3236,64 @@ def _drive_and_act(
+         holds.update({n.replace("issue_", ""): "unpushed" for n in sorted(held_unpushed)})
+         holds.update({n.replace("issue_", ""): "conflict" for n in held_conflict})
+         holds.update({n.replace("issue_", ""): "base" for n in sorted(held_base)})
++        holds.update({n.replace("issue_", ""): "group" for n in sorted(held_group)})
+         holds.update({n.replace("issue_", ""): why for n, why in late.items()})
+     return results
+ 
+ 
++def _report_groups(cfg: Config, groups: Mapping[str, Collection[str]], *,
++                   landed: Collection[str], wave_of: Mapping[str, int], dry: bool) -> None:
++    """Name, at the end of a merge-mode run, each ``Merges with`` group (#412) the run did
++    not merge whole — one stderr line per group, with why and what to do. ``groups`` is
++    :func:`waves.merge_groups` of the run's drive set, ``landed`` the members
++    ``merge.merge_wave`` merged. A group is left when a member of it is COMPLETE with a
++    patch and not in ``landed``; its members are listed in the order to merge them in
++    (wave, then name). Then either:
++
++    * the group cannot land together in this run — a member is not COMPLETE
++      (DISCONTINUED, never built, or the run stopped first), or has a record merge mode
++      refuses (``merge.group_blocker``: no recorded PR, say);
++    * it landed in part — the host refused a member's merge after another merged, which
++      stopped the run (``merge_wave`` said so then), or a split child joined the group
++      after the rest had merged;
++    * or nothing blocks it, but no wave boundary of the run merged it: its last member
++      finished in the final wave, whose PRs merge mode leaves as drafts — the whole group
++      may have been in it, never held — or the run stopped first. The human merges it
++      together, in that order."""
++    seen: set[str] = set()
++    for name in sorted(groups):
++        if name in seen or not groups[name]:
++            continue
++        members = {name, *groups[name]}
++        seen |= members
++        order = sorted(members, key=lambda m: (wave_of.get(m, len(wave_of)), m))
++        left = [m for m in order if m not in landed
++                and state.state(cfg.bundle_root / m) == state.COMPLETE
++                and integrate._has_patch(cfg.bundle_root / m)]
++        if not left:
++            continue
++        group = ", ".join(order)
++        missing = [(m, state.state(cfg.bundle_root / m)) for m in order]
++        why = (", ".join(f"{m} is {st}" for m, st in missing if st != state.COMPLETE)
++               or merge.group_blocker(cfg, members, dry_run=dry)[0])
++        part = [m for m in order if m in landed]
++        if why:
++            print(f"flow: `Merges with` group {group} was not merged — {why}, so it cannot "
++                  f"land together in this run. Not merged: {', '.join(left)}. Merge the "
++                  f"group together once that is resolved, or drop the `Merges with` edge to "
++                  f"land them alone.", file=sys.stderr)
++        elif part:
++            print(f"flow: `Merges with` group {group} landed only in part — "
++                  f"{', '.join(part)} merged, {', '.join(left)} not: merge the rest, or "
++                  f"revert {', '.join(part)}.", file=sys.stderr)
++        else:
++            print(f"flow: `Merges with` group {group} was not merged — every member is "
++                  f"COMPLETE, but no wave boundary of this run merged it (its last member "
++                  f"finished in the final wave, whose PRs merge mode leaves as drafts, or the "
++                  f"run stopped first). Merge its PRs together, back to back, in this order: "
++                  f"{', '.join(left)}.", file=sys.stderr)
++
++
+ def _report_late_rewrites(cfg: Config, accepted: list[Path], carried: Mapping[str, str],
+                           batch: Collection[str], *, bases: integrate.Bases | None = None,
+                           line_prs: integrate.LinePrs | None = None) -> dict[str, str]:
+diff --git a/template/src/pdca_harness/merge.py b/template/src/pdca_harness/merge.py
+index a6c9795..cc4f8a1 100644
+--- a/template/src/pdca_harness/merge.py
++++ b/template/src/pdca_harness/merge.py
+@@ -89,6 +89,12 @@ possibly someone else's, with other work on it and any base — so ``_merge_one`
+ (issue #658) before any ``gh`` call for that PR, in a dry run too, and whether or not the
+ PR already reads merged, as ``merged.merged_into`` and the fold (``integrate._gone_branch``)
+ never trust such a record either.
++
++A brief's ``Merges with`` field (issue #412) names an atomic merge group: bundles that must
++not land on the base separately. ``merge_wave`` holds a COMPLETE member while any member of
++its group is not COMPLETE, or has a publish record ``_merge_one`` would refuse — no
++ready-mark, no merge, the PR stays a draft — and the caller passes it back at each later
++boundary; once nothing blocks the group it merges back to back.
+ """
+ 
+ from __future__ import annotations
+@@ -97,6 +103,7 @@ import json
+ import subprocess
+ import sys
+ import time
++from collections.abc import Collection, Mapping
+ from pathlib import Path
+ 
+ from . import integrate, merged, publish, state
+@@ -117,17 +124,134 @@ _ROLLUP_PENDING = frozenset({"pending"})
+ 
+ 
+ def merge_wave(cfg: Config, bundles: list[Path], *, dry_run: bool = False,
+-               method: str = "merge") -> int:
++               method: str = "merge", groups: Mapping[str, Collection[str]] | None = None,
++               held: set[str] | None = None, landed: set[str] | None = None) -> int:
+     """Merge each accepted bundle's PR into its base, then fetch the base. Return 0 iff
+-    every bundle merged (or had nothing to merge); non-zero (STOP) on the first failure."""
+-    fetched: set[str] = set()
++    every bundle merged (or had nothing to merge, or was held for its group); non-zero
++    (STOP) on the first failure.
++
++    ``groups`` (issue #412, ``waves.merge_groups``) maps a bundle name to the other members
++    of its ``Merges with`` group: bundles that must not land on the base separately. A
++    COMPLETE member with a patch is held while its group cannot all be merged now
++    (``group_blocker``): a member is not COMPLETE, or a member's own record is one
++    ``_merge_one`` would refuse before any ``gh`` call (no recorded PR, an ``Onto branch``
++    record, no repo to read its base in). Checking that for every member BEFORE the first
++    merge keeps a refusal the run can see coming from landing the group in part. A held
++    member is not readied or merged, its PR stays a draft, and one stderr line says why —
++    the first time only; the caller names it again at the end of the run, with the reason
++    as it then stands. It is added to ``held``, the caller's run-scoped set, and the caller
++    passes it back in ``bundles`` at every later boundary. Once nothing blocks the group,
++    its members here merge back to back, in ``bundles`` order (the caller passes earlier
++    waves first, then name order), each through ``_merge_one``; each that merged (or had
++    nothing to merge) leaves ``held`` and joins ``landed``. GitHub cannot merge two PRs at
++    once: when a member's merge fails after another member merged — the host refused it —
++    the STOP says which landed. ``groups`` None: no group, every bundle merged in order."""
++    groups = groups or {}
++    held = held if held is not None else set()
++    landed = landed if landed is not None else set()
++    go: list[Path] = []
+     for d in bundles:
++        members = sorted(groups.get(d.name, ()))
++        if members and state.state(d) == state.COMPLETE and integrate._has_patch(d):
++            why, waiting = group_blocker(cfg, [d.name, *members], dry_run=dry_run)
++            if why:
++                if d.name not in held:
++                    tail = ("Its PR stays a draft; the run goes on and merges the group once "
++                            "every member is COMPLETE." if waiting else
++                            "No member is readied or merged, so the group does not land in "
++                            "part; the run goes on.")
++                    print(f"merge: {d.name} held — not readied or merged: it `Merges with` "
++                          f"{', '.join(members)}, and the group must land together, but "
++                          f"{why}. {tail}", file=sys.stderr)
++                held.add(d.name)
++                continue
++        go.append(d)
++    fetched: set[str] = set()
++    done: list[str] = []
++    for d in _back_to_back(go, groups):
+         rc = _merge_one(cfg, d, dry_run=dry_run, method=method, fetched=fetched)
+         if rc:
++            members = groups.get(d.name, ())
++            half = [n for n in done if n in members]
++            if half and not dry_run:
++                rest = [d.name] + [m.name for m in go if m.name in members
++                                   and m.name not in done and m.name != d.name]
++                print(f"\n!!! merge: the `Merges with` group of {d.name} landed only in "
++                      f"part — {', '.join(half)} merged, {', '.join(rest)} did not. GitHub "
++                      "cannot merge several PRs at once. Merge the rest once what stopped "
++                      f"{d.name} above is resolved, or revert {', '.join(half)}.\n",
++                      file=sys.stderr)
+             return rc
++        done.append(d.name)
++        landed.add(d.name)
++        held.discard(d.name)
+     return 0
+ 
+ 
++def group_blocker(cfg: Config, members: Collection[str], *,
++                  dry_run: bool = False) -> tuple[str, bool]:
++    """Why the ``Merges with`` group ``members`` (bundle names) cannot all be merged now
++    (issue #412), as ``(why, waiting)``; ``("", False)`` when nothing local stops it.
++    ``waiting`` is True when a member is not COMPLETE yet but still in flight — a later
++    boundary may release the group. A member that ended otherwise (DISCONTINUED, RESOLVED)
++    never will. Else ``why`` names each member whose own record ``_merge_one`` would refuse
++    before readying anything (``_unmergeable``): that does not change within a run, so
++    merging the others first would land the group in part. Not asked in a dry run, which
++    merges nothing: there ``_merge_one`` refuses such a record as it always has."""
++    names = sorted(set(members))
++    states = [(m, state.state(cfg.bundle_root / m)) for m in names]
++    ended = [(m, st) for m, st in states if st in state.TERMINAL and st != state.COMPLETE]
++    if ended:
++        return ", ".join(f"{m} is {st}" for m, st in ended), False
++    waiting = [(m, st) for m, st in states if st != state.COMPLETE]
++    if waiting:
++        return (f"{', '.join(f'{m} ({st})' for m, st in waiting)} "
++                f"{'is' if len(waiting) == 1 else 'are'} not COMPLETE yet"), True
++    if dry_run:
++        return "", False
++    bad = [(m, _unmergeable(cfg, cfg.bundle_root / m)) for m in names]
++    return "; ".join(f"{m} {why}" for m, why in bad if why), False
++
++
++def _unmergeable(cfg: Config, d: Path) -> str:
++    """Why ``_merge_one`` would refuse COMPLETE bundle ``d`` on its own publish record,
++    before readying it (issue #412), or "" — the record checks it makes: no ``pr_url``, a
++    ``"stacked"`` record, and (under ``merge_requires != "required"``) a record that names
++    no repo. A bundle with nothing to merge (not COMPLETE, no patch) is never refused here,
++    as ``_merge_one`` returns 0 for it. What is left is the host's to refuse (a red rollup,
++    a refused merge), or a setting that refuses every PR alike (``expected_checks_error``,
++    which ``_merge_one`` refuses before readying the group's first member, so nothing of the
++    group lands)."""
++    if state.state(d) != state.COMPLETE or not integrate._has_patch(d):
++        return ""
++    rec = publish._publish_record(d)
++    rec = rec if isinstance(rec, dict) else {}
++    if not rec.get("pr_url"):
++        return "has no recorded PR (its publish did not run, or failed)"
++    if rec.get("mode") == "stacked":
++        return ("is an `Onto branch` commit added to an existing PR, which merge mode does "
++                "not ready or merge")
++    if cfg.merge_requires != "required" and not rec.get("repo"):
++        return ("has a publish record that names no repo, so there is no checkout to read "
++                "its base in")
++    return ""
++
++
++def _back_to_back(bundles: list[Path], groups: Mapping[str, Collection[str]]) -> list[Path]:
++    """``bundles`` in order, except that a ``Merges with`` group's members follow its first
++    one directly (issue #412), each group in ``bundles`` order — so nothing of the wave
++    merges between two members of one group."""
++    out: list[Path] = []
++    seen: set[str] = set()
++    for d in bundles:
++        members = groups.get(d.name, ())
++        for m in [d, *(x for x in bundles if x.name in members)]:
++            if m.name not in seen:
++                seen.add(m.name)
++                out.append(m)
++    return out
++
++
+ def _check_rollup(pr_url: str) -> tuple[str, str, tuple[str, ...]]:
+     """Classify PR ``pr_url``'s FULL check rollup (issue #413). Returns
+     ``(verdict, detail, names)``; only ``"green"`` may merge. ``names`` (issue #621) is the
+diff --git a/template/src/pdca_harness/waves.py b/template/src/pdca_harness/waves.py
+index c7a61c9..72dfdc4 100644
+--- a/template/src/pdca_harness/waves.py
++++ b/template/src/pdca_harness/waves.py
+@@ -25,11 +25,19 @@ conflict edge, so the wave is safe to build in parallel and fold in one step. Wi
+ fields declared the whole batch is a single wave, sorted by name — byte-for-byte the
+ prior sort-by-name dispatch. Control flow stays deterministic code: the planner only
+ *declares* the fields; this module *computes* the order.
++
++A third field, ``Merges with:`` (#412), does not shape the partition: it names an atomic
++merge group, bundles that must not land on the base separately (:func:`merge_groups`).
++Only ``wave_mode = "merge"`` acts on it, at the wave boundary (``merge.merge_wave``). There
++a group the schedule cannot merge together — one member built after another, members that
++``Conflicts with`` each other, a member outside the batch — is refused before any build
++(:func:`merge_group_refusals`, raised by :func:`check_dep_graph`).
+ """
+ 
+ from __future__ import annotations
+ 
+ import re
++from collections.abc import Collection, Mapping
+ from pathlib import Path
+ 
+ from . import brief, state
+@@ -63,7 +71,8 @@ class DependencyGraphError(ValueError):
+ 
+ 
+ def check_dep_graph(cfg: Config, bundles: list[Path], *,
+-                    offered: frozenset[str] = frozenset()) -> None:
++                    offered: frozenset[str] = frozenset(),
++                    in_run: Collection[str] = frozenset()) -> None:
+     """Validate the declared dependency DAG before any build (issue #36).
+ 
+     A dependency that is neither in this batch nor an already-COMPLETE bundle on disk
+@@ -78,6 +87,12 @@ def check_dep_graph(cfg: Config, bundles: list[Path], *,
+     schedule only at the seed splice, which re-levels with it in place, so that is where
+     the edge orders anything. A ``Stacks on`` edge to one stays refused (a stack parent must
+     be an active COMPLETE bundle). Empty ⇒ exactly the check as it always was.
++
++    With ``cfg.wave_mode == "merge"`` a ``Merges with`` group the run could never merge
++    together is refused here too (#412, :func:`merge_group_refusals`), naming its ids and
++    the ways out. Stack mode ignores the field. ``offered`` and ``in_run`` (bundle names
++    the run already drives that are not in ``bundles``: a re-levelling's driven waves,
++    ``flow._reschedule``) count as in the batch for that check only.
+     """
+     names = {b.name for b in bundles}
+     graph: dict[str, list[str]] = {}
+@@ -132,6 +147,12 @@ def check_dep_graph(cfg: Config, bundles: list[Path], *,
+         if color[n] == WHITE:
+             visit(n)
+ 
++    if cfg.wave_mode == "merge":
++        refused = merge_group_refusals(cfg, bundles, graph, in_run=set(offered) | set(in_run))
++        if refused:
++            _members, why, remedy = refused[0]
++            raise DependencyGraphError(why, remedy=remedy)
++
+ 
+ def conflict_map(cfg: Config, bundles: list[Path]) -> dict[str, set[str]]:
+     """Symmetric bundle-name → conflicting-bundle-names map, restricted to this batch.
+@@ -153,6 +174,153 @@ def conflict_map(cfg: Config, bundles: list[Path]) -> dict[str, set[str]]:
+     return conflicts
+ 
+ 
++def _merges_with(cfg: Config, bundles: list[Path]) -> list[set[str]]:
++    """The ``Merges with`` groups the batch's briefs declare (#412): each the connected set
++    of bundle names under the relation read symmetrically (either side declaring it binds
++    both, as :func:`conflict_map` reads ``Conflicts with``). A group may name bundles
++    outside ``bundles``; only groups of two or more appear. Sorted, for a stable report."""
++    rel: dict[str, set[str]] = {}
++    for b in bundles:
++        bp = b / "brief.md"
++        if not bp.exists():
++            continue
++        for mid in brief.merges_with(bp):
++            other = cfg.bundle(mid).name
++            if other != b.name:
++                rel.setdefault(b.name, set()).add(other)
++                rel.setdefault(other, set()).add(b.name)
++    groups: list[set[str]] = []
++    seen: set[str] = set()
++    for n in sorted(rel):
++        if n in seen:
++            continue
++        group: set[str] = set()
++        stack = [n]
++        while stack:
++            m = stack.pop()
++            if m not in group:
++                group.add(m)
++                stack.extend(rel[m])
++        seen |= group
++        groups.append(group)
++    return groups
++
++
++def merge_groups(cfg: Config, bundles: list[Path]) -> dict[str, set[str]]:
++    """Bundle name → the OTHER members of its ``Merges with`` group in this batch (#412),
++    an empty set for a bundle in no group. Restricted to the batch as :func:`conflict_map`
++    is: in merge mode a group naming a bundle outside it never reaches a run —
++    :func:`check_dep_graph` refuses it for an explicit request, :func:`partition_schedulable`
++    holds it in the sweep and in a re-levelling after a split. ``flow._drive_and_act``
++    passes every bundle the run has had in its drive set."""
++    names = {b.name for b in bundles}
++    groups: dict[str, set[str]] = {b.name: set() for b in bundles}
++    for group in _merges_with(cfg, bundles):
++        inside = group & names
++        for n in inside:
++            groups[n] = inside - {n}
++    return groups
++
++
++def _prereq_path(deps: Mapping[str, Collection[str]], src: str, dst: str) -> list[str]:
++    """The shortest prerequisite path ``src → … → dst`` (``src`` builds after ``dst``) in
++    ``deps`` (name → its in-batch prerequisites), or ``[]`` when there is none."""
++    prev: dict[str, str] = {}
++    queue, seen = [src], {src}
++    while queue:
++        n = queue.pop(0)
++        for p in sorted(deps.get(n, ())):
++            if p in seen:
++                continue
++            prev[p] = n
++            if p == dst:
++                path = [p]
++                while path[-1] != src:
++                    path.append(prev[path[-1]])
++                return path[::-1]
++            seen.add(p)
++            queue.append(p)
++    return []
++
++
++def merge_group_refusals(cfg: Config, bundles: list[Path],
++                         deps: Mapping[str, Collection[str]], *,
++                         in_run: Collection[str] = frozenset()
++                         ) -> list[tuple[list[str], str, str]]:
++    """Each ``Merges with`` group merge mode could never land together (#412), as
++    ``(its members in the batch, why, the ways out)``; ``[]`` when there is none.
++    ``deps`` maps a bundle name to its in-batch prerequisites (``Depends on`` /
++    ``Depends on (merged)`` / ``Stacks on``), as :func:`check_dep_graph` builds them.
++
++    Merge mode holds a group member unmerged until every member is COMPLETE, and a bundle
++    that depends on a held member is held too, so three shapes cannot work there:
++
++    * **a member built after another** — a prerequisite path from one member to another,
++      directly or through other bundles: the later one can only be built once the earlier
++      one has merged, which the group forbids, so the group never completes;
++    * **members that ``Conflicts with`` each other** — the scheduler builds the later one
++      on a base without the held earlier one, so landing it needs ``gh pr update-branch``
++      across the declared overlap at the release boundary, which can stop the run with the
++      group half landed;
++    * **a member outside the batch** — ``merge.merge_wave`` only ever sees this run's
++      bundles, so the group could never be merged together. ``in_run`` names bundles of
++      the run that are not in ``bundles`` (a re-levelling after a split sees only the
++      un-driven tail, ``flow._reschedule``): a member among them is not outside.
++
++    The ways out of the first two are the same: make the group one bundle, or run the batch
++    in ``wave_mode = "stack"``, where the human merges the stack and can take the group
++    together. Callers act only in merge mode."""
++    names = {b.name for b in bundles}
++    cmap = conflict_map(cfg, bundles)
++    refusals: list[tuple[list[str], str, str]] = []
++    for group in _merges_with(cfg, bundles):
++        refused = _group_refusal(group, names, names | set(in_run), cmap, deps)
++        if refused:
++            refusals.append((sorted(group & names), *refused))
++    return refusals
++
++
++def _group_refusal(group: set[str], names: set[str], known: set[str],
++                   cmap: Mapping[str, Collection[str]],
++                   deps: Mapping[str, Collection[str]]) -> tuple[str, str] | None:
++    """Why merge mode could never land the ``Merges with`` group ``group`` together, and
++    the ways out — or None (:func:`merge_group_refusals`). ``names`` are the bundles being
++    scheduled, ``known`` every bundle of the run (``names`` included), ``cmap`` the
++    batch's :func:`conflict_map` and ``deps`` its in-batch prerequisite edges."""
++    inside = sorted(group & names)
++    listed = ", ".join(inside)
++    one_bundle = f"make {listed} one bundle"
++    stack_mode = 'or run this batch with [driver] wave_mode = "stack"'
++    outside = sorted(group - known)
++    if outside:
++        ids = ", ".join(n.removeprefix("issue_") for n in outside)
++        return ((f"{listed}: their `Merges with` group names {', '.join(outside)}, which "
++                 f"is not in this run's batch — merge mode merges only this run's bundles, "
++                 f"so the group could never land together"),
++                f"add {ids} to this run's ids; or {one_bundle} with "
++                f"{', '.join(outside)}; {stack_mode}")
++    clash = next(((a, b) for a in inside for b in sorted(cmap.get(a, ())) if b in group),
++                 None)
++    if clash:
++        a, b = clash
++        return ((f"{a} and {b} declare `Merges with` each other (one atomic merge group) and "
++                 f"`Conflicts with` each other: in merge mode the later one is built on a "
++                 f"base without the held earlier one, so landing it needs `gh pr "
++                 f"update-branch` across the declared overlap at the release boundary, which "
++                 f"can stop the run with the group half landed"),
++                f"{one_bundle}; {stack_mode}")
++    chain = next((path for a in inside for b in inside if a != b
++                  for path in [_prereq_path(deps, a, b)] if path), None)
++    if chain:
++        after, first = chain[0], chain[-1]
++        via = (f" (through {', '.join(chain[1:-1])})" if len(chain) > 2 else "")
++        return ((f"{after} `Depends on` {first}{via}, and they are one `Merges with` group "
++                 f"({listed}): in merge mode {after} can only be built after {first} has "
++                 f"merged, which the group forbids, so the group would never complete"),
++                f"{one_bundle}; {stack_mode}")
++    return None
++
++
+ def _reaches(deps: dict[str, set[str]], src: str, dst: str) -> bool:
+     """True iff ``dst`` is a transitive prerequisite of ``src`` (``dst`` builds before
+     ``src``) in the current edge set — used to test whether a conflict pair is already
+@@ -170,7 +338,8 @@ def _reaches(deps: dict[str, set[str]], src: str, dst: str) -> bool:
+ 
+ 
+ def compute_waves(cfg: Config, bundles: list[Path], *,
+-                  offered: frozenset[str] = frozenset()) -> list[list[Path]]:
++                  offered: frozenset[str] = frozenset(),
++                  in_run: Collection[str] = frozenset()) -> list[list[Path]]:
+     """Partition ``bundles`` into ordered waves.
+ 
+     ``wave[k]`` holds the bundles whose every prerequisite is in an earlier wave; within
+@@ -178,10 +347,11 @@ def compute_waves(cfg: Config, bundles: list[Path], *,
+     folds onto the integration branch in one step. Raises :class:`DependencyGraphError`
+     (a ``ValueError``, via :func:`check_dep_graph`) on an unschedulable graph — a cycle,
+     or a dependency neither in this batch nor already COMPLETE (nor ``offered``, passed
+-    straight to :func:`check_dep_graph`). No fields declared ⇒ one wave, sort-by-name.
++    straight to :func:`check_dep_graph`, as ``in_run`` is). No fields declared ⇒ one wave,
++    sort-by-name.
+     """
+     # cycle / unresolved dep → ValueError, before any work
+-    check_dep_graph(cfg, bundles, offered=offered)
++    check_dep_graph(cfg, bundles, offered=offered, in_run=in_run)
+     by_name = {b.name: b for b in bundles}
+ 
+     # Directed prerequisite edges, restricted to the batch (out-of-batch prereqs are
+@@ -272,7 +442,8 @@ def _propagate_holds(edges: dict[str, list[str]], held: dict[str, str]) -> None:
+                 changed = True
+ 
+ 
+-def partition_schedulable(cfg: Config, bundles: list[Path]
++def partition_schedulable(cfg: Config, bundles: list[Path], *,
++                          in_run: Collection[str] = frozenset()
+                           ) -> tuple[list[Path], dict[str, str]]:
+     """Split ``bundles`` into ``(schedulable, held)`` so one bad bundle can't abort the whole
+     run (#191). Where :func:`check_dep_graph` *raises* on any unschedulable bundle — right for
+@@ -284,9 +455,15 @@ def partition_schedulable(cfg: Config, bundles: list[Path]
+     dependency is *unresolvable* — neither in the surviving batch nor an existing COMPLETE
+     bundle on disk (archived ``completed/`` too, #171; ``Stacks on`` against the active bundle)
+     — or when it sits in a dependency cycle. Held-ness propagates to in-batch dependents (a
+-    fixpoint: a bundle whose prerequisite is held can't build either). The schedulable
+-    remainder is a valid DAG that :func:`compute_waves` levels without raising. ``held`` maps
+-    each held bundle name to a one-line reason for the caller to report."""
++    fixpoint: a bundle whose prerequisite is held can't build either). In merge mode (#412)
++    a ``Merges with`` group is schedulable only whole: every member of a group
++    :func:`check_dep_graph` would refuse is held, and so is every member of a group one of
++    whose members is held — the relation read off every bundle given, a held one's
++    declaration included, so a partner of a held bundle never lands alone. ``in_run`` names
++    bundles of the run that are not in ``bundles`` (``flow._reschedule`` re-levels only the
++    un-driven tail): a group member among them is not outside the batch. The schedulable
++    remainder is a valid DAG that :func:`compute_waves` levels without raising. ``held``
++    maps each held bundle name to a one-line reason for the caller to report."""
+     names = {b.name for b in bundles}
+     by_name = {b.name: b for b in bundles}
+     edges: dict[str, list[str]] = {}
+@@ -322,6 +499,39 @@ def partition_schedulable(cfg: Config, bundles: list[Path]
+         held.setdefault(name, "dependency cycle")
+     _propagate_holds(edges, held)
+ 
++    # Merge mode (#412): a `Merges with` group is schedulable only whole. The relation is
++    # read off EVERY bundle given, held ones included: a held bundle's one-sided declaration
++    # still binds its partner, which must not land alone. A group with a held member, or one
++    # `check_dep_graph` would refuse, is held whole, then its dependents. Repeated until a
++    # round holds nothing more; each other round holds at least one more bundle, so it ends.
++    relation = _merges_with(cfg, bundles) if cfg.wave_mode == "merge" else []
++    known = names | set(in_run)
++    while relation:
++        survivors = [by_name[n] for n in by_name if n not in held]
++        alive = {b.name for b in survivors}
++        cmap = conflict_map(cfg, survivors)
++        more: dict[str, str] = {}
++        for group in relation:
++            members = sorted(group & alive)
++            gone = sorted(group & set(held))
++            if not members:
++                continue
++            if gone:
++                why = (f"its `Merges with` group cannot land together this run: "
++                       f"{', '.join(gone)} {'is' if len(gone) == 1 else 'are'} held too")
++            else:
++                refused = _group_refusal(group, alive, known, cmap, edges)
++                if refused is None:
++                    continue
++                why = (f"`Merges with` group refused in merge mode: {refused[0]}; ways out: "
++                       f"{refused[1]}")
++            for name in members:
++                more.setdefault(name, why)
++        if not more:
++            break
++        held.update(more)
++        _propagate_holds(edges, held)
++
+     schedulable = [by_name[n] for n in by_name if n not in held]
+     return schedulable, held
+ 
+diff --git a/template/templates/brief.md.tpl b/template/templates/brief.md.tpl
+index 04c2b16..fc7c565 100644
+--- a/template/templates/brief.md.tpl
++++ b/template/templates/brief.md.tpl
+@@ -31,6 +31,7 @@
+ - **Depends on:** <id>[, <id>…]   (optional — ids only on the value line, any trailing note is ignored; the PRIMARY ordering field. A batch runs as dependency WAVES: this bundle lands in a later wave than its prereqs and builds on their accepted result — the wave driver folds each wave's accepted work onto the base the next builds on, so no human merge is needed between them; docs 09)
+ - **Depends on (merged):** <id>[, <id>…]   (optional, DEPRECATED — in the wave model this is just `Depends on`: the wave fold already gives the dependent the prereq's accepted diff without waiting for a merge. Still parsed for back-compat; prefer `Depends on`; docs 09)
+ - **Conflicts with:** <id>[, <id>…]   (optional — ids only on the value line, any trailing note is ignored; these edit a shared resource, so they are scheduled into DIFFERENT waves — never built blind on the same base; docs 09)
++- **Merges with:** <id>[, <id>…]   (optional — ids only on the value line, any trailing note is ignored; an atomic merge group: these must not land on the base separately; either side declaring it binds both. Only `wave_mode = "merge"` acts on it: no member's PR is merged until every member is COMPLETE, then the group merges together. There a group whose members depend on or `Conflicts with` each other, or that names an id outside the run, is refused before anything builds — make them one bundle, or run in `wave_mode = "stack"`)
+ - **Stacks on:** <id>[, <id>…]   (optional, DEPRECATED — in the wave model this is just `Depends on`: whole-wave stacking generalises the single-chain Stacks on (and fixes multi-parent). Still parsed for back-compat; prefer `Depends on`; docs 09)
+ - **Ordering note:** <optional free text — WHY the scheduling fields above are set as they are (e.g. "depends-on-merged 12 because both edit cache.py"). Not machine-parsed; it documents the human's sequencing decision next to the bare-id fields.>
+ - **Surfaces:** <where the change is observable — `gui` (touches the frontend / an E2E
+diff --git a/template/tests/test_flow_adopt_split.py b/template/tests/test_flow_adopt_split.py
+index 2ac6431..f28e13b 100644
+--- a/template/tests/test_flow_adopt_split.py
++++ b/template/tests/test_flow_adopt_split.py
+@@ -1257,12 +1257,12 @@ class AdoptSplitChildren(unittest.TestCase):
+         real_partition = waves.partition_schedulable
+         raised: list[tuple[list[str], str]] = []   # (the list it was given, 8's state then)
+ 
+-        def failing_partition(cfg, bundles):
++        def failing_partition(cfg, bundles, **kw):
+             names = [d.name for d in bundles]
+             if "issue_601" in names:
+                 raised.append((names, self._state("8")))
+                 raise RuntimeError("levelling blew up")
+-            return real_partition(cfg, bundles)
++            return real_partition(cfg, bundles, **kw)
+ 
+         waves.partition_schedulable = failing_partition
+         self.addCleanup(setattr, waves, "partition_schedulable", real_partition)
+diff --git a/template/tests/test_flow_single_driver.py b/template/tests/test_flow_single_driver.py
+index 43068a7..fc4bede 100644
+--- a/template/tests/test_flow_single_driver.py
++++ b/template/tests/test_flow_single_driver.py
+@@ -282,7 +282,7 @@ def _child_main(argv: list[str]) -> int:
+         # The one branch `_reschedule` cannot be driven into from the outside: it answers
+         # None only when the levelling itself RAISES (`flow.py:1098-1101`). Injected here,
+         # in the run's own process, so the production splice really takes that path.
+-        def boom(cfg, bundles):
++        def boom(cfg, bundles, **_kw):
+             raise RuntimeError("levelling is unavailable")
+ 
+         waves.partition_schedulable = boom
+diff --git a/template/tests/test_merge_group.py b/template/tests/test_merge_group.py
+new file mode 100644
+index 0000000..a1be9e9
+--- /dev/null
++++ b/template/tests/test_merge_group.py
+@@ -0,0 +1,541 @@
++"""A `Merges with` group lands together in merge mode, or is refused up front (#412).
++
++A brief may declare ``- **Merges with:** <id>[, <id>…]``: an atomic merge group, bundles that
++must not reach the base separately. With ``[driver].wave_mode = "merge"`` the driver merges
++every non-final wave's PRs at its boundary, so before #412 a pair split across waves landed
++one PR at a time — or only half, if the run stopped between them. Now a COMPLETE member is
++held (no ``gh pr ready``, no ``gh pr merge``, its PR stays a draft) while its group cannot
++all merge — a member is not COMPLETE, or has a publish record merge mode would refuse — and
++the whole group merges back to back at the boundary where nothing blocks it any more. A
++bundle that depends on a held member is not built. A group left unmerged at the end of the
++run, a group wholly in the final wave included, is named with what to do. A group the
++schedule could never merge together — one member built after another, members that
++``Conflicts with`` each other, a member outside the batch — is refused before any Do, with
++rc 2 and a ``Ways out:`` line; the resume sweep holds it instead, and holds a group one of
++whose members it holds. A split mid-run does not break a group. Stack mode ignores the field.
++
++Offline: bundles on disk, the build / sign-off leaf stubbed (``flow._drive_wave`` writes a
++patch, accepts the bundle and records its ``publish.json``, or splits it through the
++production ``split.accept``), publishing stubbed, and ``gh`` answered by a stub in front of
++``subprocess.run`` that records every call — the shape of
++tests/test_flow_out_of_batch_prereq_hold.py. The publisher is NOT a stub (a stub publisher
++is a dry-run, which merges nothing). ``[driver].merge_requires = "required"`` keeps the
++merge itself to ``gh pr ready`` + ``gh pr merge`` (tests/test_merge.py covers the rollup).
++
++Only modules are imported (never a symbol the fix adds), so with the production change
++reverted these cases still load and run — and fail on their assertions.
++    cd template && PYTHONPATH=src python3 -m unittest tests.test_merge_group
++"""
++
++from __future__ import annotations
++
++import io
++import json
++import shutil
++import subprocess
++import tempfile
++import unittest
++from contextlib import ExitStack, redirect_stderr, redirect_stdout
++from pathlib import Path
++from unittest import mock
++
++from pdca_harness import cli, flow, leaves, merge, publish, signoff, split, state, waves
++from pdca_harness.config import Config, LeafConfig
++
++TEMPLATES = Path(__file__).resolve().parents[1] / "templates"
++TODAY = "2026-10-23"
++REPO = "org/repo"
++
++
++def _cfg(root: Path, wave_mode: str) -> Config:
++    return Config(
++        root=root, bundle_root=root / "results", process_dir=root / "process",
++        templates_dir=TEMPLATES, default_branch="main", tracker_system="github",
++        tracker_url="", issue_id_example="#1",
++        builder=LeafConfig(mode="stub"), reviewer=LeafConfig(mode="stub"),
++        planner=LeafConfig(mode="stub", interactive=True),
++        signoff=LeafConfig(mode="stub", interactive=True),
++        publisher=LeafConfig(mode="command", interactive=True),
++        act=LeafConfig(mode="stub", interactive=True), gates_checks=[],
++        # Inside the temp dir and never a git checkout: nothing outside it is looked at.
++        repo_checkouts={REPO: str(root / "repo")},
++        wave_mode=wave_mode, merge_requires="required")
++
++
++def _url(iid: str) -> str:
++    return f"https://github.com/{REPO}/pull/{iid}"
++
++
++def _fields(**fields: str) -> str:
++    """``- **<Label>:** <value>`` lines, the label spelled with spaces for underscores
++    (``merges_with="B"`` → ``Merges with: B``)."""
++    return "".join(f"- **{k.replace('_', ' ').capitalize()}:** {v}\n"
++                   for k, v in fields.items())
++
++
++class MergeGroup(unittest.TestCase):
++
++    def setUp(self) -> None:
++        self.tmp = Path(tempfile.mkdtemp())
++        self.addCleanup(shutil.rmtree, self.tmp, True)
++        self.cfg = _cfg(self.tmp, "merge")
++        self.discontinue: set[str] = set()    # ids the stub sign-off discontinues
++        self.unpublished: set[str] = set()    # ids accepted with no PR recorded (publish failed)
++        self.stacked: set[str] = set()        # ids whose record is an `Onto branch` commit
++        self.merge_fails: set[str] = set()    # ids whose `gh pr merge` the host refuses
++        # id → the children its build splits it into, through `split.accept`: (id, fields).
++        self.splits: dict[str, list[tuple[str, dict[str, str]]]] = {}
++        self.merged: set[str] = set()         # PR urls the host has merged
++        self.gh_calls: list[list[str]] = []
++        self.built: list[str] = []            # ids, in the order the build leaf ran
++        self.calls_at: dict[str, int] = {}    # id → len(gh_calls) when it was built
++        self._real_run = subprocess.run
++
++    # -- fixture ---------------------------------------------------------------------------
++
++    def _brief(self, iid: str, **fields: str) -> Path:
++        """A PLANNED bundle; ``fields`` adds its ``- **<Label>:** <value>`` lines."""
++        d = self.cfg.bundle(iid)
++        d.mkdir(parents=True, exist_ok=True)
++        (d / "brief.md").write_text(
++            f"- **Slug:** {iid.lower()}\n- **Repo + branch target:** {REPO} @ main\n"
++            f"{_fields(**fields)}", encoding="utf-8")
++        return d
++
++    def _split(self, d: Path, children: list[tuple[str, dict[str, str]]]) -> None:
++        """Split ``d`` as `pdca split --accept` does — the PRODUCTION ``split.accept`` writes
++        the children, their lineage and the parent's close marker. A proposal's ordering
++        fields may only name sibling labels, so each child's ``fields`` are added to its
++        brief afterwards, as a re-plan of the child would."""
++        blocks = "".join(
++            f"<!-- pdca:child child-{n} -->\n- **Slug:** {cid.lower()}\n"
++            f"- **Repo + branch target:** {REPO} @ main\n<!-- pdca:end child-{n} -->\n\n"
++            for n, (cid, _fields) in enumerate(children, 1))
++        (d / split.PROPOSAL).write_text(
++            f"<!-- pdca:split-proposal v1 -->\n# Split proposal\n\n{blocks}", encoding="utf-8")
++        split.accept(d, [cid for cid, _fields in children], self.cfg)
++        for cid, fields in children:
++            with (self.cfg.bundle(cid) / "brief.md").open("a", encoding="utf-8") as f:
++                f.write(_fields(**fields))
++
++    # -- stubs -----------------------------------------------------------------------------
++
++    def _gh_stub(self, args, *a, **kw):
++        if not (isinstance(args, list) and args[:1] == ["gh"]):
++            return self._real_run(args, *a, **kw)
++        self.gh_calls.append(list(args))
++        url = next((str(x) for x in args if str(x).startswith("https://")), "")
++        if args[:3] == ["gh", "pr", "merge"]:
++            if url.rsplit("/", 1)[-1] in self.merge_fails:
++                return subprocess.CompletedProcess(args, 1, "", "merge refused by host")
++            self.merged.add(url)
++            return subprocess.CompletedProcess(args, 0, "", "")
++        if args[:3] == ["gh", "pr", "view"]:
++            return subprocess.CompletedProcess(args, 0, json.dumps(
++                {"state": "MERGED" if url in self.merged else "OPEN"}), "")
++        return subprocess.CompletedProcess(args, 0, "", "")
++
++    def _drive_wave(self, cfg, wave: list[Path], **_kw) -> int:
++        """Build each bundle and sign it off (accept, discontinue, or split), recording a
++        published PR for an accepted one, as publish would."""
++        for d in wave:
++            iid = d.name.removeprefix("issue_")
++            self.built.append(iid)
++            self.calls_at[iid] = len(self.gh_calls)
++            if iid in self.splits:
++                self._split(d, self.splits[iid])   # accepted below: terminal on a split
++            else:
++                (d / "patch.diff").write_text(
++                    f"diff --git a/{iid}.txt b/{iid}.txt\nnew file mode 100644\n--- /dev/null\n"
++                    f"+++ b/{iid}.txt\n@@ -0,0 +1 @@\n+{iid}\n", encoding="utf-8")
++            (d / "check-gates.json").write_text("{}", encoding="utf-8")
++            shutil.copyfile(TEMPLATES / "SUMMARY.md.tpl", d / "SUMMARY.md")
++            action = "discontinue" if iid in self.discontinue else "accept"
++            signoff.record(d / "SUMMARY.md", action=action, by="T", date=TODAY)
++            if action == "accept" and iid not in self.splits and iid not in self.unpublished:
++                (d / "publish.json").write_text(json.dumps({
++                    "mode": "stacked" if iid in self.stacked else "new-pr",
++                    "branch": f"fix/{iid}", "base": "main", "repo": REPO,
++                    "pr_url": _url(iid), "by": "T", "date": TODAY}), encoding="utf-8")
++        return 1
++
++    def _stubs(self, stack: ExitStack) -> None:
++        stack.enter_context(mock.patch.object(subprocess, "run", self._gh_stub))
++        stack.enter_context(mock.patch.object(flow, "_drive_wave", self._drive_wave))
++        stack.enter_context(mock.patch.object(flow, "_publish_bundle", lambda *a, **k: True))
++        stack.enter_context(mock.patch.object(publish, "draft_texts", lambda *a, **k: True))
++        stack.enter_context(mock.patch.object(leaves, "do_plan_batch", lambda *a, **k: None))
++        stack.enter_context(mock.patch.object(merge, "_sleep", lambda *_a: None))
++
++    def _run(self, ids: list[str]) -> None:
++        """One merge-mode run driving ``ids`` (publishing on, Act off)."""
++        err, out = io.StringIO(), io.StringIO()
++        self.holds: dict[str, str] = {}
++        with ExitStack() as stack:
++            self._stubs(stack)
++            stack.enter_context(redirect_stdout(out))
++            stack.enter_context(redirect_stderr(err))
++            self.results = flow._drive_and_act(
++                self.cfg, [self.cfg.bundle(i) for i in ids], do_publish=True, do_act=False,
++                by="T", today=TODAY, batch=ids, holds=self.holds)
++        self.err = err.getvalue()
++        self.rc = cli._results_rc(self.results, holds=self.holds)
++        self.assertNotIn("Traceback", self.err)
++
++    def _sweep(self, *, do_publish: bool) -> None:
++        """The resume sweep (`pdca flow --from-csv`): every in-flight bundle on disk."""
++        err = io.StringIO()
++        self.holds = {}
++        with ExitStack() as stack:
++            self._stubs(stack)
++            stack.enter_context(redirect_stdout(io.StringIO()))
++            stack.enter_context(redirect_stderr(err))
++            self.results = flow.flow_batch(self.cfg, do_publish=do_publish, do_act=False,
++                                           by="T", today=TODAY, holds=self.holds)
++        self.err = err.getvalue()
++        self.assertNotIn("Traceback", self.err)
++
++    def _cli(self, *argv: str) -> int:
++        """``pdca flow <argv>`` through ``cli.main`` on this config."""
++        err, out = io.StringIO(), io.StringIO()
++        with ExitStack() as stack:
++            self._stubs(stack)
++            stack.enter_context(mock.patch.object(cli.Config, "load", return_value=self.cfg))
++            stack.enter_context(redirect_stdout(out))
++            stack.enter_context(redirect_stderr(err))
++            rc = cli.main(["flow", *argv])
++        self.err = err.getvalue()
++        self.assertNotIn("Traceback", self.err)
++        return rc
++
++    # -- reading the gh log ----------------------------------------------------------------
++
++    def _readied_or_merged(self, iid: str, calls: list[list[str]] | None = None
++                           ) -> list[list[str]]:
++        """Each ``gh pr ready`` (not ``--undo``) / ``gh pr merge`` call on ``iid``'s PR."""
++        return [c for c in (self.gh_calls if calls is None else calls)
++                if c[:3] in (["gh", "pr", "ready"], ["gh", "pr", "merge"])
++                and _url(iid) in c and "--undo" not in c]
++
++    def _merge_index(self, iid: str) -> int:
++        at = [n for n, c in enumerate(self.gh_calls)
++              if c[:3] == ["gh", "pr", "merge"] and _url(iid) in c]
++        self.assertEqual(len(at), 1, (iid, self.gh_calls, self.err))
++        return at[0]
++
++    def _lines(self, *needles: str) -> list[str]:
++        return [x for x in self.err.splitlines() if all(n in x for n in needles)]
++
++    # -- fixture (a): A + B one group across waves 0 and 1 ----------------------------------
++
++    def _group_across_waves(self, **a_fields: str) -> list[str]:
++        """``A`` and ``B`` one group with no edge between them; ``D`` (no group) in wave 0;
++        ``B`` `Depends on: D`, so ``A`` is wave 0 and ``B`` wave 1; ``C`` `Depends on: B`,
++        wave 2. ``a_fields`` defaults to ``A`` declaring the group too."""
++        self._brief("A", **(a_fields or {"merges_with": "B"}))
++        self._brief("B", merges_with="A", depends_on="D")
++        self._brief("C", depends_on="B")
++        self._brief("D")
++        return ["A", "B", "C", "D"]
++
++    def _assert_held_then_merged_together(self, merged: tuple[str, ...] = ("A", "B", "D")
++                                          ) -> None:
++        # Wave 0's boundary has passed by the time B builds: D merged, A neither readied
++        # nor merged — and the run went on.
++        self.assertIn("B", self.built, self.err)
++        at_b = self.gh_calls[:self.calls_at["B"]]
++        self.assertEqual(self._readied_or_merged("A", at_b), [], self.err)
++        self.assertNotEqual(self._readied_or_merged("D", at_b), [], self.err)
++        self.assertEqual(len(self._lines("issue_A held", "issue_B", "`Merges with`")), 1,
++                         self.err)
++        self.assertNotIn("STOPPING", self.err)
++        # Wave 1's boundary: A and B both merged, A first, before C builds.
++        self.assertIn("C", self.built, self.err)
++        at_c = self.calls_at["C"]
++        self.assertLess(self._merge_index("A"), self._merge_index("B"))
++        self.assertLess(self._merge_index("B"), at_c)
++        self.assertEqual({_url(i) for i in merged}, self.merged)
++        for iid in "ABCD":
++            self.assertEqual(self.results[iid], state.COMPLETE, self.err)
++        self.assertEqual(self._lines("`Merges with` group", "not merged"), [], self.err)
++        self.assertEqual(self.holds, {})
++        self.assertEqual(self.rc, 0, self.err)
++
++    def test_a_group_member_is_held_until_the_group_completes_then_merged_with_it(self):
++        # (a)
++        self._run(self._group_across_waves())
++        self._assert_held_then_merged_together()
++
++    def test_merges_with_declared_on_one_side_binds_both(self):
++        # (f) only B declares it; A's brief says nothing — the group is the same.
++        self._run(self._group_across_waves(ordering_note="none"))
++        self.assertNotIn("Merges with",
++                         (self.cfg.bundle("A") / "brief.md").read_text(encoding="utf-8"))
++        self._assert_held_then_merged_together()
++
++    def test_a_split_before_the_last_member_does_not_break_the_group(self):
++        # S splits in wave 0, so the run re-levels its un-driven tail — B and C, plus the
++        # child S1 — after A was driven. A is not "outside the batch" for that: B and C are
++        # still built, and A and B still merge together at wave 1's boundary.
++        ids = self._group_across_waves() + ["S"]
++        self._brief("S")
++        self.splits = {"S": [("S1", {})]}
++        self._run(ids)
++
++        self.assertIn("S1", self.built, self.err)
++        self.assertEqual(self._lines("not in this run's batch"), [], self.err)
++        self.assertEqual(self._lines("held this run"), [], self.err)
++        self._assert_held_then_merged_together(merged=("A", "B", "D", "S1"))
++        self.assertEqual(self.results["S1"], state.COMPLETE)
++
++    # -- (b): a member that ends not COMPLETE leaves the rest held -------------------------
++
++    def test_a_member_that_ends_discontinued_leaves_the_rest_unmerged(self):
++        self.discontinue = {"B"}
++        self._run(self._group_across_waves())
++
++        self.assertEqual(self.results["B"], state.DISCONTINUED)
++        self.assertEqual(self._readied_or_merged("A"), [], self.err)   # never, by the run
++        self.assertNotIn(_url("A"), self.merged)
++        self.assertNotEqual(self._readied_or_merged("D"), [], self.err)
++        held = self._lines("issue_A held", "`Merges with` issue_B")
++        self.assertEqual(len(held), 1, self.err)
++        end = self._lines("`Merges with` group issue_A, issue_B was not merged",
++                          "issue_B is DISCONTINUED")
++        self.assertEqual(len(end), 1, self.err)
++        self.assertIn("cannot land together in this run", end[0])
++        self.assertIn("Not merged: issue_A.", end[0])
++        self.assertEqual(self.holds, {"A": "group"})
++        self.assertEqual(self.rc, 1, self.err)          # B did not finish
++
++    # -- (c): a dependent of a held member is held -----------------------------------------
++
++    def test_a_bundle_depending_on_a_held_member_is_not_built(self):
++        ids = self._group_across_waves() + ["E"]
++        self._brief("E", depends_on="A")              # wave 1, beside B
++        self._run(ids)
++
++        self.assertNotIn("E", self.built, self.err)
++        self.assertEqual(self.results["E"], state.PLANNED)
++        why = self._lines("flow: issue_E held", "issue_A")
++        self.assertEqual(len(why), 1, self.err)
++        self.assertIn("`Merges with` group with issue_B", why[0])
++        self.assertNotIn("pushed no branch", why[0])
++        # The group itself still lands together at wave 1's boundary.
++        self.assertLess(self._merge_index("A"), self._merge_index("B"))
++
++    # -- a member whose record merge mode refuses holds the whole group --------------------
++
++    def _assert_whole_group_held(self, why: str) -> None:
++        # Nothing of the group was readied or merged, so it did not land in part; the run
++        # went on (no STOP) and held B's dependent C, naming the group.
++        for iid in "AB":
++            self.assertEqual(self._readied_or_merged(iid), [], self.err)
++        self.assertEqual(self.merged, {_url("D")}, self.err)
++        self.assertNotIn("STOPPING", self.err)
++        self.assertNotIn("landed only in part", self.err)
++        held = self._lines("issue_B held", "`Merges with` issue_A", why)
++        self.assertEqual(len(held), 1, self.err)
++        self.assertIn("No member is readied or merged", held[0])
++        self.assertNotIn("C", self.built, self.err)
++        self.assertEqual(len(self._lines("flow: issue_C held", "issue_B", "`Merges with`")), 1,
++                         self.err)
++        end = self._lines("`Merges with` group issue_A, issue_B was not merged", why)
++        self.assertEqual(len(end), 1, self.err)
++        self.assertIn("cannot land together in this run", end[0])
++        self.assertEqual(self.holds, {"A": "group", "B": "group"})
++
++    def test_a_member_without_a_recorded_pr_holds_the_whole_group(self):
++        # B's publish failed (no publish.json): `_merge_one` would refuse it, so A must not
++        # be merged first — at wave 1's boundary neither is readied.
++        self.unpublished = {"B"}
++        self._run(self._group_across_waves())
++        self._assert_whole_group_held("issue_B has no recorded PR")
++
++    def test_a_member_with_an_onto_branch_record_holds_the_whole_group(self):
++        self.stacked = {"B"}
++        self._run(self._group_across_waves())
++        self._assert_whole_group_held("issue_B is an `Onto branch` commit")
++
++    def test_a_malformed_expected_checks_refuses_the_group_before_any_member_is_readied(self):
++        # A guard, not a red→green case: a setting that refuses every PR alike is left to
++        # `_merge_one`, which refuses it before readying the group's FIRST member — so the
++        # release stops with nothing of the group landed.
++        self.cfg.expected_checks_error = "[driver].expected_checks must be a list of names"
++        self._brief("A", merges_with="B")
++        self._brief("B")
++        self._brief("C", depends_on="B")             # wave 0 = [A, B] is not the final one
++        self._run(["A", "B", "C"])
++
++        for iid in "AB":
++            self.assertEqual(self._readied_or_merged(iid), [], self.err)
++        self.assertIn("STOPPING", self.err)
++        self.assertNotIn("landed only in part", self.err)
++        self.assertNotIn("C", self.built, self.err)
++
++    # -- the final wave, and a member that fails to merge after another landed -------------
++
++    def test_a_group_wholly_in_the_final_wave_is_named_for_the_human(self):
++        # One wave, so no boundary merges anything: every PR stays a draft as always, and
++        # the run says the group's PRs must be merged together.
++        self._brief("A", merges_with="B")
++        self._brief("B")
++        self._run(["A", "B"])
++
++        for iid in "AB":
++            self.assertEqual(self._readied_or_merged(iid), [], self.err)
++        end = self._lines("`Merges with` group issue_A, issue_B was not merged")
++        self.assertEqual(len(end), 1, self.err)
++        self.assertIn("every member is COMPLETE", end[0])
++        self.assertIn("Merge its PRs together, back to back, in this order: issue_A, issue_B.",
++                      end[0])
++        self.assertEqual(self.holds, {})                # nothing was held: final-wave drafts
++        self.assertEqual(self.rc, 0, self.err)
++
++    def test_a_group_whose_last_member_completes_in_the_final_wave_stays_all_draft(self):
++        self._brief("A", merges_with="B")
++        self._brief("B", depends_on="D")
++        self._brief("D")
++        self._run(["A", "B", "D"])                    # waves [A, D], [B]: B is final
++
++        for iid in "AB":
++            self.assertEqual(self._readied_or_merged(iid), [], self.err)
++        self.assertIn(_url("D"), self.merged)
++        end = self._lines("`Merges with` group issue_A, issue_B was not merged")
++        self.assertEqual(len(end), 1, self.err)
++        self.assertIn("every member is COMPLETE", end[0])
++        self.assertIn("in this order: issue_A, issue_B.", end[0])
++        self.assertEqual(self.holds, {"A": "group"})   # A was held at wave 0's boundary
++        self.assertEqual(self.rc, 3, self.err)
++
++    def test_a_member_refused_after_another_merged_names_what_landed(self):
++        self.merge_fails = {"B"}
++        self._run(self._group_across_waves())
++
++        self.assertIn(_url("A"), self.merged)
++        self.assertNotIn(_url("B"), self.merged)
++        self.assertIn("STOPPING", self.err)
++        self.assertNotIn("C", self.built, self.err)
++        part = self._lines("!!! merge:", "landed only in part", "issue_A merged",
++                           "issue_B did not")
++        self.assertEqual(len(part), 1, self.err)
++        end = self._lines("flow: `Merges with` group issue_A, issue_B landed only in part",
++                          "issue_A merged, issue_B not")
++        self.assertEqual(len(end), 1, self.err)
++
++    # -- (d), (g): refused before any Do in merge mode ------------------------------------
++
++    def _assert_refused(self, rc: int, *ids: str) -> str:
++        self.assertEqual(rc, 2, self.err)
++        self.assertEqual(self.built, [], self.err)
++        self.assertEqual(self.gh_calls, [], self.err)
++        self.assertIn("refusing to start — no bundle was built", self.err)
++        ways = self._lines("Ways out:")
++        self.assertEqual(len(ways), 1, self.err)
++        self.assertIn("one bundle", ways[0])
++        self.assertIn('wave_mode = "stack"', ways[0])
++        head = self._lines("flow: ", "`Merges with`")
++        self.assertEqual(len(head), 1, self.err)
++        for iid in ids:
++            self.assertIn(f"issue_{iid}", head[0])
++            self.assertEqual(state.state(self.cfg.bundle(iid)), state.PLANNED)
++        return head[0]
++
++    def _chained_pair(self) -> None:
++        self._brief("A", merges_with="B")
++        self._brief("B", merges_with="A", depends_on="A")
++
++    def test_a_chained_group_is_refused_before_any_do(self):
++        # (d)
++        self._chained_pair()
++        head = self._assert_refused(self._cli("A", "B", "--no-act"), "A", "B")
++        self.assertIn("`Depends on` issue_A", head)
++
++    def test_the_chained_group_runs_as_today_in_stack_mode(self):
++        # (e) the same batch, wave_mode = "stack": the field is ignored.
++        self.cfg.wave_mode = "stack"
++        self._chained_pair()
++        plan = waves.compute_waves(self.cfg, [self.cfg.bundle("A"), self.cfg.bundle("B")])
++        self.assertEqual([[d.name for d in w] for w in plan], [["issue_A"], ["issue_B"]])
++        rc = self._cli("A", "B", "--no-publish", "--no-act")
++        self.assertEqual(rc, 0, self.err)
++        self.assertEqual(self.built, ["A", "B"], self.err)
++        self.assertNotIn("Merges with", self.err)
++
++    def test_a_group_whose_members_conflict_is_refused_before_any_do(self):
++        # (g) the members `Conflicts with` each other (declared on one side).
++        self._brief("A", merges_with="B", conflicts_with="B")
++        self._brief("B")
++        head = self._assert_refused(self._cli("A", "B", "--no-act"), "A", "B")
++        self.assertIn("`Conflicts with` each other", head)
++
++    def test_a_group_naming_an_id_outside_the_batch_is_refused_before_any_do(self):
++        # (g) X is an in-flight bundle the run was not asked for.
++        self._brief("A", merges_with="X")
++        self._brief("X")
++        head = self._assert_refused(self._cli("A", "--no-act"), "A", "X")
++        self.assertIn("not in this run's batch", head)
++        self.assertIn("add X to this run's ids", self._lines("Ways out:")[0])
++
++    # -- the resume sweep holds a group it cannot drive whole -------------------------------
++
++    def test_the_sweep_holds_a_refused_group_and_drives_the_rest(self):
++        self._chained_pair()
++        self._brief("U")
++        self._sweep(do_publish=False)
++        self.assertEqual(self.built, ["U"], self.err)
++        self.assertEqual(self.results.get("U"), state.COMPLETE)
++        for iid in "AB":
++            held = self._lines(f"flow: issue_{iid} held this run", "`Merges with`")
++            self.assertEqual(len(held), 1, self.err)
++
++    def test_the_sweep_holds_the_partner_of_a_held_bundle_that_declared_the_group(self):
++        # X declares `Merges with: A` (A's brief is silent) and is held for an unresolvable
++        # dependency. A must not then be driven and merged alone: the relation is read off
++        # X's brief too, and A is held with it.
++        self._brief("A")
++        self._brief("X", merges_with="A", depends_on="Z")   # Z: no such bundle
++        self._brief("D")
++        self._brief("U", depends_on="D")                    # a boundary after wave 0
++        self._sweep(do_publish=True)
++
++        self.assertEqual(sorted(self.built), ["D", "U"], self.err)
++        self.assertEqual(self._readied_or_merged("A"), [], self.err)
++        self.assertIn(_url("D"), self.merged)
++        held = self._lines("flow: issue_A held this run", "`Merges with` group",
++                           "issue_X is held too")
++        self.assertEqual(len(held), 1, self.err)
++        self.assertEqual(len(self._lines("flow: issue_X held this run", "Z")), 1, self.err)
++
++    # -- a split child a later reschedule drops still holds its partner --------------------
++
++    def test_a_split_child_dropped_later_still_holds_the_member_it_declared(self):
++        # T splits in wave 0 into T1, which declares `Merges with: A` (one-sided) and
++        # `Depends on: P`. P is DISCONTINUED in wave 1, where U splits too, so that
++        # re-levelling holds T1 and drops it from the drive set again. A must stay held:
++        # T1's declaration is still the run's, though T1 has left the drive set.
++        self._brief("A")
++        self._brief("Q")
++        self._brief("T")
++        self._brief("P", depends_on="Q")
++        self._brief("U", depends_on="Q")
++        self.splits = {"T": [("T1", {"merges_with": "A", "depends_on": "P"})],
++                       "U": [("U1", {})]}
++        self.discontinue = {"P"}
++        self._run(["A", "P", "Q", "T", "U"])
++
++        self.assertNotIn("T1", self.built, self.err)
++        self.assertEqual(len(self._lines("issue_T1 — adopted earlier this run, now held")),
++                         1, self.err)
++        self.assertNotIn("T1", self.results)
++        self.assertEqual(self._readied_or_merged("A"), [], self.err)
++        self.assertNotIn(_url("A"), self.merged)
++        self.assertIn(_url("Q"), self.merged)
++        end = self._lines("`Merges with` group issue_A, issue_T1 was not merged",
++                          "issue_T1 is PLANNED")
++        self.assertEqual(len(end), 1, self.err)
++        self.assertEqual(self.holds, {"A": "group"})
++
++
++if __name__ == "__main__":
++    unittest.main()

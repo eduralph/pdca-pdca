@@ -1,0 +1,26 @@
+Bash was unavailable in this run (every command failed with `apply-seccomp: … Permission denied`); this review used Read, Grep and Glob only.
+
+# Plan review: issue 672 / carry-keeps-a-fold-time-skip-off-the-line
+
+I checked every `path:line` the brief cites against `$PDCA_TARGET`, and each one resolves to the code it describes: `flow.py:1002-1029`, `:1032-1132`, `:1093`, `:1104-1113`, `:1052-1054`, `integrate.py:518-544`, `:532-539`, `:690`, `:849`, `:863`, `docs/07-crosscutting.md:718` and `:728-730`, and the test file's `:61-172`, `:246-258`, `:347` and `:373-385`. The issue thread backs the stated defect, and it is a real residual (`flow.py:1052-1054` states it).
+
+The brief goes further than the issue in one useful way. It shows that the issue's literal shape does not leak: if P conflicts and Q holds P's change, Q conflicts too. For the RED it uses a branch where Q's author has already resolved the conflict. I traced that shape through `_merge_published` (`integrate.py:608-635`). That function has no check that refuses a branch for undoing the base's change, so Q merges cleanly and the RED is real. Findings:
+
+- NEEDS-HUMAN — **The "Invariant to restore" is false today in cases this slice leaves out of scope, so a reviewer cannot hold Do to it as written.** The brief says: "Precisely: after the carry, no commit a not-carried finished id's branch adds over the base is reachable from the line's tip." That fails in at least two cases this fix does not touch:
+  (a) **Red re-gate.** `_fold_lines` pushes the line before the re-gate (`integrate.fold` pushes at `integrate.py:552-553`; the re-gate runs at `flow.py:947-950`). On red, the carry only adds the carried ids to `why` (`flow.py:1114-1116`). Origin's line still holds their commits, as `test_a_red_regate_of_the_carried_line_holds_and_the_run_goes_on` (`tests/test_flow_resume_stack_prereqs.py:326-343`) shows: it relies on the wave-0 fold replacing the line.
+  (b) **A finished id judged not clean before the fold with no declared edge.** For example, P is CLOSED and Q is cut from `fix/P` without `Depends on: P`. `_cascade_not_clean` follows only declared `Depends on` edges (`flow.py:1011-1017`), so Q is still carried with P's commit.
+  Fix: narrow the invariant to fold-time skips (or to "the line the carry hands to wave 0"), or name (a) and (b) as out of scope.
+
+- NEEDS-HUMAN — **Criterion (2) invites a hidden second change to the pre-fold cascade.** Criterion (2) requires detecting containment by ancestry ("Q's brief has no `Depends on: P`") for fold-time skips only. The pre-fold path (`_cascade_not_clean`, `flow.py:1002-1029`) stays declared-edge-only. Given finding (b) above, Do may reasonably switch `_cascade_not_clean` to ancestry too "for consistency". That changes #652's behaviour and its hint text (`flow.py:1025-1026`, "its `Depends on` names …"), which nothing in the brief covers. The brief should say explicitly that the pre-fold cascade stays edge-only (out of scope), or include that change and test it.
+
+- NEEDS-HUMAN — **The append-only requirement in Scope has no check that could fail.** Scope says "the carry's one push per target must not be followed by a rewrite of what it pushed (no extra force-push)". The issue itself allows "re-fold without them", and a re-fold done after the push is exactly what this bans. Yet criteria (1)-(3) only check ancestry of the final line and of E's tip. A fix that pushes, detects the leak, then re-folds and force-pushes would pass all three. The fixture already has a push counter (`self.fx._pushes`, used at `tests/test_flow_resume_stack_prereqs.py:366`). Add a criterion that the carry makes exactly one push to the line in (1) and (2).
+
+- NEEDS-HUMAN — **The criteria pin only one fold order.** Both cases ask for `["P", "Q", "X", …]`, so P is folded before Q. If the order is Q then P, Q merges first. P's own merge then becomes a no-op ("already in the line", `integrate.py:622-623`), so P is never skipped and is reported as carried through Q. That may be acceptable (P's merge never failed), but the brief neither states nor pins it. A Do that removes only dependents folded *after* the skipped id passes, and so does one that re-checks every carried id. Name the intended order semantics, or add a reversed-order case.
+
+- NEEDS-HUMAN — **I could not check the dependency and conflict ids.** `Conflicts with: 673, 694` and "463 (last wave) depends on this" cite other bundles. This leaf received no `sources/` directory and no `dependency-state.json`, so I could not confirm those bundles exist or that 673/694 really edit `integrate.py:518-544` and the `_carry_finished` hold messages. The order (672 first) is only as good as those claims; the human should check them at sign-off.
+
+On everything else (the root cause, the RED and the target `eduralph/pdca-harness @ main`) I tried to fault the brief and could not. Apart from the points above, the scope is one logical fix.
+
+> **pdca:** Bash was unavailable to this reviewer. The vendor sandbox could not start on this host, so every Bash call it made failed before running (`apply-seccomp: write /proc/self/setgroups (nested userns is capability-restricted; caller must provide CAP_SYS_ADMIN): Permission denied`) and it ran no commands; this review was delivered without Bash.
+
+<!-- pdca:leaf-complete -->

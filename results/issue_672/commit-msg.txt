@@ -1,0 +1,31 @@
+flow: keep a fold-skipped bundle's commits off the carried line
+
+When a re-issued stack-mode run carries bundles finished in an earlier run,
+it folds them onto one integration line and pushes it once. A bundle whose
+merge fails in that fold (a conflict, a deleted branch, any merge error) is
+skipped, but until now only that bundle was left out. Another finished
+bundle built on it, or holding any of its commits, was still merged and
+pushed, so the skipped bundle's work reached the line anyway and the next
+wave was built on top of it. The docs listed this as a known gap.
+
+The carry's fold now works out each skipped bundle's commits (those on its
+branch or its PR head that neither the base nor the line's starting commit
+has) and leaves out every finished bundle whose head reaches any of them,
+whether it was merged before the skip or after, with a `Depends on` edge or
+without. Bundles holding commits of one left out this way are left out too.
+If anything merged has to come off, the line is rebuilt from the same
+starting commit with only the bundles kept, so there is still exactly one
+push and nothing is pushed and then rewritten. Each bundle left out is
+reported with the skipped bundle as its cause ("was built on ..., which is
+not carried"), and its `Depends on` dependents wait, as for any bundle not
+carried. A bundle that fails on its own and also holds an earlier failed
+bundle's commits is reported for the latter.
+
+The hold is on purpose wider than strictly needed: a bundle sharing a commit
+with a skipped one is held even when that commit is its own. On a line
+continued from an earlier run, commits of the skipped bundle that the
+earlier run already pushed stay on it; this change adds none. Both are
+written in docs/07-crosscutting.md. In-run folds are unchanged and do no
+extra work.
+
+Fixes #672

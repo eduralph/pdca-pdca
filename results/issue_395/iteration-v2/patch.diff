@@ -1,0 +1,1258 @@
+diff --git a/docs/07-crosscutting.md b/docs/07-crosscutting.md
+index 35bb1c3..6485e7f 100644
+--- a/docs/07-crosscutting.md
++++ b/docs/07-crosscutting.md
+@@ -720,7 +720,22 @@ wave builds on, via `[driver].wave_mode`:
+   and neither declares `Conflicts with` the other) do not stop the run either.
+   The fold merges a wave's bundles in name order; a bundle whose branch merges
+   cleanly onto the line as the wave found it, but not on top of the ones of its
+-  wave merged before it, is left out of the line for the rest of the run. The
++  wave merged before it, is left out of the line for the rest of the run. On
++  every wave but the last, the run finds that bundle before the wave is
++  published: it builds each bundle's commit locally (its patch on the commit
++  publish would cut its branch from, never pushed), tries them in the same
++  order by the same rule, and does not publish the one it would leave out. No
++  branch is pushed and no PR is opened for it, so the wave never opens two PRs
++  that conflict with each other. Only bundles whose publish texts passed are
++  tried, and the hold stands if the other bundle's push then fails. If the
++  run cannot try them (it cannot lock the integration checkout, or a fetch or
++  another git step there fails on a second try too), it publishes only the
++  first of the wave's bundles for that base and holds the rest as if they
++  pushed no branch, naming what failed. The fold still checks, for a branch
++  that changed after that trial. On the last wave no fold follows, so both
++  bundles are published and neither is held. A re-issue that finds such a
++  held bundle finished (it has no PR) names the bundles it conflicts with and
++  gives the step below, rather than asking you to open its PR. The
+   bundles that depend on it or share a `Conflicts with` edge with it are held,
+   as above, and the rest of the run goes on. The run names the pair and the
+   files when it happens and again at the end, with a step for you to confirm:
+diff --git a/template/src/pdca_harness/flow.py b/template/src/pdca_harness/flow.py
+index b92ef34..b706946 100644
+--- a/template/src/pdca_harness/flow.py
++++ b/template/src/pdca_harness/flow.py
+@@ -1367,6 +1367,14 @@ def _clash_why(clash: tuple[str, dict[str, list[str]], list[str]], ref: str,
+             f"bundle of this batch was found to account for", "line_conflict")
+ 
+ 
++def _held_before_why(partners: list[str], paths: list[str]) -> str:
++    """Why a finished id the run held before publishing it (#395) is not carried: its
++    conflict hold names ``partners``, bundles of its own wave, and the files."""
++    return (f"an earlier run held it before publishing it, as its change conflicts with "
++            f"{_conflict_partners(partners)}, of its own wave ({', '.join(paths)}), so it has "
++            f"no PR")
++
++
+ def _reached(cfg: Config, d: Path, stops: Collection[str],
+              through: Mapping[str, Path]) -> dict[str, list[str]]:
+     """The ids of ``stops`` that bundle ``d``'s plain ``Depends on`` reaches (#728), each
+@@ -1458,7 +1466,11 @@ def _carry_finished(cfg: Config, bundles: list[Path], finished: list[Path], *,
+     #674); else the base, or other work on the line, with no id named; else, when it merges
+     onto that line, the ids the fold took back off it that it conflicts with, said not to
+     be carried, with that step for once a line carries them (or, when it took none off, a
+-    plain re-issue) — never the ``open`` hint, which cannot change the outcome. A target
++    plain re-issue) — never the ``open`` hint, which cannot change the outcome. One an
++    earlier run held before publishing it (#395: its conflict hold is on record,
++    :func:`publish.read_conflict_hold`) has no PR to judge, and its PR would conflict: it
++    is named with the bundles of its wave it conflicts with, the files, and that step —
++    never the ``open`` hint either, whatever else is wrong. A target
+     the carry did not put to use is not seeded, so the run's first fold of it starts
+     fresh, as today. A dry-run (stub publisher) asks no host and holds nothing: it prints
+     the plan. A prerequisite that is no requested id, such as a split child an earlier run
+@@ -1499,10 +1511,18 @@ def _carry_finished(cfg: Config, bundles: list[Path], finished: list[Path], *,
+         causes: dict[str, str] = {}             # built on a not-clean id: name → that id
+         partners: dict[str, list[str]] = {}     # conflicts with these finished ids (#694)
+         base_ref, tip, bad = f"{cfg.base_remote}/{tgt[1]}", None, None
++        # Held before it was published (#395): no PR to judge — named with the bundles of
++        # its wave it conflicts with, whatever else below is wrong.
++        prior = {d.name: hold for d in ids if (hold := publish.read_conflict_hold(d))}
++        unpublished = {name: (_held_before_why(*hold), "conflict")
++                       for name, hold in prior.items()}
+         try:
+             repo, tip = integrate.carry_view(cfg, tgt[0], line, [
+                 cands[d.name][2][0] for d in ids if cands[d.name][2]])
+             for d in ids:
++                if d.name in unpublished:
++                    why[d.name] = unpublished[d.name]
++                    continue
+                 try:
+                     v = _finished_head(d, cands[d.name][2], repo, base_ref, tip)
+                 except integrate.IntegrationError as exc:
+@@ -1523,6 +1543,8 @@ def _carry_finished(cfg: Config, bundles: list[Path], finished: list[Path], *,
+             why = {d.name: (f"origin's {line} holds {bad[:12]}, which neither {base_ref} nor "
+                             f"a clean finished prerequisite's PR accounts for", "line")
+                    for d in ids}
++        why.update(unpublished)
++        partners.update({name: list(hold[0]) for name, hold in prior.items()})
+         clean = [d for d in ids if d.name not in why]
+         if clean:
+             skipped: dict[str, str] = {}
+@@ -1629,16 +1651,21 @@ def _rebuild_on(name: str, own: list[str]) -> str:
+ 
+ def _announce_conflict_holds(cfg: Config, held: Mapping[str, tuple[list[str], list[str]]],
+                              names: Collection[str], k: int, *, wave: Collection[str] = (),
+-                             finished: Collection[str] = ()) -> None:
++                             finished: Collection[str] = (), published: bool = True) -> None:
+     """One stderr line per bundle of ``names`` the wave-``k`` fold just held out of the line:
+     its branch conflicts with the bundles named, with the files. Each is said to be where it
+     is: one of ``wave``, merged before it in the same wave (#674); or already on the line
+     (#747), from an earlier wave, or a finished id the carry put there (``finished``). A
+     partner the held bundle says it builds on comes with the step: rebuild its branch on
+-    that one's (:func:`_own_prereqs`). Printed before the next wave builds."""
++    that one's (:func:`_own_prereqs`). Printed before the next wave builds. ``published``
++    False (#395): the wave's pre-publish trial held them (:func:`_held_before_publish`), so
++    nothing is merged yet — each partner is ahead of it in the wave — and each line says no
++    branch was pushed and no PR opened for it."""
++    unpushed = "" if published else " Found before publishing: no branch pushed, no PR opened."
++    ahead = "merged before it" if published else "ahead of it"
+     for name in names:
+         partners, paths = held[name]
+-        groups = ((f"merged before it in the same wave {k}", [p for p in partners if p in wave]),
++        groups = ((f"{ahead} in the same wave {k}", [p for p in partners if p in wave]),
+                   ("already on the line from an earlier wave",
+                    [p for p in partners if p not in wave and p not in finished]),
+                   ("already on the line, finished in an earlier run",
+@@ -1648,16 +1675,52 @@ def _announce_conflict_holds(cfg: Config, held: Mapping[str, tuple[list[str], li
+         fix = f"{_rebuild_on(name, own)}; " if own else ""
+         print(f"flow: {name} held out of the integration fold — its change conflicts with "
+               f"{whose} (conflicts in {', '.join(paths)}); {fix}bundles that depend on it or "
+-              f"are its `Conflicts with` partners are held this run.", file=sys.stderr)
++              f"are its `Conflicts with` partners are held this run.{unpushed}",
++              file=sys.stderr)
++
++
++def _held_before_publish(cfg: Config, wave: list[Path], *,
++                         folded_tips: Mapping[tuple[str, str], str | None], batch: list[str]
++                         ) -> tuple[dict[str, tuple[list[str], list[str]]],
++                                    dict[str, tuple[str, str]]]:
++    """The wave's pre-publish trial (#395, :func:`integrate.same_wave_holds`) over ``wave``,
++    its ready bundles in fold order, under each target's lock, entered on ONE stack as
++    :func:`_fold_lines` does. Returns ``(held, untried)``: each bundle the fold after the
++    wave would hold for a conflict with ones of the wave ahead of it (#674) → (those
++    bundles, the files), as the fold records them; and each bundle that could not be tried
++    against the others (a lock, or each try failing at a git step) → (the first of its
++    target, which alone of them is published, what failed). Neither kind is published."""
++    held: dict[str, tuple[list[str], list[str]]] = {}
++    untried: dict[str, tuple[str, str]] = {}
++    with contextlib.ExitStack() as locks:
++        integrate.same_wave_holds(cfg, wave, folded_this_run=folded_tips, batch=batch,
++                                  held_out=held, untried=untried, locks=locks)
++    return held, untried
++
++
++def _announce_untried(untried: Mapping[str, tuple[str, str]], k: int) -> None:
++    """One stderr line per bundle of wave ``k`` the pre-publish trial could not try (#395,
++    :func:`_held_before_publish`): not published this run, so that no two PRs of the wave
++    can conflict, with what failed and what to do. Its dependents and ``Conflicts with``
++    partners are held as for a bundle that pushed no branch (#593)."""
++    for name, (first, cause) in untried.items():
++        print(f"flow: {name} is not published this run — its change could not be tried "
++              f"against {first}'s, ahead of it in wave {k}, before publishing ({cause}), so "
++              f"its PR could conflict with that one's; bundles that depend on it or are its "
++              f"`Conflicts with` partners are held this run. Once that is fixed, re-drive "
++              f"{name}, or check that its change merges with {first}'s and publish it "
++              f"(`pdca publish {name.removeprefix('issue_')}`).", file=sys.stderr)
+ 
+ 
+ def _report_conflict_holds(cfg: Config,
+-                           held: Mapping[str, tuple[list[str], list[str]]]) -> None:
++                           held: Mapping[str, tuple[list[str], list[str]]], *,
++                           unpublished: Collection[str] = ()) -> None:
+     """At the end of the run, one stderr line per bundle a fold held out of the line for a
+     conflict (#674, #747), with the step to take: a ``Conflicts with`` declaration of the
+     partners that are not its own prerequisites (:func:`_own_prereqs`), proposed for the
+     human — no brief is written — then a rebuild on a base that holds every partner; with
+-    only its own prerequisites, the rebuild of its branch on theirs."""
++    only its own prerequisites, the rebuild of its branch on theirs. One of ``unpublished``
++    was held before it was published (#395): its line says it has no branch or PR."""
+     for name, (partners, paths) in held.items():
+         own = _own_prereqs(cfg, name, partners)
+         others = [p for p in partners if p not in own]
+@@ -1668,9 +1731,11 @@ def _report_conflict_holds(cfg: Config,
+                 f"Proposed, for you to confirm: {step}.")
+         else:
+             step = f"{_rebuild_on(name, own)}, then re-run."
++        none = (f" {name} was not published: this run pushed no branch and opened no PR "
++                f"for it." if name in unpublished else "")
+         print(f"flow: {name} was held out of this run's integration line — its change "
+-              f"conflicts with {_conflict_partners(partners)} ({', '.join(paths)}). {step}",
+-              file=sys.stderr)
++              f"conflicts with {_conflict_partners(partners)} ({', '.join(paths)}). "
++              f"{step}{none}", file=sys.stderr)
+ 
+ 
+ # Terminal: finished (COMPLETE), deliberately abandoned (DISCONTINUED), or settled in the
+@@ -2772,8 +2837,11 @@ def _drive_and_act(
+     end of the run with ``{id: reason}``. A fold held an accepted bundle out of the
+     integration line: ``"unpushed"`` for one that pushed no branch (#593) and ``"conflict"``
+     for one whose branch conflicts with a same-wave bundle merged before it (#674), or with
+-    bundles already on the line that explain the whole clash (#747). Such a bundle is
+-    COMPLETE in the returned map, which therefore cannot say it was held.
++    bundles already on the line that explain the whole clash (#747). On a wave a fold runs
++    after, a same-wave conflict is found before the wave publishes, and such a bundle is
++    not published at all (#395, :func:`_held_before_publish`); one that trial could not try
++    against the bundle ahead of it is not published either, and is ``"unpushed"``. Such a
++    bundle is COMPLETE in the returned map, which therefore cannot say it was held.
+     ``"base"`` (#738) for one held before it was built, because its own base could not be
+     built (:func:`_bundle_bases`): not driven this run — PLANNED in the map, for one not
+     built yet — and named on stderr with the cause and the fix. ``cli._flow`` reads this to
+@@ -2805,10 +2873,13 @@ def _drive_and_act(
+     held_unpushed: set[str] = set()
+     # Accepted bundles a fold left out because their branch conflicts with a bundle of their
+     # own wave merged before it (#674), or with bundles already on the line that explain the
+-    # whole clash (#747): name → (those bundles, the files). Left out of every later fold,
+-    # their in-batch dependents and `Conflicts with` partners held by `_runnable`, as
+-    # `held_unpushed`'s are.
++    # whole clash (#747) — or that the wave's pre-publish trial held for the first reason,
++    # before they were published (#395): name → (those bundles, the files). Left out of every
++    # later fold, their in-batch dependents and `Conflicts with` partners held by
++    # `_runnable`, as `held_unpushed`'s are.
+     held_conflict: dict[str, tuple[list[str], list[str]]] = {}
++    # The bundles of `held_conflict` held before they were published (#395): no branch, no PR.
++    held_unpublished: set[str] = set()
+     accepted: list[Path] = []        # cumulative COMPLETE bundles, wave then name order
+     integ: dict[tuple[str, str], str] = {}  # per-target (repo, base) → integration branch (#187)
+     # Per-target (repo, base) → the tip this run's last fold pushed (None in a dry-run), so
+@@ -3056,8 +3127,34 @@ def _drive_and_act(
+                                                lambda d=d: publish.draft_texts(
+                                                    cfg, d, draft=False)))
+                      for d in to_publish}
++            # #395: on a wave the fold runs after (stack mode, not the last wave, not a
++            # dry-run — the fold's own condition below), each ready bundle the fold would
++            # hold for a conflict with one of its wave ahead of it (#674) is found BEFORE
++            # anything is pushed, and not published: held as the fold holds it, its hold on
++            # record for a re-issue's carry, so the wave never opens two PRs that conflict
++            # with each other. The rest of the wave publishes as before. A hold stands if
++            # its partner's push then fails: that partner is still accepted work, to be
++            # re-published. Fail-closed: where the trial could not run, only the first
++            # bundle of that target is published; the others are held as unpushed (#593).
++            trial_held, untried = (
++                _held_before_publish(cfg, [d for d in to_publish if ready.get(d.name)],
++                                     folded_tips=folded_tips, batch=run_batch)
++                if (k < len(wave_list) - 1 and cfg.wave_mode != "merge"
++                    and cfg.publisher.mode != "stub") else ({}, {}))
++            held_conflict.update(trial_held)
++            held_unpublished.update(trial_held)
++            for d in to_publish:
++                if d.name in trial_held:
++                    publish.write_conflict_hold(d, *trial_held[d.name])
++            _announce_conflict_holds(cfg, held_conflict, list(trial_held), k,
++                                     wave=[d.name for d in complete],
++                                     finished=finished_heads, published=False)
++            held_unpushed.update(untried)
++            _announce_untried(untried, k)
+             for d in to_publish:
+-                if ready.get(d.name):
++                if d.name in trial_held or d.name in untried:
++                    pass   # held above, named with what it is held for: NOT published
++                elif ready.get(d.name):
+                     # Mechanics-only: the pre-pass drafted AND T4-gated the texts — a
+                     # second T4 run here could transiently fail AFTER siblings pushed,
+                     # recreating the half-published wave (#295 review).
+@@ -3089,10 +3186,11 @@ def _drive_and_act(
+                 # leaves the fold nothing to carry (#593). Hold it, and via `_runnable` its
+                 # dependents, rather than stop the run. A branch pushed this run is folded
+                 # even if `gh pr create` failed after it. Not in a dry-run: the stub pushes
+-                # nothing and records no branch.
++                # nothing and records no branch. One held before publish for a same-wave
++                # conflict (#395) is a conflict hold, already named: not this one too.
+                 if not dry:
+                     for d in integrate.unpublished(accepted, pushed=pushed):
+-                        if d.name not in held_unpushed:
++                        if d.name not in held_unpushed and d.name not in held_unpublished:
+                             held_unpushed.add(d.name)
+                             print(f"flow: {d.name} pushed no branch this run — left out "
+                                   f"of the integration fold; bundles that depend on it or "
+@@ -3152,7 +3250,7 @@ def _drive_and_act(
+     # the time it ends.
+     _warn_stranded_split_children(cfg, bundles, adopt_seeds)
+     # Each bundle a fold held for a conflict, again, with the step to take (#674, #747).
+-    _report_conflict_holds(cfg, held_conflict)
++    _report_conflict_holds(cfg, held_conflict, unpublished=held_unpublished)
+     # A carried branch rewritten after the run's last fold read it (#695) — after Act on
+     # purpose, so the window covers it too (Act never re-decides a bundle's disposition).
+     # Only where a fold ran: `carried_heads` is filled by a stack-mode fold that pushed, so
+diff --git a/template/src/pdca_harness/integrate.py b/template/src/pdca_harness/integrate.py
+index f841f2f..71ecfde 100644
+--- a/template/src/pdca_harness/integrate.py
++++ b/template/src/pdca_harness/integrate.py
+@@ -65,7 +65,9 @@ is a loud :class:`IntegrationError` that stops the run before the next wave buil
+ broken base — unless its conflict is with bundles of its own wave merged before it (it
+ merges cleanly onto the line as the wave found it, but not onto that line plus them): the
+ flow's fold then holds just that bundle out of the line and names the bundles it conflicts
+-with (``held_out``, #674). Mechanics are deterministic ``git`` subprocesses (no model).
++with (``held_out``, #674). On a wave a fold runs after, the flow finds such a bundle before
++the wave publishes, by the same rule, and does not publish it (:func:`same_wave_holds`,
++#395). Mechanics are deterministic ``git`` subprocesses (no model).
+ """
+ 
+ from __future__ import annotations
+@@ -749,6 +751,154 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
+     return result
+ 
+ 
++#: How many times :func:`same_wave_holds` tries one target's bundles before it gives up on
++#: them (#395): a second try, after :data:`_FETCH_RETRY_PAUSE`, gets past a fetch that fails
++#: once — a concurrent git process holding a ref lock in the same checkout (#695).
++_TRIAL_ATTEMPTS = 2
++
++
++def same_wave_holds(cfg: Config, wave: Sequence[Path], *,
++                    folded_this_run: Mapping[tuple[str, str], str | None],
++                    batch: Collection[str] | None,
++                    held_out: dict[str, tuple[list[str], list[str]]],
++                    untried: dict[str, tuple[str, str]],
++                    locks: contextlib.ExitStack | None = None) -> None:
++    """Before any bundle of ``wave`` is published (#395): each one the :func:`fold` after the
++    wave would hold for a conflict with bundles of its own wave merged before it (#674),
++    recorded in place as ``held_out[name] = (partners, paths)``, as that fold records it — so
++    the flow publishes none of them, and no two PRs of one wave conflict with each other.
++
++    ``wave``: the wave's bundles that will be published, in fold order (the flow's name
++    order). Nothing is pushed. Each one's would-be commit is built in its target's
++    integration worktree, on no branch (:func:`_would_be`): its ``patch.diff`` committed
++    onto the commit publish cuts its branch from (:func:`publish.cut_base`), so it has the
++    parent and the tree of the branch publish would push. Those commits are merged in order
++    onto the line as the wave finds it — the tip this run last pushed for the target
++    (``folded_this_run``), else ``<base_remote>/<base>``, where the fold starts it — as the
++    fold merges the pushed branches, and one whose merge conflicts is judged by the fold's
++    own rule (:func:`_held_by`): held when it names bundles merged before it. Any other is
++    neither held nor merged: its would-be commit cannot be built (its patch does not apply
++    there, so its publish fails too), or it conflicts with the line as the wave found it (a
++    conflict with work already on the line, which only the fold judges, #747). ``batch``
++    names the line's branch, as for :func:`fold`. A target with fewer than two bundles of
++    ``wave`` is not tried: one bundle has no sibling to conflict with.
++
++    Fail-closed: a target whose bundles could not be tried — its lock could not be taken, or
++    each of :data:`_TRIAL_ATTEMPTS` tries failed at a git step (a fetch, a tree that would
++    not reset) — gets no holds; instead each of its bundles but the first is recorded as
++    ``untried[name] = (the first, what failed)``. The flow publishes none of them: the first
++    can never be held for a same-wave conflict, and no other bundle of that target is
++    published beside it. Holds a failed try found before it failed are dropped.
++
++    The fold keeps its own check: a branch can change between this trial and the fold.
++    ``locks``: as for :func:`fold` — each target's :func:`integ_lock` is entered on it, in
++    sorted target order, and stays held until the caller exits it; the tries of a target
++    run under the one lock. A try that succeeds leaves the worktree clean, on the line's
++    branch at the tip the wave found; the fold resets it before each use either way."""
++    groups: dict[tuple[str, str], list[tuple[Path, str, str]]] = {}
++    for d, repo_spec, base, _slug in _targeted([d for d in wave if _has_patch(d)]):
++        cut = publish.cut_base(cfg, d)
++        if cut is not None:
++            groups.setdefault((repo_spec, base), []).append((d, *cut))
++    for (repo_spec, base), members in sorted(groups.items()):   # the fold's lock order
++        if len(members) < 2:
++            continue
++        repo = publish._checkout_path(cfg, repo_spec)
++        wt = _integ_worktree(repo, base)
++        found: dict[str, tuple[list[str], list[str]]] | None = None
++        cause = f"could not take the integration lock next to {wt.name}"
++        with contextlib.ExitStack() as scope:
++            holder = locks if locks is not None else scope
++            if holder.enter_context(integ_lock(wt)):
++                for attempt in range(_TRIAL_ATTEMPTS):
++                    if attempt:
++                        time.sleep(_FETCH_RETRY_PAUSE)
++                    try:
++                        found = _same_wave_trial(cfg, repo, base,
++                                                 integration_branch(cfg, base, batch), members,
++                                                 folded_this_run.get((repo_spec, base)))
++                        break
++                    except IntegrationError as exc:
++                        cause = exc.cause
++        if found is not None:
++            held_out.update(found)
++        else:
++            first = members[0][0].name
++            untried.update({d.name: (first, cause) for d, _remote, _ref in members[1:]})
++
++
++def _same_wave_trial(cfg: Config, repo: Path, base: str, branch: str,
++                     members: Sequence[tuple[Path, str, str]], tip: str | None
++                     ) -> dict[str, tuple[list[str], list[str]]]:
++    """One try of :func:`same_wave_holds` for the bundles of one target, ``members`` (each
++    ``(bundle, remote, cut)``, in fold order), under its lock: fetch, start ``branch`` at
++    ``tip`` (else ``<base_remote>/<base>``), build each would-be commit, then merge them in
++    order as the fold merges, judging one that conflicts by :func:`_held_by`. Returns name →
++    ``(partners, paths)`` for each one held. The line is put back at its start, clean, before
++    it returns or raises; a failed git step raises :class:`IntegrationError`."""
++    wt = _prepare_worktree(repo, cfg.base_remote, base,
++                           remotes=[remote for _d, remote, _ref in members])
++    start = tip or f"{cfg.base_remote}/{base}"
++    _reset_tree(wt, "HEAD")
++    if _git(wt, "checkout", "-B", branch, start) != 0:
++        raise IntegrationTreeError(f"could not put {branch} at {start} in {wt} — check that "
++                                   f"checkout, then re-run")
++    pre = _rev(wt, "HEAD")
++    if pre is None:
++        raise IntegrationTreeError(f"could not read the tip of {branch} in {wt} — check that "
++                                   f"checkout, then re-run")
++    built = [(d.name, head) for d, _remote, ref in members
++             if (head := _would_be(wt, branch, d, ref)) is not None]
++    held: dict[str, tuple[list[str], list[str]]] = {}
++    kept: list[tuple[str, str]] = []    # merged so far, as the fold merges them: (name, head)
++    try:
++        for name, head in built:
++            rc, paths = _merge(wt, head, f"pdca-integrate: trial of {name}")
++            if rc == 0:
++                kept.append((name, head))
++            elif not paths:
++                raise IntegrationError(
++                    f"could not try merging {name}'s would-be commit in {wt} — `git merge` "
++                    f"exited {rc} with no conflicting path, so a git step failed: check that "
++                    f"checkout, then re-run")
++            elif kept:
++                clash = _held_by(wt, branch, head, pre, kept)
++                if clash:
++                    held[name] = clash
++    finally:
++        _reset_tree(wt, pre)        # the line back where the wave found it (on `branch`)
++    return held
++
++
++def _would_be(wt: Path, branch: str, d: Path, ref: str) -> str | None:
++    """The commit publish would push for bundle ``d`` (#395), made in ``wt`` and never
++    pushed: publish's own steps less the push — check out ``ref``, where publish cuts the
++    branch (:func:`publish.cut_base`), apply ``d``'s ``patch.diff``, stage everything,
++    commit — on a detached HEAD, so it has the parent and the tree of the branch publish
++    pushes (the message differs: no commit hooks, a trial commit is never pushed). None when
++    a step fails (``ref`` does not resolve, the patch does not apply, nothing to commit):
++    publish fails at the same step and pushes nothing. Ends with the tree back on ``branch``
++    at the tip it had, clean, as :func:`_trial` does; one that will not go back raises
++    :class:`_LineBroken`."""
++    tip = _rev(wt, "HEAD")
++    if tip is None:
++        raise IntegrationTreeError(f"could not read the tip of {branch} in {wt} — check that "
++                                   f"checkout, then re-run")
++    try:
++        built = (_git(wt, "checkout", "-q", "--detach", ref) == 0
++                 and _git(wt, "apply", str((d / "patch.diff").resolve())) == 0
++                 and _git(wt, "add", "--all") == 0
++                 and _git(wt, "commit", "-q", "--no-verify", "-m",
++                          f"pdca-integrate: trial commit of {d.name}") == 0)
++        return _rev(wt, "HEAD") if built else None
++    finally:
++        _reset_tree(wt, "HEAD")
++        if _git(wt, "checkout", "-q", branch) != 0 or _rev(wt, "HEAD") != tip:
++            raise _LineBroken(f"could not put {branch} back at {tip} in {wt} after building "
++                              f"{d.name}'s would-be commit — check that checkout, then "
++                              f"re-run")
++
++
+ def _bundle_name(name: str) -> str:
+     """``name`` as a bundle's name, given as one or as its id: ``500`` and ``issue_500`` are
+     one bundle, as :func:`batch_key` counts them."""
+diff --git a/template/src/pdca_harness/publish.py b/template/src/pdca_harness/publish.py
+index 36b3b42..663346c 100644
+--- a/template/src/pdca_harness/publish.py
++++ b/template/src/pdca_harness/publish.py
+@@ -258,11 +258,8 @@ def publish(
+     # (its `host_ci_base` is the recorded tip), and `_line_tip_refusal` first checks the line
+     # still holds it. pr_base is what `gh --base` gets — and it MUST be a branch in the
+     # upstream (`--repo`) repo.
+-    cut_from_tip = wave_stacked and bool(wave_tip)
+-    if cut_from_tip:
+-        checkout_base = wave_tip
+-    else:
+-        checkout_base = f"origin/{stack_branch}" if stack_branch else f"{base_remote}/{base}"
++    checkout_base, cut_from_tip = _checkout_base(cfg, base, wave_base=wave_base,
++                                                 wave_tip=wave_tip, stack_branch=stack_branch)
+     # A wave>0 bundle (a recorded `stack-base`) opens its PR against its REAL target base, on
+     # the own-repo and fork paths alike (#593): the integration branch is a run-scoped
+     # staging line, and a PR merged into it never reaches the target. The PR carries every
+@@ -446,6 +443,7 @@ def publish(
+     if stack_branch:
+         record["stacks_on"] = brief.stacks_on(d / "brief.md")
+     (d / "publish.json").write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
++    clear_conflict_hold(d)   # its branch is pushed: a pre-publish hold no longer stands (#395)
+ 
+     # A requested-but-failed PR is a partial run, not a success — the branch is
+     # pushed but the cycle isn't done. Exit non-zero so `flow` doesn't read the
+@@ -562,6 +560,7 @@ def _publish_stacked(
+     if ci_base:
+         rec["host_ci_base"] = ci_base  # certified == pushed, auditable (#311)
+     (d / "publish.json").write_text(json.dumps(rec, indent=2) + "\n", encoding="utf-8")
++    clear_conflict_hold(d)   # the commit is pushed: a pre-publish hold no longer stands (#395)
+ 
+     print(f"\nCommit stacked onto {repo_spec} PR branch {branch} ({pr_url}).")
+     print(f"  watch CI:  gh pr checks {pr_url} --watch")
+@@ -705,6 +704,35 @@ def read_stack_base_tip(d: Path) -> str:
+     return tip.read_text(encoding="utf-8").strip()
+ 
+ 
++def write_conflict_hold(d: Path, partners: list[str], paths: list[str]) -> None:
++    """Record that the flow held bundle ``d`` before publishing it (#395,
++    ``state.CONFLICT_HOLD``): its change conflicts with ``partners``, bundles of its own
++    wave ahead of it, in ``paths``. :func:`publish` removes it once it pushes the branch."""
++    (d / state.CONFLICT_HOLD).write_text(
++        json.dumps({"partners": partners, "paths": paths}, indent=2) + "\n", encoding="utf-8")
++
++
++def read_conflict_hold(d: Path) -> tuple[list[str], list[str]] | None:
++    """``(partners, paths)`` from bundle ``d``'s pre-publish conflict hold
++    (:func:`write_conflict_hold`), or None — none recorded, or one that does not read as
++    one (a hand-edited file is not a hold)."""
++    try:
++        rec = json.loads((d / state.CONFLICT_HOLD).read_text(encoding="utf-8"))
++    except (OSError, ValueError):
++        return None
++    partners = rec.get("partners") if isinstance(rec, dict) else None
++    paths = rec.get("paths") if isinstance(rec, dict) else None
++    if (not isinstance(partners, list) or not partners or not isinstance(paths, list)
++            or not all(isinstance(x, str) for x in [*partners, *paths])):
++        return None
++    return partners, paths
++
++
++def clear_conflict_hold(d: Path) -> None:
++    """Remove bundle ``d``'s pre-publish conflict hold (#395): its branch was pushed."""
++    (d / state.CONFLICT_HOLD).unlink(missing_ok=True)
++
++
+ def _line_tip_refusal(d: Path, repo: Path, tip: str, line: str) -> str:
+     """Why publish must not cut ``d``'s PR branch from its recorded line tip, or "" (#593).
+ 
+@@ -766,6 +794,40 @@ def _stacks_on_branch(cfg: Config, d: Path) -> str | None:
+     return rec.get("branch") if rec else None
+ 
+ 
++def _checkout_base(cfg: Config, base: str, *, wave_base: str, wave_tip: str,
++                   stack_branch: str | None) -> tuple[str, bool]:
++    """What :func:`publish` cuts a new PR's branch from (``checkout_base``), and whether
++    that is a recorded line commit (``cut_from_tip``): the line commit a stacked bundle was
++    built on (``wave_tip``, #593) when the run recorded one in stack mode, else the stack
++    branch on origin, else the target base. The ONE rule :func:`publish` and
++    :func:`cut_base` share (#395)."""
++    if cfg.wave_mode != "merge" and wave_base and wave_tip:
++        return wave_tip, True
++    return (f"origin/{stack_branch}" if stack_branch else f"{cfg.base_remote}/{base}"), False
++
++
++def cut_base(cfg: Config, d: Path) -> tuple[str, str] | None:
++    """``(remote, ref)``: the remote :func:`publish` fetches for bundle ``d``, and the commit
++    or ref it cuts ``d``'s branch from — so a caller can build the commit publish would push
++    without pushing it (#395, :func:`integrate.same_wave_holds`). An ``Onto branch`` (#54)
++    commits onto that PR branch (:func:`_publish_stacked`); any other bundle's branch is cut
++    from :func:`_checkout_base`. None where publish cuts nothing: no usable target, or a
++    ``Stacks on`` prerequisite with no published branch yet (publish refuses both)."""
++    repo_spec, base, _slug = _resolve_target(d)
++    if not repo_spec or not base:
++        return None
++    onto = brief.onto_branch(d / "brief.md")
++    if onto is not None:
++        return onto[0], f"{onto[0]}/{onto[1]}"
++    wave_base = _read_stack_base(d)
++    stack_branch = wave_base or _stacks_on_branch(cfg, d)
++    if brief.stacks_on(d / "brief.md") and not stack_branch:
++        return None
++    ref, _tip = _checkout_base(cfg, base, wave_base=wave_base, wave_tip=read_stack_base_tip(d),
++                               stack_branch=stack_branch)
++    return ("origin" if stack_branch else cfg.base_remote), ref
++
++
+ def _merge_base_refusal(cfg: Config, d: Path, repo_spec: str, pr_base: str, base: str) -> str:
+     """Why ``pr_base`` is not a base that exists independently of this run — or "" if it is.
+ 
+diff --git a/template/src/pdca_harness/state.py b/template/src/pdca_harness/state.py
+index 13fe3e4..eb278eb 100644
+--- a/template/src/pdca_harness/state.py
++++ b/template/src/pdca_harness/state.py
+@@ -59,6 +59,14 @@ DEPENDENCY_ADJUDICATION = "dependency-adjudication.json"
+ # attempt via DOWNSTREAM_OF_BRIEF below.
+ SESSION_CARRY = "session-carry-forward"
+ 
++# A bundle the flow held before publishing it (#395): the wave's pre-publish trial found
++# that its change conflicts with bundles of its own wave ahead of it, so it pushed no
++# branch and opened no PR. The record names them and the files, so a re-issued run's carry
++# gives the conflict step instead of asking for the PR it never had. Written by the flow,
++# removed by publish once it pushes the bundle's branch, and archived with its attempt via
++# DOWNSTREAM_OF_BRIEF below (a rebuilt attempt is tried again).
++CONFLICT_HOLD = "conflict-hold.json"
++
+ # The reviewer leaf's captured-error tail (#138): each failed attempt's record is written
+ # as that attempt happens (#540) and the record is SETTLED once the attempts are spent —
+ # which makes it, SETTLED, the discriminator (#369) between a reviewer that ran-and-failed
+@@ -145,6 +153,9 @@ DOWNSTREAM_OF_BRIEF = [
+     # Archived per round WITH the verdict they explain, so each iteration-v<N>/ keeps the
+     # full basis of its own gate run — the state-is-files doctrine applied to evidence.
+     GATE_LOGS_DIR,
++    # The pre-publish conflict hold (#395): a verdict on THIS attempt's patch, so the
++    # rebuild is tried afresh rather than held for a clash it may no longer have.
++    CONFLICT_HOLD,
+ ]
+ 
+ # Cycle artifacts matched by pattern rather than name. ONE definition, read by both
+diff --git a/template/tests/test_flow_hold_exit_code.py b/template/tests/test_flow_hold_exit_code.py
+index 3299246..516d9df 100644
+--- a/template/tests/test_flow_hold_exit_code.py
++++ b/template/tests/test_flow_hold_exit_code.py
+@@ -213,7 +213,10 @@ class FlowHoldExitCode(unittest.TestCase):
+         return kids
+ 
+     def _ancestor_of_line(self, iid: str, batch: list[str]) -> bool:
+-        """``iid``'s branch is on the line of the run asked for ``batch``."""
++        """``iid``'s branch is on the line of the run asked for ``batch``: never when origin
++        has no branch of it (a same-wave conflict held before publish pushes none, #395)."""
++        if not self.fx._has(f"fix/{iid}"):
++            return False
+         line = integrate.integration_branch(self.cfg, "main", batch)
+         return self.fx._ancestor(self.fx._tip(f"fix/{iid}"), self.fx._tip(line))
+ 
+diff --git a/template/tests/test_flow_reissue_after_conflict_hold.py b/template/tests/test_flow_reissue_after_conflict_hold.py
+index d7f2cd3..7e7cd61 100644
+--- a/template/tests/test_flow_reissue_after_conflict_hold.py
++++ b/template/tests/test_flow_reissue_after_conflict_hold.py
+@@ -112,10 +112,20 @@ class ReissueAfterConflictHold(unittest.TestCase):
+ 
+     def _run(self, drive: list[str], batch: list[str]) -> None:
+         """One stack-mode run asked for ``batch``, driving ``drive``: the shape ``flow_ids``
+-        gives a re-issue, whose finished ids it skips."""
++        gives a re-issue, whose finished ids it skips. The wave's pre-publish trial (#395,
++        ``flow._held_before_publish``) is switched off — no ``create=True``, so a rename of
++        it fails here rather than quietly turn the trial back on — and a same-wave conflict
++        is published, then held by the fold (#674), its PR open: the state these cases
++        judge. A plain same-wave pair no longer ends that way with the trial on, but a run
++        still can: a branch that changed after the trial, which the fold's own check holds;
++        a pair on a run's last wave, which no trial or fold judges and a re-issue's carry
++        then does; a run from before #395. A re-issue after a trial hold, whose bundle has
++        no PR, is tests/test_flow_same_wave_prepublish.py's."""
+         self.line = integrate.integration_branch(self.cfg, "main", batch)
+         self._err, out = io.StringIO(), io.StringIO()
+         with ExitStack() as stack:
++            stack.enter_context(mock.patch.object(flow, "_held_before_publish",
++                                                  lambda *a, **k: ({}, {})))
+             stack.enter_context(mock.patch.object(subprocess, "run", self._gh_stub))
+             stack.enter_context(mock.patch.object(flow, "_drive_wave", self._drive_wave))
+             stack.enter_context(mock.patch.object(flow, "_publish_bundle",
+diff --git a/template/tests/test_flow_same_wave_conflict.py b/template/tests/test_flow_same_wave_conflict.py
+index dfa0cae..d280dd1 100644
+--- a/template/tests/test_flow_same_wave_conflict.py
++++ b/template/tests/test_flow_same_wave_conflict.py
+@@ -3,7 +3,10 @@
+ In stack mode two bundles of one wave can both pass Check while their branches conflict
+ textually. Before #674 nothing found that until the fold, which raised on the second of the
+ pair, and the flow stopped: every later wave was dropped, bundles unrelated to the pair
+-included, and the message named only the branch that failed. These cases drive
++included, and the message named only the branch that failed. Since #395 a wave the fold
++runs after finds such a conflict before it publishes, and the held bundle pushes no branch
++(tests/test_flow_same_wave_prepublish.py); the fold's own check stays, for a branch that
++changes after that trial (the mid-wave cases at the end). These cases drive
+ ``flow._drive_and_act`` through real folds — the ``StackFoldGit`` fixture of
+ tests/test_integrate_stack_bases.py (a bare ``origin`` and a primary checkout), loaded by
+ path and used as a helper object, exactly as tests/test_flow_resume_stack_prereqs.py does.
+@@ -223,16 +226,16 @@ class SameWaveConflict(unittest.TestCase):
+         # (1) Held, not stopped.
+         self.assertNotIn("did not integrate", self.err)
+         self.assertNotIn("STOPPING", self.err)
+-        on21 = self._built_on("21", "12")
++        self._built_on("21", "12")
+         self._on_line("21", "10", "12")
+-        self.assertFalse(self.fx._ancestor(self._head("11"), on21))
++        # Held before it was published (#395): no branch of it reaches origin, or any line.
++        self.assertFalse(self.fx._has("fix/11"), self.err)
+         self.assertNotIn("issue_20", self.seen, self.err)        # its prerequisite is held
+         self.assertEqual(self.results["20"], state.PLANNED)
+         # The wave-1 fold leaves 11 out too: the hold lasts the whole run.
+-        on30 = self._built_on("30", "21", "12")
++        self._built_on("30", "21", "12")
+         self._on_line("30", "10", "12", "21")
+-        self.assertFalse(self.fx._ancestor(self._head("11"), on30))
+-        self.assertFalse(self.fx._ancestor(self._head("11"), self.fx._tip(self.line)))
++        self.assertEqual(self.fx._show(self.fx._tip(self.line), "shared.txt"), "ten\n")
+ 
+         # (2) Named by pair and file, before the next wave builds.
+         held = self._holds("11")
+@@ -288,10 +291,11 @@ class SameWaveConflict(unittest.TestCase):
+         self._run(ids)
+ 
+         self.assertNotIn("did not integrate", self.err)
+-        on50 = self._built_on("50", "42")
++        self._built_on("50", "42")
+         self._on_line("50", "40", "42")
+-        self.assertFalse(self.fx._ancestor(self._head("41"), on50))
+-        self.assertFalse(self.fx._ancestor(self._head("41"), self.fx._tip(self.line)))
++        self.assertFalse(self.fx._has("fix/41"), self.err)      # held before publish (#395)
++        self.assertEqual(self.fx._show(self.fx._tip(self.line), "chain.txt"),
++                         _edit(NINE, l2="forty", l8="forty-two"))
+         held = self._holds("41")
+         self.assertEqual(len(held), 1, self.err)
+         self.assertIn("conflicts with issue_40's", held[0])
+@@ -305,11 +309,11 @@ class SameWaveConflict(unittest.TestCase):
+ 
+     def test_a_conflicts_with_partner_of_a_held_bundle_is_held_too(self):
+         # 25 declares `Conflicts with: 11` and 11 declares it with 26 (either side counts),
+-        # so the scheduler puts both in the wave after 11, to build on 11's work. The fold
+-        # holds 11 for its clash with 10, so no line of this run holds that work: neither
+-        # partner is built on a line without it, as for a bundle that pushed no branch
+-        # (#629). 25 changes the line 11 changed, so building it there would clash with
+-        # 11's rebuild. 21, unrelated, is built.
++        # so the scheduler puts both in the wave after 11, to build on 11's work. 11 is held
++        # for its clash with 10 (before it is published, #395), so no line of this run holds
++        # that work: neither partner is built on a line without it, as for a bundle that
++        # pushed no branch (#629). 25 changes the line 11 changed, so building it there
++        # would clash with 11's rebuild. 21, unrelated, is built.
+         self._on_base({"shared.txt": NINE})
+         self._plan("10", {"shared.txt": _edit(NINE, l2="ten")})
+         self._plan("11", {"shared.txt": _edit(NINE, l2="eleven", l8="eleven")},
+@@ -322,8 +326,8 @@ class SameWaveConflict(unittest.TestCase):
+         self._run(ids)
+ 
+         self.assertNotIn("did not integrate", self.err)
+-        on21 = self._built_on("21", "12")
+-        self.assertFalse(self.fx._ancestor(self._head("11"), on21))
++        self._built_on("21", "12")
++        self.assertFalse(self.fx._has("fix/11"), self.err)       # held before publish (#395)
+         for iid in ("25", "26"):
+             self.assertNotIn(f"issue_{iid}", self.seen, self.err)      # never built
+             self.assertEqual(self.results[iid], state.PLANNED, self.err)
+@@ -336,7 +340,7 @@ class SameWaveConflict(unittest.TestCase):
+             self.assertIn("`Conflicts with` issue_11", why[0])
+             self.assertIn("conflicts with issue_10's", why[0])        # why 11 is held
+             self.assertIn("rebuilt on a base that holds issue_10", why[0])
+-            self.assertNotIn("pushed no branch", why[0])              # 11 did push one
++            self.assertNotIn("pushed no branch", why[0])              # 11 is a conflict hold
+             self.assertIn(why[0], self.err_at["issue_21"])           # before wave 1 builds
+         self._briefs_unchanged(ids)
+ 
+@@ -405,20 +409,25 @@ class SameWaveConflict(unittest.TestCase):
+ 
+     def _a_pr_of_the_wave_merges_before_the_fold(self, line_of_22: str) -> list[str]:
+         """Wave 0 is ``10``; wave 1 is ``20`` (line 2 of ``shared.txt``), ``21`` (a file of
+-        its own) and ``22`` (``line_of_22``), each depending on ``10``; ``30`` depends on
+-        ``20``. Right after the wave publishes, 21's PR merges into main with a merge commit
+-        and its branch is deleted, and someone else changes line 8 of ``shared.txt`` on
+-        main. So the wave-1 fold merges 20, then takes main in for 21 (its branch is gone,
+-        its PR merged, #593), which puts that line-8 change on the line, then tries 22.
+-        Runs the batch; returns its ids."""
++        its own) and ``22`` (line 5), each depending on ``10``; ``30`` depends on ``20``.
++        The wave's pre-publish trial (#395) finds no conflict, so all three publish. Right
++        after, a fixup pushed onto 22's PR branch changes ``line_of_22`` too, 21's PR
++        merges into main with a merge commit and its branch is deleted, and someone else
++        changes line 8 of ``shared.txt`` on main. So the wave-1 fold — the last line of
++        defence, for a branch that changed after the trial — merges 20, then takes main in
++        for 21 (its branch is gone, its PR merged, #593), which puts that line-8 change on
++        the line, then tries 22. Runs the batch; returns its ids."""
+         self._on_base({"shared.txt": NINE})
+         self._plan("10", {"ten.txt": "ten\n"})
+         self._plan("20", {"shared.txt": _edit(NINE, l2="twenty")}, "10")
+         self._plan("21", {"twenty-one.txt": "twenty-one\n"}, "10")
+-        self._plan("22", {"shared.txt": _edit(NINE, **{line_of_22: "twenty-two"})}, "10")
++        self._plan("22", {"shared.txt": _edit(NINE, l5="twenty-two")}, "10")
+         self._plan("30", {"thirty.txt": "thirty\n"}, "20")
+ 
+         def merge_21_and_move_main() -> None:       # 22 is the wave's last to publish
++            self.fx._push_from_human(
++                {"shared.txt": _edit(NINE, l5="twenty-two", **{line_of_22: "twenty-two"})},
++                to="fix/22", off="origin/fix/22")
+             self.merged_prs["https://example.test/pr/21"] = self._head("21")
+             self.fx._merge_pr("21")
+             self.fx._delete("fix/21")
+@@ -433,8 +442,8 @@ class SameWaveConflict(unittest.TestCase):
+         return ids
+ 
+     def test_a_conflict_only_with_a_base_taken_in_mid_wave_still_stops_the_run(self):
+-        # 22 changes line 8, as main now does. It merges cleanly onto the line the wave
+-        # found and onto that line plus 20 (line 2): its conflict is with the base the
++        # 22's branch now changes line 8, as main does. It merges cleanly onto the line the
++        # wave found and onto that line plus 20 (line 2): its conflict is with the base the
+         # fold took in for 21, not with 20. Holding it would blame 20 and propose a wrong
+         # `Conflicts with: 20`; the fold stops on it, as before #674.
+         self._a_pr_of_the_wave_merges_before_the_fold("l8")
+@@ -448,8 +457,9 @@ class SameWaveConflict(unittest.TestCase):
+         self.assertNotIn("issue_30", self.seen, self.err)
+ 
+     def test_a_base_taken_in_mid_wave_does_not_stop_a_same_wave_hold(self):
+-        # 22 changes line 2, as 20 does, and not line 8: its conflict is with 20, so it is
+-        # held and named with 20 and the file, though the line took main in before it.
++        # 22's branch now changes line 2, as 20 does, and not line 8: its conflict is with
++        # 20, so the fold holds it and names it with 20 and the file, though the line took
++        # main in before it.
+         ids = self._a_pr_of_the_wave_merges_before_the_fold("l2")
+ 
+         self.assertNotIn("did not integrate", self.err)
+diff --git a/template/tests/test_flow_same_wave_prepublish.py b/template/tests/test_flow_same_wave_prepublish.py
+new file mode 100644
+index 0000000..6f3760b
+--- /dev/null
++++ b/template/tests/test_flow_same_wave_prepublish.py
+@@ -0,0 +1,481 @@
++"""A same-wave conflict is found before the wave publishes (#395).
++
++Since #674 the fold holds the later of two bundles of one wave whose branches conflict, and
++the run goes on — but only after both were published, so the wave ends with two draft PRs
++that conflict with each other, and the held one's PR is work the human must close or redo.
++On a wave the fold runs after (stack mode, not the last wave), the driver now tries the
++wave's ready bundles against each other before anything is pushed, with the fold's own
++rule, and publishes none it would hold: no branch, no PR. The last wave (and so a one-wave
++run) is unchanged. A trial that cannot run is tried again, and where it still cannot, only
++the first bundle of the wave is published. A re-issue that finds a bundle held this way
++finished names the bundles it conflicts with, never asks for the PR it does not have.
++
++These cases drive ``flow._drive_and_act`` through real folds — the ``StackFoldGit`` fixture
++of tests/test_integrate_stack_bases.py (a bare ``origin`` and a primary checkout), with the
++fixture loading and helpers of tests/test_flow_same_wave_conflict.py, loaded by path as
++tests/test_flow_reissue_after_conflict_hold.py does. The build and sign-off leaves are
++stubbed (the build writes a ``patch.diff`` and the two publish texts, then accepts), and so
++is drafting the texts. Publishing is NOT stubbed: the production ``publish.publish`` cuts,
++commits and pushes each branch to the bare origin, and its ``gh pr create`` is answered by a
++stub in front of ``subprocess.run`` that records every ``gh`` call. The publisher is in
++``command`` mode (a stub turns every fold into a dry-run). A push that fails is a real
++refusal: a ``pre-receive`` hook on the bare origin. A fetch that fails is
++``integrate._fetch`` raising as it does when ``git fetch`` fails, for the first calls of a
++run only.
++
++Only modules are imported (never a symbol the fix adds), so with the production change
++reverted these cases still load and run — and fail on their assertions.
++    cd template && PYTHONPATH=src python3 -m unittest tests.test_flow_same_wave_prepublish
++"""
++
++from __future__ import annotations
++
++import importlib.util
++import io
++import json
++import subprocess
++import unittest
++from contextlib import ExitStack, redirect_stderr, redirect_stdout
++from pathlib import Path
++from unittest import mock
++
++from pdca_harness import cli, flow, integrate, publish, state
++
++_SPEC = importlib.util.spec_from_file_location(
++    "same_wave_conflict_fixture", Path(__file__).with_name("test_flow_same_wave_conflict.py"))
++swc = importlib.util.module_from_spec(_SPEC)
++_SPEC.loader.exec_module(swc)
++sb = swc.sb                     # the StackFoldGit fixture module, loaded by path there
++
++TODAY = "2026-10-24"
++NINE = swc.NINE                 # a nine-line file
++_edit = swc._edit
++# The step a same-wave conflict between 10 and 11 gets, at the end of a run and on a re-issue.
++STEP_11 = ("declare `Conflicts with: 10` in issue_11's brief, then rebuild issue_11 on a base "
++           "that holds issue_10")
++
++
++class SameWavePrepublish(unittest.TestCase):
++    # The SameWaveConflict fixture and helpers, borrowed method by method: subclassing it
++    # would collect and run its own cases again here.
++    setUp = swc.SameWaveConflict.setUp
++    _on_base = swc.SameWaveConflict._on_base
++    _plan = swc.SameWaveConflict._plan
++    _patch = swc.SameWaveConflict._patch
++
++    # -- stubs -----------------------------------------------------------------------------
++
++    def _gh_stub(self, args, *a, **kw):
++        """Any ``gh`` call is recorded and answered: ``gh pr create`` with a PR url naming
++        the branch, ``gh pr view`` OPEN with that branch's tip on origin as its head (no PR
++        here ever merges); everything else runs for real — what a call does not capture
++        (publish's git steps) goes to /dev/null, not the test log."""
++        if not (isinstance(args, list) and args[:1] == ["gh"]):
++            if not {"capture_output", "stdout", "stderr"} & kw.keys():
++                kw = {**kw, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
++            return self._real_run(args, *a, **kw)
++        self.gh_calls.append(list(args))
++        if args[:3] == ["gh", "pr", "create"]:
++            head = args[args.index("--head") + 1]
++            return subprocess.CompletedProcess(
++                args, 0, f"https://example.test/pr/{head.split(':', 1)[-1]}\n", "")
++        branch = str(args[3]).partition("/pr/")[2] if args[:3] == ["gh", "pr", "view"] else ""
++        tip = self.fx._tip(branch) if branch and self.fx._has(branch) else ""
++        return subprocess.CompletedProcess(
++            args, 0, json.dumps({"state": "OPEN", "headRefOid": tip}), "")
++
++    def _drive_wave(self, cfg, wave: list[Path], **_kw) -> int:
++        """Build and accept each bundle: its ``patch.diff`` and both publish texts."""
++        for d in wave:
++            iid = d.name.removeprefix("issue_")
++            self.built.append(iid)
++            (d / "patch.diff").write_text(self._patch(self.changes[iid]), encoding="utf-8")
++            (d / publish.COMMIT_MSG).write_text(f"Fix {iid}\n\nRefs #{iid}\n",
++                                                encoding="utf-8")
++            (d / publish.PR_BODY).write_text(f"**User impact:** fixes {iid}.\n\nRefs #{iid}\n",
++                                             encoding="utf-8")
++            sb._accept(d)
++        return 1
++
++    def _draft_texts(self, cfg, d: Path, **_kw) -> bool:
++        """Drafting and T4: they pass, except for an id in ``t4_fails``."""
++        return d.name.removeprefix("issue_") not in self.t4_fails
++
++    def _run(self, ids: list[str], drive: list[str] | None = None) -> None:
++        """One stack-mode run asked for ``ids``, driving ``drive`` (all of them by default:
++        a re-issue drives only the ids it does not skip as finished); publish is real. The
++        first ``fetch_fails`` calls of ``integrate._fetch`` fail, the rest run for real."""
++        self.built: list[str] = []
++        self._err, out = io.StringIO(), io.StringIO()
++        self.holds: dict[str, str] = {}
++        real_fetch = integrate._fetch
++
++        def fetch(*a, **kw):
++            if self.fetch_fails:
++                self.fetch_fails -= 1
++                raise integrate.IntegrationError(
++                    "could not fetch origin in the test's checkout (failure injected by the "
++                    "test) — the fold cannot see the branches it merges",
++                    cause="could not fetch origin (failure injected by the test)")
++            return real_fetch(*a, **kw)
++
++        with ExitStack() as stack:
++            stack.enter_context(mock.patch.object(subprocess, "run", self._gh_stub))
++            stack.enter_context(mock.patch.object(integrate, "_fetch", fetch))
++            stack.enter_context(mock.patch.object(flow, "_drive_wave", self._drive_wave))
++            stack.enter_context(mock.patch.object(publish, "draft_texts", self._draft_texts))
++            stack.enter_context(redirect_stdout(out))
++            stack.enter_context(redirect_stderr(self._err))
++            self.results = flow._drive_and_act(
++                self.cfg, [self.cfg.bundle(i) for i in (ids if drive is None else drive)],
++                do_publish=True, do_act=False, by="T", today=TODAY, batch=ids,
++                holds=self.holds)
++        self.err = self._err.getvalue()
++        self.rc = cli._results_rc(self.results, holds=self.holds)
++        self.assertNotIn("Traceback", self.err)
++
++    def _publish_by_hand(self, iid: str) -> None:
++        """``pdca publish <iid>``, run by hand between two runs: the production publish,
++        drafting and T4 included (no T4 gate is configured here), its PR opened."""
++        err = io.StringIO()
++        with mock.patch.object(subprocess, "run", self._gh_stub), \
++                redirect_stdout(io.StringIO()), redirect_stderr(err):
++            rc = publish.publish(self.cfg, iid, by="T", today=TODAY)
++        self.assertEqual(rc, 0, err.getvalue())
++
++    # -- helpers ---------------------------------------------------------------------------
++
++    t4_fails: frozenset[str] = frozenset()
++    fetch_fails = 0
++
++    def _branch(self, iid: str) -> str:
++        """The PR branch publish pushes for ``issue_<iid>``."""
++        d = self.cfg.bundle(iid)
++        return publish._branch_name(self.cfg, d, publish._resolve_target(d)[2])
++
++    def _pr_created(self, iid: str) -> bool:
++        """``gh pr create`` was called for ``issue_<iid>``'s branch."""
++        return any(c[:3] == ["gh", "pr", "create"]
++                   and c[c.index("--head") + 1].endswith(":" + self._branch(iid))
++                   for c in self.gh_calls)
++
++    def _published(self, iid: str) -> None:
++        """``issue_<iid>``'s branch is on origin and its PR was opened."""
++        self.assertTrue(self.fx._has(self._branch(iid)), (iid, self.err))
++        self.assertTrue(self._pr_created(iid), (iid, self.gh_calls))
++
++    def _not_published(self, iid: str) -> None:
++        """No branch of ``issue_<iid>`` reached origin and no PR was opened for it."""
++        self.assertFalse(self.fx._has(self._branch(iid)), (iid, self.err))
++        self.assertFalse(self._pr_created(iid), (iid, self.gh_calls))
++
++    def _held_lines(self, iid: str) -> list[str]:
++        """The stderr lines saying ``issue_<iid>`` was held for a conflict."""
++        return [x for x in self.err.splitlines()
++                if x.startswith(f"flow: issue_{iid} held out of the integration fold")]
++
++    def _lines(self, start: str) -> list[str]:
++        """The stderr lines of the last run that start with ``start``."""
++        return [x for x in self.err.splitlines() if x.startswith(start)]
++
++    def _refuse_pushes(self, branch: str) -> None:
++        """Origin refuses every push to ``branch`` (a ``pre-receive`` hook)."""
++        hook = self.fx.origin / "hooks" / "pre-receive"
++        hook.write_text("#!/bin/sh\nwhile read old new ref; do\n"
++                        f'  [ "$ref" = "refs/heads/{branch}" ] && '
++                        '{ echo "refused by the test" >&2; exit 1; }\n'
++                        "done\nexit 0\n", encoding="utf-8")
++        hook.chmod(0o755)
++
++    def _pair(self, ten: dict[str, str], eleven: dict[str, str]) -> list[str]:
++        """``10`` and ``11`` (``ten`` / ``eleven``: their files) and ``12`` (a file of its
++        own) in wave 0, with no ``Conflicts with`` between them; ``20`` depends on ``12``
++        alone, so it is wave 1 and the fold runs after wave 0. Returns the ids."""
++        self._plan("10", ten)
++        self._plan("11", eleven)
++        self._plan("12", {"twelve.txt": "twelve\n"})
++        self._plan("20", {"twenty.txt": "twenty\n"}, "12")
++        return ["10", "11", "12", "20"]
++
++    def _held_11_with_20_on_it(self) -> list[str]:
++        """Run 1: 10 and 11 change the same line of ``shared.txt`` in wave 0, beside 12;
++        20 depends on 11, so wave 1 waits on it. 11 is held before it is published, and 20
++        is never built. Returns the ids."""
++        self._on_base({"shared.txt": "x\n"})
++        self._plan("10", {"shared.txt": "ten\n"})
++        self._plan("11", {"shared.txt": "eleven\n"})
++        self._plan("12", {"twelve.txt": "twelve\n"})
++        self._plan("20", {"twenty.txt": "twenty\n"}, "11")
++        ids = ["10", "11", "12", "20"]
++        self._run(ids)
++        self._not_published("11")
++        self.assertEqual(self.results["20"], state.PLANNED, self.err)
++        end = self._lines("flow: issue_11 was held out of this run's integration line")
++        self.assertEqual(len(end), 1, self.err)
++        self.assertIn(STEP_11, end[0])
++        return ids
++
++    def _not_carried(self, iid: str) -> str:
++        """The ONE stderr line of the last run saying finished ``issue_<iid>`` is not
++        carried."""
++        said = [x for x in self.err.splitlines()
++                if f"issue_{iid} (finished in an earlier run) is not carried" in x]
++        self.assertEqual(len(said), 1, self.err)
++        return said[0]
++
++    # -- (a) a same-wave conflict holds the later bundle BEFORE it is published -------------
++
++    def test_a_same_wave_conflict_is_held_before_it_is_published(self):
++        self._on_base({"shared.txt": "x\n"})
++        ids = self._pair({"shared.txt": "ten\n"}, {"shared.txt": "eleven\n"})
++        self._run(ids)
++
++        self._published("10")
++        self._not_published("11")
++        self._published("12")
++        self.assertEqual(self.holds, {"11": "conflict"}, self.err)
++        # Named with its partner and the file, and the step at the end of the run.
++        held = self._held_lines("11")
++        self.assertEqual(len(held), 1, self.err)
++        self.assertIn("conflicts with issue_10's, ahead of it in the same wave 0", held[0])
++        self.assertIn("shared.txt", held[0])
++        self.assertIn("no branch pushed, no PR opened", held[0])
++        end = self._lines("flow: issue_11 was held out of this run's integration line")
++        self.assertEqual(len(end), 1, self.err)
++        self.assertIn("`Conflicts with: 10`", end[0])
++        self.assertIn("rebuild issue_11 on a base that holds issue_10", end[0])
++        self.assertNotIn("issue_11 pushed no branch", self.err)    # a conflict hold only
++        line = integrate.integration_branch(self.cfg, "main", ids)   # 10's change, not 11's
++        self.assertEqual(self.fx._show(self.fx._tip(line), "shared.txt"), "ten\n")
++        # A later bundle that depends on neither still builds, and publishes.
++        self.assertIn("20", self.built)
++        self.assertEqual(self.results["20"], state.COMPLETE, self.err)
++        self._published("20")
++        self.assertEqual(self.rc, 3, self.err)
++
++    def test_a_same_wave_conflict_in_a_later_wave_is_held_before_it_is_published(self):
++        # 20 and 21 both depend on 10, so wave 1 builds each on a base of its own holding 10
++        # (#727), and publish cuts each branch from that base's tip — so does the trial; 30
++        # depends on 20, so a fold follows wave 1. 20 and 21 change the same line: 21 is
++        # held before it is published, as in wave 0, and 30 is built.
++        self._on_base({"shared.txt": "x\n"})
++        self._plan("10", {"ten.txt": "ten\n"})
++        self._plan("20", {"shared.txt": "twenty\n"}, "10")
++        self._plan("21", {"shared.txt": "twenty-one\n"}, "10")
++        self._plan("30", {"thirty.txt": "thirty\n"}, "20")
++        ids = ["10", "20", "21", "30"]
++        self._run(ids)
++
++        d20 = self.cfg.bundle("20")
++        self.assertEqual(publish.read_stack_base(d20),
++                         integrate.bundle_base_branch(self.cfg, "main", ids, "issue_20"))
++        self.assertEqual(json.loads((d20 / "publish.json").read_text(encoding="utf-8"))
++                         ["cut_from"], publish.read_stack_base_tip(d20))
++        for iid in ("10", "20", "30"):
++            self._published(iid)
++        self._not_published("21")
++        self.assertEqual(self.holds, {"21": "conflict"}, self.err)
++        held = self._held_lines("21")
++        self.assertEqual(len(held), 1, self.err)
++        self.assertIn("conflicts with issue_20's, ahead of it in the same wave 1", held[0])
++        self.assertIn("shared.txt", held[0])
++        self.assertEqual(self.rc, 3, self.err)
++
++    # -- (b) a shared file that merges cleanly holds nothing --------------------------------
++
++    def test_a_shared_file_on_different_lines_publishes_both(self):
++        self._on_base({"shared.txt": NINE})
++        ids = self._pair({"shared.txt": _edit(NINE, l2="ten")},
++                         {"shared.txt": _edit(NINE, l8="eleven")})
++        self._run(ids)
++
++        for iid in ids:
++            self._published(iid)
++        self.assertEqual(self.holds, {}, self.err)
++        self.assertEqual(self._held_lines("10") + self._held_lines("11"), [])
++        self.assertEqual(self.rc, 0, self.err)
++
++    # -- (c) a conflict only with work already on the line is the fold's (#747) ------------
++
++    def test_a_conflict_with_work_on_the_line_still_publishes_and_the_fold_holds_it(self):
++        # 21 depends on 12 only, so it is built on a base without 10 (#727), but 10 is on the
++        # line from wave 0: its clash is with 10, not with 22, its wave's other bundle. The
++        # trial leaves it to the fold, which holds it (#747), as it did before #395.
++        self._on_base({"shared.txt": "x\n"})
++        self._plan("10", {"shared.txt": "ten\n"})
++        self._plan("12", {"twelve.txt": "twelve\n"})
++        self._plan("21", {"shared.txt": "twenty-one\n"}, "12")
++        self._plan("22", {"twenty-two.txt": "twenty-two\n"}, "12")
++        self._plan("30", {"thirty.txt": "thirty\n"}, "22")
++        ids = ["10", "12", "21", "22", "30"]
++        self._run(ids)
++
++        self._published("21")
++        self.assertEqual(self.holds, {"21": "conflict"}, self.err)
++        held = self._held_lines("21")
++        self.assertEqual(len(held), 1, self.err)
++        self.assertIn("issue_10's, already on the line from an earlier wave", held[0])
++        self.assertNotIn("Found before publishing", held[0])
++        for iid in ("10", "12", "22", "30"):
++            self._published(iid)
++        self.assertNotIn("STOPPING", self.err)
++        self.assertEqual(self.rc, 3, self.err)
++
++    # -- (d) only bundles whose texts passed draft + T4 are tried --------------------------
++
++    def test_a_partner_whose_texts_failed_t4_holds_nothing(self):
++        self._on_base({"shared.txt": "x\n"})
++        ids = self._pair({"shared.txt": "ten\n"}, {"shared.txt": "eleven\n"})
++        self.t4_fails = frozenset({"10"})
++        self._run(ids)
++
++        self._not_published("10")
++        self._published("11")
++        self.assertEqual(self.holds, {"10": "unpushed"}, self.err)
++        self.assertEqual(self._held_lines("11"), [])
++
++    # -- (e) a hold stands when its partner's push then fails -------------------------------
++
++    def test_a_hold_stands_when_the_partners_push_fails(self):
++        self._on_base({"shared.txt": "x\n"})
++        ids = self._pair({"shared.txt": "ten\n"}, {"shared.txt": "eleven\n"})
++        self._refuse_pushes(self._branch("10"))
++        self._run(ids)
++
++        self.assertFalse(self.fx._has(self._branch("10")), self.err)   # the push failed
++        self._not_published("11")
++        self.assertEqual(self.holds, {"10": "unpushed", "11": "conflict"}, self.err)
++        held = self._held_lines("11")
++        self.assertEqual(len(held), 1, self.err)
++        self.assertIn("conflicts with issue_10's", held[0])
++        self.assertNotIn("issue_11 pushed no branch", self.err)
++        self.assertIn("issue_10 pushed no branch", self.err)
++        self._published("12")
++        self._published("20")
++
++    # -- (f) the last wave is unchanged -----------------------------------------------------
++
++    def test_a_same_wave_conflict_in_the_last_wave_publishes_both(self):
++        # 20 and 21 are wave 1, the run's last: no fold runs after it, so no trial either.
++        self._on_base({"shared.txt": "x\n"})
++        self._plan("12", {"twelve.txt": "twelve\n"})
++        self._plan("20", {"shared.txt": "twenty\n"}, "12")
++        self._plan("21", {"shared.txt": "twenty-one\n"}, "12")
++        ids = ["12", "20", "21"]
++        self._run(ids)
++
++        for iid in ids:
++            self._published(iid)
++        self.assertEqual(self.holds, {}, self.err)
++        self.assertEqual(self._held_lines("21"), [])
++        self.assertEqual(self.rc, 0, self.err)
++
++    def test_a_same_wave_conflict_in_a_one_wave_run_publishes_both(self):
++        self._on_base({"shared.txt": "x\n"})
++        self._plan("10", {"shared.txt": "ten\n"})
++        self._plan("11", {"shared.txt": "eleven\n"})
++        self._run(["10", "11"])
++
++        self._published("10")
++        self._published("11")
++        self.assertEqual(self.holds, {}, self.err)
++        self.assertEqual(self._held_lines("11"), [])
++        self.assertEqual(self.rc, 0, self.err)
++
++    # -- a trial that fails is tried again; one that cannot run publishes only the first ---
++
++    def test_a_trial_whose_fetch_fails_once_tries_again_and_still_holds(self):
++        # The run's first fetch — the trial's — fails, as a fetch racing another git
++        # process in the same checkout can (#695). The trial tries again and gets past it,
++        # so 11 is still held before it is published. Every later fetch runs for real, the
++        # fold's included.
++        self._on_base({"shared.txt": "x\n"})
++        ids = self._pair({"shared.txt": "ten\n"}, {"shared.txt": "eleven\n"})
++        self.fetch_fails = 1
++        self._run(ids)
++
++        self._published("10")
++        self._not_published("11")
++        self._published("12")
++        self.assertEqual(self.fetch_fails, 0)        # the failure was injected
++        self.assertEqual(self.holds, {"11": "conflict"}, self.err)
++        held = self._held_lines("11")
++        self.assertEqual(len(held), 1, self.err)
++        self.assertIn("conflicts with issue_10's", held[0])
++        self.assertNotIn("STOPPING", self.err)
++        self.assertIn("20", self.built)
++        self._published("20")
++        self.assertEqual(self.rc, 3, self.err)
++
++    def test_a_trial_that_cannot_run_publishes_only_the_first_bundle_of_the_wave(self):
++        # Both of the trial's fetches fail; the fold's, after the wave publishes, does not.
++        # The run cannot tell whether 11 conflicts with 10, so it publishes 10 alone — no
++        # sibling can hold the first of a wave — and holds 11 as unpushed (no branch, no
++        # PR), naming what failed. The fold then folds 10, and 20, built on it, runs.
++        self._on_base({"shared.txt": "x\n"})
++        self._plan("10", {"shared.txt": "ten\n"})
++        self._plan("11", {"shared.txt": "eleven\n"})
++        self._plan("20", {"twenty.txt": "twenty\n"}, "10")
++        ids = ["10", "11", "20"]
++        self.fetch_fails = 2
++        self._run(ids)
++
++        self._published("10")
++        self._not_published("11")
++        self.assertEqual(self.fetch_fails, 0)        # both failures were injected
++        self.assertEqual(self.holds, {"11": "unpushed"}, self.err)
++        why = self._lines("flow: issue_11 is not published this run")
++        self.assertEqual(len(why), 1, self.err)
++        self.assertIn("could not be tried against issue_10's, ahead of it in wave 0", why[0])
++        self.assertIn("failure injected by the test", why[0])
++        self.assertIn("`pdca publish 11`", why[0])
++        self.assertNotIn("issue_11 pushed no branch", self.err)    # named once, not twice
++        self.assertEqual(self._held_lines("11"), [])               # no conflict was found
++        self.assertNotIn("STOPPING", self.err)
++        self.assertIn("20", self.built)
++        self._published("20")
++        self.assertEqual(self.rc, 3, self.err)
++
++    # -- a re-issue after a trial hold: the partner is named, and no PR is asked for ------
++
++    def test_a_reissue_after_a_trial_hold_names_the_partner_and_opens_no_pr(self):
++        # Re-issued, the run skips the finished ids and its carry judges them for 20. 11
++        # has no PR, and asking for one (`pdca publish 11`) would open the PR that
++        # conflicts with 10's: it is named with 10, the file and run 1's step instead.
++        ids = self._held_11_with_20_on_it()
++        self._run(ids, drive=["20"])
++
++        said = self._not_carried("11")
++        self.assertIn("an earlier run held it before publishing it, as its change conflicts "
++                      "with issue_10's, of its own wave (shared.txt), so it has no PR", said)
++        self.assertIn(f"proposed, for you to confirm: {STEP_11}, then re-issue", said)
++        self.assertIn("holding issue_20 this run", said)
++        for wrong in ("get issue_11's PR open", "pdca publish 11", "issue_12"):
++            self.assertNotIn(wrong, said)
++        self._not_published("11")             # neither run pushed it or opened its PR
++        self.assertNotIn("20", self.built)
++        self.assertEqual(self.results["20"], state.PLANNED, self.err)
++        carried = self._lines("flow: carried ")
++        self.assertEqual(len(carried), 1, self.err)
++        self.assertIn("issue_10, issue_12 (finished", carried[0])
++
++    def test_a_trial_hold_published_by_hand_is_judged_by_its_pr(self):
++        # After run 1, 11 is published by hand anyway. Its branch is pushed, so the hold no
++        # longer stands: the re-issue's carry judges its PR as for any finished id, and its
++        # fold finds the conflict with 10 (#694) — no word of a hold before publishing.
++        ids = self._held_11_with_20_on_it()
++        self._publish_by_hand("11")
++        self._published("11")
++        self._run(ids, drive=["20"])
++
++        said = self._not_carried("11")
++        self.assertIn(f"its branch origin/{self._branch('11')} does not merge cleanly onto the "
++                      f"line — its change conflicts with issue_10's (shared.txt), finished "
++                      f"in this batch", said)
++        self.assertIn(f"proposed, for you to confirm: {STEP_11}, then re-issue", said)
++        self.assertNotIn("before publishing", said)
++        self.assertEqual(self.results["20"], state.PLANNED, self.err)
++
++
++if __name__ == "__main__":
++    unittest.main()

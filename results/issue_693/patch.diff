@@ -1,0 +1,615 @@
+diff --git a/docs/07-crosscutting.md b/docs/07-crosscutting.md
+index 09e50da..e9d08aa 100644
+--- a/docs/07-crosscutting.md
++++ b/docs/07-crosscutting.md
+@@ -708,6 +708,19 @@ wave builds on, via `[driver].wave_mode`:
+   so does one that conflicts only with a newer base the fold merged in during
+   the wave (a PR of the wave merged and its branch was deleted meanwhile).
+ 
++  A held bundle is still COMPLETE, so the results `pdca flow` prints list it as
++  COMPLETE. The exit code tells the two runs apart: a run in which every bundle
++  finished, but a fold held one or more of them out of the line for either
++  reason above (it pushed no branch, or it conflicts with a bundle of its wave),
++  exits **3**, not 0. That holds with one id too (a run over a split parent
++  folds between the waves of the children it adopts), where a bundle stopped
++  for sign-off still counts as finished. A bundle that did not finish still
++  exits 1, which wins over 3 (a held bundle's dependent is left unbuilt, so a
++  hold with a dependent in the run exits 1). So 0 means every bundle finished
++  and none was held out of a fold the run performed. An accepted bundle of the
++  last wave that pushed no branch is not covered: no fold runs after it, so the
++  run holds nothing.
++
+   To recover a run that stopped part-way (an integrity stop, the pass budget, a
+   crash, Ctrl-C), re-issue the same `pdca flow <ids>`. The ids the earlier run
+   finished are skipped, and if a bundle the new run drives names one of them in
+diff --git a/template/src/pdca_harness/cli.py b/template/src/pdca_harness/cli.py
+index 054f515..a605215 100644
+--- a/template/src/pdca_harness/cli.py
++++ b/template/src/pdca_harness/cli.py
+@@ -16,7 +16,7 @@ import shutil
+ import subprocess
+ import sys
+ import time
+-from collections.abc import Callable
++from collections.abc import Callable, Mapping
+ from pathlib import Path
+ 
+ from . import (act, brief, cleanup, doctor, drift, drive_claim, driver, flow, gates, leaves,
+@@ -167,7 +167,14 @@ def main(argv: list[str] | None = None) -> int:
+     # sequential cycle, several ids fan out across lanes with a cheap-first sign-off
+     # queue. Unbriefed ids are auto-planned (one shared Plan session); --from-csv with
+     # no ids plans a batch the planner picks from the export. --rehearse (#87) dry-runs.
+-    p_flow = sub.add_parser("flow", help="run the cycle for one or more issues (Plan→Do→Check→sign-off→publish→Act)")
++    p_flow = sub.add_parser(
++        "flow", help="run the cycle for one or more issues (Plan→Do→Check→sign-off→publish→Act)",
++        epilog="exit status: 0 every bundle finished (with one id, a stop for sign-off counts "
++               "too); 1 a bundle did not finish, or the run could not start; 2 bad input (a "
++               "bad pdca.toml, no ids, an unschedulable dependency graph); 3 every bundle "
++               "finished, but a fold held an accepted bundle out of the run's integration "
++               "line (it pushed no branch, or it conflicts with a same-wave bundle), so that "
++               "work is on no line of the run (#693).")
+     p_flow.add_argument("issue_ids", nargs="*", help="issue ids; 1 → single cycle, N → batch; 0 + --from-csv → plan a batch from the export")
+     p_flow.add_argument("--from-csv", help="tracker export to seed the interactive Plan of unbriefed ids")
+     p_flow.add_argument("--from-briefs", type=Path, help="init any missing bundle from DIR/<id>.md before driving")
+@@ -628,6 +635,9 @@ def _flow_claimed(cfg: Config, args: argparse.Namespace, claims: drive_claim.Run
+             shutil.copyfile(src, d / "brief.md")
+ 
+     do_publish, do_act = not args.no_publish, not args.no_act
++    # The bundles a fold of this run held out of its line (#693), filled by the drive: they
++    # read COMPLETE in the results map, so the exit code needs this beside it.
++    holds: dict[str, str] = {}
+ 
+     if not ids:  # batch the planner picks from the export
+         if not args.from_csv:
+@@ -637,7 +647,7 @@ def _flow_claimed(cfg: Config, args: argparse.Namespace, claims: drive_claim.Run
+         try:
+             return _report_batch(flow.flow_batch(
+                 cfg, csv=args.from_csv, do_publish=do_publish, do_act=do_act, by=args.by,
+-                claims=claims))
++                claims=claims, holds=holds), holds)
+         except flow.PreflightError as exc:
+             print(f"flow: {exc}", file=sys.stderr)
+             return 1
+@@ -654,7 +664,7 @@ def _flow_claimed(cfg: Config, args: argparse.Namespace, claims: drive_claim.Run
+     try:
+         results = flow.flow_ids(cfg, ids, plan_missing=True, csv=args.from_csv,
+                                 do_publish=do_publish, do_act=do_act, by=args.by,
+-                                claims=claims)
++                                claims=claims, holds=holds)
+     except flow.PreflightError as exc:
+         print(f"flow: {exc}", file=sys.stderr)
+         return 1
+@@ -668,7 +678,8 @@ def _flow_claimed(cfg: Config, args: argparse.Namespace, claims: drive_claim.Run
+ 
+     # Two PRESENTATIONS of that one map — never two drive paths, and never a second source
+     # of truth: both read only `results`, so neither can report what the other cannot see.
+-    return _report_single(cfg, ids[0], results) if len(ids) == 1 else _report_batch(results)
++    return (_report_single(cfg, ids[0], results, holds) if len(ids) == 1
++            else _report_batch(results, holds))
+ 
+ 
+ #: States a flow run counts as a SUCCESSFUL terminal: finished, or settled in the tracker
+@@ -676,18 +687,36 @@ def _flow_claimed(cfg: Config, args: argparse.Namespace, claims: drive_claim.Run
+ _FLOW_OK = (state.COMPLETE, state.RESOLVED)
+ 
+ 
+-def _results_rc(results: dict[str, str], ok: tuple[str, ...] = _FLOW_OK) -> int:
+-    """The ONE exit-code rule over a flow results map (issue #468): 0 iff every bundle in it
+-    reached a successful terminal. An EMPTY map — nothing was asked for, or nothing driven —
+-    is 0: a no-op is not a failure. (Only ``flow_batch``, which is handed no ids, can produce
+-    one: :func:`flow.flow_ids` answers for every id it is given.)
++#: Exit code of a flow run that finished every bundle but held one out of its line (#693).
++_RC_HELD = 3
++
++
++def _results_rc(results: dict[str, str], ok: tuple[str, ...] = _FLOW_OK,
++                holds: Mapping[str, str] | None = None) -> int:
++    """The ONE exit-code rule over a flow results map (issue #468), in precedence order:
++
++    - **1** — a bundle in the map did not reach a successful terminal. This wins over 3.
++    - **3** — every bundle did, but ``holds`` is not empty (#693): a fold of this run held
++      an accepted bundle out of the integration line — it pushed no branch (#593,
++      ``"unpushed"``) or its branch conflicts with a same-wave bundle merged before it
++      (#674, ``"conflict"``). Such a bundle is COMPLETE in the map, so the map alone read
++      it as success while its work is on no line of the run; 3 lets a script or CI job
++      tell that run from a clean one without parsing stderr. ``holds`` is the collector
++      ``_flow`` passes to :func:`flow.flow_ids` / :func:`flow.flow_batch`.
++    - **0** — every bundle reached a successful terminal and nothing was held.
++
++    An EMPTY map — nothing was asked for, or nothing driven — is 0: a no-op is not a
++    failure. (Only ``flow_batch``, which is handed no ids, can produce one:
++    :func:`flow.flow_ids` answers for every id it is given.)
+ 
+     ``ok`` carries the single documented difference between the shapes, in one place instead
+     of as an emergent property of two drive paths: a SINGLE-id run adds AWAITING_SIGNOFF,
+     because stopping for the human who just typed the command is the intended end of that
+     run, not a failure. A multi-id set keeps the batch rule (rc 0 iff all COMPLETE/RESOLVED).
+     """
+-    return 0 if all(s in ok for s in results.values()) else 1
++    if not all(s in ok for s in results.values()):
++        return 1
++    return _RC_HELD if holds else 0
+ 
+ 
+ def _report_entry(cfg: Config, iid: str, st: str) -> None:
+@@ -705,7 +734,8 @@ def _report_entry(cfg: Config, iid: str, st: str) -> None:
+             print(f"    {it}")
+ 
+ 
+-def _report_single(cfg: Config, iid: str, results: dict[str, str]) -> int:
++def _report_single(cfg: Config, iid: str, results: dict[str, str],
++                   holds: Mapping[str, str] | None = None) -> int:
+     """The single-id presentation of the shared results map (issue #468).
+ 
+     Preserved from the pre-#468 single-id route, now DERIVED from the map the batch shape
+@@ -738,15 +768,15 @@ def _report_single(cfg: Config, iid: str, results: dict[str, str]) -> int:
+     for other in sorted(results):
+         if other != iid:
+             _report_entry(cfg, other, results[other])
+-    return _results_rc(results, ok=(*_FLOW_OK, state.AWAITING_SIGNOFF))
++    return _results_rc(results, ok=(*_FLOW_OK, state.AWAITING_SIGNOFF), holds=holds)
+ 
+ 
+-def _report_batch(results: dict[str, str]) -> int:
++def _report_batch(results: dict[str, str], holds: Mapping[str, str] | None = None) -> int:
+     """Print a batch result map and return a process code — :func:`_results_rc`'s rule
+     (0 iff every bundle reached a SUCCESSFUL terminal — COMPLETE, or RESOLVED (#302 review
+     round 11): a tracker item settled outside the cycle is a successful no-op, and
+     automation must not read it as a failed flow), which the single-id shape derives its
+-    own exit code from too (issue #468)."""
++    own exit code from too (issue #468); 3 when it also held a bundle (``holds``, #693)."""
+     if not results:
+         print("flow: nothing to drive — no in-flight briefs among the ids.", file=sys.stderr)
+         return 0
+@@ -756,7 +786,7 @@ def _report_batch(results: dict[str, str]) -> int:
+     resolved = sum(1 for s in results.values() if s == state.RESOLVED)
+     tail = f" ({resolved} resolved in the tracker)" if resolved else ""
+     print(f"flow: {done}/{len(results)} complete{tail}")
+-    return _results_rc(results)
++    return _results_rc(results, holds=holds)
+ 
+ 
+ def _prog() -> str:
+diff --git a/template/src/pdca_harness/flow.py b/template/src/pdca_harness/flow.py
+index 7a2abc0..aa08e06 100644
+--- a/template/src/pdca_harness/flow.py
++++ b/template/src/pdca_harness/flow.py
+@@ -2225,6 +2225,7 @@ def _drive_and_act(
+     adopt_seeds: list[Path] | None = None,
+     claims: drive_claim.Run | None = None,
+     batch: Collection[str] | None = None,
++    holds: dict[str, str] | None = None,
+ ) -> dict[str, str]:
+     """Drive a set of in-flight bundles through the full cycle to Act, in waves.
+ 
+@@ -2273,6 +2274,13 @@ def _drive_and_act(
+     finished bundles on that line when a bundle it drives depends on one, or holds that
+     bundle, loudly (:func:`_carry_finished`, #646). ``None`` — a library call — scopes by
+     the drive set as passed.
++
++    ``holds`` (#693) is the caller's collector for the accepted bundles a fold of this run
++    held out of the integration line: filled at the end of the run with ``{id: reason}``,
++    ``"unpushed"`` for one that pushed no branch (#593) and ``"conflict"`` for one whose
++    branch conflicts with a same-wave bundle merged before it (#674). Such a bundle is
++    COMPLETE in the returned map, which therefore cannot say it was held; ``cli._flow``
++    reads this to exit 3 instead of 0 (``cli._results_rc``). ``None`` — nobody listens.
+     """
+     bundles = list(bundles)          # the drive set — split adoption extends it (#469)
+     allowance = cfg.max_passes if max_passes is None else max_passes
+@@ -2570,6 +2578,11 @@ def _drive_and_act(
+     _warn_stranded_split_children(cfg, bundles, adopt_seeds)
+     # Each bundle a fold held for a same-wave conflict, again, with the step to take (#674).
+     _report_conflict_holds(held_conflict)
++    # The run's holds, for the caller's exit code (#693): a held bundle reads COMPLETE above.
++    # Keyed exactly as `results` is, so each held id is a key of the map returned beside it.
++    if holds is not None:
++        holds.update({n.replace("issue_", ""): "unpushed" for n in sorted(held_unpushed)})
++        holds.update({n.replace("issue_", ""): "conflict" for n in held_conflict})
+     return results
+ 
+ 
+@@ -2586,6 +2599,7 @@ def flow_batch(
+     today: str | None = None,
+     max_passes: int | None = None,
+     claims: drive_claim.Run | None = None,
++    holds: dict[str, str] | None = None,
+ ) -> dict[str, str]:
+     """Plan many → drive every in-flight bundle to sign-off → publish → Act once. **Resumable.**
+ 
+@@ -2610,6 +2624,8 @@ def flow_batch(
+     claimed yet, since the sweep pulls in EVERY in-flight bundle, that includes whatever it
+     just split. Best-effort and never gates the batch: a marker this cannot record still
+     leaves the ordinary per-bundle claims to refuse or exclude correctly, exactly as before.
++
++    ``holds`` is handed to :func:`_drive_and_act` unchanged (#693).
+     """
+     today = today or datetime.date.today().isoformat()
+     marker = drive_claim.sweep_marker(cfg) if claims is not None else None
+@@ -2670,7 +2686,7 @@ def flow_batch(
+             return {}
+         return _drive_and_act(cfg, bundles, do_publish=do_publish, do_act=do_act, by=by,
+                               today=today, max_passes=max_passes, claims=claims,
+-                              batch=swept)
++                              batch=swept, holds=holds)
+     finally:
+         # The sweep is fully decided by every return above (and by a raise, which leaves
+         # nothing further for `cli._split` to promise about either) — released here so the
+@@ -2709,6 +2725,7 @@ def flow_ids(
+     today: str | None = None,
+     max_passes: int | None = None,
+     claims: drive_claim.Run | None = None,
++    holds: dict[str, str] | None = None,
+ ) -> dict[str, str]:
+     """Drive specific bundles by id through the FULL cycle to Act.
+ 
+@@ -2740,6 +2757,9 @@ def flow_ids(
+     split parent handed on as an adoption SEED, which is held until its adoption pre-pass
+     has read it (:func:`_drive_and_act`). The rest reach adoption through
+     :func:`_drive_and_act`.
++
++    ``holds`` is handed to :func:`_drive_and_act` unchanged (#693); an id skipped here is
++    never held.
+     """
+     today = today or datetime.date.today().isoformat()
+ 
+@@ -2824,7 +2844,7 @@ def flow_ids(
+     return skipped | _drive_and_act(cfg, bundles, adopt_seeds=seeds, do_publish=do_publish,
+                                     do_act=do_act, by=by, today=today,
+                                     max_passes=max_passes, claims=claims,
+-                                    batch=list(ids))
++                                    batch=list(ids), holds=holds)
+ 
+ 
+ def _bundle_dirs(cfg: Config) -> set[str]:
+diff --git a/template/tests/test_flow_hold_exit_code.py b/template/tests/test_flow_hold_exit_code.py
+new file mode 100644
+index 0000000..3299246
+--- /dev/null
++++ b/template/tests/test_flow_hold_exit_code.py
+@@ -0,0 +1,325 @@
++"""A stack-mode flow run that held a bundle out of its line exits 3, not 0 (#693).
++
++A held bundle IS COMPLETE — built, signed off, published; only the fold left it out — so
++the exit-code rule over the results map (``cli._results_rc``: 0 iff every bundle reached a
++successful terminal) read such a run as clean, and the only signal was stderr. These cases
++drive the WHOLE CLI route, ``cli._flow``, through real folds on the ``StackFoldGit`` fixture
++of tests/test_integrate_stack_bases.py (a bare ``origin`` and a primary checkout), loaded by
++path exactly as tests/test_flow_same_wave_conflict.py does, with that file's stubs: the
++build and sign-off leaves stubbed (``flow._drive_wave`` writes a ``patch.diff`` and
++accepts), ``flow._publish_bundle`` cutting and pushing the PR branch, and ``gh`` answered by
++a stub in front of ``subprocess.run``. The publisher is NOT a stub (a stub turns every fold
++into a dry-run, which holds nothing).
++
++Both CLI shapes are covered, and all three routes ``cli._flow`` takes. The batch shape
++(several ids: ``flow.flow_ids``, then ``cli._report_batch``) by the four cases of the
++issue. ``--from-csv`` with no ids (``flow.flow_batch``, then ``cli._report_batch``) by one
++hold, its Plan session stubbed to brief nothing new. The single-id shape (``flow.flow_ids``,
++then ``cli._report_single``) by a run that names one id and still folds: one id is one
++wave, with no fold after it, unless the run adopts more. ``pdca flow <parent>`` over a split
++parent whose children are still PLANNED (the #473 recovery) is such a run — it drives the
++children in their own waves and folds between them — so the same four bundles, as the
++children of a parent split by the production ``split.accept``, give that shape a real hold:
++with every child accepted, and with the last one waiting for sign-off, which that shape
++counts as success.
++
++The exit code is read ONLY from what ``cli._flow`` returns. Only modules are imported
++(never a symbol the fix adds), so with the production change reverted these cases still
++load and run — and fail on their exit-code assertions.
++    cd template && PYTHONPATH=src python3 -m unittest tests.test_flow_hold_exit_code
++"""
++
++from __future__ import annotations
++
++import dataclasses
++import difflib
++import importlib.util
++import io
++import json
++import shutil
++import subprocess
++import unittest
++from contextlib import ExitStack, redirect_stderr, redirect_stdout
++from pathlib import Path
++from types import SimpleNamespace
++from unittest import mock
++
++from pdca_harness import cli, flow, integrate, leaves, publish, split, state
++
++_SPEC = importlib.util.spec_from_file_location(
++    "stack_bases_fixture", Path(__file__).with_name("test_integrate_stack_bases.py"))
++sb = importlib.util.module_from_spec(_SPEC)
++_SPEC.loader.exec_module(sb)
++
++#: What the run prints on stderr, after the bundle's name, for each hold: the #674 line
++#: (``flow._announce_conflict_holds``, printed at the fold for every bundle it holds) and the
++#: #593 line (the fold step of ``flow._drive_and_act``, for an accepted bundle that pushed no
++#: branch). The hold cases match each after ``issue_11 ``; the no-hold cases check that
++#: neither appears. One constant for both, so a wording change fails the hold cases rather
++#: than leave the no-hold checks passing on a phrase the run no longer prints.
++_CONFLICT_HOLD = "held out of the integration fold"
++_UNPUSHED_HOLD = "pushed no branch this run"
++
++
++class FlowHoldExitCode(unittest.TestCase):
++
++    def setUp(self) -> None:
++        self.fx = sb.StackFoldGit()          # the fixture's real-git setUp/tearDown and helpers
++        self.fx.setUp()
++        self.addCleanup(self.fx.tearDown)
++        self.cfg = self.fx.cfg
++        self.cfg.publisher = dataclasses.replace(self.cfg.publisher, mode="command")
++        self.base: dict[str, str] = {}               # files committed on the base
++        self.changes: dict[str, dict[str, str]] = {}  # id → the files its build changes
++        self.no_push: set[str] = set()               # ids whose publish pushes no branch
++        self.no_signoff: set[str] = set()            # ids left waiting for the human
++        self._real_run = subprocess.run
++
++    # -- fixture ---------------------------------------------------------------------------
++
++    def _on_base(self, files: dict[str, str]) -> None:
++        """Commit ``files`` on origin's ``main`` (the base every bundle targets)."""
++        for name, text in files.items():
++            (self.fx.primary / name).write_text(text, encoding="utf-8")
++        sb._git(self.fx.primary, "add", "--all")
++        sb._git(self.fx.primary, "commit", "-q", "-m", "base files")
++        sb._git(self.fx.primary, "push", "-q", "origin", "main")
++        self.base.update(files)
++
++    def _plan(self, iid: str, files: dict[str, str], depends_on: str = "") -> None:
++        sb._brief(self.cfg.bundle(iid),
++                  extra=f"- **Depends on:** {depends_on}\n" if depends_on else "")
++        self.changes[iid] = files
++
++    def _patch(self, files: dict[str, str]) -> str:
++        """A unified diff of ``files`` against the base (new files included)."""
++        out = []
++        for name, text in files.items():
++            old = self.base.get(name)
++            out.append(f"diff --git a/{name} b/{name}\n"
++                       + ("new file mode 100644\n" if old is None else "")
++                       + "".join(difflib.unified_diff(
++                           (old or "").splitlines(keepends=True),
++                           text.splitlines(keepends=True),
++                           "/dev/null" if old is None else f"a/{name}", f"b/{name}")))
++        return "".join(out)
++
++    # -- stubs -----------------------------------------------------------------------------
++
++    def _gh_stub(self, args, *a, **kw):
++        """Any ``gh`` call is answered OPEN; everything else runs for real."""
++        if not (isinstance(args, list) and args[:1] == ["gh"]):
++            return self._real_run(args, *a, **kw)
++        return subprocess.CompletedProcess(
++            args, 0, json.dumps({"state": "OPEN", "headRefOid": ""}), "")
++
++    def _drive_wave(self, cfg, wave: list[Path], **_kw) -> int:
++        """Build and accept each bundle — except an id in ``no_signoff``, whose Check
++        finishes and which then waits for the human's sign-off (AWAITING_SIGNOFF)."""
++        for d in wave:
++            iid = d.name.removeprefix("issue_")
++            (d / "patch.diff").write_text(self._patch(self.changes[iid]), encoding="utf-8")
++            if iid in self.no_signoff:
++                (d / "check-gates.json").write_text("{}", encoding="utf-8")
++                shutil.copyfile(sb.TEMPLATES / "SUMMARY.md.tpl", d / "SUMMARY.md")
++            else:
++                sb._accept(d)
++        return 1
++
++    def _publish_bundle(self, cfg, d: Path, **_kw) -> bool:
++        """What publish does: cut the PR branch from the recorded line tip (else the line,
++        else the base), push it, record it — except for an id in ``no_push``, whose publish
++        fails before its push (returns False, pushes nothing, records nothing)."""
++        iid = d.name.removeprefix("issue_")
++        if iid in self.no_push:
++            return False
++        tip, line = publish.read_stack_base_tip(d), publish.read_stack_base(d)
++        cut = tip or (f"origin/{line}" if line else "origin/main")
++        brief = (d / "brief.md").read_text(encoding="utf-8")
++        self.fx._publish(iid, self.changes[iid], cut_from=cut)
++        (d / "brief.md").write_text(brief, encoding="utf-8")
++        return True
++
++    def _flow(self, ids: list[str], *, csv: str | None = None) -> int:
++        """One stack-mode ``pdca flow <ids…>`` — or, with no ids, ``pdca flow --from-csv
++        <csv>`` — publishing on, Act off, through ``cli._flow``; returns its exit code. The
++        Plan session briefs nothing: every bundle here is planned by the test."""
++        args = SimpleNamespace(issue_ids=list(ids), from_csv=csv, from_briefs=None,
++                               no_publish=False, no_act=True, by="T", lanes=None)
++        err, out = io.StringIO(), io.StringIO()
++        with ExitStack() as stack:
++            stack.enter_context(mock.patch.object(leaves, "do_plan_batch",
++                                                  lambda *a, **k: None))
++            stack.enter_context(mock.patch.object(subprocess, "run", self._gh_stub))
++            stack.enter_context(mock.patch.object(flow, "_drive_wave", self._drive_wave))
++            stack.enter_context(mock.patch.object(flow, "_publish_bundle",
++                                                  self._publish_bundle))
++            stack.enter_context(mock.patch.object(publish, "draft_texts",
++                                                  lambda *a, **k: True))
++            stack.enter_context(redirect_stdout(out))
++            stack.enter_context(redirect_stderr(err))
++            rc = cli._flow(self.cfg, args)
++        self.err, self.out = err.getvalue(), out.getvalue()
++        self.assertNotIn("Traceback", self.err)
++        self.assertNotIn("STOPPING", self.err)
++        return rc
++
++    def _state(self, iid: str) -> str:
++        return state.state(self.cfg.bundle(iid))
++
++    def _bundles(self, *, conflict: bool) -> list[tuple[str, dict[str, str], str]]:
++        """``10``, ``11``, ``12`` (wave 0) and ``21`` depending on ``12`` (wave 1): each id
++        with the files its build changes and the id it depends on. With ``conflict``,
++        ``10`` and ``11`` change the same line of ``shared.txt`` (on the base) to different
++        text; else ``11`` adds a file of its own."""
++        self._on_base({"shared.txt": "x\n"})
++        return [("10", {"shared.txt": "ten\n"}, ""),
++                ("11", {"shared.txt": "eleven\n"} if conflict
++                 else {"eleven.txt": "eleven\n"}, ""),
++                ("12", {"twelve.txt": "twelve\n"}, ""),
++                ("21", {"twenty-one.txt": "twenty-one\n"}, "12")]
++
++    def _batch(self, *, conflict: bool) -> list[str]:
++        """The bundles of :meth:`_bundles`, planned; returns their ids."""
++        ids = []
++        for iid, files, depends_on in self._bundles(conflict=conflict):
++            self._plan(iid, files, depends_on)
++            ids.append(iid)
++        return ids
++
++    def _split_parent(self, iid: str, *, conflict: bool) -> list[str]:
++        """``iid`` split by the production ``split.accept`` into the bundles of
++        :meth:`_bundles` as its children, then accepted: COMPLETE on a split, its children
++        PLANNED where the split left them. Returns the child ids."""
++        parent = self.cfg.bundle(iid)
++        sb._brief(parent)
++        specs = self._bundles(conflict=conflict)
++        label = {cid: f"child-{n}" for n, (cid, _files, _dep) in enumerate(specs, 1)}
++        proposal = "<!-- pdca:split-proposal v1 -->\n\n"
++        for cid, files, depends_on in specs:
++            proposal += (f"<!-- pdca:child {label[cid]} -->\n"
++                         f"- **Slug:** child-{cid}\n"
++                         f"- **Repo + branch target:** org/repo @ main\n"
++                         + (f"- **Depends on:** {label[depends_on]}\n" if depends_on else "")
++                         + f"<!-- pdca:end {label[cid]} -->\n\n")
++            self.changes[cid] = files
++        (parent / split.PROPOSAL).write_text(proposal, encoding="utf-8")
++        kids = [cid for cid, _files, _dep in specs]
++        split.accept(parent, kids, self.cfg)
++        sb._accept(parent)
++        self.assertEqual(self._state(iid), state.COMPLETE)
++        for cid in kids:
++            self.assertEqual(self._state(cid), state.PLANNED, cid)
++        return kids
++
++    def _ancestor_of_line(self, iid: str, batch: list[str]) -> bool:
++        """``iid``'s branch is on the line of the run asked for ``batch``."""
++        line = integrate.integration_branch(self.cfg, "main", batch)
++        return self.fx._ancestor(self.fx._tip(f"fix/{iid}"), self.fx._tip(line))
++
++    def _assert_held_nothing(self) -> None:
++        """The last run printed no hold line, for any bundle and either reason."""
++        for phrase in (_CONFLICT_HOLD, _UNPUSHED_HOLD):
++            self.assertNotIn(phrase, self.err)
++
++    # -- (1) the #674 hold → 3 -------------------------------------------------------------
++
++    def test_a_run_that_held_a_same_wave_conflict_exits_3(self):
++        ids = self._batch(conflict=True)
++        rc = self._flow(ids)
++        self.assertIn(f"issue_11 {_CONFLICT_HOLD}", self.err)
++        self.assertFalse(self._ancestor_of_line("11", ids))
++        for iid in ids:
++            self.assertEqual(self._state(iid), state.COMPLETE, (iid, self.err))
++        self.assertEqual(rc, 3, self.err)
++
++    # -- (2) the #593 hold → 3 -------------------------------------------------------------
++
++    def test_a_run_that_held_an_unpushed_bundle_exits_3(self):
++        ids = self._batch(conflict=False)
++        self.no_push.add("11")
++        rc = self._flow(ids)
++        self.assertIn(f"issue_11 {_UNPUSHED_HOLD}", self.err)
++        for iid in ids:
++            self.assertEqual(self._state(iid), state.COMPLETE, (iid, self.err))
++        self.assertEqual(rc, 3, self.err)
++
++    # -- (3) no hold → 0 -------------------------------------------------------------------
++
++    def test_a_run_that_held_nothing_exits_0(self):
++        ids = self._batch(conflict=False)
++        rc = self._flow(ids)
++        self._assert_held_nothing()
++        self.assertTrue(self._ancestor_of_line("11", ids))
++        for iid in ids:
++            self.assertEqual(self._state(iid), state.COMPLETE, (iid, self.err))
++        self.assertEqual(rc, 0, self.err)
++
++    # -- (4) a bundle left unfinished wins over a hold → 1 ---------------------------------
++
++    def test_a_held_dependent_left_planned_wins_over_the_hold(self):
++        ids = self._batch(conflict=True)
++        self._plan("20", {"twenty.txt": "twenty\n"}, "11")
++        ids = sorted([*ids, "20"])
++        rc = self._flow(ids)
++        self.assertIn(f"issue_11 {_CONFLICT_HOLD}", self.err)
++        self.assertEqual(self._state("20"), state.PLANNED, self.err)
++        self.assertEqual(rc, 1, self.err)
++
++    # -- `--from-csv` with no ids: the sweep `flow.flow_batch` drives -----------------------
++
++    def test_a_csv_batch_that_held_a_bundle_exits_3(self):
++        ids = self._batch(conflict=True)
++        rc = self._flow([], csv="tracker.csv")
++        self.assertIn(f"issue_11 {_CONFLICT_HOLD}", self.err)
++        self.assertFalse(self._ancestor_of_line("11", ids))   # the sweep is the batch
++        for iid in ids:
++            self.assertEqual(self._state(iid), state.COMPLETE, (iid, self.err))
++            self.assertIn(f"{state.COMPLETE}\t{iid}", self.out.splitlines())
++        self.assertEqual(rc, 3, self.err)
++
++    # -- the single-id shape: `pdca flow 7` over a split parent folds between its children --
++
++    def _single(self, *, conflict: bool) -> int:
++        """``pdca flow 7``, ``7`` a split parent whose children are the four bundles; checks
++        the run drove every child and answered in the single-id shape; returns its exit
++        code."""
++        kids = self._split_parent("7", conflict=conflict)
++        rc = self._flow(["7"])
++        for cid in kids:
++            self.assertEqual(self._state(cid), state.COMPLETE, (cid, self.err))
++        # `_report_single`'s output, not the batch table: the named id's `state<TAB>path`
++        # line first, then one such line per child the run adopted.
++        self.assertEqual(self.out.splitlines(),
++                         [f"{state.COMPLETE}\t{self.cfg.bundle(i)}" for i in ["7", *kids]],
++                         self.err)
++        return rc
++
++    def test_a_single_id_run_that_held_a_bundle_exits_3(self):
++        rc = self._single(conflict=True)
++        self.assertIn(f"issue_11 {_CONFLICT_HOLD}", self.err)
++        self.assertFalse(self._ancestor_of_line("11", ["7"]))
++        self.assertEqual(rc, 3, self.err)
++
++    def test_a_single_id_run_that_held_nothing_exits_0(self):
++        rc = self._single(conflict=False)
++        self._assert_held_nothing()
++        self.assertTrue(self._ancestor_of_line("11", ["7"]))
++        self.assertEqual(rc, 0, self.err)
++
++    def test_a_single_id_run_stopped_for_sign_off_still_exits_3_for_its_hold(self):
++        # The single-id shape keeps its rule that a stop for sign-off is success: 21, of the
++        # last wave, waits for the human, and the hold of 11 still makes the run 3 — not 1,
++        # as the same results would be in the batch shape, and not 0.
++        self.no_signoff.add("21")
++        self._split_parent("7", conflict=True)
++        rc = self._flow(["7"])
++        self.assertEqual(self._state("21"), state.AWAITING_SIGNOFF, self.err)
++        for cid in ("10", "11", "12"):
++            self.assertEqual(self._state(cid), state.COMPLETE, (cid, self.err))
++        self.assertIn(f"issue_11 {_CONFLICT_HOLD}", self.err)
++        self.assertEqual(rc, 3, self.err)
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/template/tests/test_flow_single_driver.py b/template/tests/test_flow_single_driver.py
+index 02ed7c9..43068a7 100644
+--- a/template/tests/test_flow_single_driver.py
++++ b/template/tests/test_flow_single_driver.py
+@@ -803,14 +803,14 @@ class SingleDriver(unittest.TestCase):
+         leaves.do_plan_batch = _quiet_plan
+         real_report, probe = cli._report_batch, {}
+ 
+-        def report(results):
++        def report(results, *rest):
+             # Still inside the run: fix 8's brief and drive it from a SECOND process. A
+             # released claim lets that through; a claim held to the end of the run does not.
+             (self.cfg.bundle("8") / "brief.md").write_text(_brief("slice-8"),
+                                                            encoding="utf-8")
+             probe["rc"], probe["err"] = self._run_child(
+                 "flow", str(self.cfg.root), "-", "8", tag="probe")
+-            return real_report(results)
++            return real_report(results, *rest)
+ 
+         cli._report_batch = report
+ 

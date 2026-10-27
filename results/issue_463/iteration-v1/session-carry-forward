@@ -1,0 +1,4 @@
+Oversized slice (165 KB, 15 files; backstop 125 KB) — split it at Plan rather than rebuild.
+Suggested split: (1) integrate.fold named-destination API + per-bundle base build; (2) flow switches to dependency-scoped bases, incl. docs/glossary/docstrings stating the old rule; (3) failure handling.
+Decide in the re-plan: should a per-bundle base failure (cross-wave undeclared overlap, moved-base clash, fetch failure) hold only that bundle and its dependents instead of stopping the whole run? Fix the error text for a clash with the moved base.
+Carry-forward defects the review reproduced (reviewer-probe.log): a carried finished prerequisite can bring in unrelated ancestry (validate ancestry against the closure); carried heads from the pre-wave carry are not recorded, so the #633 rewrite check is bypassed on per-bundle bases. Both need regression tests.

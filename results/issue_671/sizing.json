@@ -1,0 +1,11 @@
+{
+  "band": "ok",
+  "independent_outcomes": [
+    "pdca cleanup closes a COMPLETE duplicate bundle's open issue with --reason duplicate and a comment naming #N, only once its recorded 'Close when' condition holds, and reports (never closes) when the target or condition is missing, unreadable, or can no longer be met"
+  ],
+  "proposed_seams": [
+    "No seam recommended. The only visible cut is 'Duplicate of' + duplicate reason/comment (case 1 with 'now') vs. the 'Close when' PR/issue condition checks (cases 2-3). It does not hold up: the brief's own rule (case 4) makes a missing 'Close when' report-only, so the first half cannot close anything without at least the 'now' form. Both halves edit the same row of cleanup._plan_bundle (cleanup.py:425-432), share one DuplicateClose test class, and the motivating case (issue_624, close after #652's PR merges) needs the condition. The brief.md.tpl fields, docstring matrix and docs/07 table are supporting edits for the same outcome, not separate ones."
+  ],
+  "confidence": "high",
+  "brief_sha": "434ddc07cd40a575"
+}

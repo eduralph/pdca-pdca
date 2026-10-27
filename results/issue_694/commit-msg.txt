@@ -1,0 +1,25 @@
+flow: name the clashing bundle when a re-issue meets a conflict hold
+
+When two bundles of one batch change the same lines, the run holds one of
+them and, at its end, tells the operator which bundle it clashes with and
+what to do: declare `Conflicts with: <id>` in its brief and rebuild it on a
+base that holds the other (0c263a9f8ef677dd9a4561932a6000e11e09df5d).
+
+Re-issuing the same batch gave different advice for the same bundle. The
+pre-wave carry called the clash "an undeclared cross-wave overlap" and said
+to get the bundle's PR open and re-publish it. The PR was already open, so
+that step changed nothing, and the other bundle was never named.
+
+The carry now works out what the held branch conflicts with, on the line it
+pushes. It tries the branch on the base alone first: a clash there names the
+base and the files and says to update the branch from the base. Otherwise it
+names each finished bundle of the batch whose own change the branch clashes
+with, with the files, and gives the same step as the end of the run, word
+for word. A bundle stacked on another is named only for its own change, not
+for one it carries from below. When no single bundle accounts for the clash,
+the files are named and no bundle is blamed. The other carry advice is
+unchanged, and so is which of two clashing bundles gets carried.
+
+docs/07-crosscutting.md now describes this advice.
+
+Fixes #694

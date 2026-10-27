@@ -1,0 +1,13 @@
+{
+  "band": "watch",
+  "independent_outcomes": [
+    "build_bundle_base builds and pushes a correctly named per-bundle branch holding exactly the fetched base plus the chosen members, behind every existing fold safeguard (criteria 1-5 and 7: exact contents, name, push rule, clean-merge / gone-branch / revert checks, #633 rewritten-head check). It has its own tests, and v4 already reviewed this part as sound.",
+    "The ownership check (criterion 6): refuse a build whose result holds work that is neither the base's nor some member's own work as judged by its recorded cut point, and fail closed when a cut point can't be trusted (cases i-iv). It has its own tests (6a-6h). This is the part four build rounds never got right."
+  ],
+  "proposed_seams": [
+    "Cut between criteria 1-5 (+7) and criterion 6. The first PR adds build_bundle_base with the fold safeguards only. The second adds the ownership check and the fail-closed list. The seam is clean: criterion 6 is a separate check that runs after all members are merged and before the push, it reads different inputs (publish.json, stack-base records, the brief's Stacks on:), and its tests (6a-6h) do not overlap the tests for 1-5. The first PR is safe to ship alone because nothing calls build_bundle_base yet (#724 is the first caller), so a base cannot be silently widened in practice before the second PR lands. The cost: #724 should declare Depends on the second PR, not the first, and the invariant ('refused, never silently widened') only holds once both have merged.",
+    "Why only 'watch' and not 'oversized': the second outcome can't ship without the first (it checks build_bundle_base's result), so this is a two-step sequence rather than two unrelated outcomes. The human also already decided at Plan on 2026-10-17 not to split. This is flagged only because criterion 6 is where all four rounds stalled, and splitting would let 1-5 merge while 6 keeps iterating."
+  ],
+  "confidence": "medium",
+  "brief_sha": "b676fb119f69998f"
+}

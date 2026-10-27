@@ -1,0 +1,12 @@
+{
+  "mode": "stacked-pr",
+  "branch": "fix/727-flow-in-batch-dependency-scoped-bases",
+  "pr_url": "https://github.com/eduralph/pdca-harness/pull/733",
+  "base": "main",
+  "repo": "eduralph/pdca-harness",
+  "by": "Eduard Ralph",
+  "date": "2026-10-15",
+  "id_pending": false,
+  "host_ci_base": "fcae4aaee0233103ea0dac73c66c8811c713850c",
+  "stacks_on": []
+}

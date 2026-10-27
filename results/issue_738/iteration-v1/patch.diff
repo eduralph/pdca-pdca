@@ -1,0 +1,981 @@
+diff --git a/template/src/pdca_harness/cli.py b/template/src/pdca_harness/cli.py
+index 0d6d28a..f6af2c0 100644
+--- a/template/src/pdca_harness/cli.py
++++ b/template/src/pdca_harness/cli.py
+@@ -697,22 +697,30 @@ _RC_HELD = 3
+ #: could not check for that at its end (``flow._report_late_rewrites``).
+ _FAILED_REASONS = frozenset({"rewritten", "unchecked"})
+ 
++#: The ``holds`` reason of a bundle held before it was built, because its own base could not
++#: be built (#738): PLANNED in the results map, and still a hold, not a failure.
++_HELD_UNBUILT = "base"
++
+ 
+ def _results_rc(results: dict[str, str], ok: tuple[str, ...] = _FLOW_OK,
+                 holds: Mapping[str, str] | None = None) -> int:
+     """The ONE exit-code rule over a flow results map (issue #468), in precedence order:
+ 
+-    - **1** — a bundle in the map did not reach a successful terminal; or ``holds`` names a
+-      bundle whose branch a fold of this run carried and that was rewritten after the run's
+-      last fold read it (``"rewritten"``, #695) — the line carries commits no PR holds any
+-      more, though every bundle reached a successful terminal — or that the end-of-run
+-      check could not judge (``"unchecked"``: the line may). This wins over 3.
+-    - **3** — every bundle did, but ``holds`` is not empty (#693): a fold of this run held
+-      an accepted bundle out of the integration line — it pushed no branch (#593,
++    - **1** — a bundle in the map did not reach a successful terminal, other than one
++      ``holds`` names as held unbuilt (below); or ``holds`` names a bundle whose branch a
++      fold of this run carried and that was rewritten after the run's last fold read it
++      (``"rewritten"``, #695) — the line carries commits no PR holds any more, though every
++      bundle reached a successful terminal — or that the end-of-run check could not judge
++      (``"unchecked"``: the line may). This wins over 3.
++    - **3** — every bundle did, but ``holds`` is not empty (#693): the run held a bundle. A
++      fold held an accepted bundle out of the integration line — it pushed no branch (#593,
+       ``"unpushed"``) or its branch conflicts with a same-wave bundle merged before it
+       (#674, ``"conflict"``). Such a bundle is COMPLETE in the map, so the map alone read
+-      it as success while its work is on no line of the run; 3 lets a script or CI job
+-      tell that run from a clean one without parsing stderr. ``holds`` is the collector
++      it as success while its work is on no line of the run. Or a bundle was held before it
++      was built, because its own base could not be built (#738, ``"base"``): it is PLANNED
++      in the map, held with the cause and the fix named, not failed; a bundle that depends
++      on it is not in ``holds`` and still makes the run 1. 3 lets a script or CI job tell
++      that run from a clean one without parsing stderr. ``holds`` is the collector
+       ``_flow`` passes to :func:`flow.flow_ids` / :func:`flow.flow_batch`.
+     - **0** — every bundle reached a successful terminal and nothing was held.
+ 
+@@ -725,7 +733,8 @@ def _results_rc(results: dict[str, str], ok: tuple[str, ...] = _FLOW_OK,
+     because stopping for the human who just typed the command is the intended end of that
+     run, not a failure. A multi-id set keeps the batch rule (rc 0 iff all COMPLETE/RESOLVED).
+     """
+-    if not all(s in ok for s in results.values()):
++    unbuilt = {k for k, why in (holds or {}).items() if why == _HELD_UNBUILT}
++    if not all(s in ok for k, s in results.items() if k not in unbuilt):
+         return 1
+     if holds and any(why in _FAILED_REASONS for why in holds.values()):
+         return 1
+diff --git a/template/src/pdca_harness/flow.py b/template/src/pdca_harness/flow.py
+index 5152d90..7b01c76 100644
+--- a/template/src/pdca_harness/flow.py
++++ b/template/src/pdca_harness/flow.py
+@@ -686,7 +686,8 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
+               conflicts: Mapping[str, Collection[str]] | None = None,
+               conflict_held: Mapping[str, Collection[str]] | None = None,
+               lines: Mapping[tuple[str, str], tuple[str, str | None]] | None = None,
+-              on_line: Collection[str] | None = None
++              on_line: Collection[str] | None = None,
++              unbuilt: Collection[str] = frozenset()
+               ) -> list[Path]:
+     """Drop a wave bundle whose declared prerequisite isn't ready to build on top of.
+ 
+@@ -729,9 +730,14 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
+     out of the line, for a conflict with bundles of its own wave, to those bundles. A bundle
+     tied by a ``Conflicts with`` edge to one of them is held the same way, for the same
+     reason — one stderr line per such bundle, naming the conflict — and waits until that
+-    bundle, rebuilt on a base holding them, has its PR merged. A skipped bundle never
+-    completes, so its own dependents fall out of later waves the same way (the skip
+-    cascades).
++    bundle, rebuilt on a base holding them, has its PR merged. ``unbuilt`` (#738) names each
++    bundle this run held before building it, because its own base could not be built
++    (:func:`_bundle_bases`): it never completes, so a prerequisite edge to it is not ready
++    as above, and a bundle tied to it by a ``Conflicts with`` edge is held the same way as
++    a partner of ``unpushed`` — one stderr line per such bundle, saying a re-run builds it
++    once the cause that bundle's own hold line names is fixed (that bundle is still
++    PLANNED, so the re-run drives it first). A skipped bundle never completes, so its own
++    dependents fall out of later waves the same way (the skip cascades).
+ 
+     ``lines`` maps a target ``(repo, base)`` to the run's line for it — ``(branch, the tip
+     the run recorded)`` — once the run has folded (or carried) that target. ``on_line``
+@@ -760,6 +766,9 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
+         # … or held out for a conflict with a bundle of its own wave (#674): on no line either.
+         clashed = (sorted(set(conflicts.get(d.name, ())) & set(conflict_held))
+                    if conflicts and conflict_held else [])
++        # … or held before it was built, its own base not buildable (#738): never built.
++        unbuilt_partners = (sorted(set(conflicts.get(d.name, ())) & set(unbuilt))
++                            if conflicts and unbuilt else [])
+         bp = d / "brief.md"
+         deps = waves.declared_deps(bp) if bp.exists() else []
+         merged_deps = set(brief.depends_on_merged(bp)) if deps else set()
+@@ -851,7 +860,17 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
+                   f"work; not built on a base missing it. To build it, wait until {p} is "
+                   f"rebuilt on a base that holds {', '.join(conflict_held[p])} and its PR "
+                   f"merges{into}, then re-run.", file=sys.stderr)
+-        if not unmet and not unmerged and not off_line and not partners and not clashed:
++        if unbuilt_partners:
++            ids = ", ".join(unbuilt_partners)
++            them, their = ("it", "its") if len(unbuilt_partners) == 1 else ("them", "their")
++            print(f"flow: {d.name} held — it `Conflicts with` {ids}, which this run held "
++                  f"before building {them}: {their} own base could not be built (see {their} "
++                  f"hold line above), so no line or base of this run holds that work; not "
++                  f"built on a base missing it. To build it, fix what {their} hold line "
++                  f"names, then re-run: the re-run builds {ids} first and {d.name} on a base "
++                  f"holding {them}.", file=sys.stderr)
++        if (not unmet and not unmerged and not off_line and not partners and not clashed
++                and not unbuilt_partners):
+             runnable.append(d)
+     return runnable
+ 
+@@ -996,16 +1015,20 @@ def _bundle_bases(cfg: Config, runnable: list[Path], *,
+                   carried_heads: Mapping[str, str], batch: list[str],
+                   bases: dict[str, tuple[str, dict[str, str]]],
+                   line_cut: dict[str, dict[str, str]],
+-                  taken: tuple[integrate.Bases, integrate.LinePrs]) -> None:
++                  taken: tuple[integrate.Bases, integrate.LinePrs],
++                  held: dict[str, integrate.IntegrationError]) -> None:
+     """Point each bundle of ``runnable`` at what its plan says it is built on (#727,
+     ``plans``: :func:`_base_plans`): a base of its own, the real base, or — a seam — the
+     run's line, as before (:func:`_point_at_integration`). A base of its own is
+     :func:`integrate.build_bundle_base` of the members, held to the heads the line took
+     (``carried_heads``) and the run's PRs hold (``taken``, :func:`_heads_taken`). Every base
+-    of the wave is built before any bundle is pointed; an :class:`integrate.IntegrationError`
+-    names the bundle and its members and propagates (the caller stops the run). Then
+-    ``bases`` gets ``(branch, {member: head})`` per base, and ``line_cut`` the heads of its
+-    target's branches the line held (none: no line yet) per bundle pointed at a seam."""
++    of the wave is built before any bundle is pointed. A base that cannot be built is that
++    bundle's failure alone (#738): the :class:`integrate.IntegrationError` the build raises
++    goes into ``held`` under the bundle's name, its message naming the bundle and its
++    members, and that bundle is not pointed — the caller holds it — while every other
++    bundle is. Then ``bases`` gets ``(branch, {member: head})`` per base, and ``line_cut``
++    the heads of its target's branches the line held (none: no line yet) per bundle pointed
++    at a seam."""
+     made: dict[str, tuple[str, str, dict[str, str]]] = {}
+     for d in runnable:
+         members = plans[d.name][1]
+@@ -1019,9 +1042,12 @@ def _bundle_bases(cfg: Config, runnable: list[Path], *,
+         except integrate.IntegrationError as exc:   # the same error, saying whose base it is
+             exc.args = (f"could not build {d.name}'s own base from "
+                         f"{', '.join(m.name for m in members)}: {exc}",)
+-            raise
++            held[d.name] = exc
++            continue
+         made[d.name] = (branch, tip, took)
+     for d in runnable:
++        if d.name in held:
++            continue
+         mine, plan = plans[d.name]
+         if isinstance(plan, str):      # a seam: the run's line, as before #727
+             _point_at_integration(integ, [d], folded_tips)
+@@ -1034,6 +1060,58 @@ def _bundle_bases(cfg: Config, runnable: list[Path], *,
+             publish.clear_stack_base(d)
+ 
+ 
++def _announce_base_holds(held: Mapping[str, integrate.IntegrationError]) -> None:
++    """One stderr line per bundle held because its own base could not be built (#738):
++    ``held`` as :func:`_bundle_bases` fills it, each error naming the bundle, its members,
++    the cause and the step that fixes that cause. Printed before the rest of the wave
++    builds."""
++    for name, exc in held.items():
++        print(f"flow: {name} held — {exc}. {name} is not built this run; bundles that depend "
++              f"on it or are its `Conflicts with` partners are held with it, and the rest of "
++              f"the run goes on.", file=sys.stderr)
++
++
++def _built_on_lost_heads(held: Mapping[str, integrate.IntegrationError], pointed: list[Path],
++                         *, bases: Mapping[str, tuple[str, Mapping[str, str]]],
++                         line_cut: Mapping[str, Mapping[str, str]]) -> set[str]:
++    """Name each bundle of ``pointed`` built on a head a member's branch lost (#738).
++
++    ``held`` (:func:`_bundle_bases`) may hold a bundle whose base refused a member's branch
++    as rewritten (:class:`integrate._Rewritten`): that refusal named every PR of the run
++    that held a head the branch lost, but it was made before the wave's other bundles were
++    pointed. One of them pointed at the run's line (``line_cut``: the heads the line held),
++    which still holds the head the line took, or at a base of its own built before the
++    rewrite (``bases``), holds such a head too: its PR will hold commits the branch no longer
++    has. Each is named on one stderr line, with the fix. Returns the names of the members
++    whose branch a line named, for the caller's exit code: a PR of the run holds commits that
++    branch lost, as with a late rewrite (#695). The rewrite itself is not named again."""
++    lost: dict[str, tuple[str, set[str], list[str]]] = {}   # member → (ref, heads, held by)
++    for name, exc in held.items():
++        if isinstance(exc, integrate._Rewritten):
++            _ref, heads, by = lost.setdefault(exc.name, (exc.ref, set(), []))
++            heads.update(exc.lost)
++            by.append(name)
++    named: set[str] = set()
++    for d in pointed if lost else ():
++        if d.name in line_cut:
++            on = (f"is cut from {publish.read_stack_base(d)} at "
++                  f"{publish.read_stack_base_tip(d)[:12]}", line_cut[d.name])
++        elif d.name in bases:
++            on = (f"is built on its own base {bases[d.name][0]}", bases[d.name][1])
++        else:
++            continue
++        for m, (ref, heads, by) in lost.items():
++            h = on[1].get(m)
++            if h in heads:
++                named.add(m)
++                print(f"flow: {d.name} {on[0]}, which holds {h[:12]} from {m}'s "
++                      f"branch {ref}: that branch no longer has it (rewritten — see the hold "
++                      f"line of {', '.join(by)} above), so {d.name}'s PR will hold those old "
++                      f"commits too. Restore {ref} to {h[:12]} or a commit that contains it; or "
++                      f"{integrate._rebuild([d.name])}.", file=sys.stderr)
++    return named
++
++
+ def _heads_taken(bases: Mapping[str, tuple[str, Mapping[str, str]]],
+                  line_cut: Mapping[str, Mapping[str, str]], pushed: Collection[str]
+                  ) -> tuple[integrate.Bases, integrate.LinePrs]:
+@@ -2552,16 +2630,21 @@ def _drive_and_act(
+     bundle, loudly (:func:`_carry_finished`, #646). ``None`` — a library call — scopes by
+     the drive set as passed.
+ 
+-    ``holds`` (#693) is the caller's collector for the accepted bundles a fold of this run
+-    held out of the integration line: filled at the end of the run with ``{id: reason}``,
+-    ``"unpushed"`` for one that pushed no branch (#593) and ``"conflict"`` for one whose
+-    branch conflicts with a same-wave bundle merged before it (#674). Such a bundle is
+-    COMPLETE in the returned map, which therefore cannot say it was held; ``cli._flow``
+-    reads this to exit 3 instead of 0 (``cli._results_rc``). It also names each bundle whose
+-    carried branch was rewritten after the run's last fold read it (#695,
+-    :func:`_report_late_rewrites`): ``"rewritten"``, or ``"unchecked"`` for each carried
+-    branch that end-of-run check could not judge — either one makes ``cli._flow`` exit 1,
+-    ahead of any hold. ``None`` — nobody listens.
++    ``holds`` (#693) is the caller's collector for the bundles this run held: filled at the
++    end of the run with ``{id: reason}``. A fold held an accepted bundle out of the
++    integration line: ``"unpushed"`` for one that pushed no branch (#593) and ``"conflict"``
++    for one whose branch conflicts with a same-wave bundle merged before it (#674). Such a
++    bundle is COMPLETE in the returned map, which therefore cannot say it was held.
++    ``"base"`` (#738) for one held before it was built, because its own base could not be
++    built (:func:`_bundle_bases`): PLANNED in the map, named on stderr with the cause and
++    the fix, while the rest of the run goes on. ``cli._flow`` reads this to exit 3 instead
++    of 0 (``cli._results_rc``). It also names each bundle whose carried branch was rewritten
++    after the run's last fold read it (#695, :func:`_report_late_rewrites`), or whose
++    rewrite a base hold named while a PR of the run holds the old commits — one that hold
++    named, or one built after it (#738, :func:`_built_on_lost_heads`); one only the run's
++    line holds them for is no failure: ``"rewritten"``, or ``"unchecked"`` for each
++    carried branch that end-of-run check could not judge — either one makes ``cli._flow``
++    exit 1, ahead of any hold. ``None`` — nobody listens.
+     """
+     bundles = list(bundles)          # the drive set — split adoption extends it (#469)
+     allowance = cfg.max_passes if max_passes is None else max_passes
+@@ -2683,9 +2766,16 @@ def _drive_and_act(
+     # The loop stopped on a fold error or a red re-gate: that run already ends non-zero, and
+     # a rewrite the fold refused is reported there — so no end-of-run check (#695).
+     line_stopped = False
+-    # A bundle's own base stopped the loop (#727): it checks only its members' branches, so
+-    # the end-of-run check still runs, without the branch whose rewrite that stop named.
+-    stop_named: set[str] = set()
++    # Bundles held before they were built because their own base could not be built (#738),
++    # each named on stderr with the cause and the fix: never COMPLETE, so their dependents
++    # are not ready, and their `Conflicts with` partners are held by `_runnable` too.
++    held_base: set[str] = set()
++    # A member's branch such a base refused as rewritten (#727): that hold named it, so the
++    # end-of-run check runs without it. `in_prs`: those a PR of the run holds a lost head of
++    # — named by the hold, or for a bundle built after it — which fail the run, as a late
++    # rewrite does (#695); one only the run's line holds is a hold like any other (#738).
++    base_rewrites: set[str] = set()
++    in_prs: set[str] = set()
+     for k, wave in enumerate(wave_list):
+         # What each bundle of the wave is built on (#727), asked once: `_bundle_bases` points
+         # it there below, and `_runnable` judges a merged prerequisite on the run's line for
+@@ -2697,20 +2787,22 @@ def _drive_and_act(
+         on_line = ({n for n, (_mine, plan) in plans.items() if isinstance(plan, str)}
+                    if own_bases else None)
+         # `Conflicts with` partners of `held_unpushed` are held too (#629), and so are those
+-        # of `held_conflict` (#674). The relation is read off the LIVE `bundles` each wave:
+-        # an adopted split child adds its edges.
++        # of `held_conflict` (#674) and of `held_base` (#738). The relation is read off the
++        # LIVE `bundles` each wave: an adopted split child adds its edges.
+         runnable = _runnable(cfg, wave, batch_names,
+-                             held=held_unpushed | held_finished | set(held_conflict),
++                             held=held_unpushed | held_finished | set(held_conflict)
++                             | held_base,
+                              requested=requested, hold_unmerged=hold_unmerged,
+                              unpushed=held_unpushed,
+                              conflicts=(waves.conflict_map(cfg, bundles)
+-                                        if held_unpushed or held_conflict else None),
++                                        if held_unpushed or held_conflict or held_base
++                                        else None),
+                              conflict_held={n: ps for n, (ps, _paths) in held_conflict.items()},
+                              # The line each target's bundles are cut from, if any (#655),
+                              # and the bundles cut from it (#729).
+                              lines={tgt: (branch, folded_tips.get(tgt))
+                                     for tgt, branch in integ.items()},
+-                             on_line=on_line)
++                             on_line=on_line, unbuilt=held_base)
+         if not runnable:
+             continue
+         # The pool, read off the schedule as it stands NOW — so a splice below has already
+@@ -2755,19 +2847,28 @@ def _drive_and_act(
+         # base (#187). Unconditional — the stale-clear must run even before any wave has
+         # folded (integ still empty). Where the line folds for real, a bundle gets the line
+         # only at a seam (#727): else a base of its own holding exactly what it declares, or
+-        # the real base. A base that cannot be built stops the run, as a failed fold does.
++        # the real base. A base that cannot be built holds that bundle, named on one line
++        # with the cause and the fix, and the rest of the wave goes on (#738), as an
++        # unpushed bundle is held (#593) — it does not stop the run as a failed fold does.
+         if own_bases:
+-            try:
+-                _bundle_bases(cfg, runnable, plans=plans, integ=integ,
+-                              folded_tips=folded_tips, carried_heads=carried_heads,
+-                              batch=run_batch, bases=bases_took, line_cut=line_cut,
+-                              taken=_heads_taken(bases_took, line_cut, pushed))
+-            except integrate.IntegrationError as exc:
+-                print(f"flow: wave {k} — {exc}; STOPPING — wave {k} and later waves not run.",
+-                      file=sys.stderr)
++            failed: dict[str, integrate.IntegrationError] = {}
++            _bundle_bases(cfg, runnable, plans=plans, integ=integ,
++                          folded_tips=folded_tips, carried_heads=carried_heads,
++                          batch=run_batch, bases=bases_took, line_cut=line_cut,
++                          taken=_heads_taken(bases_took, line_cut, pushed), held=failed)
++            _announce_base_holds(failed)
++            held_base.update(failed)
++            for exc in failed.values():
+                 if isinstance(exc, integrate._Rewritten):
+-                    stop_named.add(exc.name)
+-                break
++                    base_rewrites.add(exc.name)
++                    if exc.prs:        # the hold named a PR holding the old commits
++                        in_prs.add(exc.name)
++            runnable = [d for d in runnable if d.name not in failed]
++            # A bundle pointed after a rewrite hold, on a head the branch lost (#738).
++            in_prs |= _built_on_lost_heads(failed, runnable, bases=bases_took,
++                                           line_cut=line_cut)
++            if not runnable:
++                continue
+         else:
+             _point_at_integration(integ, runnable, folded_tips)
+         # This wave's allowance is its own cap AND what is left of the run's pool, whichever
+@@ -2911,16 +3012,20 @@ def _drive_and_act(
+     # stopped on the line: that run already ends non-zero, and reported the rewrite a fold
+     # refused. What the run's PRs hold is checked too (#727).
+     taken = _heads_taken(bases_took, line_cut, pushed)
+-    late = (_report_late_rewrites(cfg, [d for d in accepted if d.name not in stop_named],
++    late = (_report_late_rewrites(cfg, [d for d in accepted if d.name not in base_rewrites],
+                                   carried_heads, run_batch, bases=taken[0], line_prs=taken[1])
+             if carried_heads and not line_stopped else {})
+-    # The run's holds, for the caller's exit code (#693): a held bundle reads COMPLETE above.
+-    # Keyed exactly as `results` is, so each held id is a key of the map returned beside it.
+-    # A late rewrite ("rewritten", or "unchecked" for a branch the check could not judge)
+-    # fails the run (exit 1, `cli._results_rc`), so it is written last: it outranks a hold.
++    # The run's holds, for the caller's exit code (#693): a held bundle reads COMPLETE above,
++    # or — held because its own base could not be built (#738) — PLANNED. Keyed exactly as
++    # `results` is, so each held id is a key of the map returned beside it. A rewrite
++    # ("rewritten": a late one, or one a base hold refused whose old commits a PR of the run
++    # holds; "unchecked" for a branch the check could not judge) fails the run (exit 1,
++    # `cli._results_rc`), so it is written last: it outranks a hold.
+     if holds is not None:
+         holds.update({n.replace("issue_", ""): "unpushed" for n in sorted(held_unpushed)})
+         holds.update({n.replace("issue_", ""): "conflict" for n in held_conflict})
++        holds.update({n.replace("issue_", ""): "base" for n in sorted(held_base)})
++        holds.update({n.replace("issue_", ""): "rewritten" for n in sorted(in_prs)})
+         holds.update({n.replace("issue_", ""): why for n, why in late.items()})
+     return results
+ 
+diff --git a/template/src/pdca_harness/integrate.py b/template/src/pdca_harness/integrate.py
+index d592270..82025c0 100644
+--- a/template/src/pdca_harness/integrate.py
++++ b/template/src/pdca_harness/integrate.py
+@@ -86,7 +86,9 @@ class IntegrationError(RuntimeError):
+     """A wave's accepted work could not be folded onto the integration branch — a published
+     branch does not merge cleanly (undeclared overlap), is missing, or was rewritten after
+     the run carried it (#633), another run moved the line, or a git step failed. The caller
+-    STOPs rather than build the next wave on an incomplete base.
++    STOPs rather than build the next wave on an incomplete base. Raised by
++    :func:`build_bundle_base` too, where it is that one bundle's failure: the flow holds the
++    bundle, not the run (#738).
+ 
+     ``cause`` (#695): what failed, in a few words, without the step the message tells a fold
+     to take (fix the checkout, then re-run) — for a report made outside a fold, where that
+@@ -126,11 +128,18 @@ class _Conflict(IntegrationError):
+ class _Rewritten(IntegrationError):
+     """What :func:`build_bundle_base` refuses a member's rewritten branch with (#727):
+     bundle ``name``'s, every PR holding a head it lost named in the message — so the flow's
+-    end-of-run check (#695) does not report that branch again."""
++    end-of-run check (#695) does not report that branch again. ``ref``: that branch;
++    ``lost``: the heads it no longer holds (#738), so the flow can name a bundle it builds
++    after the refusal on something holding one of them; ``prs``: the bundles whose PR holds
++    one, as the message names them (none: only the run's line does)."""
+ 
+-    def __init__(self, message: str, name: str) -> None:
++    def __init__(self, message: str, name: str, *, ref: str = "",
++                 lost: Sequence[str] = (), prs: Sequence[str] = ()) -> None:
+         super().__init__(message)
+         self.name = name
++        self.ref = ref
++        self.lost = tuple(lost)
++        self.prs = tuple(prs)
+ 
+ 
+ def integration_branch(cfg: Config, base: str, batch: Iterable[str] | None = None) -> str:
+@@ -750,7 +759,11 @@ def build_bundle_base(cfg: Config, d: Path, members: Sequence[Path], *,
+     target, one on another target than ``d``, or one with no published branch raises before
+     any git step.
+ 
+-    Refused with :class:`IntegrationError`, before anything is pushed:
++    Refused with :class:`IntegrationError`, before anything is pushed — each refusal ``d``'s
++    alone, so the flow holds ``d`` and the bundles that depend on it or are its ``Conflicts
++    with`` partners, not the run (#738), and each names its cause and the step to take. A
++    checkout that cannot be fetched (or its worktree made) is said of ``d``'s base, with
++    that step (``cause``: what failed). Then:
+ 
+     * ``carried`` (member name → the head a fold of this run put on its line, #633): a
+       member whose branch no longer holds that head was rewritten
+@@ -832,7 +845,14 @@ def build_bundle_base(cfg: Config, d: Path, members: Sequence[Path], *,
+                 f"could not take the integration lock next to "
+                 f"{_integ_worktree(repo, base).name} — fix the checkout's parent "
+                 f"directory (permissions?), then re-run")
+-        wt = _prepare_worktree(repo, base_remote, base, remotes=[r[0] for r in refs.values()])
++        try:
++            wt = _prepare_worktree(repo, base_remote, base,
++                                   remotes=[r[0] for r in refs.values()])
++        except IntegrationError as exc:    # said of this base, with the step to take (#738)
++            raise IntegrationError(
++                f"{exc.cause}, so {branch} cannot be built — nothing was merged or pushed. "
++                f"Check that remote (its URL, the network, credentials) and that checkout, "
++                f"then re-run", cause=exc.cause) from exc
+         heads = {m.name: _rev(wt, refs[m.name][1]) for m in mine}   # each read once (#633)
+         takers = _takers(took_by, bases, line_prs)
+         for m in mine:
+@@ -841,7 +861,8 @@ def build_bundle_base(cfg: Config, d: Path, members: Sequence[Path], *,
+                     if tip else [])
+             if gone:
+                 raise _Rewritten(_rewrite_stop(m.name, ref, tip, line, gone, onto=branch),
+-                                 m.name)
++                                 m.name, ref=ref, lost=[h for h, _by, _f in gone],
++                                 prs=[by[0] for _h, by, _f in gone if by is not None])
+         cuts: dict[str, str | None] = {}           # member → its cut point (None: never stacked)
+         for m in mine:
+             head = heads[m.name]
+@@ -850,7 +871,8 @@ def build_bundle_base(cfg: Config, d: Path, members: Sequence[Path], *,
+         existing = _rev(wt, f"origin/{branch}")    # origin's copy, as just fetched
+         _reset_tree(wt, "HEAD")
+         if _git(wt, "checkout", "-B", branch, base_ref) != 0:
+-            raise IntegrationError(f"could not start {branch} off {base_ref}")
++            raise IntegrationError(f"could not start {branch} off {base_ref} in {wt} — a git "
++                                   f"step failed: check that checkout, then re-run")
+         merged_in: list[tuple[str, str]] = []      # (member, head on the branch), in order
+         for m in mine:
+             head = heads[m.name]
+diff --git a/template/tests/test_flow_dependency_scoped_bases.py b/template/tests/test_flow_dependency_scoped_bases.py
+index a001da4..c74f6bf 100644
+--- a/template/tests/test_flow_dependency_scoped_bases.py
++++ b/template/tests/test_flow_dependency_scoped_bases.py
+@@ -500,11 +500,14 @@ class DependencyScopedBases(unittest.TestCase):
+             self.assertEqual(stop[0].lower().count(words.lower()), 1, stop[0])
+         self.assertNotIn("issue_D", self.seen, self.err)
+ 
+-    def test_a_later_base_that_reads_the_rewrite_stops_naming_each_base_and_pr(self):
++    def test_a_later_base_that_reads_the_rewrite_holds_its_bundle_naming_each_base_and_pr(
++            self):
+         # The rewrite comes after the fold after wave 1: D's own base, built next, reads it
+-        # and stops the run on ONE line naming the line's PR and each base's, as a fold does.
++        # and holds D — not the run (#738) — on ONE line naming the line's PR and each
++        # base's, as a fold does. Those PRs hold commits fix/A lost: the run fails (#695).
+         _h1, h2 = self._two_bases_and_the_line("D", after_fold=True)
+-        stop = self._lines("STOPPING")
++        self.assertNotIn("STOPPING", self.err)
++        stop = self._lines("flow: issue_D held — ")
+         self.assertEqual(len(stop), 1, self.err)
+         for part in ("could not build issue_D's own base from issue_A, issue_B",
+                      f"was rewritten after this run folded it onto {self.line}",
+@@ -517,11 +520,13 @@ class DependencyScopedBases(unittest.TestCase):
+             self.assertIn(part, stop[0])
+         self.assertNotIn("issue_D", self.seen, self.err)
+         self.assertEqual(self._lines("No fold of this run ran after"), [], self.err)  # once
++        self.assertEqual(self.holds, {"D": "base", "A": "rewritten"})
+ 
+-    def test_a_base_that_stops_the_run_for_a_clash_leaves_the_end_check_on(self):
++    def test_a_base_that_cannot_be_built_for_a_clash_leaves_the_end_check_on(self):
+         # After the fold after wave 1, fix/Z goes back a commit and main gains a file that
+-        # clashes with A's. C's base (A, B) stops the run on the clash; it never read fix/Z,
+-        # so the end of the run still names Z's rewrite, with S, cut from the line holding it.
++        # clashes with A's. C's base (A, B) is refused for the clash and C is held (#738);
++        # that build never read fix/Z, so the end of the run still names Z's rewrite, with
++        # S, cut from the line holding it.
+         self._plan("A")
+         self._plan("Z", TWO)
+         self._plan("S", stacks_on="Z")
+@@ -534,7 +539,8 @@ class DependencyScopedBases(unittest.TestCase):
+ 
+         self.during["B"] = lambda: setattr(self, "after_line_fold", back_and_clash)
+         self._run(["A", "Z", "S", "B", "C"])
+-        stop = self._lines("STOPPING")
++        self.assertNotIn("STOPPING", self.err)
++        stop = self._lines("flow: issue_C held — ")
+         self.assertEqual(len(stop), 1, self.err)
+         self.assertIn("could not build issue_C's own base from issue_A, issue_B", stop[0])
+         self.assertNotIn("issue_Z", stop[0])
+@@ -542,7 +548,7 @@ class DependencyScopedBases(unittest.TestCase):
+                            f"it onto {self.line}")
+         self.assertEqual(len(said), 1, self.err)
+         self.assertIn("(issue_S)", said[0])
+-        self.assertEqual(self.holds, {"Z": "rewritten"})
++        self.assertEqual(self.holds, {"Z": "rewritten", "C": "base"})
+ 
+     def _a_taken_twice(self, rewrite: Callable[[dict[str, str]], None],
+                        git: Callable | None = None) -> dict[str, str]:
+diff --git a/template/tests/test_integrate_carried_rewrite_late.py b/template/tests/test_integrate_carried_rewrite_late.py
+index e59517e..26aa55f 100644
+--- a/template/tests/test_integrate_carried_rewrite_late.py
++++ b/template/tests/test_integrate_carried_rewrite_late.py
+@@ -34,7 +34,8 @@ spy failing fetches; a fold stopped by its own check still gives its error word
+ Since #727 the dependent ``B`` is built on a base of its own, built from ``fix/A`` after the
+ line's fold: in a two-wave run that build, not the line's fold, is the run's last read of
+ ``fix/A``. So a fault meant to come after the last read is armed by B's base's push; the
+-same fault armed by the line's push, as before, stops the run at B's base (1d, 1e).
++same fault armed by the line's push, as before, holds B at its base (1d, 1e): the run goes
++on (#738).
+ 
+ Only modules are imported (never a symbol the fix adds), and the fix's retry pause is
+ patched to 0 with ``create=True``, so with the production change reverted these cases still
+@@ -204,13 +205,15 @@ class LateRewrite(unittest.TestCase):
+         self.base_b = integrate.bundle_base_branch(self.cfg, "main", ["A", "B"], "issue_B")
+         return ["A", "B"]
+ 
+-    def _stopped_at_b(self, *parts: str) -> None:
+-        """The run stopped before building B, on ONE line naming B's base and ``parts``."""
++    def _held_at_b(self, *parts: str) -> None:
++        """B was held before it was built (#738), on ONE line naming B's base and ``parts``;
++        the run did not stop."""
+         self.assertEqual(state.state(self.cfg.bundle("B")), state.PLANNED, self.err)
+-        stop = [ln for ln in self.err.splitlines() if "STOPPING" in ln]
+-        self.assertEqual(len(stop), 1, self.err)
++        self.assertNotIn("STOPPING", self.err)
++        held = [ln for ln in self.err.splitlines() if ln.startswith("flow: issue_B held — ")]
++        self.assertEqual(len(held), 1, self.err)
+         for part in ("could not build issue_B's own base", *parts):
+-            self.assertIn(part, stop[0])
++            self.assertIn(part, held[0])
+ 
+     def _rewrite_lines(self, iid: str = "A") -> list[str]:
+         return [ln for ln in self.err.splitlines() if _rewritten(iid) in ln]
+@@ -290,11 +293,13 @@ class LateRewrite(unittest.TestCase):
+         self._assert_reported()
+         self.assertEqual(rc, 1, self.err)
+ 
+-    # -- (1d) the same rewrite racing the line's own push → stopped at B's base, exit 1 ----
++    # -- (1d) the same rewrite racing the line's own push → B held at its base, exit 3 -----
+ 
+-    def test_a_rewrite_during_the_lines_fold_stops_the_run_at_the_dependents_base(self):
++    def test_a_rewrite_during_the_lines_fold_holds_the_dependent_at_its_base(self):
+         # (1c)'s race as it was before #727. B is not cut from the line: its own base, built
+-        # next, reads fix/A again and refuses the rewrite (#633), so B is never built.
++        # next, reads fix/A again and refuses the rewrite (#633), so B is never built — held,
++        # not a stop (#738). The hold names the rewrite and its fix; no PR of the run holds
++        # A's old commits (only the line does), so it is a hold: exit 3.
+         ids = self._two_waves()
+         line = integrate.integration_branch(self.cfg, "main", ids)
+         real, rewrote = integrate._git, []
+@@ -306,10 +311,10 @@ class LateRewrite(unittest.TestCase):
+ 
+         rc = self._flow(ids, git=racing)
+         self.assertEqual(len(rewrote), 1, self.err)
+-        self.assertEqual(len(self._rewrite_lines()), 1, self.err)   # by the stop, not again
+-        self._stopped_at_b(_rewritten("A"), self.heads["A"][:12])
++        self.assertEqual(len(self._rewrite_lines()), 1, self.err)   # by the hold, not again
++        self._held_at_b(_rewritten("A"), self.heads["A"][:12])
+         self.assertEqual(self._unchecked_lines(), [], self.err)
+-        self.assertEqual(rc, 1, self.err)
++        self.assertEqual(rc, 3, self.err)
+ 
+     # -- the end-of-run check cannot judge a branch → named, exit 1 ------------------------
+ 
+@@ -347,10 +352,11 @@ class LateRewrite(unittest.TestCase):
+             integrate.integration_branch(self.cfg, "main", ids), self.base_b], self.err)
+         self.assertEqual(len(failed), 2, failed)      # the check's fetch, tried twice
+ 
+-    def test_a_fetch_failing_after_the_lines_fold_stops_the_run_at_the_dependents_base(self):
++    def test_a_fetch_failing_after_the_lines_fold_holds_the_dependent_at_its_base(self):
+         # The fault above armed as before #727, by the line's push: B's own base fetches
+-        # before it is built, so the run stops there, naming B and the fetch. The end check
+-        # still runs and cannot fetch either: A's branch is named to check by hand; exit 1.
++        # before it is built, so B is held there (#738), named with the fetch and the step.
++        # The end check still runs and cannot fetch either: A's branch is named to check by
++        # hand; exit 1.
+         ids = self._two_waves()
+         real, pushed, failed = integrate._git, [], []
+ 
+@@ -365,7 +371,7 @@ class LateRewrite(unittest.TestCase):
+ 
+         rc = self._flow(ids, git=flaky)
+         cause = f"could not fetch origin in {self.fx.primary.resolve()}"
+-        self._stopped_at_b(cause)
++        self._held_at_b(cause, "then re-run")
+         self._assert_unchecked("A", cause, not_named="issue_B")
+         self.assertEqual(rc, 1, self.err)
+         self.assertEqual(len(pushed), 1, self.err)    # the line's; B's base never pushed
+diff --git a/template/tests/test_flow_bundle_base_holds.py b/template/tests/test_flow_bundle_base_holds.py
+new file mode 100644
+index 0000000..91dd155
+--- /dev/null
++++ b/template/tests/test_flow_bundle_base_holds.py
+@@ -0,0 +1,382 @@
++"""A bundle whose own base cannot be built is held, not the run (#738).
++
++Since #727 a stack-mode bundle is built on a base of its own (``integrate.build_bundle_base``,
++#723) holding only what it declares. When that base could not be built — ``main`` moved
++mid-run and clashes with a prerequisite, an in-batch prerequisite's branch was rewritten
++after the line took it (#633), the fetch failed, origin refused the push of the base's
++branch — the flow printed ``STOPPING`` and dropped the rest of the run, bundles that had
++nothing to do with the failure included. Now that bundle is held, named on one stderr line
++with the cause and a fix that works for that cause; the bundles that declared ``Depends
++on`` or ``Conflicts with`` it wait; and the rest of the run goes on.
++
++These cases drive ``flow._drive_and_act`` through real folds and real base builds on the
++``StackFoldGit`` fixture of tests/test_integrate_stack_bases.py (a bare ``origin`` and a
++primary checkout), loaded by path exactly as tests/test_flow_same_wave_conflict.py does,
++with that file's stubs: the build and sign-off leaves stubbed (``flow._drive_wave`` writes
++a ``patch.diff`` and accepts), ``flow._publish_bundle`` cutting and pushing each PR branch
++from the recorded stack-base tip, and ``gh`` answered by a stub in front of
++``subprocess.run``. The publisher is NOT a stub (a stub turns every fold into a dry-run).
++The exit code is the one ``cli._flow`` gives the same run: ``cli._results_rc`` over the
++results and holds.
++
++Two failures are injected for one bundle only, each at the git step that fails in the
++field, never at the flow's own handling: the fetch (``integrate._prepare_worktree`` as
++``build_bundle_base`` calls it, run for real with its ``git fetch`` failing) and the push
++of the base's branch (the ``integrate._git`` push of that one branch returns non-zero, so
++``build_bundle_base``'s own refusal fires). Everything else is real git.
++
++Only modules are imported (never a symbol the fix adds), so with the production change
++reverted these cases still load and run — and fail on their assertions.
++    cd template && PYTHONPATH=src python3 -m unittest tests.test_flow_bundle_base_holds
++"""
++
++from __future__ import annotations
++
++import dataclasses
++import importlib.util
++import io
++import json
++import subprocess
++import unittest
++from collections.abc import Callable
++from contextlib import ExitStack, redirect_stderr, redirect_stdout
++from pathlib import Path
++from unittest import mock
++
++from pdca_harness import cli, flow, integrate, publish, state
++
++_SPEC = importlib.util.spec_from_file_location(
++    "stack_bases_fixture", Path(__file__).with_name("test_integrate_stack_bases.py"))
++sb = importlib.util.module_from_spec(_SPEC)
++_SPEC.loader.exec_module(sb)
++
++TODAY = "2026-10-18"
++
++
++class BundleBaseHolds(unittest.TestCase):
++
++    def setUp(self) -> None:
++        self.fx = sb.StackFoldGit()          # the fixture's real-git setUp/tearDown and helpers
++        self.fx.setUp()
++        self.addCleanup(self.fx.tearDown)
++        self.cfg = self.fx.cfg
++        self.cfg.publisher = dataclasses.replace(self.cfg.publisher, mode="command")
++        self.changes: dict[str, dict[str, str]] = {}   # id → the files its build adds
++        self.after_fold: list[Callable[[], None]] = []  # run once, after the run's next fold
++        self.after_build: dict[str, Callable[[], None]] = {}   # id → run once its base built
++        self.fetch_fails_for: set[str] = set()         # ids whose own base's fetch fails
++        self.push_refused_for: set[str] = set()        # ids whose own base's push is refused
++        self.building: str | None = None               # the bundle whose base is being built
++        self.refused: list[str] = []                   # the base branches a push was refused
++        self.seen: dict[str, tuple[str, str]] = {}     # bundle → (stack base, tip) when built
++        self._real_run = subprocess.run
++
++    # -- fixture ---------------------------------------------------------------------------
++
++    def _plan(self, iid: str, files: dict[str, str], *, depends_on: str = "",
++              conflicts_with: str = "", stacks_on: str = "") -> None:
++        sb._brief(self.cfg.bundle(iid),
++                  extra=(f"- **Depends on:** {depends_on}\n" if depends_on else "")
++                  + (f"- **Conflicts with:** {conflicts_with}\n" if conflicts_with else "")
++                  + (f"- **Stacks on:** {stacks_on}\n" if stacks_on else ""))
++        self.changes[iid] = files
++
++    def _a_z_then_b_w(self) -> list[str]:
++        """``A`` and ``Z`` (wave 0, files of their own); ``B`` (``Depends on: A``) and ``W``
++        (``Depends on: Z``) in wave 1, each built on a base of its own. ``W`` has nothing
++        to do with ``B``. Returns the ids."""
++        self._plan("A", {"a.txt": "a\n"})
++        self._plan("Z", {"z.txt": "z\n"})
++        self._plan("B", {"b.txt": "b\n"}, depends_on="A")
++        self._plan("W", {"w.txt": "w\n"}, depends_on="Z")
++        return ["A", "Z", "B", "W"]
++
++    def _rewrite_a_after_the_fold(self) -> list[str]:
++        """Once the fold after wave 0 has put ``A`` on the line, ``fix/A`` is force-pushed to
++        a commit that does not hold the head the line took (#633). Returns a list that gets
++        that old head."""
++        took: list[str] = []
++
++        def rewrite() -> None:
++            took.append(self._head("A"))
++            self.fx._push_from_human({"a2.txt": "A, rebuilt\n"}, to="fix/A", force=True)
++
++        self.after_fold.append(rewrite)
++        return took
++
++    # -- stubs -----------------------------------------------------------------------------
++
++    def _gh_stub(self, args, *a, **kw):
++        """Any ``gh`` call is answered OPEN with the PR's head, its branch's tip on origin;
++        everything else runs for real."""
++        if not (isinstance(args, list) and args[:1] == ["gh"]):
++            return self._real_run(args, *a, **kw)
++        iid = str(args[3]).rsplit("/", 1)[-1]
++        head = self.fx._tip(f"fix/{iid}") if self.fx._has(f"fix/{iid}") else ""
++        return subprocess.CompletedProcess(
++            args, 0, json.dumps({"state": "OPEN", "headRefOid": head}), "")
++
++    def _drive_wave(self, cfg, wave: list[Path], **_kw) -> int:
++        """Build and accept each bundle, recording what it was built on."""
++        for d in wave:
++            iid = d.name.removeprefix("issue_")
++            self.seen[d.name] = (publish.read_stack_base(d), publish.read_stack_base_tip(d))
++            (d / "patch.diff").write_text("".join(
++                sb._new_file_patch(n, t.rstrip("\n")) for n, t in self.changes[iid].items()),
++                encoding="utf-8")
++            sb._accept(d)
++        return 1
++
++    def _publish_bundle(self, cfg, d: Path, **_kw) -> bool:
++        """What publish does: cut the PR branch from the recorded stack-base tip (else that
++        branch, else the base), push it, record it. The run's brief is kept as it was."""
++        iid = d.name.removeprefix("issue_")
++        tip, base = publish.read_stack_base_tip(d), publish.read_stack_base(d)
++        cut = tip or (f"origin/{base}" if base else "origin/main")
++        brief = (d / "brief.md").read_text(encoding="utf-8")
++        self.fx._publish(iid, self.changes[iid], cut_from=cut)
++        (d / "brief.md").write_text(brief, encoding="utf-8")
++        return True
++
++    def _run(self, ids: list[str]) -> None:
++        """One stack-mode run asked for ``ids``, driving all of them."""
++        self.ids = list(ids)
++        self.line = integrate.integration_branch(self.cfg, "main", ids)
++        self.holds: dict[str, str] = {}
++        real_fold, real_build = integrate.fold, integrate.build_bundle_base
++        real_prepare, real_git = integrate._prepare_worktree, integrate._git
++        refuse = {integrate.bundle_base_branch(self.cfg, "main", ids, f"issue_{i}")
++                  for i in self.push_refused_for}
++
++        def fold(*a, **kw):
++            out = real_fold(*a, **kw)
++            hooks, self.after_fold = self.after_fold, []
++            for hook in hooks:
++                hook()
++            return out
++
++        def build(cfg, d: Path, *a, **kw):
++            """The real base build, noting whose base it is for the two stubs below; then
++            what ``after_build`` names for it happens."""
++            self.building = d.name.removeprefix("issue_")
++            try:
++                out = real_build(cfg, d, *a, **kw)
++            finally:
++                self.building = None
++            self.after_build.pop(d.name.removeprefix("issue_"), lambda: None)()
++            return out
++
++        def prepare(repo: Path, *a, **kw) -> Path:
++            """``_prepare_worktree`` as the build of a base of ``fetch_fails_for`` calls it:
++            run for real, its ``git fetch`` failing (the error is the real one)."""
++            if self.building not in self.fetch_fails_for:
++                return real_prepare(repo, *a, **kw)
++
++            def git(where: Path, *args: str) -> int:
++                return 1 if args[:1] == ("fetch",) else real_git(where, *args)
++
++            with mock.patch.object(integrate, "_git", git):
++                return real_prepare(repo, *a, **kw)
++
++        def git(where: Path, *args: str) -> int:
++            """The push of a base branch of ``push_refused_for`` is refused; any other git
++            step runs for real."""
++            if args[:1] == ("push",) and args[-1] in refuse:
++                self.refused.append(args[-1])
++                return 1
++            return real_git(where, *args)
++
++        self._err = io.StringIO()
++        with ExitStack() as stack:
++            stack.enter_context(mock.patch.object(subprocess, "run", self._gh_stub))
++            stack.enter_context(mock.patch.object(flow, "_drive_wave", self._drive_wave))
++            stack.enter_context(mock.patch.object(flow, "_publish_bundle",
++                                                  self._publish_bundle))
++            stack.enter_context(mock.patch.object(publish, "draft_texts",
++                                                  lambda *a, **k: True))
++            stack.enter_context(mock.patch.object(integrate, "fold", fold))
++            stack.enter_context(mock.patch.object(integrate, "build_bundle_base", build))
++            stack.enter_context(mock.patch.object(integrate, "_prepare_worktree", prepare))
++            stack.enter_context(mock.patch.object(integrate, "_git", git))
++            stack.enter_context(redirect_stdout(io.StringIO()))
++            stack.enter_context(redirect_stderr(self._err))
++            self.results = flow._drive_and_act(
++                self.cfg, [self.cfg.bundle(i) for i in ids], do_publish=True,
++                do_act=False, by="T", today=TODAY, batch=ids, holds=self.holds)
++        self.err = self._err.getvalue()
++        self.rc = cli._results_rc(self.results, holds=self.holds)
++        self.assertNotIn("Traceback", self.err)
++
++    # -- helpers ---------------------------------------------------------------------------
++
++    def _lines(self, *parts: str) -> list[str]:
++        """The stderr lines holding every one of ``parts``."""
++        return [x for x in self.err.splitlines() if all(p in x for p in parts)]
++
++    def _held(self, iid: str, *parts: str) -> str:
++        """``iid`` was never built and is left PLANNED, the run did not stop, and ONE stderr
++        line says it is held, with each of ``parts``. Returns that line."""
++        self.assertNotIn("STOPPING", self.err)
++        self.assertNotIn(f"issue_{iid}", self.seen, self.err)
++        self.assertEqual(self.results[iid], state.PLANNED, self.err)
++        lines = [x for x in self.err.splitlines() if x.startswith(f"flow: issue_{iid} held — ")]
++        self.assertEqual(len(lines), 1, self.err)
++        for part in parts:
++            self.assertIn(part, lines[0])
++        return lines[0]
++
++    def _complete(self, *ids: str) -> None:
++        """Each of ``ids`` was built and is COMPLETE."""
++        for iid in ids:
++            self.assertIn(f"issue_{iid}", self.seen, self.err)
++            self.assertEqual(self.results[iid], state.COMPLETE, self.err)
++
++    def _head(self, iid: str) -> str:
++        return self.fx._tip(f"fix/{iid}")
++
++    # -- (1) main moved under a prerequisite, in the last wave -------------------------------
++
++    def test_a_base_that_moved_under_a_prerequisite_holds_only_its_dependent(self):
++        # After wave 0's fold, main gets an a.txt of its own: A's branch no longer merges
++        # onto it, so no base of B's can hold A. Before: STOPPING, and W stayed PLANNED.
++        ids = self._a_z_then_b_w()
++        self.after_fold.append(lambda: self.fx._push_from_human(
++            {"a.txt": "main's own\n"}, to="main"))
++        self._run(ids)
++        line = self._held("B", "issue_A", "origin/main")
++        self.assertIn("rebuild issue_a's branch on the new origin/main", line.lower())
++        self._complete("A", "Z", "W")
++        self.assertEqual(self.holds, {"B": "base"})
++        self.assertEqual(self.rc, 3, self.err)
++
++    # -- (2) an in-batch prerequisite rewritten after the line took it ----------------------
++
++    def test_a_prerequisite_rewritten_after_the_fold_holds_only_its_dependent(self):
++        # After the fold carried A, fix/A is force-pushed to another commit (#633): B's base
++        # refuses it, with the restore/re-publish remedy. The rewrite is named once, by B's
++        # hold, and not again by the end-of-run check.
++        ids = self._a_z_then_b_w()
++        took = self._rewrite_a_after_the_fold()
++        self._run(ids)
++        rewritten = "issue_A's branch origin/fix/A was rewritten"
++        self._held("B", "issue_A", "rewritten", rewritten, took[0][:12],
++                   "Restore origin/fix/A")
++        self.assertEqual(len(self._lines(rewritten)), 1, self.err)
++        self.assertEqual(self._lines("No fold of this run ran after"), [], self.err)
++        self._complete("A", "Z", "W")
++        self.assertEqual(self.holds, {"B": "base"})
++        self.assertEqual(self.rc, 3, self.err)
++
++    # -- (3) the fetch of one bundle's base fails -------------------------------------------
++
++    def test_a_fetch_that_fails_for_one_base_holds_only_that_bundle(self):
++        ids = self._a_z_then_b_w()
++        self.fetch_fails_for.add("B")
++        self._run(ids)
++        line = self._held("B", "could not build issue_B's own base from issue_A",
++                          "could not fetch origin", "re-run")
++        self.assertNotIn("rebuild", line.lower())
++        self._complete("A", "Z", "W")
++        self.assertEqual(self.holds, {"B": "base"})
++        self.assertEqual(self.rc, 3, self.err)
++
++    # -- (4) origin refuses the push of one bundle's base -----------------------------------
++
++    def test_a_push_origin_refuses_holds_only_that_bundle(self):
++        ids = self._a_z_then_b_w()
++        self.push_refused_for.add("B")
++        self._run(ids)
++        name = integrate.bundle_base_branch(self.cfg, "main", ids, "issue_B")
++        self.assertEqual(self.refused, [name])
++        self._held("B", f"could not push {name} to origin", "check origin's rules")
++        self.assertFalse(self.fx._has(name))
++        self._complete("A", "Z", "W")
++        self.assertEqual(self.holds, {"B": "base"})
++        self.assertEqual(self.rc, 3, self.err)
++
++    # -- (5) a `Conflicts with` partner of a held bundle ------------------------------------
++
++    def test_a_conflicts_with_partner_of_a_held_bundle_is_held(self):
++        # Case (3)'s shape, and X (`Conflicts with: B`), scheduled after B (wave 2): X must be
++        # built on a base holding B's work, and no base or line of this run has it. Before
++        # the fix X was not reached (STOPPING); with B held but X's partner check blind to
++        # it, X would be built on the plain base.
++        ids = self._a_z_then_b_w()
++        self._plan("X", {"x.txt": "x\n"}, conflicts_with="B")
++        self.fetch_fails_for.add("B")
++        self._run([*ids, "X"])
++        self._held("B", "could not fetch origin")
++        line = self._held("X", "`Conflicts with` issue_B", "re-run")
++        self.assertNotIn("prerequisite", line)
++        self._complete("A", "Z", "W")
++        self.assertEqual(self.holds, {"B": "base"})
++        self.assertEqual(self.rc, 1, self.err)          # X is left PLANNED
++
++    # -- (6) a PR cut from the line a rewrite left stale ------------------------------------
++
++    def test_a_pr_cut_from_the_stale_line_after_a_rewrite_hold_is_named(self):
++        # Case (2)'s shape, and S (`Stacks on: A`, a seam) in B's wave: S is cut from the
++        # line, which holds A's old head. S's PR holds commits fix/A no longer has, so a line
++        # names it; A stays out of the end-of-run check, so the rewrite itself is named once.
++        ids = self._a_z_then_b_w()
++        self._plan("S", {"s.txt": "s\n"}, stacks_on="A")
++        took = self._rewrite_a_after_the_fold()
++        self._run([*ids, "S"])
++        rewritten = "issue_A's branch origin/fix/A was rewritten"
++        self._held("B", rewritten)
++        self._complete("A", "Z", "W", "S")
++        self.assertEqual(self.seen["issue_S"][0], self.line)
++        self.assertTrue(self.fx._ancestor(took[0], self._head("S")))     # the fixture's fact
++        named = self._lines(f"issue_S is cut from {self.line}", "issue_A", took[0][:12])
++        self.assertEqual(len(named), 1, self.err)
++        self.assertIn("rebuild issue_S's PR on the rewritten branch", named[0])
++        self.assertEqual(len(self._lines(rewritten)), 1, self.err)
++        self.assertEqual(self._lines("No fold of this run ran after"), [], self.err)
++        self.assertEqual(self.holds, {"B": "base", "A": "rewritten"})
++        self.assertEqual(self.rc, 1, self.err)          # a PR holds commits fix/A lost
++
++    def test_a_base_built_before_the_rewrite_in_the_same_wave_is_named(self):
++        # B and E (`Depends on: A`) and W in wave 1; B's base is built first and takes A's
++        # head, then fix/A is force-pushed, so E's base refuses it and E is held. B's base —
++        # and its PR — hold commits fix/A no longer has: a line names B, as (6) names S.
++        ids = self._a_z_then_b_w()
++        self._plan("E", {"e.txt": "e\n"}, depends_on="A")
++        took: list[str] = []
++
++        def rewrite() -> None:
++            took.append(self._head("A"))
++            self.fx._push_from_human({"a2.txt": "A, rebuilt\n"}, to="fix/A", force=True)
++
++        self.after_build["B"] = rewrite
++        self._run([*ids, "E"])
++        self._held("E", "issue_A's branch origin/fix/A was rewritten", took[0][:12])
++        self._complete("A", "Z", "B", "W")
++        base = integrate.bundle_base_branch(self.cfg, "main", self.ids, "issue_B")
++        self.assertEqual(self.seen["issue_B"][0], base)
++        self.assertTrue(self.fx._ancestor(took[0], self._head("B")))     # the fixture's fact
++        named = self._lines(f"issue_B is built on its own base {base}", "issue_A",
++                            took[0][:12])
++        self.assertEqual(len(named), 1, self.err)
++        self.assertIn("rebuild issue_B's PR on the rewritten branch", named[0])
++        self.assertEqual(self.holds, {"E": "base", "A": "rewritten"})
++        self.assertEqual(self.rc, 1, self.err)          # B's PR holds commits fix/A lost
++
++    # -- (7) a dependent of a held bundle ---------------------------------------------------
++
++    def test_a_dependent_of_a_held_bundle_is_skipped_and_fails_the_run(self):
++        ids = self._a_z_then_b_w()
++        self._plan("C", {"c.txt": "c\n"}, depends_on="B")
++        self.fetch_fails_for.add("B")
++        self._run([*ids, "C"])
++        self._held("B", "could not fetch origin")
++        self.assertNotIn("issue_C", self.seen, self.err)
++        self.assertEqual(self.results["C"], state.PLANNED, self.err)
++        self.assertEqual(len(self._lines("flow: issue_C skipped — prerequisite(s) not ready",
++                                         "B")), 1, self.err)
++        self._complete("A", "Z", "W")
++        self.assertEqual(self.holds, {"B": "base"})
++        self.assertEqual(self.rc, 1, self.err)          # human decision 3: C is PLANNED
++
++
++if __name__ == "__main__":
++    unittest.main()

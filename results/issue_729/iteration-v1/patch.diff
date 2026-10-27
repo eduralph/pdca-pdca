@@ -1,0 +1,362 @@
+diff --git a/template/src/pdca_harness/flow.py b/template/src/pdca_harness/flow.py
+index 4985bb9..3f30c52 100644
+--- a/template/src/pdca_harness/flow.py
++++ b/template/src/pdca_harness/flow.py
+@@ -685,7 +685,8 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
+               unpushed: Collection[str] = frozenset(),
+               conflicts: Mapping[str, Collection[str]] | None = None,
+               conflict_held: Mapping[str, Collection[str]] | None = None,
+-              lines: Mapping[tuple[str, str], tuple[str, str | None]] | None = None
++              lines: Mapping[tuple[str, str], tuple[str, str | None]] | None = None,
++              on_line: Collection[str] | None = None
+               ) -> list[Path]:
+     """Drop a wave bundle whose declared prerequisite isn't ready to build on top of.
+ 
+@@ -733,14 +734,18 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
+     cascades).
+ 
+     ``lines`` maps a target ``(repo, base)`` to the run's line for it — ``(branch, the tip
+-    the run recorded)`` — once the run has folded (or carried) that target: a dependent of
+-    it is cut from that line, not from the freshly fetched base (#655), and the line does
+-    not follow the base. So an out-of-batch prerequisite judged merged into d's base above
+-    counts only when the line has its work: the commit its PR merge put on the base, or
+-    the PR's head, which the carry may have put on the line (:func:`_line_lacks_merge`).
+-    Else d is held, named on ONE stderr line with the line's tip and the way out — once
+-    the run ends, delete the line on origin, then re-run: a re-run whose carry finds the
+-    line continues it, and holds d again. A target with no line (or no recorded tip: a
++    the run recorded)`` — once the run has folded (or carried) that target. A bundle built
++    on that line — one named in ``on_line`` (``None``: every bundle, where no bundle gets a
++    base of its own) — is cut from it, not from the freshly fetched base (#655), and the
++    line does not follow the base. So for such a d an out-of-batch prerequisite judged
++    merged into d's base above counts only when the line has its work: the commit its PR
++    merge put on the base, or the PR's head, which the carry may have put on the line
++    (:func:`_line_lacks_merge`). Else d is held, named on ONE stderr line with the line's
++    tip and the way out — once the run ends, delete the line on origin, then re-run: a
++    re-run whose carry finds the line continues it, and holds d again. A bundle not built
++    on the line (a base of its own, or the real base, #727) is built from the base as
++    fetched when its wave starts, which has every merge into it so far: the merge is
++    enough, and the line is not read (#729). A target with no line (or no recorded tip: a
+     dry-run) is judged as before."""
+     asked = set(requested) if requested is not None else set(batch_names)
+     unpushed_set = set(unpushed)
+@@ -783,8 +788,10 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
+                 # and its "not ready" line stand.
+                 if merged.merged_into(cfg, dep, repo, base):
+                     # … and when d is cut from this run's line, that line must have it too
+-                    # (#655). A close/no-fix prereq merged nothing.
+-                    line = (lines or {}).get((repo, base)) if targeted else None
++                    # (#655); a d on a base of its own is built from the base as fetched,
++                    # which has it (#729). A close/no-fix prereq merged nothing.
++                    line = ((lines or {}).get((repo, base))
++                            if targeted and (on_line is None or d.name in on_line) else None)
+                     if line is None or line[1] is None or not integrate._has_patch(p):
+                         continue
+                     key = (p.name, repo, base)
+@@ -958,6 +965,27 @@ def _closure_members(cfg: Config, d: Path, *, built: Mapping[str, tuple[Path, in
+     return f"{seam} was pointed at a seam itself" if seam else members
+ 
+ 
++def _base_plans(cfg: Config, ds: list[Path], *, built: Mapping[str, tuple[Path, int]],
++                finished: list[Path], bundles: list[Path], seams: Collection[str]
++                ) -> dict[str, tuple[set[str], list[Path] | str]]:
++    """Per bundle of ``ds``: the names of the bundles of ``built`` whose branch the fold
++    carries on its target, and what it is built on (:func:`_closure_members`: the members
++    of a base of its own, ``[]`` for the real base, or a str — the seam that keeps it on
++    the run's line). ``seams``: the bundles pointed at a seam so far. One answer for
++    :func:`_runnable`, which judges a merged prerequisite on the line only for a bundle
++    built on it (#729), and :func:`_bundle_bases`, which points the bundle there."""
++    conflicts = waves.conflict_map(cfg, [*bundles, *finished])
++    cands = integrate._fold_candidates([p for p, _w in built.values()])
++    plans: dict[str, tuple[set[str], list[Path] | str]] = {}
++    for d in ds:
++        target = publish._resolve_target(d)[:2]
++        mine = {m.name for m, repo, base, _s, _r in cands if (repo, base) == target}
++        plans[d.name] = (mine, _closure_members(
++            cfg, d, built=built, on_target=mine, finished={f.name for f in finished},
++            conflicts=conflicts, seams=set(seams)))
++    return plans
++
++
+ def _bundle_bases(cfg: Config, runnable: list[Path], *, built: Mapping[str, tuple[Path, int]],
+                   finished: list[Path], bundles: list[Path],
+                   integ: dict[tuple[str, str], str],
+@@ -975,15 +1003,8 @@ def _bundle_bases(cfg: Config, runnable: list[Path], *, built: Mapping[str, tupl
+     names the bundle and its members and propagates (the caller stops the run). Then
+     ``bases`` gets ``(branch, {member: head})`` per base, and ``line_cut`` the heads of its
+     target's branches the line held (none: no line yet) per bundle pointed at a seam."""
+-    conflicts = waves.conflict_map(cfg, [*bundles, *finished])
+-    cands = integrate._fold_candidates([p for p, _w in built.values()])
+-    plans: dict[str, tuple[set[str], list[Path] | str]] = {}
+-    for d in runnable:
+-        target = publish._resolve_target(d)[:2]
+-        mine = {m.name for m, repo, base, _s, _r in cands if (repo, base) == target}
+-        plans[d.name] = (mine, _closure_members(
+-            cfg, d, built=built, on_target=mine, finished={f.name for f in finished},
+-            conflicts=conflicts, seams=set(line_cut)))
++    plans = _base_plans(cfg, runnable, built=built, finished=finished, bundles=bundles,
++                        seams=line_cut)
+     made: dict[str, tuple[str, str, dict[str, str]]] = {}
+     for d in runnable:
+         members = plans[d.name][1]
+@@ -2665,6 +2686,14 @@ def _drive_and_act(
+     # the end-of-run check still runs, without the branch whose rewrite that stop named.
+     stop_named: set[str] = set()
+     for k, wave in enumerate(wave_list):
++        built = {d.name: (d, wave_of[d.name]) for d in accepted}
++        # The wave's bundles a seam keeps on the run's line (#727), the only ones whose
++        # merged prerequisite is judged on that line (#729): `_bundle_bases` points the
++        # same ones there below. Elsewhere every bundle is on the line (`None`).
++        on_line = ({n for n, (_m, plan) in _base_plans(
++                        cfg, wave, built=built, finished=finished, bundles=bundles,
++                        seams=line_cut).items() if isinstance(plan, str)}
++                   if own_bases else None)
+         # `Conflicts with` partners of `held_unpushed` are held too (#629), and so are those
+         # of `held_conflict` (#674). The relation is read off the LIVE `bundles` each wave:
+         # an adopted split child adds its edges.
+@@ -2677,7 +2706,8 @@ def _drive_and_act(
+                              conflict_held={n: ps for n, (ps, _paths) in held_conflict.items()},
+                              # The line each target's bundles are cut from, if any (#655).
+                              lines={tgt: (branch, folded_tips.get(tgt))
+-                                    for tgt, branch in integ.items()})
++                                    for tgt, branch in integ.items()},
++                             on_line=on_line)
+         if not runnable:
+             continue
+         # The pool, read off the schedule as it stands NOW — so a splice below has already
+@@ -2725,8 +2755,7 @@ def _drive_and_act(
+         # the real base. A base that cannot be built stops the run, as a failed fold does.
+         if own_bases:
+             try:
+-                _bundle_bases(cfg, runnable,
+-                              built={d.name: (d, wave_of[d.name]) for d in accepted},
++                _bundle_bases(cfg, runnable, built=built,
+                               finished=finished, bundles=bundles, integ=integ,
+                               folded_tips=folded_tips, carried_heads=carried_heads,
+                               batch=run_batch, bases=bases_took, line_cut=line_cut,
+diff --git a/template/src/pdca_harness/merged.py b/template/src/pdca_harness/merged.py
+index a48f0fc..0744b89 100644
+--- a/template/src/pdca_harness/merged.py
++++ b/template/src/pdca_harness/merged.py
+@@ -23,7 +23,9 @@ run carries (#647): is it merged into the DEPENDENT's target base — that repo
+ not just some branch?
+ :func:`merge_and_head` answers the follow-up when the dependent is cut from the run's line
+ for that base (#655): which commit did the merge put on the base, and which head did it
+-merge — so the flow can ask whether the line has either?
++merge — so the flow can ask whether the line has either? Only a dependent a seam keeps on
++the line (#727) is asked it (#729); one on a base of its own, or on the real base, is built
++from the base as fetched, so :func:`merged_into` is the whole answer for it.
+ """
+ 
+ from __future__ import annotations
+@@ -185,7 +187,8 @@ def pr_state(pr_url: str) -> tuple[str, str] | None:
+ def _pr_view(pr_url: str, fields: str) -> dict | None:
+     """``gh pr view <pr_url> --json <fields>`` read as a JSON object, or ``None`` when it
+     cannot be: ``gh`` missing (``OSError``), ``gh`` failing, or output that is not a JSON
+-    object. Silent — :func:`pr_state` and :func:`merge_and_head` share it (#655)."""
++    object. Silent — :func:`pr_state` and :func:`merge_and_head` share it (#655; the
++    latter asked only for a dependent built on the run's line, #729)."""
+     try:
+         r = subprocess.run(["gh", "pr", "view", pr_url, "--json", fields],
+                            capture_output=True, text=True)
+diff --git a/template/tests/test_flow_merged_prereq_dependency_base.py b/template/tests/test_flow_merged_prereq_dependency_base.py
+new file mode 100644
+index 0000000..1dd549d
+--- /dev/null
++++ b/template/tests/test_flow_merged_prereq_dependency_base.py
+@@ -0,0 +1,95 @@
++"""A merged prerequisite is judged on the base the dependent is actually built on (#729).
++
++In stack mode a dependent ``D`` of an out-of-batch prerequisite ``P`` — a ``Depends on
++(merged): P``, or a plain ``Depends on: P`` the run was not asked for (#647) — waits until
++``P``'s PR merges into ``D``'s own target base (``merged.merged_into``). Since #727 a ``D``
++that only declares edges to bundles this run built is built on a base of its own
++(``integrate.build_bundle_base``), built from the base as fetched when its wave starts. So
++once ``P`` has merged, that base has the merge, even when the run's line, started before the
++merge, does not: ``D`` is not held for the line (#655's check), and is built on a base that
++holds ``P``'s merge commit. A ``P`` not merged into the base still holds ``D``. A ``D`` a
++seam keeps on the line is still judged on the line: tests/test_flow_merged_prereq_on_line.py.
++
++These cases drive ``flow._drive_and_act`` against real git through the helpers of
++tests/test_flow_merged_prereq_on_line.py (the ``StackFoldGit`` fixture, the ``gh`` stub, the
++stubbed build and publish leaves), loaded by path and used as a helper object, as that suite
++uses ``StackFoldGit``. Only modules are imported (never a symbol the fix adds), so with the
++production change reverted these cases still load and run — and fail on their assertions.
++    cd template && PYTHONPATH=src python3 -m unittest tests.test_flow_merged_prereq_dependency_base
++"""
++
++from __future__ import annotations
++
++import importlib.util
++import unittest
++from pathlib import Path
++
++from pdca_harness import state
++
++_SPEC = importlib.util.spec_from_file_location(
++    "merged_prereq_on_line_helpers",
++    Path(__file__).with_name("test_flow_merged_prereq_on_line.py"))
++ol = importlib.util.module_from_spec(_SPEC)
++_SPEC.loader.exec_module(ol)
++
++
++class MergedPrereqOnADependencyBase(unittest.TestCase):
++
++    def setUp(self) -> None:
++        self.h = ol.MergedPrereqOnTheLine()   # a helper object: its setUp, stubs and runs
++        self.h.setUp()
++        self.addCleanup(self.h.doCleanups)
++
++    # -- (1) merged after the first fold: D is built on its own base, which has it --------
++
++    def _built_on_its_own_base_with_the_merge(self, edge: str) -> None:
++        h = self.h
++        h._prereq()
++        h.after_first_fold = h._merge          # P's PR merges into main after W's fold
++        h._run(h._wd(edge), ["W", "D"])
++        self.assertEqual(h.results["W"], state.COMPLETE, h.err)
++        # The run's line was started before the merge and does not have it (#655's case) …
++        self.assertFalse(h.fx._ancestor(h.merge_oid["P"], h.line))
++        self.assertFalse(h.fx._ancestor(h.fx._tip("fix/P"), h.line))
++        # … yet D is not held for it: it is COMPLETE, built on a base of its own (not the
++        # line), and that base holds P's merge commit and W's branch.
++        self.assertNotIn("does not have that merge", h.err)
++        self.assertNotIn("is not known to have that merge", h.err)
++        self.assertEqual([x for x in h.err.splitlines() if "issue_D held" in x], [], h.err)
++        tip = h._built_on_line()               # D built; on its own base, as #727 builds it
++        base, _tip = h.seen["issue_D"]
++        self.assertEqual(base, f"{h.line}-bD", h.err)
++        self.assertNotEqual(base, h.line)
++        self.assertEqual(h.results["D"], state.COMPLETE)
++        self.assertTrue(h.fx._ancestor(h.merge_oid["P"], tip))
++        self.assertTrue(h.fx._ancestor(h.fx._tip("fix/W"), tip))
++
++    def test_a_merge_after_the_first_fold_builds_a_depends_on_merged_dependent(self):
++        self._built_on_its_own_base_with_the_merge(ol.MERGED_EDGE)
++
++    def test_a_merge_after_the_first_fold_builds_a_plain_depends_on_dependent(self):
++        # The #647 edge: a plain `Depends on: P`, P not in the batch.
++        self._built_on_its_own_base_with_the_merge(ol.PLAIN_EDGE)
++
++    # -- (2) not merged: still held (#647) ----------------------------------------------
++
++    def _held_unmerged(self, edge: str) -> None:
++        h = self.h
++        h._prereq()                            # P's PR stays OPEN
++        h._run(h._wd(edge), ["W", "D"])
++        self.assertEqual(h.results["W"], state.COMPLETE, h.err)
++        self.assertNotIn("issue_D", h.seen, h.err)
++        self.assertEqual(h.results["D"], state.PLANNED)
++        lines = [x for x in h.err.splitlines() if "issue_D held" in x and "issue_P" in x]
++        self.assertEqual(len(lines), 1, h.err)
++        self.assertIn("not merged into main", lines[0])
++
++    def test_an_unmerged_depends_on_merged_prerequisite_still_holds_the_dependent(self):
++        self._held_unmerged(ol.MERGED_EDGE)
++
++    def test_an_unmerged_plain_depends_on_prerequisite_still_holds_the_dependent(self):
++        self._held_unmerged(ol.PLAIN_EDGE)
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/template/tests/test_flow_merged_prereq_on_line.py b/template/tests/test_flow_merged_prereq_on_line.py
+index 6898c29..d774d45 100644
+--- a/template/tests/test_flow_merged_prereq_on_line.py
++++ b/template/tests/test_flow_merged_prereq_on_line.py
+@@ -1,15 +1,20 @@
+-"""A prerequisite merged into the base counts only when the run's line has its work (#655).
++"""For a dependent built on the run's line, a prerequisite merged into the base counts only
++when that line has its work (#655).
+ 
+ In stack mode a dependent of an out-of-batch prerequisite ``P`` — a ``Depends on (merged):
+ P``, or a plain ``Depends on: P`` the run was not asked for (#647) — waits until ``P``'s PR
+-merges into the dependent's own target base. Once the run has a line for that target, the
+-dependent is cut from the line, not from the base, and the line does not follow the base.
+-So a merge after the line was started may not be on it, and the dependent must be held,
+-named, with a way out that works: a re-run whose carry (#646) finds the line on origin
+-continues it and holds the dependent again, so the line is deleted on origin first. The
+-line has ``P``'s work when it has the commit the merge put on the base (``mergeCommit``,
+-which a squash merge has and ``headRefOid`` does not) or ``P``'s PR head (which the carry
+-puts on a line it carries ``P`` onto).
++merges into the dependent's own target base. Since #727 most dependents are built on a base
++of their own, built from the base as fetched when their wave starts, which has that merge:
++for them the merge is enough (#729, tests/test_flow_merged_prereq_dependency_base.py). This
++suite covers the rest: a dependent a seam keeps on the run's line (#727) — here a legacy
++``Stacks on: W`` beside its ``Depends on: W``, or a carried prerequisite. Such a dependent
++is cut from the line, not from the base, and the line does not follow the base. So a merge
++after the line was started may not be on it, and the dependent must be held, named, with a
++way out that works: a re-run whose carry (#646) finds the line on origin continues it and
++holds the dependent again, so the line is deleted on origin first. The line has ``P``'s
++work when it has the commit the merge put on the base (``mergeCommit``, which a squash merge
++has and ``headRefOid`` does not) or ``P``'s PR head (which the carry puts on a line it
++carries ``P`` onto).
+ 
+ These cases drive ``flow._drive_and_act`` against real git: the ``StackFoldGit`` fixture of
+ tests/test_integrate_stack_bases.py (a bare ``origin``, a primary checkout and a scratch
+@@ -46,6 +51,8 @@ _SPEC.loader.exec_module(sb)
+ TODAY = "2026-10-14"
+ MERGED_EDGE = "- **Depends on:** W\n- **Depends on (merged):** P\n"
+ PLAIN_EDGE = "- **Depends on:** W, P\n"
++# A legacy edge to W: a seam, so D keeps the run's line (#727) and is judged on it (#729).
++ON_LINE = "- **Stacks on:** W\n"
+ 
+ 
+ class MergedPrereqOnTheLine(unittest.TestCase):
+@@ -166,8 +173,10 @@ class MergedPrereqOnTheLine(unittest.TestCase):
+         self.err = err.getvalue()
+         self.assertNotIn("Traceback", self.err)
+ 
+-    def _wd(self, edge: str) -> list[Path]:
+-        return [self._planned("W"), self._planned("D", edge)]
++    def _wd(self, edge: str, *, on_line: bool = False) -> list[Path]:
++        """W, and D with ``edge``; ``on_line``: D also `Stacks on: W`, so it is built on the
++        run's line (a seam, #727), not on a base of its own."""
++        return [self._planned("W"), self._planned("D", edge + (ON_LINE if on_line else ""))]
+ 
+     # -- assertions ------------------------------------------------------------------------
+ 
+@@ -215,7 +224,7 @@ class MergedPrereqOnTheLine(unittest.TestCase):
+         # (1) Pre-fix: D passes the gate and is built on a line without P's merge.
+         self._prereq()
+         self.after_first_fold = self._merge
+-        self._run(self._wd(MERGED_EDGE), ["W", "D"])
++        self._run(self._wd(MERGED_EDGE, on_line=True), ["W", "D"])
+         self.assertEqual(self.results["W"], state.COMPLETE)
+         self.assertFalse(self.fx._ancestor(self.merge_oid["P"], self.line))
+         self.assertFalse(self.fx._ancestor(self.fx._tip("fix/P"), self.line))
+@@ -225,7 +234,7 @@ class MergedPrereqOnTheLine(unittest.TestCase):
+         # (2) The #647 edge: a plain `Depends on: P`, P not requested.
+         self._prereq()
+         self.after_first_fold = self._merge
+-        self._run(self._wd(PLAIN_EDGE), ["W", "D"])
++        self._run(self._wd(PLAIN_EDGE, on_line=True), ["W", "D"])
+         self.assertEqual(self.results["W"], state.COMPLETE)
+         self._held("does not have that merge")
+ 
+@@ -255,7 +264,7 @@ class MergedPrereqOnTheLine(unittest.TestCase):
+         self._prereq()
+         self._merge()
+         self.gh_fail_merge_commit = True
+-        self._run(self._wd(MERGED_EDGE), ["W", "D"])
++        self._run(self._wd(MERGED_EDGE, on_line=True), ["W", "D"])
+         self._held("is not known to have that merge", "could not be read")
+ 
+     def test_a_checkout_that_cannot_be_fetched_holds_the_dependent(self):
+@@ -263,7 +272,7 @@ class MergedPrereqOnTheLine(unittest.TestCase):
+         self._prereq()
+         self._merge()
+         self.after_first_fold = lambda: self._origin(self.fx.tmp / "gone.git")
+-        self._run(self._wd(MERGED_EDGE), ["W", "D"])
++        self._run(self._wd(MERGED_EDGE, on_line=True), ["W", "D"])
+         self._held("is not known to have that merge", "could not be fetched")
+ 
+     def test_a_target_with_no_line_builds_the_dependent_from_the_base(self):
+@@ -309,7 +318,7 @@ class MergedPrereqOnTheLine(unittest.TestCase):
+         # origin, the carry starts it from main, which has P's merge, and D is built on it.
+         self._prereq()
+         self.after_first_fold = self._merge
+-        w, d = self._wd(MERGED_EDGE)
++        w, d = self._wd(MERGED_EDGE, on_line=True)
+         self._run([w, d], ["W", "D"])
+         self._held("does not have that merge")
+         old = self.fx._tip(self.line)

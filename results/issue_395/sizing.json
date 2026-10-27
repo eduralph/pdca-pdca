@@ -1,0 +1,15 @@
+{
+  "band": "oversized",
+  "independent_outcomes": [
+    "Core: in a stack-mode flow run's non-final waves, refuse at accept (via _apply_decision) a bundle whose branch would textually conflict with an already-accepted same-wave sibling, using the fold's #674 trial; open \u00a76 row, stays AWAITING_SIGNOFF, one more session then parked with the conflict-step message (leg h), iterate-plan held back to the next run, shared-path fallback when the trial cannot run, and the docs/07-crosscutting.md same-wave + exit-code paragraphs. Legs (a)-(h) plus the iteration-6/8 legs on this path.",
+    "waves.diff_files (waves.py:329) cannot parse Git-quoted diff headers (non-ASCII / special-char paths), so any footprint check sees no paths and calls the bundle disjoint. A defect on main today: it also feeds the advisory _audit_wave_overlap (flow.py:1586). Fix: decode quoted paths, treat an unparsable footprint as 'may overlap'. Own real-git test with a non-ASCII file name.",
+    "cli._signoff records a decision (e.g. --iterate-plan) but leaves a stale signoff-decision file on disk, so a later flow run's pre-apply (flow.py:2516-2522) can apply an old 'accept' to a re-planned, rebuilt bundle with no review. Fix: delete signoff-decision once cli._signoff records, as flow._apply_decision does. Own test: stale accept + standalone --iterate-plan + re-run -> fresh session, not auto-accepted. Any C6-refused bundle on main can hit this, not only a trial-refused one."
+  ],
+  "proposed_seams": [
+    "Pull the Git-quoted path decoding in waves.diff_files out into its own small PR, merged first. It does not need wave context, the trial, or the accept path. The core slice then relies on it for its fallback (the 'unparsable = may overlap' rule can stay in core, or go with this fix). It came in at iteration 8 as a carry-forward, not as part of the design.",
+    "Pull the cli._signoff stale-decision cleanup out into its own PR. It is a sign-off/CLI contract fix that stands without the trial: a C6 refusal on main leaves the same stale 'accept' behind. It came in at iteration 7. If it ships first, the core slice's 'refuse -> standalone iterate-plan -> re-run' leg is just a regression check.",
+    "Do NOT split the rest. The accept-time refusal, the bounded re-offer (leg h), parking the in-session iterate-plan until the next run, the shared-path fallback and the docs paragraphs are one behaviour. Without leg h the refusal spins to the pass budget with the wrong hint. Without the fallback, a broken trial silently accepts. Each piece needs the refusal to exist before it can be tested."
+  ],
+  "confidence": "medium",
+  "brief_sha": "0c79ffc112e2a463"
+}

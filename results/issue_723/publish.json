@@ -1,0 +1,12 @@
+{
+  "mode": "stacked-pr",
+  "branch": "enhancement/723-fold-builds-a-per-bundle-base",
+  "pr_url": "https://github.com/eduralph/pdca-harness/pull/726",
+  "base": "main",
+  "repo": "eduralph/pdca-harness",
+  "by": "Eduard Ralph",
+  "date": "2026-10-15",
+  "id_pending": false,
+  "host_ci_base": "489e5fb5b59a7be46ef8914670d1835abd8fc7c1",
+  "stacks_on": []
+}

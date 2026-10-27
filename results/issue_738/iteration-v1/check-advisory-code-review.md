@@ -1,0 +1,16 @@
+# Advisory code review — issue #738 (hold a bundle whose own base cannot be built)
+
+Scope: `patch.diff` against the target at `$PDCA_TARGET` (pre-fix base `75a886e`, patch applied). The gates are green: C4 is red before the fix and green after it, and T3's suites are OK. I found no correctness bug that breaks the seven cases in the brief. The catch-and-hold path in `_bundle_bases`, the `unbuilt` partner check in `_runnable`, and the `_results_rc` exemption all read correctly. Two findings and one small cleanup:
+
+- NEEDS-HUMAN [human] — A rewrite hold is only a hold in the **last** wave. In any earlier wave, the next fold stops the run anyway. The hold message at `template/src/pdca_harness/flow.py:1069-1071` tells the operator "the rest of the run goes on". But the line fold after that wave gets every accepted bundle so far (`flow.py:2967-2970`), and that includes the rewritten prerequisite `A`. `integrate.fold` re-checks every carried branch (`template/src/pdca_harness/integrate.py:538`, `_carried_tips`), so it refuses `fix/A` and the run prints `wave k did not integrate … STOPPING`. The same goes for a moved base in a non-last wave: the next fold clashes with the new `main`. The brief puts that clash out of scope (#739). So in a run with more waves after the hold, the hold delays the stop by one wave rather than preventing it, and the stderr line promises more than the run delivers. All the new tests (`template/tests/test_flow_bundle_base_holds.py:239-362`) put the held bundle in the last wave, so none of them sees this. A human should decide one of three things: accept this as #739's territory, have Do soften the message when later waves remain, or extend the hold to the fold.
+
+- NEEDS-HUMAN [impl] — No test covers the hold in a non-last wave, or a later wave after a hold. Every case ends at wave 1, so nothing checks that `held_base` stays in `_runnable`'s `held` set across a fold (`flow.py:2792-2794`), or that a dependent two waves later is still skipped. Case (5)'s `X` lands in wave 2, but that wave runs no fold after it. One case with a third wave, using the fetch failure so the fold itself stays clean, would cover the carry-over. It would also pin down what the run does after a non-rewrite hold.
+
+- Cleanup (minor): the `"base"` holds reason is written twice. `cli.py:702` names it `_HELD_UNBUILT`, but `flow.py:3027` writes the literal `"base"`. If one changes without the other, `_results_rc` stops exempting held bundles (they read PLANNED, so the exit code would go from 3 to 1). This copies how `"unpushed"`/`"conflict"` are already done, so it is not new debt, just one more copy of it. It is not a blocker.
+
+Checked and found clean:
+- Per-bundle catch at `flow.py:1042-1048`: nothing is pushed before the raise, because the push is `build_bundle_base`'s last step (`integrate.py:892-903`).
+- The `_prepare_worktree` re-wrap at `integrate.py:848-855`: `cause` falls back to the full message (`integrate.py:98-100`).
+- `_Rewritten.prs` takes every non-line taker (`integrate.py:864-865`). The same-wave bases built before the rewrite are not in `taken` yet, and `_built_on_lost_heads` (`flow.py:1074-1113`) covers exactly that gap.
+- `conflict_map` is symmetric (`waves.py:136-153`), so `unbuilt_partners` catches `X` whichever side declared the edge.
+<!-- pdca:leaf-complete -->

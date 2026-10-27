@@ -1,0 +1,16 @@
+{
+  "band": "oversized",
+  "independent_outcomes": [
+    "Fail-closed merge-time base check (safety fix): in merge._merge_one, after the expected_checks_error refusal and before gh pr ready, refuse with a plain STOP + return 1 when the resolved target is a batch-produced branch (#411 route 2) or when the PR's host base differs from the resolved target; runs under both merge_requires values; no gh pr edit/ready/merge on refusal. Criteria (b) minus the edit-failure leg, (c), (e), (f), plus (d)'s 'equal base passes untouched'. Ships alone, needs no decision reversal, and only touches the docs/comment that say no merge-time check exists.",
+    "Unattended retarget (enhancement, stacked on the above): when the host base differs from a good target, gh pr edit --base <target>, re-read, continue only if it took; otherwise refuse with a retarget-specific fix hint. Criteria (a), (b)'s edit-failed / did-not-take legs, (d)'s no-edit-when-equal. Reverses the recorded #411 decision and the 'the harness never retargets a PR for you' docs promise (docs/07-crosscutting.md:897, publish.py:288-290), so it carries its own maintainer sign-off question and its own residual-risk acceptance (stale pull_request-triggered rollup after a base edit)."
+  ],
+  "proposed_seams": [
+    "Cut between 'detect and refuse' and 'retarget then re-check'. The first changes the mismatch branch to a refusal; the second replaces that refusal with edit + re-read + refuse-on-failure. The brief already names this as the fallback (Motivation, last paragraph), and the human is offered exactly this split there.",
+    "Why the cut is real and not cosmetic: the two halves answer different questions at sign-off. The safety fix needs no one to approve anything new \u2014 a wrong-based PR merging silently is a defect. The retarget needs the maintainer to reverse a recorded design decision and accept a stated CI-staleness risk. Bundling them means a 'no' on the retarget blocks the safety fix.",
+    "Evidence from iteration 1: every implementation-level finding carried forward (base change observed after a successful retarget still merging into the wrong branch; the route-2 fix hint wrongly shown when gh pr edit fails) sits in the retarget half. The refuse-only half is where the brief's invariant is restored, and it is the part least likely to churn.",
+    "The retarget half is not independent in the strict sense: it builds on the comparison and refusal the first half adds, so it would ship as a stacked child (depends on the safety-fix bundle), not in parallel. Both also edit the same block of merge._merge_one that #547 rewrites, so order them 500a \u2192 500b, with 547 either before or after the pair.",
+    "Not worth splitting further: the route-2 refusal (e) and the host-base mismatch refusal could be separate PRs in principle, but they share target resolution, placement, refusal wording and the same invariant; keep them together in the first child."
+  ],
+  "confidence": "medium",
+  "brief_sha": "99c0687f38865b05"
+}

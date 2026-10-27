@@ -1,0 +1,33 @@
+flow: carry finished work through bundles closed with no patch
+
+When a stack-mode run is re-issued, it carries finished bundles onto the
+run's line for the planned bundles that depend on them. It only looked at
+a planned bundle's direct `Depends on` edges, though. A finished bundle
+that closed with no patch (a no-fix outcome) is never carried itself, so
+any dependency that ran through one was dropped.
+
+Two things went wrong as a result:
+
+- Missing work. With A finished, N closed with no patch (`Depends on: A`)
+  and D planned (`Depends on: N`), nothing was carried. D was built on
+  the plain base without A and reported COMPLETE, with no warning.
+- Unvetted work. If A's PR was closed, nothing held D back. A finished P
+  built on A and depending on it through N was judged clean and carried,
+  bringing A's closed-PR commit onto the line.
+
+The carry now treats a finished bundle with no patch as a node of the
+dependency graph and follows plain `Depends on` edges through it, as the
+in-run closure walk already does (#727). This applies to all three
+things the carry decides: which finished bundles are carried for which
+planned bundles, which finished bundles are not clean because what they
+build on is not, and which planned bundles wait. A no-patch bundle that
+reaches held work is held too, so its dependents wait. It prints no
+message of its own; the held bundle's "is not carried" line names the
+dependents it holds through it.
+
+Runs that only use direct edges between patched bundles behave exactly
+as before. Out of scope, filed separately: an out-of-batch prerequisite
+reached only through a no-patch bundle (#734), and carried bundles as
+members of a dependent's own base (#735).
+
+Fixes #728

@@ -1,0 +1,1385 @@
+diff --git a/docs/07-crosscutting.md b/docs/07-crosscutting.md
+index 35bb1c3..fea1d96 100644
+--- a/docs/07-crosscutting.md
++++ b/docs/07-crosscutting.md
+@@ -718,6 +718,45 @@ wave builds on, via `[driver].wave_mode`:
+ 
+   Two bundles of one wave whose branches conflict (they change the same lines,
+   and neither declares `Conflicts with` the other) do not stop the run either.
++  On every wave but the last, the second of them you accept is refused, so only
++  one of them reaches a PR. When you accept a bundle, the run first builds the
++  commit publish would push for it and for each bundle of its wave already
++  accepted on the same target (each patch committed on the commit publish cuts
++  that bundle's branch from, locally, never pushed), and merges them in name
++  order onto the line as the wave found it, by the fold's rule below. If
++  accepting the bundle would have the fold hold one more bundle than it holds
++  without it, the accept is refused the way an open §6 item refuses one: the
++  bundle stays AWAITING_SIGNOFF, and its §6 gets an open row naming the bundles
++  it conflicts with, the files, and the step — declare
++  `Conflicts with: <the other id>` in its brief, then iterate-plan it. So
++  whichever of the two you accept first is the one kept, whatever their names.
++  The run offers the refused bundle one more sign-off session (a session that
++  fails is not that one, and is offered again); if that session records nothing
++  new, the run stops offering it, finishes the wave without it, and names it
++  with that step when the wave ends. A later run of the same ids does the same
++  while the row is open: one session, then that step, not the pass budget. It
++  is not published: no branch is pushed and no PR is opened for it, and the
++  bundles that depend on it are skipped as for any bundle that did not finish.
++  If the check cannot run (the integration checkout cannot be locked, a fetch
++  fails, a commit cannot be built), the run refuses only a bundle whose patch
++  shares a file with a bundle of its wave already accepted on that target, with
++  a row saying the check could not run, and accepts any other. A check that
++  leaves the integration checkout in a state it cannot put back (a reset or a
++  checkout there fails) is different, as a fold stops the run on that: the
++  bundle it was checking is refused whatever files it shares, with a row naming
++  that state — check that checkout (or remove it to have it recreated), then
++  tick the row and accept the bundle again. The row is only in `SUMMARY.md`: a
++  summary assembled again (an iterate-do, an auto-iterate rebuild) drops it and
++  any tick on it, and the next accept is checked again. To publish the bundle
++  anyway, tick the row and accept it again in the same run: it is accepted and
++  published, and the fold then holds one of the two, as below.
++
++  The fold still checks, after the wave is published: for such an override, for
++  a branch that changed after its accept, and for a conflict that also involves
++  work already on the line (a bundle of an earlier wave, or a finished id the
++  run carried), which the check at accept does not judge, so both of those
++  bundles are still published. On the last wave, and in a run of one wave, no
++  fold follows, so neither check runs: both bundles are accepted and published.
+   The fold merges a wave's bundles in name order; a bundle whose branch merges
+   cleanly onto the line as the wave found it, but not on top of the ones of its
+   wave merged before it, is left out of the line for the rest of the run. The
+@@ -739,10 +778,13 @@ wave builds on, via `[driver].wave_mode`:
+   folds between the waves of the children it adopts), where a bundle stopped
+   for sign-off still counts as finished. A bundle that did not finish still
+   exits 1, which wins over 3 (a held bundle's dependent is left unbuilt, so a
+-  hold with a dependent in the run exits 1). So 0 means every bundle finished
+-  and none was held out of a fold the run performed. An accepted bundle of the
+-  last wave that pushed no branch is not covered: no fold runs after it, so the
+-  run holds nothing.
++  hold with a dependent in the run exits 1). A bundle whose accept was refused
++  for a conflict with a bundle of its wave did not finish either: it is still
++  AWAITING_SIGNOFF and held by nothing, so the run exits 1 (in a run of one id
++  it counts as stopped for sign-off, as above). So 0 means every bundle
++  finished and none was held out of a fold the run performed. An accepted
++  bundle of the last wave that pushed no branch is not covered: no fold runs
++  after it, so the run holds nothing.
+ 
+   To recover a run that stopped part-way (an integrity stop, the pass budget, a
+   crash, Ctrl-C), re-issue the same `pdca flow <ids>`. The ids the earlier run
+diff --git a/template/src/pdca_harness/flow.py b/template/src/pdca_harness/flow.py
+index b92ef34..d0f1ff0 100644
+--- a/template/src/pdca_harness/flow.py
++++ b/template/src/pdca_harness/flow.py
+@@ -20,7 +20,9 @@ rebuilds; ``iterate-plan`` re-opens Plan) and bounded so a cycle can't spin fore
+ from __future__ import annotations
+ 
+ import contextlib
++import dataclasses
+ import datetime
++import json
+ import re
+ import sys
+ import threading
+@@ -131,8 +133,23 @@ def _repair_unsignable(d: Path, *, action: str, today: str, why: str) -> str | N
+     return REASSEMBLE if kept else None
+ 
+ 
++@dataclasses.dataclass(frozen=True)
++class _AcceptTrial:
++    """What an accept is tried against on a wave the fold runs after (#395,
++    :func:`_refused_for_wave`): ``wave``, the wave's bundles; ``k``, its index;
++    ``folded_tips``, each target's tip this run last pushed, where the fold after the wave
++    starts that target's line; ``batch``, the ids that name the run's line
++    (:func:`integrate.integration_branch`). :func:`_drive_and_act` builds one for exactly the
++    waves that fold runs after (:func:`_drive_wave`'s ``trial``)."""
++    wave: tuple[Path, ...]
++    k: int
++    folded_tips: Mapping[tuple[str, str], str | None]
++    batch: tuple[str, ...]
++
++
+ def _apply_decision(
+-    cfg: Config, d: Path, *, by: str, today: str, apply_now: bool
++    cfg: Config, d: Path, *, by: str, today: str, apply_now: bool,
++    trial: _AcceptTrial | None = None,
+ ) -> str | None:
+     """Record the bundle's written sign-off decision under the C6 guard.
+ 
+@@ -142,6 +159,12 @@ def _apply_decision(
+     SUMMARY was moved aside so a later beat can rebuild it, or ``"blocked"`` if an accept
+     was refused because §6 NEEDS-HUMAN is still open. Pure deterministic code — no leaf.
+ 
++    ``trial`` (#395): the bundle is in a wave the fold runs after. An accept C6 lets through
++    is then refused the same way when the bundle's change would conflict with bundles of
++    its wave already accepted (:func:`_refused_for_wave`): §6 gets an open row saying so,
++    the bundle stays AWAITING_SIGNOFF, and this returns ``"blocked"``. ``None`` (the
++    single-issue flow, the last wave, a dry-run, ``--no-publish``, merge mode): C6 alone.
++
+     ``apply_now`` advances the bundle immediately (single-issue ``flow``). The batch
+     sweep passes ``apply_now=False`` so an ``iterate-do`` does NOT rebuild on the spot —
+     the human reviews the whole cheap-first queue first, and the next pass's build-all
+@@ -177,6 +200,11 @@ def _apply_decision(
+     if action == "accept" and accept_blockers(d):
+         print(f"flow: {d.name} — cannot accept, §6 NEEDS-HUMAN still open (C6)", file=sys.stderr)
+         return "blocked"
++    # After C6, so a row the human must clear first is cleared first; before the record, so
++    # an accept that would open a PR conflicting with an accepted sibling's is refused, never
++    # recorded and undone (#395). The decision file stays, as for a C6 refusal.
++    if action == "accept" and trial is not None and _refused_for_wave(cfg, d, trial):
++        return "blocked"
+     # The iterate rationale ("why rejected / what to change") rides §9 → the driver
+     # folds it into the brief's carry-forward so the next iteration isn't blind.
+     # §9's "Iteration delta" is a single line, so flatten a multi-line rationale.
+@@ -191,6 +219,8 @@ def _apply_decision(
+         # `_isolate` because the single-issue flow has no `_isolate` around this call, and a
+         # traceback would abandon the run instead of reporting one bad bundle.
+         return _repair_unsignable(d, action=action, today=today, why=str(exc))
++    # A decision is recorded: a refused accept's record (#395) no longer describes the bundle.
++    (d / state.SAME_WAVE_REFUSAL).unlink(missing_ok=True)
+     # Driver-side capture of the session's carry-forward (issue #331). The rationale
+     # lines below the token are the LIVE channel — the sign-off session writes them as
+     # each decision is made — and the unlink below destroys the only full copy while §9
+@@ -238,6 +268,199 @@ def accept_blockers(d: Path) -> list[str]:
+     return signoff.open_needs_human(d / "SUMMARY.md")
+ 
+ 
++def _refused_for_wave(cfg: Config, d: Path, trial: _AcceptTrial) -> bool:
++    """Whether bundle ``d``'s accept is refused because its change would conflict with
++    bundles of its own wave already accepted (#395) — refused as C6 refuses one: an open §6
++    row, the bundle left AWAITING_SIGNOFF, so no PR of it is opened beside theirs.
++
++    "Would conflict" is the fold's own rule, in the fold's order, on the commits publish
++    would push (:func:`integrate.same_wave_clash`): accepting ``d`` would make the fold after
++    the wave hold more bundles than it holds without it. So whichever bundle is accepted
++    first is kept, and the accepted bundles of a wave hold no such conflict unless the human
++    overrides. When that check cannot run for ``d``'s target (a lock, a fetch, a commit
++    that cannot be built), ``d`` is refused only if its patch shares a path with an accepted
++    bundle of the wave on that target (:func:`integrate.same_wave_overlap`), as a textual
++    conflict needs one; otherwise it is accepted, and stderr says so. A check that left the
++    shared integration worktree in a state it could not put back is not that: the fold
++    stops on the same errors (:class:`integrate.IntegrationTreeError`, #631;
++    :class:`integrate._LineBroken`, #623), so ``d`` is refused whatever it shares, with a row
++    that names the tree's state and the step for it — never accepted on a broken tree.
++
++    The row names the bundles it conflicts with, the files, and the step: declare
++    ``Conflicts with`` in ``d``'s brief, then iterate-plan. It goes into SUMMARY §6 only
++    (:func:`signoff.ensure_needs_human_item`), never into a Check artifact, so a SUMMARY
++    reassembled later drops it and the next accept tries again. A row already there and
++    ticked is the human's override, as C6 honours every tick: the accept goes on, and the
++    fold holds one of the two (#674). Each refusal is recorded in
++    ``state.SAME_WAVE_REFUSAL`` for :func:`_drive_wave`, which offers the bundle one more
++    sign-off session, not one every pass."""
++    accepted = [s for s in trial.wave
++                if s.name != d.name and state.state(s) == state.COMPLETE]
++    if not accepted:
++        return False
++    try:
++        repo_spec, base, _slug = publish._resolve_target(d)
++        clash = integrate.same_wave_clash(cfg, d, accepted,
++                                          tip=trial.folded_tips.get((repo_spec, base)),
++                                          batch=trial.batch)
++    except (integrate.IntegrationTreeError, integrate._LineBroken) as exc:
++        siblings = [s.name for s in integrate.same_wave_siblings(d, accepted)]
++        return _refuse(d, "tree", siblings, [], _cause(exc))
++    except (integrate.IntegrationError, OSError, ValueError) as exc:
++        cause = _cause(exc)
++        clash = integrate.same_wave_overlap(d, accepted)
++        if clash is None:
++            print(f"flow: {d.name} — the same-wave conflict check could not run ({cause}); "
++                  f"accepted, as its change shares no file with a bundle of wave {trial.k} "
++                  f"already accepted", file=sys.stderr)
++            return False
++        return _refuse(d, "unrun", *clash, cause)
++    if clash is None:
++        return False
++    return _refuse(d, "conflict", *clash, "")
++
++
++def _cause(exc: Exception) -> str:
++    """What failed, on one line: an :class:`integrate.IntegrationError`'s ``cause``, else
++    the error's own words."""
++    return " ".join((getattr(exc, "cause", "") or str(exc)).split())
++
++
++def _refuse(d: Path, kind: str, partners: list[str], paths: list[str], cause: str) -> bool:
++    """Refuse bundle ``d``'s accept for the reason ``kind`` names (#395,
++    :func:`_refusal_words`): add the row saying so to §6, record the refusal for
++    :func:`_drive_wave`, and say so on stderr. False when that row is already there and
++    ticked: the human accepts it anyway, as C6 honours every tick."""
++    item, why, step = _refusal_words(d, kind, partners, paths, cause)
++    summary = d / "SUMMARY.md"
++    signoff.ensure_needs_human_item(summary, item)
++    if not signoff.open_needs_human(summary):
++        return False
++    _write_refusal(d, {"item": item, "why": why, "step": step, "partners": partners,
++                       "paths": paths, "cause": cause, "sessions": 0})
++    print(f"flow: {d.name} — cannot accept: {why}; added that to §6 NEEDS-HUMAN. "
++          f"{_capital(step)}.", file=sys.stderr)
++    return True
++
++
++def _capital(text: str) -> str:
++    """``text`` with its first letter in upper case, to start a sentence."""
++    return text[:1].upper() + text[1:]
++
++
++def _refusal_words(d: Path, kind: str, partners: list[str], paths: list[str], cause: str
++                   ) -> tuple[str, str, str]:
++    """``(row, why, step)`` for bundle ``d``'s accept refused over ``partners``, accepted in
++    its own wave (#395, :func:`_refused_for_wave`): the §6 row, then why it was refused and
++    the step as stderr says them. ``kind``: ``"conflict"``, its change conflicts with theirs
++    in ``paths``; ``"unrun"``, the check could not run (``cause``) and it shares ``paths``
++    with them; ``"tree"``, the check left the integration worktree in a state it could not
++    put back (``cause``), so whether it conflicts with them is not known."""
++    whose, files = _conflict_partners(partners), ", ".join(paths)
++
++    def why(change: str) -> str:
++        if kind == "tree":
++            return (f"the same-wave conflict check could not run, as it left the integration "
++                    f"worktree in a state it could not put back ({cause}), so whether "
++                    f"{change} conflicts with {whose}, accepted in its own wave, is not known")
++        if kind == "unrun":
++            return (f"the same-wave conflict check could not run ({cause}), and {change} "
++                    f"shares {files} with {whose}, accepted in its own wave, so their PRs may "
++                    f"conflict")
++        return (f"{change} conflicts with {whose}, accepted in its own wave (conflicts in "
++                f"{files}), so their PRs would conflict")
++
++    def step(row: str) -> str:
++        if kind == "tree":
++            return (f"check that checkout (or remove it to have it recreated), then tick {row} "
++                    f"and accept {d.name} again")
++        ids = ", ".join(p.removeprefix("issue_") for p in partners)
++        return (f"declare `Conflicts with: {ids}` in {d.name}'s brief, then iterate-plan it "
++                f"(`pdca signoff {d.name.removeprefix('issue_')} --iterate-plan`); or tick "
++                f"{row} and accept it again to publish it anyway")
++
++    lead = "same-wave conflict: " if kind == "conflict" else ""
++    mine = f"{d.name}'s change"
++    return f"{lead}{why(mine)} — {step('this row')}", why("its change"), step("that row")
++
++
++def _write_refusal(d: Path, record: dict) -> None:
++    """Write bundle ``d``'s refused-accept record (#395, ``state.SAME_WAVE_REFUSAL``). One
++    that cannot be written is left out: the bundle is then offered a session every pass, as
++    after a C6 refusal."""
++    with contextlib.suppress(OSError):
++        (d / state.SAME_WAVE_REFUSAL).write_text(json.dumps(record, indent=2) + "\n",
++                                                 encoding="utf-8")
++
++
++def _refusal(d: Path) -> dict | None:
++    """Bundle ``d``'s refused-accept record (#395, :func:`_write_refusal`), or None: none, or
++    one that does not read as one (a hand-edited file is no record)."""
++    try:
++        rec = json.loads((d / state.SAME_WAVE_REFUSAL).read_text(encoding="utf-8"))
++    except (OSError, ValueError):
++        return None
++    if not (isinstance(rec, dict)
++            and all(isinstance(rec.get(k), str) for k in ("item", "why", "step"))
++            and type(rec.get("sessions")) is int):
++        return None
++    return rec
++
++
++def _session_offered(d: Path) -> None:
++    """Count, in ``d``'s refused-accept record, a sign-off session it was offered that ran
++    (#395): :func:`_drive_wave` calls this only once the session returned. No record:
++    nothing to count."""
++    rec = _refusal(d)
++    if rec is not None:
++        _write_refusal(d, {**rec, "sessions": rec["sessions"] + 1})
++
++
++def _sessions_reset(d: Path) -> None:
++    """Set the count in ``d``'s refused-accept record back to none (#395), as a wave starts:
++    each run offers a refused bundle one session, then stops (:func:`_parked`). The record
++    itself stays — deleted, a later run would offer the bundle a session every pass until
++    its budget ran out, as after a plain C6 refusal. No record: nothing to reset."""
++    rec = _refusal(d)
++    if rec is not None and rec["sessions"]:
++        _write_refusal(d, {**rec, "sessions": 0})
++
++
++def _parked(d: Path) -> bool:
++    """Whether the wave offers bundle ``d`` no more sign-off sessions (#395): its accept was
++    refused for a same-wave conflict (:func:`_refused_for_wave`), the wave has offered it a
++    session since that ran, and that session recorded nothing that settled it — it is still
++    AWAITING_SIGNOFF with that row open. A row the human ticked, a new refusal (a new
++    record), or another open row alone leaves it to the plain C6 path, offered every pass."""
++    rec = _refusal(d)
++    if rec is None or rec["sessions"] < 1:
++        return False
++    try:
++        if state.state(d) != state.AWAITING_SIGNOFF:
++            return False
++        rows = signoff.open_needs_human(d / "SUMMARY.md")
++    except Exception:  # noqa: BLE001 — a bundle that cannot be read is not parked
++        return False
++    want = " ".join(rec["item"].split()).casefold()
++    return any(" ".join(r[len("- [ ]"):].split()).casefold() == want for r in rows)
++
++
++def _report_parked(wave: list[Path], k: int | None) -> None:
++    """At the end of wave ``k``, one stderr line per bundle of ``wave`` it stopped offering
++    sessions to (#395, :func:`_parked`): why its accept was refused and the step, as the
++    refusal said them (its record), and that it is not published — never the pass budget,
++    which is not why it stopped."""
++    for d in wave:
++        rec = _refusal(d) if _parked(d) else None
++        if rec is None:
++            continue
++        wave_k = "this wave" if k is None else f"wave {k}"
++        print(f"flow: {d.name} [{state.AWAITING_SIGNOFF}] — not accepted: {rec['why']}; the "
++              f"sign-off session it was offered since recorded nothing new, so {wave_k} offers "
++              f"it no more and it is NOT published this run. {_capital(rec['step'])}.",
++              file=sys.stderr)
++
++
+ #: :func:`_apply_recorded_decision` outcome meaning "the bundle carries no decision, so it
+ #: still owes a sign-off session". Deliberately distinct from every other outcome, because
+ #: only this one may open a session: ``None`` means a decision WAS on disk but could not be
+@@ -248,7 +471,8 @@ UNDECIDED = "undecided"
+ 
+ 
+ def _apply_recorded_decision(
+-    cfg: Config, d: Path, *, by: str, today: str, apply_now: bool
++    cfg: Config, d: Path, *, by: str, today: str, apply_now: bool,
++    trial: _AcceptTrial | None = None,
+ ) -> str | None:
+     """Consume the decision the bundle **already carries**, before any session is offered.
+ 
+@@ -276,11 +500,14 @@ def _apply_recorded_decision(
+     or the record is dropped / the summary repaired and the bundle goes back to reassemble
+     (:func:`_repair_unsignable`). Those paths stay reported — each already prints its own
+     line naming this bundle and this action — but they must not be reported as an apply.
++
++    ``trial`` is handed to :func:`_apply_decision` (#395): an accept recorded before the
++    session is tried against the bundle's wave exactly as one written in it.
+     """
+     action = leaves.signoff_decision(d)
+     if not action:
+         return UNDECIDED
+-    outcome = _apply_decision(cfg, d, by=by, today=today, apply_now=apply_now)
++    outcome = _apply_decision(cfg, d, by=by, today=today, apply_now=apply_now, trial=trial)
+     if outcome == action:
+         print(f"flow: {d.name} — applied the '{action}' sign-off decision already recorded "
+               f"in the bundle; no new session", file=sys.stderr)
+@@ -2445,7 +2672,7 @@ def _pass_pool(allowance: int, wave_list: list[list[Path]]) -> int:
+ 
+ 
+ def _drive_wave(cfg: Config, wave: list[Path], *, by: str, today: str,
+-                max_passes: int | None = None) -> int:
++                max_passes: int | None = None, trial: _AcceptTrial | None = None) -> int:
+     """Drive ONE wave's bundles to all-terminal (COMPLETE / DISCONTINUED) with iteration,
+     then the cheap-first sign-off restricted to the wave. Publishing and folding are the
+     caller's. The pass loop mirrors the prior single-batch driver: build-all
+@@ -2466,9 +2693,25 @@ def _drive_wave(cfg: Config, wave: list[Path], *, by: str, today: str,
+     would hand the next (possibly adopted) wave a budget the operator never allowed. Both
+     are pinned — ``test_a_wave_that_runs_its_allowance_out_still_charges_the_run_pool``,
+     ``test_a_wave_that_stalls_charges_the_run_pool_for_what_it_spent``. Defaults to
+-    ``cfg.max_passes`` (``[driver].max_passes``)."""
++    ``cfg.max_passes`` (``[driver].max_passes``).
++
++    ``trial`` (#395): this is a wave the fold runs after (:func:`_drive_and_act` builds it).
++    Both accept routes — the pre-apply and the post-session apply — then refuse an accept
++    that would add a same-wave conflict (:func:`_refused_for_wave`). A bundle refused so is
++    offered ONE more session; if that session records nothing that settles it, the wave
++    stops offering it (:func:`_parked`), ends once its other bundles are terminal, and names
++    it with the conflict and the step (:func:`_report_parked`) — not with the pass budget,
++    which it would otherwise spin to. The sessions it was offered since the refusal are
++    counted in the bundle's ``state.SAME_WAVE_REFUSAL``: one only once it returned, so a
++    session that raised is not that one more session; and from none again as each wave
++    starts, so each run — a later one, with or without ``trial``, the refusal's row still
++    open — offers the bundle one session, then names it with its step. A plain C6 refusal
++    has no such record and is offered a session every pass, as before."""
+     max_passes = cfg.max_passes if max_passes is None else max_passes
+     names = {b.name for b in wave}
++    k = trial.k if trial is not None else None
++    for d in wave:
++        _sessions_reset(d)
+     used = 0
+     for _ in range(max_passes):
+         used += 1
+@@ -2485,7 +2728,10 @@ def _drive_wave(cfg: Config, wave: list[Path], *, by: str, today: str,
+                 if _isolate(d, "auto-iterate", lambda d=d: _maybe_auto_iterate(
+                         cfg, d, by=by, today=today, apply_now=False)):
+                     auto_iterated = True
+-        pending = [e.bundle for e in queue.awaiting_signoff(cfg) if e.bundle.name in names]
++        # A bundle refused for a same-wave conflict that has had its one more session is
++        # left out (#395, `_parked`): nothing it carries can settle it this wave.
++        pending = [e.bundle for e in queue.awaiting_signoff(cfg)
++                   if e.bundle.name in names and not _parked(e.bundle)]
+         if not pending:
+             # A fired auto-iterate IS progress, even though it leaves the bundle in the state
+             # the pass began in (PR #270 review). A bundle already ITERATE_DO gets rebuilt by
+@@ -2500,7 +2746,9 @@ def _drive_wave(cfg: Config, wave: list[Path], *, by: str, today: str,
+             if not auto_iterated and [state.state(d) for d in wave] == before:
+                 # Genuinely stuck (all terminal / planner declined an UNPLANNED) — but an
+                 # ITERATE_* bundle here is progress the driver can no longer make.
+-                _warn_abandoned(wave, why="a full pass made no progress")
++                _warn_abandoned([d for d in wave if not _parked(d)],
++                                why="a full pass made no progress")
++                _report_parked(wave, k)
+                 return used
+             continue    # progress (e.g. an iterate-plan re-open) — give it another pass
+         # Read before asking (issue #453). A pending bundle may already carry a decision from
+@@ -2517,7 +2765,7 @@ def _drive_wave(cfg: Config, wave: list[Path], *, by: str, today: str,
+         for d in pending:
+             applied = _isolate(d, "applying the recorded sign-off decision",
+                                lambda d=d: _apply_recorded_decision(
+-                                   cfg, d, by=by, today=today, apply_now=False))
++                                   cfg, d, by=by, today=today, apply_now=False, trial=trial))
+             if applied in (UNDECIDED, "blocked"):
+                 needing_session.append(d)
+         for chunk in _chunks(needing_session, SIGNOFF_BATCH_SIZE):
+@@ -2527,19 +2775,29 @@ def _drive_wave(cfg: Config, wave: list[Path], *, by: str, today: str,
+                 print(f"flow: sign-off session over {[b.name for b in chunk]} failed "
+                       f"({type(exc).__name__}: {exc}); applying decisions written so far",
+                       file=sys.stderr)
++            else:
++                # A session that ran is the one after a same-wave refusal (#395); a dropped
++                # one is not, and is offered again. Counted before the apply below, so a new
++                # refusal it brings gets its own one more session.
++                for d in chunk:
++                    _session_offered(d)
+             for d in chunk:
+                 _isolate(d, "sign-off", lambda d=d: _apply_decision(
+-                    cfg, d, by=by, today=today, apply_now=False))
+-        if all(state.state(d) in _TERMINAL for d in wave):
++                    cfg, d, by=by, today=today, apply_now=False, trial=trial))
++        if all(state.state(d) in _TERMINAL or _parked(d) for d in wave):
++            _report_parked(wave, k)
+             return used
+     # Budget spent with work still in flight. An `iterate-do` recorded on the last allowed
+     # pass defers its rebuild to "the next pass's build-all" — which never comes. The
+     # allowance is named as THIS WAVE's (#469): once a run adopts, a later wave gets what is
+     # left of the run's pool, and "exhausted after 1 pass(es); raise [driver].max_passes"
+     # while that setting reads 20 is a contradiction to the operator it is addressed to.
+-    _warn_abandoned(wave, why=f"pass budget exhausted after {max_passes} pass(es) — this "
+-                             f"wave's allowance out of the run's pool; raise "
+-                             f"[driver].max_passes / PDCA_MAX_PASSES / --max-passes")
++    # A parked bundle (#395) is not waiting on the budget: it is named with its own step.
++    _warn_abandoned([d for d in wave if not _parked(d)],
++                    why=f"pass budget exhausted after {max_passes} pass(es) — this "
++                        f"wave's allowance out of the run's pool; raise "
++                        f"[driver].max_passes / PDCA_MAX_PASSES / --max-passes")
++    _report_parked(wave, k)
+     return used
+ 
+ 
+@@ -2773,7 +3031,11 @@ def _drive_and_act(
+     integration line: ``"unpushed"`` for one that pushed no branch (#593) and ``"conflict"``
+     for one whose branch conflicts with a same-wave bundle merged before it (#674), or with
+     bundles already on the line that explain the whole clash (#747). Such a bundle is
+-    COMPLETE in the returned map, which therefore cannot say it was held.
++    COMPLETE in the returned map, which therefore cannot say it was held. On a wave the
++    fold runs after, the first kind is found at sign-off instead (#395,
++    :func:`_refused_for_wave`): such a bundle is never accepted, so it is AWAITING_SIGNOFF
++    in the map, unfinished, and not held; the fold holds one only when the human overrode
++    that refusal, or a branch changed after its accept.
+     ``"base"`` (#738) for one held before it was built, because its own base could not be
+     built (:func:`_bundle_bases`): not driven this run — PLANNED in the map, for one not
+     built yet — and named on stderr with the cause and the fix. ``cli._flow`` reads this to
+@@ -3018,8 +3280,18 @@ def _drive_and_act(
+         # is smaller — the second term is the admission rule again, applied to the wave that
+         # was let in (#469); with the pool covering the live schedule (#473) it can only bite
+         # if a wave came to spend more than it was handed.
++        # On a wave the fold below runs after — its own condition: not the last wave,
++        # publishing on, stack mode, not a dry-run (where it holds nothing) — an accept that
++        # would add a same-wave conflict to that fold is refused at sign-off (#395), so the
++        # wave opens no two PRs that conflict the way the fold judges, and no accepted bundle
++        # of it goes without a PR for that reason. The fold keeps its own hold (#674) for an
++        # override, or a branch that changed after the accept.
++        trial = (_AcceptTrial(wave=tuple(runnable), k=k, folded_tips=dict(folded_tips),
++                              batch=tuple(run_batch))
++                 if (k < len(wave_list) - 1 and do_publish and cfg.wave_mode != "merge"
++                     and cfg.publisher.mode != "stub") else None)
+         spent += _drive_wave(cfg, runnable, by=by, today=today,
+-                             max_passes=min(allowance, budget - spent))
++                             max_passes=min(allowance, budget - spent), trial=trial)
+         # A bundle that SPLIT during this wave hands its children back to the run that
+         # caused the split (#469), spliced into the waves AFTER this one — instead of
+         # ending with the parent terminal, the children PLANNED, and the operator
+diff --git a/template/src/pdca_harness/integrate.py b/template/src/pdca_harness/integrate.py
+index f841f2f..473ae9e 100644
+--- a/template/src/pdca_harness/integrate.py
++++ b/template/src/pdca_harness/integrate.py
+@@ -65,7 +65,10 @@ is a loud :class:`IntegrationError` that stops the run before the next wave buil
+ broken base — unless its conflict is with bundles of its own wave merged before it (it
+ merges cleanly onto the line as the wave found it, but not onto that line plus them): the
+ flow's fold then holds just that bundle out of the line and names the bundles it conflicts
+-with (``held_out``, #674). Mechanics are deterministic ``git`` subprocesses (no model).
++with (``held_out``, #674). On a wave a fold runs after, the flow applies that same rule at
++sign-off, to the commits publish would push, and refuses to accept the bundle that would add
++such a conflict (:func:`same_wave_clash`, #395); the fold's own hold stays as the last check.
++Mechanics are deterministic ``git`` subprocesses (no model).
+ """
+ 
+ from __future__ import annotations
+@@ -749,6 +752,236 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
+     return result
+ 
+ 
++def same_wave_clash(cfg: Config, d: Path, accepted: Sequence[Path], *,
++                    tip: str | None, batch: Collection[str] | None
++                    ) -> tuple[list[str], list[str]] | None:
++    """Whether accepting bundle ``d`` would add a same-wave conflict to the :func:`fold`
++    that runs after its wave (#395): ``(partners, paths)`` if so, else None.
++
++    ``accepted``: the bundles of ``d``'s wave already accepted. Only those with a patch on
++    ``d``'s target count (each target folds onto a line of its own); with none, nothing is
++    tried and no git step runs. The rule is the fold's own (``held_out``, #674:
++    :func:`_held_by` over :func:`_trial`), applied to what the fold will merge: each
++    bundle's would-be commit, its ``patch.diff`` committed onto the commit publish cuts its
++    branch from (:func:`publish.cut_base`), built locally on no branch and never pushed
++    (:func:`_would_be`). They are merged in the fold's order — name order, within a wave —
++    onto the line as the wave found it: ``tip``, the tip this run last pushed for the
++    target, else ``<base_remote>/<base>``, where the fold starts it. ``batch`` names the
++    line's branch, as for :func:`fold`.
++
++    "A conflict" (#395's choice, which the fold does not make): those bundles of
++    ``accepted`` with ``d``, merged so, have the fold hold more bundles than those of
++    ``accepted`` alone (:func:`_wave_holds`). So whichever was accepted first is kept: ``d``
++    is refused also when it sorts first and the bundle the fold would hold is the earlier
++    one. ``partners``: each newly held bundle's partners when it is ``d``, else that bundle
++    itself; ``paths``: the files they conflict in. A commit that conflicts with the line
++    itself is neither held nor merged here, as a conflict with work already on the line is
++    the fold's to judge (#747), after publish.
++
++    Runs in the target's integration worktree, under its :func:`integ_lock` (entered on an
++    ``ExitStack``, as :func:`fold` enters it), and leaves that tree on the line's branch at
++    the start, clean, on every exit, a raising one included (:func:`_back_on`). Raises
++    :class:`IntegrationError` when the check cannot run: the lock cannot be taken, a fetch or
++    another git step fails, a would-be commit cannot be built (its patch does not apply
++    where publish cuts it, say), or publish would cut no branch for one of them. Raises
++    :class:`IntegrationTreeError` or :class:`_LineBroken`, as the fold does, when the tree
++    itself is in a state it could not put back (#631, #623): the error the trial was already
++    raising then is chained to it, and its words kept (:func:`_back_on`)."""
++    others = same_wave_siblings(d, accepted)
++    if not others:
++        return None
++    repo_spec, base, _slug = publish._resolve_target(d)
++    order = sorted([*others, d], key=lambda p: p.name)
++    cuts: dict[str, tuple[str, str]] = {}
++    for x in order:
++        cut = publish.cut_base(cfg, x)
++        if cut is None:
++            cause = (f"publish would cut no branch for {x.name} (a `Stacks on` prerequisite "
++                     f"with no published branch?)")
++            raise IntegrationError(f"{cause}, so the commit it would push cannot be built",
++                                   cause=cause)
++        cuts[x.name] = cut
++    repo = publish._checkout_path(cfg, repo_spec)
++    branch = integration_branch(cfg, base, batch)
++    start = tip or f"{cfg.base_remote}/{base}"
++    with contextlib.ExitStack() as locks:
++        wt = _integ_worktree(repo, base)
++        if not locks.enter_context(integ_lock(wt)):
++            cause = f"could not take the integration lock next to {wt.name}"
++            raise IntegrationError(cause, cause=cause)
++        wt = _prepare_worktree(repo, cfg.base_remote, base,
++                               remotes=[r for r, _ref in cuts.values()
++                                        if r not in ("origin", cfg.base_remote)])
++        _reset_tree(wt, "HEAD")
++        # As the fold starts its line (`could not start`, a failed git step) and reads its
++        # tip (`pre` unread: the tree's state is unknown).
++        if _git(wt, "checkout", "-q", "-B", branch, start) != 0:
++            cause = f"could not start {branch} off {start} in {wt}"
++            raise IntegrationError(f"{cause} — check that checkout, then re-run", cause=cause)
++        pre = _rev(wt, "HEAD")
++        if pre is None:
++            cause = f"could not read the tip of {branch} in {wt}"
++            raise IntegrationTreeError(f"{cause} — check that checkout, then re-run",
++                                       cause=cause)
++        after = "the same-wave trial"
++        try:
++            built = [(x.name, _would_be(wt, branch, x, cuts[x.name][1])) for x in order]
++            alone = _wave_holds(wt, branch, pre, [(n, h) for n, h in built if n != d.name])
++            _back_on(wt, branch, pre, after=after)
++            held = _wave_holds(wt, branch, pre, built)
++        except BaseException as exc:
++            _back_on(wt, branch, pre, after=after, first=exc)
++            raise
++        _back_on(wt, branch, pre, after=after)
++    if len(held) <= len(alone):
++        return None
++    partners: list[str] = []
++    paths: list[str] = []
++    for name, (its, files) in held.items():
++        if name in alone:
++            continue
++        partners += [p for p in (its if name == d.name else [name]) if p not in partners]
++        paths += [f for f in files if f not in paths]
++    return partners, paths
++
++
++def same_wave_siblings(d: Path, accepted: Sequence[Path]) -> list[Path]:
++    """The bundles of ``accepted`` that bundle ``d``'s accept is tried against (#395,
++    :func:`same_wave_clash`): each other one with a patch on ``d``'s own target, as each
++    target folds onto a line of its own, in name order. Empty when ``d`` has no patch or no
++    target."""
++    mine = _targeted([d]) if _has_patch(d) else []
++    if not mine:
++        return []
++    _d, repo_spec, base, _slug = mine[0]
++    return [o for o, r, b, _s in _targeted(sorted((o for o in accepted
++                                                   if o.name != d.name and _has_patch(o)),
++                                                  key=lambda p: p.name))
++            if (r, b) == (repo_spec, base)]
++
++
++def same_wave_overlap(d: Path, accepted: Sequence[Path]
++                      ) -> tuple[list[str], list[str]] | None:
++    """What the flow refuses an accept on when :func:`same_wave_clash` cannot run (#395):
++    ``(partners, paths)`` — the bundles of ``accepted`` with a patch on ``d``'s target whose
++    patch touches a path ``d``'s does (:func:`waves.diff_files`), and those paths — or None
++    when there are none. A textual conflict needs a shared path, so every other bundle is
++    accepted. A path under a directory the other patch touches as a file counts too: git
++    conflicts on a file one side adds where the other adds a directory."""
++    others = same_wave_siblings(d, accepted)
++    if not others:
++        return None
++    files = waves.diff_files(d / "patch.diff")
++    partners: list[str] = []
++    paths: list[str] = []
++    for o in others:
++        theirs = waves.diff_files(o / "patch.diff")
++        shared = sorted((files & theirs)
++                        | {p for p in files if any(q.startswith(p + "/") for q in theirs)}
++                        | {p for p in theirs if any(q.startswith(p + "/") for q in files)})
++        if shared:
++            partners.append(o.name)
++            paths += [p for p in shared if p not in paths]
++    return (partners, paths) if partners else None
++
++
++def _would_be(wt: Path, branch: str, d: Path, ref: str) -> str:
++    """The commit publish would push for bundle ``d`` (#395), made in ``wt`` and never
++    pushed: publish's own steps less the fetch and the push — check out ``ref``, where
++    publish puts the patch (:func:`publish.cut_base`), apply ``d``'s ``patch.diff``, stage
++    everything, commit — on a detached HEAD, so it has the parent and the tree of the branch
++    publish pushes (the message differs, and no commit hook runs: it is never pushed). A step
++    that fails raises :class:`IntegrationError`, naming it. Ends with the tree back on
++    ``branch`` at the tip it had, clean, as :func:`_trial` does: one that will not go back
++    raises :class:`_LineBroken`, chained to the error the build was already raising, if any
++    (:func:`_back_on`)."""
++    tip = _rev(wt, "HEAD")
++    if tip is None:
++        raise IntegrationTreeError(f"could not read the tip of {branch} in {wt} — check that "
++                                   f"checkout, then re-run")
++    steps = ((("checkout", "-q", "--detach", ref), f"could not check out {ref}"),
++             (("apply", str((d / "patch.diff").resolve())),
++              f"its patch does not apply onto {ref}"),
++             (("add", "--all"), "`git add --all` failed"),
++             (("commit", "-q", "--no-verify", "-m",
++               f"pdca-integrate: would-be commit of {d.name}"), "`git commit` failed"))
++    after = f"building {d.name}'s would-be commit"
++    try:
++        for args, failed in steps:
++            if _git(wt, *args) != 0:
++                cause = f"{d.name}'s would-be commit could not be built: {failed}"
++                raise IntegrationError(f"{cause} (in {wt}) — check that checkout and the "
++                                       f"bundle's patch, then re-run", cause=cause)
++        head = _rev(wt, "HEAD")
++        if head is None:
++            cause = f"{d.name}'s would-be commit could not be read in {wt}"
++            raise IntegrationError(cause, cause=cause)
++    except BaseException as exc:
++        _back_on(wt, branch, tip, after=after, first=exc)
++        raise
++    _back_on(wt, branch, tip, after=after)
++    return head
++
++
++def _wave_holds(wt: Path, branch: str, pre: str, built: Sequence[tuple[str, str]]
++                ) -> dict[str, tuple[list[str], list[str]]]:
++    """What the fold's same-wave rule (#674) holds of ``built`` — ``(name, commit)`` in fold
++    order — merged one after another onto ``branch`` in ``wt``, checked out at ``pre``, the
++    line as the wave found it, as :func:`fold` merges a wave's branches: one whose merge
++    conflicts after others of ``built`` were merged is held, never merged, exactly when
++    :func:`_held_by` says so. One that conflicts with ``pre`` itself is neither held nor
++    merged (the fold judges that against the line, #747). A merge that fails with no
++    conflicting path is a failed git step and raises. Leaves ``branch`` where the merges
++    took it: the caller puts it back."""
++    held: dict[str, tuple[list[str], list[str]]] = {}
++    kept: list[tuple[str, str]] = []
++    for name, head in built:
++        rc, paths = _merge(wt, head, f"pdca-integrate: trial of {name}")
++        if rc == 0:
++            kept.append((name, head))
++        elif not paths:
++            raise IntegrationError(f"could not try merging {name}'s would-be commit in {wt} — "
++                                   f"`git merge` exited {rc} with no conflicting path, so a git "
++                                   f"step failed: check that checkout, then re-run")
++        elif kept:
++            clash = _held_by(wt, branch, head, pre, kept)
++            if clash:
++                held[name] = clash
++    return held
++
++
++def _back_on(wt: Path, branch: str, at: str, *, after: str,
++             first: BaseException | None = None) -> None:
++    """Put ``wt`` back on ``branch`` at ``at``, clean (#395): after a step of the same-wave
++    trial (``after`` names it) the line is where the wave found it, whatever the step left —
++    a merge, a detached HEAD, untracked files. One that will not go back raises
++    :class:`_LineBroken`; a tree that cannot even be reset, :class:`IntegrationTreeError`
++    (:func:`_reset_tree`). ``first``: the error the step was already raising, if any. The
++    error raised here is then chained to it (``raise … from``) and keeps its cause in its own
++    words, so what failed first is still reported when the tree will not go back. A ``first``
++    that is no ``Exception`` (a ``^C``, an exit) is never replaced: the tree is put back if it
++    goes, and the caller raises ``first`` on, which the flow does not contain."""
++    if first is not None and not isinstance(first, Exception):
++        with contextlib.suppress(IntegrationError):
++            _back_on(wt, branch, at, after=after)
++        return
++    then = ""
++    if first is not None:
++        first_cause = getattr(first, "cause", None) or str(first) or type(first).__name__
++        then = f" (after an earlier failure: {' '.join(first_cause.split())})"
++    try:
++        _reset_tree(wt, "HEAD")
++    except IntegrationTreeError as exc:
++        if first is None:
++            raise
++        raise IntegrationTreeError(f"{exc}{then}", cause=f"{exc.cause}{then}") from first
++    if (_git(wt, "checkout", "-q", branch) != 0 or _git(wt, "reset", "-q", "--hard", at) != 0
++            or _rev(wt, "HEAD") != at):
++        cause = f"could not put {branch} back at {at} in {wt} after {after}{then}"
++        raise _LineBroken(f"{cause} — check that checkout, then re-run",
++                          cause=cause) from first
++
++
+ def _bundle_name(name: str) -> str:
+     """``name`` as a bundle's name, given as one or as its id: ``500`` and ``issue_500`` are
+     one bundle, as :func:`batch_key` counts them."""
+diff --git a/template/src/pdca_harness/publish.py b/template/src/pdca_harness/publish.py
+index 36b3b42..e9997b8 100644
+--- a/template/src/pdca_harness/publish.py
++++ b/template/src/pdca_harness/publish.py
+@@ -257,12 +257,10 @@ def publish(
+     # `checkout_base`, so the host-CI gate below fetches, pins and certifies the same commit
+     # (its `host_ci_base` is the recorded tip), and `_line_tip_refusal` first checks the line
+     # still holds it. pr_base is what `gh --base` gets — and it MUST be a branch in the
+-    # upstream (`--repo`) repo.
+-    cut_from_tip = wave_stacked and bool(wave_tip)
+-    if cut_from_tip:
+-        checkout_base = wave_tip
+-    else:
+-        checkout_base = f"origin/{stack_branch}" if stack_branch else f"{base_remote}/{base}"
++    # upstream (`--repo`) repo. The rule is :func:`_checkout_base`, which the flow's
++    # accept-time trial (#395, :func:`cut_base`) builds a bundle's would-be commit on too.
++    checkout_base, cut_from_tip = _checkout_base(cfg, base, wave_base=wave_base,
++                                                 wave_tip=wave_tip, stack_branch=stack_branch)
+     # A wave>0 bundle (a recorded `stack-base`) opens its PR against its REAL target base, on
+     # the own-repo and fork paths alike (#593): the integration branch is a run-scoped
+     # staging line, and a PR merged into it never reaches the target. The PR carries every
+@@ -766,6 +764,40 @@ def _stacks_on_branch(cfg: Config, d: Path) -> str | None:
+     return rec.get("branch") if rec else None
+ 
+ 
++def _checkout_base(cfg: Config, base: str, *, wave_base: str, wave_tip: str,
++                   stack_branch: str | None) -> tuple[str, bool]:
++    """``(checkout_base, cut_from_tip)``: what :func:`publish` cuts a new PR's branch from,
++    and whether that is a recorded line commit. In stack mode, a bundle with a recorded stack
++    base and line tip is cut from that tip (#593); else from the stack branch on origin, else
++    from the target base on the base remote. The one rule :func:`publish` and
++    :func:`cut_base` share (#395)."""
++    if cfg.wave_mode != "merge" and wave_base and wave_tip:
++        return wave_tip, True
++    return (f"origin/{stack_branch}" if stack_branch else f"{cfg.base_remote}/{base}"), False
++
++
++def cut_base(cfg: Config, d: Path) -> tuple[str, str] | None:
++    """``(remote, ref)`` for bundle ``d``: the remote :func:`publish` fetches, and the ref or
++    commit it puts ``d``'s patch on — so a caller can build the commit publish would push
++    without pushing it (#395, ``integrate.same_wave_clash``). An ``Onto branch`` (#54) gets
++    that PR branch (:func:`_publish_stacked`); any other bundle gets :func:`_checkout_base`.
++    None where publish cuts nothing: no usable target, or a ``Stacks on`` prerequisite with
++    no published branch yet (publish refuses both)."""
++    repo_spec, base, _slug = _resolve_target(d)
++    if not repo_spec or not base:
++        return None
++    onto = brief.onto_branch(d / "brief.md")
++    if onto is not None:
++        return onto[0], f"{onto[0]}/{onto[1]}"
++    wave_base = _read_stack_base(d)
++    stack_branch = wave_base or _stacks_on_branch(cfg, d)
++    if brief.stacks_on(d / "brief.md") and not stack_branch:
++        return None
++    ref, _tip = _checkout_base(cfg, base, wave_base=wave_base,
++                               wave_tip=read_stack_base_tip(d), stack_branch=stack_branch)
++    return ("origin" if stack_branch else cfg.base_remote), ref
++
++
+ def _merge_base_refusal(cfg: Config, d: Path, repo_spec: str, pr_base: str, base: str) -> str:
+     """Why ``pr_base`` is not a base that exists independently of this run — or "" if it is.
+ 
+diff --git a/template/src/pdca_harness/state.py b/template/src/pdca_harness/state.py
+index 13fe3e4..be89bf0 100644
+--- a/template/src/pdca_harness/state.py
++++ b/template/src/pdca_harness/state.py
+@@ -59,6 +59,15 @@ DEPENDENCY_ADJUDICATION = "dependency-adjudication.json"
+ # attempt via DOWNSTREAM_OF_BRIEF below.
+ SESSION_CARRY = "session-carry-forward"
+ 
++# An accept the flow refused because the bundle's change would conflict with bundles of its
++# own wave already accepted (#395, ``flow._refused_for_wave``): the §6 row it added, why and
++# the step, and how many sign-off sessions that ran the wave has offered the bundle since.
++# The wave reads it to offer such a bundle one more session, not one every pass
++# (``flow._drive_wave``), and sets that count back to none when it starts, so each run
++# offers one. Removed once a decision for the bundle is recorded, and archived with its
++# attempt via DOWNSTREAM_OF_BRIEF below.
++SAME_WAVE_REFUSAL = "same-wave-refusal.json"
++
+ # The reviewer leaf's captured-error tail (#138): each failed attempt's record is written
+ # as that attempt happens (#540) and the record is SETTLED once the attempts are spent —
+ # which makes it, SETTLED, the discriminator (#369) between a reviewer that ran-and-failed
+@@ -145,6 +154,8 @@ DOWNSTREAM_OF_BRIEF = [
+     # Archived per round WITH the verdict they explain, so each iteration-v<N>/ keeps the
+     # full basis of its own gate run — the state-is-files doctrine applied to evidence.
+     GATE_LOGS_DIR,
++    # A refused accept's record (#395): about THIS attempt's patch, so it goes with it.
++    SAME_WAVE_REFUSAL,
+ ]
+ 
+ # Cycle artifacts matched by pattern rather than name. ONE definition, read by both
+diff --git a/template/tests/test_flow_same_wave_accept_trial.py b/template/tests/test_flow_same_wave_accept_trial.py
+new file mode 100644
+index 0000000..1b02e2f
+--- /dev/null
++++ b/template/tests/test_flow_same_wave_accept_trial.py
+@@ -0,0 +1,532 @@
++"""A same-wave conflict is refused at accept, never published and then held (#395).
++
++Two bundles of one wave can both pass Check while their branches conflict textually, with no
++`Conflicts with` between them. Since #674 the fold after the wave holds the later one — but
++only after both were accepted and both PRs opened, so the run left two conflicting draft
++PRs, and an accepted bundle whose PR the human had to close or redo. Now, on every wave the
++fold runs after, the accept that would add such a conflict is refused the way C6 refuses
++one: the bundle stays AWAITING_SIGNOFF with an open §6 row naming the bundles it conflicts
++with, the files, and the step. It is never published. Every accepted bundle still ends in a
++PR.
++
++These cases drive ``flow._drive_and_act`` over real git — the ``StackFoldGit`` fixture of
++tests/test_integrate_stack_bases.py (a bare ``origin`` and a primary checkout), through the
++``SameWaveConflict`` stubs of tests/test_flow_same_wave_conflict.py, both loaded by path.
++Unlike that suite, ``flow._drive_wave`` is NOT stubbed: every accept goes through the real
++``_drive_wave`` → ``_apply_decision`` path, as tests/test_signoff_orphan.py drives it. Do and
++Check are stubbed (``flow._build_all`` writes each bundle's ``patch.diff`` and the SUMMARY
++the driver's own assembly step writes), a decision is either recorded in the bundle before
++its wave signs off (``leaves.SIGNOFF_DECISION``) or written by the stubbed sign-off session
++(``leaves.run_signoff_batch``), ``flow._publish_bundle`` cuts, pushes and records the PR
++branch and then runs the ``gh pr create`` publish runs, and ``gh`` is answered by a stub in
++front of ``subprocess.run``. The publisher is NOT a stub (a stub turns every fold into a
++dry-run). Nothing here calls ``signoff.record(... "accept")``.
++
++Only modules are imported (never a symbol the fix adds), so with the production change
++reverted these cases still load and run — and fail on their assertions.
++    cd template && PYTHONPATH=src python3 -m unittest tests.test_flow_same_wave_accept_trial
++"""
++
++from __future__ import annotations
++
++import importlib.util
++import io
++import json
++import subprocess
++import unittest
++from collections.abc import Callable
++from contextlib import ExitStack, redirect_stderr, redirect_stdout
++from pathlib import Path
++from unittest import mock
++
++from pdca_harness import assemble, cli, flow, integrate, leaves, publish, signoff, state
++
++_SPEC = importlib.util.spec_from_file_location(
++    "same_wave_conflict_fixture", Path(__file__).with_name("test_flow_same_wave_conflict.py"))
++swc = importlib.util.module_from_spec(_SPEC)
++_SPEC.loader.exec_module(swc)
++sb = swc.sb                     # the StackFoldGit fixture module, loaded by path there
++
++TODAY = "2026-10-25"
++NINE = swc.NINE                 # a nine-line file on the base
++_edit = swc._edit
++
++# A Check review with nothing for the human, closed as a finished leaf closes it: the
++# SUMMARY assembled over it has an empty §6, so only what the run adds there can refuse.
++REVIEW = ("# Cross-vendor reviewer (advisory, artifact-only)\n\nNo finding for the human.\n\n"
++          f"{assemble.LEAF_COMPLETE_TRAILER}\n")
++
++
++class SameWaveAcceptTrial(unittest.TestCase):
++    # The SameWaveConflict fixture and stubs, borrowed method by method: subclassing it
++    # would collect and run its own cases again here.
++    _on_base = swc.SameWaveConflict._on_base
++    _plan = swc.SameWaveConflict._plan
++    _patch = swc.SameWaveConflict._patch
++    _gh_stub = swc.SameWaveConflict._gh_stub
++
++    def setUp(self) -> None:
++        swc.SameWaveConflict.setUp(self)     # real git; the publisher in command mode
++        self.recorded: dict[str, str] = {}   # id → the decision its bundle carries at build
++        self.check_rows: dict[str, str] = {}  # id → an open §6 row Check gave it
++        # id → what its n-th sign-off session does (None, or past the list: nothing)
++        self.session: dict[str, list[Callable[[Path], None] | None]] = {}
++        self.sessions_had: dict[str, int] = {}
++        self.session_calls: list[list[str]] = []
++        self.built: list[str] = []
++        self.patches: list = []              # extra patches for one case's run
++        self.at_session: dict[str, tuple[str, str, str]] = {}   # id → the integration tree
++
++    # -- stubs -----------------------------------------------------------------------------
++
++    def _build_all(self, cfg, bundles: list[Path]) -> None:
++        """Do + Check, stubbed: each bundle still PLANNED gets its change against the base as
++        its ``patch.diff``, a clean gate record and review, and the SUMMARY the driver's own
++        assembly step writes (``assemble.assemble_summary``): AWAITING_SIGNOFF. A §6 row of
++        ``check_rows`` is added as Check would, and a decision of ``recorded`` is written into
++        the bundle, as a session that ended before the driver applied it leaves one."""
++        for d in bundles:
++            if state.state(d) != state.PLANNED:
++                continue
++            iid = d.name.removeprefix("issue_")
++            self.built.append(d.name)
++            (d / "patch.diff").write_text(self._patch(self.changes[iid]), encoding="utf-8")
++            (d / "check-gates.json").write_text(json.dumps({"overall": "pass", "rows": []}),
++                                                encoding="utf-8")
++            (d / "check-review.md").write_text(REVIEW, encoding="utf-8")
++            assemble.assemble_summary(d, cfg)
++            if iid in self.check_rows:
++                signoff.ensure_needs_human_item(d / "SUMMARY.md", self.check_rows[iid])
++            if iid in self.recorded:
++                (d / leaves.SIGNOFF_DECISION).write_text(self.recorded[iid], encoding="utf-8")
++
++    def _sessions(self, cfg, bundles: list[Path]) -> None:
++        """The sign-off leaf, stubbed: records which bundles each session covers, and does
++        for each what ``session`` says for its n-th session. The integration tree, as the
++        session finds it, is recorded too."""
++        self.session_calls.append([b.name for b in bundles])
++        for b in bundles:
++            iid = b.name.removeprefix("issue_")
++            n = self.sessions_had[iid] = self.sessions_had.get(iid, 0) + 1
++            self.at_session[iid] = self._integration_tree()
++            steps = self.session.get(iid, [])
++            if n <= len(steps) and steps[n - 1] is not None:
++                steps[n - 1](b)
++
++    def _publish_bundle(self, cfg, d: Path, **kw) -> bool:
++        """SameWaveConflict's publish stub — cut the PR branch where publish cuts it, push
++        it, record it — then the draft PR publish opens once the branch is pushed, through
++        the ``gh`` stub, which records it."""
++        pushed = swc.SameWaveConflict._publish_bundle(self, cfg, d, **kw)
++        iid = d.name.removeprefix("issue_")
++        subprocess.run(["gh", "pr", "create", "--draft", "--repo", "org/repo", "--base", "main",
++                        "--head", f"org:fix/{iid}", "--title", f"fix {iid}"],
++                       capture_output=True, text=True)
++        return pushed
++
++    def _run(self, ids: list[str], *, max_passes: int | None = None,
++             drive: list[str] | None = None) -> None:
++        """One stack-mode run asked for ``ids``, driving all of them — or ``drive``, the ones
++        ``flow_ids`` drives on a re-run, which skips the finished ids."""
++        self.ids = list(ids)
++        self.line = integrate.integration_branch(self.cfg, "main", ids)
++        drive = [self.cfg.bundle(i) for i in (ids if drive is None else drive)]
++        self._err, out = io.StringIO(), io.StringIO()
++        self.holds: dict[str, str] = {}
++        with ExitStack() as stack:
++            stack.enter_context(mock.patch.object(subprocess, "run", self._gh_stub))
++            stack.enter_context(mock.patch.object(flow, "_build_all", self._build_all))
++            stack.enter_context(mock.patch.object(leaves, "run_signoff_batch", self._sessions))
++            stack.enter_context(mock.patch.object(flow, "_publish_bundle",
++                                                  self._publish_bundle))
++            stack.enter_context(mock.patch.object(publish, "draft_texts",
++                                                  lambda *a, **k: True))
++            for p in self.patches:
++                stack.enter_context(p)
++            stack.enter_context(redirect_stdout(out))
++            stack.enter_context(redirect_stderr(self._err))
++            self.results = flow._drive_and_act(self.cfg, drive, do_publish=True,
++                                               do_act=False, by="T", today=TODAY,
++                                               batch=ids, holds=self.holds,
++                                               max_passes=max_passes)
++        self.err = self._err.getvalue()
++        self.rc = cli._results_rc(self.results, holds=self.holds)
++        self.assertNotIn("Traceback", self.err)
++        self.assertNotIn("skipping this bundle", self.err)   # no step of a bundle raised
++
++    # -- what a session does -----------------------------------------------------------------
++
++    @staticmethod
++    def _writes_accept(d: Path) -> None:
++        (d / leaves.SIGNOFF_DECISION).write_text("accept\n", encoding="utf-8")
++
++    def _ticks_and_accepts(self, d: Path) -> None:
++        """The human clears every open §6 row and accepts: an override."""
++        summary = d / "SUMMARY.md"
++        summary.write_text(summary.read_text(encoding="utf-8").replace("- [ ]", "- [x]"),
++                           encoding="utf-8")
++        self._writes_accept(d)
++
++    # -- helpers ---------------------------------------------------------------------------
++
++    def _pair(self, *, b_line: str = "l2") -> list[str]:
++        """Wave 0: 10 and 11 change line 2 of shared.txt — a textual conflict, with no
++        `Conflicts with` between them (``b_line``: the line 11 changes) — and 12 a file of
++        its own. Wave 1: 20, depending on 12 alone, so a fold runs after wave 0. Returns the
++        ids."""
++        self._on_base({"shared.txt": NINE})
++        self._plan("10", {"shared.txt": _edit(NINE, l2="ten")})
++        self._plan("11", {"shared.txt": _edit(NINE, **{b_line: "eleven"})})
++        self._plan("12", {"twelve.txt": "twelve\n"})
++        self._plan("20", {"twenty.txt": "twenty\n"}, "12")
++        return ["10", "11", "12", "20"]
++
++    def _summary(self, iid: str) -> Path:
++        return self.cfg.bundle(iid) / "SUMMARY.md"
++
++    def _open(self, iid: str, naming: str) -> list[str]:
++        """``iid``'s open §6 rows that name ``issue_<naming>``."""
++        return [r for r in signoff.open_needs_human(self._summary(iid))
++                if f"issue_{naming}" in r]
++
++    def _ticked(self, iid: str, naming: str) -> list[str]:
++        """``iid``'s ticked §6 rows that name ``issue_<naming>``."""
++        return [r for r in signoff.cleared_needs_human(self._summary(iid))
++                if f"issue_{naming}" in r]
++
++    def _created(self, iid: str) -> list[list[str]]:
++        """The ``gh pr create`` calls for ``iid``'s branch."""
++        return [c for c in self.gh_calls
++                if c[:3] == ["gh", "pr", "create"] and f"org:fix/{iid}" in c]
++
++    def _published(self, iid: str) -> None:
++        self.assertEqual(self.results[iid], state.COMPLETE, self.err)
++        self.assertTrue(self.fx._has(f"fix/{iid}"), self.err)
++        self.assertEqual(len(self._created(iid)), 1, self.gh_calls)
++
++    def _not_published(self, iid: str) -> None:
++        self.assertEqual(state.state(self.cfg.bundle(iid)), state.AWAITING_SIGNOFF, self.err)
++        self.assertFalse(self.fx._has(f"fix/{iid}"), self.err)
++        self.assertEqual(self._created(iid), [], self.gh_calls)
++        self.assertNotIn(iid, self.holds)
++
++    def _integration_tree(self) -> tuple[str, str, str]:
++        """``(status, the branch checked out, HEAD)`` of the target's integration worktree,
++        or empty strings when there is none yet."""
++        wt = integrate._integ_worktree(self.fx.primary, "main")
++        if not (wt / ".git").exists():
++            return "", "", ""
++        run = self._real_run
++        return tuple(run(["git", "-C", str(wt), *args], capture_output=True,
++                         text=True).stdout.strip()
++                     for args in (("status", "--porcelain"), ("symbolic-ref", "-q", "HEAD"),
++                                  ("rev-parse", "HEAD")))
++
++    def _on_the_line_at_base(self, iid: str) -> None:
++        """When ``iid``'s session opened, the integration tree was clean, on the run's line,
++        at origin's main — where the wave found the line."""
++        self.assertEqual(self.at_session.get(iid),
++                         ("", f"refs/heads/{self.line}", self.fx._tip("main")), self.err)
++
++    # -- (a) the later accept is refused, the earlier published ------------------------------
++
++    def test_a_conflicting_accept_is_refused_and_its_sibling_published(self):
++        ids = self._pair()
++        self.recorded = {i: "accept\n" for i in ids}
++        self._run(ids)
++
++        self._published("10")
++        self._not_published("11")
++        rows = self._open("11", "10")
++        self.assertEqual(len(rows), 1, self.err)
++        self.assertIn("shared.txt", rows[0])
++        self.assertIn("`Conflicts with: 10`", rows[0])
++        self.assertIn("iterate-plan", rows[0])
++        self.assertIn(rows[0], signoff.open_needs_human(self._summary("11")))
++        self.assertEqual(self.rc, 1, self.err)               # 11 did not finish
++        self.assertIn("issue_20", self.built)                # wave 1 still builds…
++        self._published("20")                                # …and completes
++        self._published("12")
++        # The trial ran in the integration tree and left it clean on the line.
++        self._on_the_line_at_base("11")
++
++    # -- (b) a shared file that merges cleanly changes nothing -------------------------------
++
++    def test_a_shared_file_that_merges_cleanly_is_accepted(self):
++        ids = self._pair(b_line="l8")
++        self.recorded = {i: "accept\n" for i in ids}
++        self._run(ids)
++
++        for iid in ids:
++            self._published(iid)
++        for iid in ("10", "11"):
++            self.assertEqual(signoff.open_needs_human(self._summary(iid)), [], iid)
++            self.assertEqual(signoff.cleared_needs_human(self._summary(iid)), [], iid)
++        self.assertEqual(self.holds, {}, self.err)
++        self.assertEqual(self.rc, 0, self.err)
++        self.assertEqual(self.sessions_had, {}, self.err)
++
++    # -- (c) whichever is accepted first is kept --------------------------------------------
++
++    def test_the_refusal_does_not_depend_on_which_accept_comes_first(self):
++        # 11's accept is recorded, so the pre-apply takes it before 10's session opens; 10,
++        # which sorts first, is then the one refused: the fold would have held 11 for it.
++        ids = self._pair()
++        self.recorded = {i: "accept\n" for i in ids if i != "10"}
++        self.session = {"10": [self._writes_accept]}
++        self._run(ids)
++
++        self._published("11")
++        self._not_published("10")
++        rows = self._open("10", "11")
++        self.assertEqual(len(rows), 1, self.err)
++        self.assertIn("shared.txt", rows[0])
++        self.assertIn("`Conflicts with: 11`", rows[0])
++        self.assertEqual([i for i in ("10", "11")
++                          if self.results[i] == state.COMPLETE], ["11"], self.err)
++        self.assertEqual(self.holds, {}, self.err)            # the fold holds nothing
++
++    # -- (d) an override in the same run: accepted, published, held by the fold --------------
++
++    def test_ticking_the_row_accepts_it_and_the_fold_holds_it(self):
++        ids = self._pair()
++        self.recorded = {i: "accept\n" for i in ids}
++        self.session = {"11": [self._ticks_and_accepts]}
++        self._run(ids)
++
++        self.assertEqual(self.sessions_had.get("11"), 1, self.err)   # offered after refusal
++        self._published("11")
++        self.assertEqual(self.holds.get("11"), "conflict", self.err)  # #674, as on main
++        self.assertEqual(len(self._ticked("11", "10")), 1, self.err)  # added once, kept
++        self.assertEqual(self._open("11", "10"), [], self.err)
++        self.assertEqual(self.rc, 3, self.err)
++
++    # -- (e) the check cannot run: refuse only where a conflict is possible -----------------
++
++    def test_a_trial_that_cannot_run_refuses_only_a_bundle_sharing_a_file(self):
++        # 11 changes line 8 here, so it would merge cleanly: only the shared path refuses it.
++        ids = self._pair(b_line="l8")
++        self.recorded = {i: "accept\n" for i in ids}
++        real, failed = integrate._git, []
++
++        def no_commit_builds(repo: Path, *args: str) -> int:
++            if args[:1] == ("apply",):          # building a would-be commit
++                failed.append(args)
++                return 1
++            return real(repo, *args)
++
++        self.patches.append(mock.patch.object(integrate, "_git", no_commit_builds))
++        self._run(ids)
++
++        self.assertTrue(failed, self.err)
++        self._published("10")
++        self._not_published("11")
++        rows = self._open("11", "10")
++        self.assertEqual(len(rows), 1, self.err)
++        self.assertIn("could not run", rows[0])
++        self.assertIn("shared.txt", rows[0])
++        self._published("12")                   # no file shared with an accepted sibling
++        self._on_the_line_at_base("11")         # a raising trial left the tree on the line
++
++    def test_a_check_that_breaks_the_tree_refuses_and_names_it(self):
++        # 12 shares no file with 10, so a check that merely could not run would accept it.
++        # Here building 12's would-be commit fails, and then the integration tree will not
++        # go back on the line once: the shared tree's state is unknown, which the fold stops
++        # on. 12 is refused, never accepted on the shared-path fallback, and the row names
++        # that state, keeping what failed first.
++        self._on_base({"shared.txt": NINE})
++        self._plan("10", {"shared.txt": _edit(NINE, l2="ten")})
++        self._plan("12", {"twelve.txt": "twelve\n"})
++        self._plan("20", {"twenty.txt": "twenty\n"}, "10")    # a later wave: a fold follows
++        ids = ["10", "12", "20"]
++        self.recorded = {i: "accept\n" for i in ids}
++        real, injected = integrate._git, []
++
++        def breaks_once(repo: Path, *args: str) -> int:
++            if args[:1] == ("apply",) and "issue_12" in args[1]:
++                injected.append("apply")          # 12's would-be commit does not build…
++                return 1
++            if injected[-1:] == ["apply"] and args[:2] == ("checkout", "-q") and len(args) == 3:
++                injected.append("checkout")       # …and the line will not come back, once
++                return 1
++            return real(repo, *args)
++
++        # What the trial raised, through the real function (absent before the fix, where
++        # nothing calls it: `create=True`, so that leg fails on an assertion, not here).
++        real_clash, raised = getattr(integrate, "same_wave_clash", None), []
++
++        def clash_spy(*a, **kw):
++            try:
++                return real_clash(*a, **kw)
++            except Exception as exc:
++                raised.append(exc)
++                raise
++
++        self.patches += [mock.patch.object(integrate, "_git", breaks_once),
++                         mock.patch.object(integrate, "same_wave_clash", clash_spy,
++                                           create=True)]
++        self._run(ids)
++
++        self.assertEqual(injected, ["apply", "checkout"], self.err)
++        self._published("10")
++        self._not_published("12")
++        rows = self._open("12", "10")
++        self.assertEqual(len(rows), 1, self.err)
++        self.assertIn("could not put back", rows[0])            # the tree's state, named…
++        self.assertIn("does not apply", rows[0])                # …with what failed first
++        self.assertIn("check that checkout", rows[0])
++        self.assertNotIn("shares no file", self.err)            # no fallback accepted it
++        # The error the trial raised is the fold's own, chained to the first one.
++        self.assertEqual([type(e) for e in raised], [integrate._LineBroken], self.err)
++        self.assertIsInstance(raised[0].__cause__, integrate.IntegrationError)
++        self.assertIn("does not apply", str(raised[0].__cause__))
++        self._on_the_line_at_base("12")         # put back on the line all the same
++        self._published("20")
++        self.assertEqual(self.rc, 1, self.err)                  # 12 did not finish
++
++    # -- (f) the row lives only in SUMMARY §6 -----------------------------------------------
++
++    def test_a_reassembled_summary_drops_the_row_and_the_next_accept_refuses_again(self):
++        ids = self._pair()
++        self.recorded = {i: "accept\n" for i in ids}
++        dropped: list[list[str]] = []
++
++        def reassembles_and_accepts(d: Path) -> None:
++            # What an iterate-do or an auto-iterate rebuild ends in: the driver's own
++            # assembly step writes §6 again from the Check artifacts. The tick goes with it.
++            self._ticks_and_accepts(d)
++            assemble.assemble_summary(d, self.cfg)
++            dropped.append([*signoff.open_needs_human(d / "SUMMARY.md"),
++                            *signoff.cleared_needs_human(d / "SUMMARY.md")])
++            self._writes_accept(d)
++
++        self.session = {"11": [reassembles_and_accepts]}
++        self._run(ids)
++
++        self.assertEqual(dropped, [[]], self.err)       # the reassembly dropped row and tick
++        self._not_published("11")
++        rows = self._open("11", "10")
++        self.assertEqual(len(rows), 1, self.err)         # back, and unticked
++        self.assertEqual(self._ticked("11", "10"), [], self.err)
++        # Never a Check finding: nothing auto-iterate reads carries it.
++        self.assertFalse([it for it in assemble.collect_needs_human(self.cfg.bundle("11"),
++                                                                     self.cfg)
++                          if "issue_10" in it.text], self.err)
++
++    # -- (h) a refused bundle is offered one more session, not one every pass ----------------
++
++    def test_a_refused_bundle_gets_one_more_session_then_the_wave_ends(self):
++        ids = self._pair()
++        self.session = {i: [self._writes_accept] for i in ids}   # 11: nothing after that
++        self._run(ids, max_passes=20)
++
++        offered = [c for c in self.session_calls if "issue_11" in c]
++        self.assertLessEqual(len(offered), 2, self.session_calls)
++        self._not_published("11")
++        self._published("20")
++        # What counted the session after the refusal is a file of the bundle, not the run.
++        mark = json.loads((self.cfg.bundle("11") / "same-wave-refusal.json")
++                          .read_text(encoding="utf-8"))
++        self.assertEqual(mark["sessions"], 1, mark)
++        about = [x for x in self.err.splitlines() if "issue_11" in x]
++        end = [x for x in about if "not accepted" in x]
++        self.assertEqual(len(end), 1, self.err)
++        self.assertIn("issue_10", end[0])
++        self.assertIn("`Conflicts with: 10`", end[0])
++        self.assertIn("iterate-plan", end[0])
++        self.assertFalse([x for x in about if "max_passes" in x], self.err)
++        self.assertNotIn("pass budget exhausted", self.err)
++
++    def test_a_session_that_fails_is_not_the_one_more_session(self):
++        # The session offered after the refusal raises: no session ran, so it is not the
++        # one the bound allows. 11 is offered another, and parked only after that one.
++        ids = self._pair()
++        self.recorded = {i: "accept\n" for i in ids}
++
++        def leaf_dies(d: Path) -> None:
++            raise RuntimeError("the sign-off leaf died")
++
++        self.session = {"11": [leaf_dies]}                  # then: nothing recorded
++        self._run(ids, max_passes=20)
++
++        self.assertEqual(self.err.count("sign-off session over ['issue_11'] failed"), 1,
++                         self.err)
++        self.assertEqual(self.sessions_had.get("11"), 2, self.err)   # the dropped one, then one
++        self._not_published("11")
++        mark = json.loads((self.cfg.bundle("11") / "same-wave-refusal.json")
++                          .read_text(encoding="utf-8"))
++        self.assertEqual(mark["sessions"], 1, mark)                   # only the one that ran
++        end = [x for x in self.err.splitlines() if "issue_11" in x and "not accepted" in x]
++        self.assertEqual(len(end), 1, self.err)
++        self.assertNotIn("pass budget exhausted", self.err)
++        self._published("20")
++
++    def test_a_later_run_offers_the_refused_bundle_a_session_again(self):
++        # The count is the wave's own: a re-run skips the finished ids, so 11 is driven
++        # alone, with no accepted sibling, and is offered a session — where the human can
++        # tick the row and accept it after all — not left with none.
++        ids = self._pair()
++        self.session = {i: [self._writes_accept] for i in ids}   # 11: nothing after that
++        self._run(ids)
++        self._not_published("11")
++
++        self.session, self.sessions_had = {"11": [self._ticks_and_accepts]}, {}
++        self._run(ids, drive=["11"])
++        self.assertEqual(self.sessions_had.get("11"), 1, self.err)
++        self._published("11")
++
++    def test_a_later_run_parks_the_refused_bundle_after_one_session_too(self):
++        # The re-run where the row stays open: 11's refused accept is still on disk, and
++        # C6 refuses it every pass. One session, then the conflict step — never a spin to
++        # the pass budget and its "raise [driver].max_passes".
++        ids = self._pair()
++        self.session = {i: [self._writes_accept] for i in ids}   # 11: nothing after that
++        self._run(ids)
++        self._not_published("11")
++
++        self.session, self.sessions_had, self.session_calls = {}, {}, []
++        self._run(ids, max_passes=20, drive=["11"])
++
++        self.assertEqual(self.sessions_had.get("11"), 1, self.err)
++        self.assertEqual(len(self.session_calls), 1, self.session_calls)
++        self._not_published("11")
++        self.assertEqual(len(self._open("11", "10")), 1, self.err)    # the row, still open
++        end = [x for x in self.err.splitlines() if "issue_11" in x and "not accepted" in x]
++        self.assertEqual(len(end), 1, self.err)
++        self.assertIn("issue_10", end[0])
++        self.assertIn("`Conflicts with: 10`", end[0])
++        self.assertIn("iterate-plan", end[0])
++        self.assertNotIn("max_passes", self.err)
++        self.assertNotIn("pass budget exhausted", self.err)
++        self.assertEqual(self.rc, 1, self.err)
++
++    def test_a_plain_c6_refusal_is_still_offered_a_session_every_pass(self):
++        # An open §6 row from Check, no trial involved: today's behaviour, unchanged.
++        ids = self._pair(b_line="l8")
++        self.recorded = {i: "accept\n" for i in ids}
++        self.check_rows = {"11": "confirm the change by hand (a Check finding)"}
++        self._run(ids, max_passes=3)
++
++        self.assertEqual(len([c for c in self.session_calls if "issue_11" in c]), 3,
++                         self.session_calls)
++        self.assertEqual(state.state(self.cfg.bundle("11")), state.AWAITING_SIGNOFF)
++        self.assertIn("pass budget exhausted", self.err)
++
++    # -- (g) the last wave has no fold to mirror ---------------------------------------------
++
++    def test_on_the_last_wave_both_are_accepted_and_published(self):
++        self._on_base({"shared.txt": NINE})
++        self._plan("10", {"shared.txt": _edit(NINE, l2="ten")})
++        self._plan("11", {"shared.txt": _edit(NINE, l2="eleven")})
++        ids = ["10", "11"]
++        self.recorded = {i: "accept\n" for i in ids}
++        self._run(ids)
++
++        self._published("10")
++        self._published("11")
++        self.assertEqual(self.holds, {}, self.err)
++        self.assertEqual(self.rc, 0, self.err)               # as on main: no fold, no hold
++
++
++if __name__ == "__main__":
++    unittest.main()

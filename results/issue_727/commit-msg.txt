@@ -1,0 +1,24 @@
+flow: build each PR on only what it declares, not the whole line
+
+In stack mode every bundle in a wave was built on the run's one integration
+line. That line holds every earlier-wave bundle for the target, so a PR's
+branch carried work from bundles it had nothing to do with. Merging that PR
+also merged their work, even when the human had closed their own PRs.
+
+A bundle whose declared prerequisites (Depends on, in-batch Depends on
+(merged), transitively, plus an earlier-wave Conflicts with partner) were all
+built in this run now gets a base of its own. That base holds exactly that
+work and nothing else from the run. If the set is empty, the bundle is built
+on the real base. Bundles that reach a seam keep the line as before: a carried
+bundle, an Onto branch member, a legacy Stacks on bundle, or a Conflicts with
+partner that was carried.
+
+The checks for a force-pushed prerequisite branch (at the next fold and at the
+end of the run) now also look at the head each bundle's own base took. For
+such a bundle they name its base, that head, and its PR to rebuild. The line
+keeps its existing report and names only the PRs cut from it.
+
+Builds on 9f47922833ae8f8747c4b91abe1f342a70d66a24 (#723), which added the
+per-bundle base builder this change calls.
+
+Fixes #727

@@ -1,0 +1,12 @@
+{
+  "mode": "stacked-pr",
+  "branch": "enhancement/738-hold-a-bundle-whose-own-base-cannot-be-built",
+  "pr_url": "https://github.com/eduralph/pdca-harness/pull/746",
+  "base": "main",
+  "repo": "eduralph/pdca-harness",
+  "by": "Eduard Ralph",
+  "date": "2026-10-15",
+  "id_pending": false,
+  "host_ci_base": "75a886e9370d7b51567c9f6803d827c66a4fac48",
+  "stacks_on": []
+}

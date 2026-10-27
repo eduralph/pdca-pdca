@@ -1,0 +1,14 @@
+{
+  "band": "watch",
+  "independent_outcomes": [
+    "The pre-wave carry never pushes onto the line any commit of an id its own fold skipped (for any skip reason), holds every finished id whose tip reaches that work with the skipped id named as the cause, and pushes once. Criteria (1)-(5) and (7), the doc and docstring updates, and the iteration-5 carry-forward tests (hold-cause tie-break, two-step hold, restart-loop drop) are all checks of this one invariant."
+  ],
+  "proposed_seams": [
+    "No clean seam. The only candidate is hold-cause attribution (criterion 5 plus carry-forward item 1: the holder that also conflicts is reported for P's work, not its own conflict). It cannot ship alone: the hold it labels does not exist until the work-set hold lands, and before that there is nothing to attribute.",
+    "Criterion (7), non-conflict skips, looks like a separate case but is not. The Definition treats every skipped= entry the same, so (7) is one more input to the same rule. Splitting it out would invite the conflict-only fix the brief warns against.",
+    "Docs and the known-limits sentence must land with the behaviour change. Shipped alone they would describe behaviour main does not have.",
+    "Reason for 'watch' rather than 'ok': this is one outcome, but the surface is large and uncertain. v1-v4 did not converge, and v5 returned with three Check findings in the restart and hold-propagation paths. The risk is that the slice keeps cycling, not that it bundles separate work. Splitting would not lower that risk."
+  ],
+  "confidence": "medium",
+  "brief_sha": "e258f0cffbe905d3"
+}

@@ -1,0 +1,37 @@
+Review issue #625: add a reusable tool that records stack-mode behavior on real GitHub and judges saved observations offline.
+
+| Item | Verdict | Basis |
+|------|---------|-------|
+| C1 Spec | PASS | The offline acceptance cases and mandatory live sign-off distinguish a working tool from confirmed GitHub behavior; the published procedure preserves that distinction (brief.md:12; target/CONTRIBUTING.md:51; target/CONTRIBUTING.md:92). |
+| C2 Reproduction (red pre-fix) | PASS | Independently stashing production files while retaining the tests produced 19 assertion failures across 16 executed tests, reproducing the missing-tool baseline rather than an import failure (review-red.log:360; target/tests/test_stack_mode_live_tool.py:110). |
+| C3 Change | PASS | The three changed paths stay within the proposed tool, root tests and contributor documentation; driver implementation and rendered instances remain outside this patch (target/tools/live/stack_mode_live.py:57; target/CONTRIBUTING.md:42). |
+| C4 Verification (red→green) | PASS | Restoring the stash independently turned the same 16 tests green; this verifies the offline criterion, including interrupted-setup recovery, without claiming a live GitHub result (review-green.log:19; gate-logs/C4-verify.log:10; target/tests/test_stack_mode_live_tool.py:352). |
+| C5 Causal adequacy | NEEDS-HUMAN [impl] | Classify an undrivable run 2 as INCOMPLETE with a nonzero run exit, as the hard sign-off condition requires — a driver exception currently yields exit 0, finished=true and ordinary FAIL, allowing an incomplete scenario to follow the accept-with-filed-bugs route (target/tools/live/stack_mode_live.py:487; target/tools/live/stack_mode_live.py:504; target/tools/live/stack_mode_live.py:717; review-run2-probe.log:3). |
+| T1 Structure | PASS | Separate recording and judging keep the offline oracle independent of network execution; the driver uses real publication with only the specified model leaves replaced (target/tools/live/stack_mode_live.py:337; target/tools/live/stack_mode_live.py:344; target/tools/live/stack_mode_live.py:610). |
+| T2 Shape | PASS | Independently reran docs lint and the 22-page render/link audit successfully; frozen docs and host-parity logs agree, though their published-site scan does not itself lint the root contributor section (target/CONTRIBUTING.md:39; gate-logs/T2-docs.log:10; gate-logs/host-ci-docs.log:10). |
+| T3 Runtime | PASS | Independently reran all 2,630 driver tests successfully with two skips; the root rerun exits 77 for unavailable copier, while the frozen host log records 40 root tests passing, so this is a host caveat rather than a patch defect (review-driver-suite.log:1819; gate-logs/T3-suite.log:70; review-root-suite.log:6). |
+| T4 Contribution | N/A | Contribution artifacts are drafted after Check; the captured deferred row explicitly assigns their substantive audit to publish (gate-logs/T4-contribution.log:10). |
+| T5 Judgment | NEEDS-HUMAN | Decide whether the maintenance cost of a reusable four-command tool is justified for an issue asking for one live run — the brief explicitly reserves that scope expansion for the maintainer; affected-path history and closed-PR searches found no competing live tool (brief.md:69; target/CONTRIBUTING.md:39). |
+| Validation — fitness-to-purpose | NEEDS-HUMAN | Supply an authenticated live setup/run/judge/teardown report and judge its findings before sign-off — GitHub topology was not exercised, setup/teardown tests use a stand-in gh, and the current token lacks delete_repo, so offline results cannot establish the host behavior that #625 asks to observe (brief.md:12; target/CONTRIBUTING.md:57; target/tests/test_stack_mode_live_tool.py:298). |
+
+Independent evidence and remaining decisions:
+
+- The disposable target matched the patch and all production citations above were checked there. Production files were restored after the red leg; no source fix was made. The C5 production-path scanner's frozen output expressly excludes this root test from its import analysis; the subprocess calls in the test directly exercise the production script instead (target/tests/test_stack_mode_live_tool.py:114; gate-logs/C5-prod-path.log:10).
+- The remaining implementation issue is reproducible without GitHub: `PYTHONDONTWRITEBYTECODE=1 python3 review-run2-probe.py`. It executes the actual scenario and command classification with external steps replaced, supplying a recorded driver exception for run 2. Observed: `run_exit: 0`, `finished: true`, `errors: []`, `judge_result: FAIL`; E3 records the driver exception. This is evidence about failure classification only. Unlike runs 1, 3 and 4, run 2 is never required to finish; the scenario sets finished unconditionally after subsequent steps. Require it to finish, or carry its inability into the overall INCOMPLETE classification and nonzero run status. Add coverage at the scenario/command boundary: the existing judge test asserts E3 FAIL but does not establish the required incomplete-run classification (target/tests/test_stack_mode_live_tool.py:196; target/tools/live/stack_mode_live.py:487; target/tools/live/stack_mode_live.py:515).
+- Earlier setup-orphan concerns are addressed: state is saved before preparation; independent subprocess tests covered refused repository settings, refused push, successful setup/teardown, and a lost create response. Unknown ancestry now stays unknown, and branch deletion is confirmed before the relevant observations (target/tools/live/stack_mode_live.py:181; target/tools/live/stack_mode_live.py:269; target/tools/live/stack_mode_live.py:409). The optional-capability/load-time symptom-guard smell test found no applicable probe in this patch.
+- Prior art was checked independently by each affected path using GitHub commit history and closed-PR search. `tools/live/stack_mode_live.py` and `tests/test_stack_mode_live_tool.py` returned no commits and no closed PRs. `CONTRIBUTING.md` history concerned copier evidence and licensing; closed PR results were #525, #68, #439 and #424, none implementing this live check. The local target has only a synthetic base commit, so the remote API supplied the merged-history check. No other checkout was consulted.
+- The only available INTEGRATION source is the template; its human-only list is an unfilled TODO, so it adds no enumerated project decision (target/template/docs/INTEGRATION.md.jinja:80). Scope approval and live fitness remain open independently of the implementation finding.
+
+For the required human live check, obtain a token with `repo` and `delete_repo` permissions, then run from the patched repository root, choosing a fresh work directory:
+
+```bash
+W="$PWD/live-check-625"
+python3 tools/live/stack_mode_live.py setup --workdir "$W"
+python3 tools/live/stack_mode_live.py run --workdir "$W"
+python3 tools/live/stack_mode_live.py judge --workdir "$W"
+python3 tools/live/stack_mode_live.py teardown --workdir "$W"
+```
+
+Inspect `observations.json` and `report.md` for all seven PRs and E0/E1/E1b/E2/E3/E4/E5, confirm that the scenario completed, and attach the report to the bundle and post it on #625. An undrivable scenario remains unresolved; a completed run's genuine expectation failures are filed individually as the brief directs. Run teardown even after an earlier command fails. These steps create, ready, merge and delete disposable GitHub resources and are explicitly assigned to human validation by the brief; no live resources were created during this review.
+
+<!-- pdca:leaf-complete -->
