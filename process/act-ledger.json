@@ -262,5 +262,61 @@
     "status": "open",
     "applied_date": null,
     "location": "Act 2026-10-14: same T5 prior-art class as rows 21, 22, 24, 26, 28 under a sixth key (#501). Pending upstream https://github.com/eduralph/pdca-harness/issues/575 and #586; the human clears it at sign-off until then."
+  },
+  {
+    "signal": "t5 judgment \u2014 confirm affected-path prior art across",
+    "raw": "T5 Judgment \u2014 Confirm affected-path prior art across merged and closed/rejected work before sign-off \u2014 the brief documents path-based merged history but only issue-number closed-PR searching, and the supplied target has one synthetic commit and no remotes (`brief.md:86`; `review-prior-art.log:1`).",
+    "first_seen": "2026-10-15",
+    "status": "open",
+    "applied_date": null,
+    "location": ""
+  },
+  {
+    "signal": "plan advisory: 8 finding(s); brief revised: yes (plan-advisory-*.md)",
+    "raw": "Plan advisory: 8 finding(s); brief revised: yes (plan-advisory-*.md)",
+    "first_seen": "2026-10-15",
+    "status": "open",
+    "applied_date": null,
+    "location": ""
+  },
+  {
+    "signal": "plan advisory: 7 finding(s); brief revised: yes (plan-advisory-*.md)",
+    "raw": "Plan advisory: 7 finding(s); brief revised: yes (plan-advisory-*.md)",
+    "first_seen": "2026-10-15",
+    "status": "open",
+    "applied_date": null,
+    "location": ""
+  },
+  {
+    "signal": "t5 judgment \u2014 confirm the affected-path prior-art search",
+    "raw": "T5 Judgment \u2014 Confirm the affected-path prior-art search covers merged and closed/rejected work \u2014 the brief records that search, but this one-commit target has no remote or closed-PR evidence with which to independently settle it (brief.md:31; review-history.log:1).",
+    "first_seen": "2026-10-15",
+    "status": "open",
+    "applied_date": null,
+    "location": ""
+  },
+  {
+    "signal": "t5 judgment \u2014 confirm prior art by both",
+    "raw": "T5 Judgment \u2014 Confirm prior art by both affected file paths across merged history and closed/rejected work \u2014 the supplied target has only a synthetic base commit and no remote, while the brief lists merged examples without closed/rejected search evidence (`reviewer-target.log:1`; `brief.md:22`).",
+    "first_seen": "2026-10-15",
+    "status": "open",
+    "applied_date": null,
+    "location": ""
+  },
+  {
+    "signal": "t5 judgment \u2014 confirm merged-history and closed/rejected-work coverage",
+    "raw": "T5 Judgment \u2014 Confirm merged-history and closed/rejected-work coverage by every affected file path before deciding this duplicates no prior solution \u2014 the brief lists flow.py history and a rejected attempt, but the supplied target has one synthetic base commit and no remotes, so the full check cannot be independently established; brief.md:27; review-prior-art.log:1.",
+    "first_seen": "2026-10-15",
+    "status": "open",
+    "applied_date": null,
+    "location": ""
+  },
+  {
+    "signal": "**the tracker record is missing, so the problem",
+    "raw": "**The tracker record is missing, so the problem statement can't be checked against the thread.** The cwd holds only `brief.md` and `dependency-state.json`. There is no `notes.json` and no `sources/`. The Invariant cites \"#630's finding (the comment on #463, 2026-10-10)\". The Repro cites \"the #630 test from the issue comment\". Prior-art cites `iteration-v1/patch.diff` and says the review \"reproduced\" (7) and (8) against it. None of these is in the inputs, so neither this review nor Check can confirm that (7) and (8) are what that review asked for. Either attach the thread and the v1 review, or quote the load-bearing lines in the brief.",
+    "first_seen": "2026-10-15",
+    "status": "open",
+    "applied_date": null,
+    "location": ""
   }
 ]

@@ -1929,3 +1929,104 @@ Open Act items (owner: the human; revisit at the next review):
 - #693/#694: no measure until #674 (PR #690) is merged and a run holds a bundle.
 - Open Act items: #624 is closed or linked, #630 is decided, and 653 is published by the
   next review.
+
+# Act review — 2026-10-15 — cycles considered: issue_463, issue_672, issue_673, issue_693, issue_694, issue_695, issue_723, issue_724, issue_725, issue_727, issue_728, issue_729, issue_738, issue_739, issue_747, issue_748
+
+Seventeenth Act review. Sixteen bundles were signed off on 2026-10-15, all `merged-wider`.
+Twelve were published as draft PRs on eduralph/pdca-harness: 672 → #702, 673 → #707,
+693 → #703, 694 → #708, 695 → #721, 723 → #726, 727 → #733, 728 → #736, 729 → #737,
+738 → #746, 747 → #751, 748 → #753 (#702, #703, #707, #708 and #721 are merged). Four
+were closed as `split` with no patch: 463, 724, 725, 739. The index lists 124 bundles; the
+other 108 were handled at earlier reviews. No instance delta. Seven issues were filed
+upstream, after a prior-art check, as agreed with the human.
+
+## What the cycles' records exposed
+
+- **Plan-advisory findings still come back as open §6 rows.** Every patch bundle has
+  them again (§6 sizes 8-22, most of them plan findings the revised brief already dealt
+  with; e.g. 728: 21 rows). Tracked upstream as #692 (open). No new filing.
+- **Build rounds are high.** Rounds to pass (`loop-telemetry.json`
+  `iterations_to_pass`): 672: 6, 738: 6, 723: 5, 728: 5, 673/694/695/727: 4, 693/747: 3,
+  729/748: 2. The 2026-10-10 measure for #656 ("hold/recover briefs converge in two Do
+  rounds or fewer") **failed** in this wave: 10 of 12 took 3 or more. #656 is still
+  open; #706 (resolve deferred design findings into the brief before rebuilding) and
+  #719 (split advice from convergence, not bytes) aim at the same cost. No new filing;
+  raised with the human as a priority signal.
+- **Size backstop listed as "ineffective"** (ledger row 12), and 739's §10 "simplify the
+  split process" (four build rounds before the slice was split). Covered upstream by
+  #719 and #750. No change to `[driver.size_signal]` in `pdca.toml`.
+- **Split children have no tracker record** (recurring signal, 3×; e.g. 728 §6 "No
+  tracker record, and the cited evidence isn't in the target"): upstream #761.
+  **Brief points Do at another bundle's files by absolute path** (749 brief): #758.
+- **One-off follow-ups from §6/§10, not yet tracked:** filed as items 1-7 below (672,
+  694, 727 ×3, 738, 739).
+- **Checked, no action:**
+  - 723 §10 (`build_bundle_base` takes `integ_lock`; do not call it inside the fold
+    window): 727 calls it in the pre-wave planning step (`results/issue_727/patch.diff`,
+    the `integrate.build_bundle_base(` hunk), not inside the fold, so it is handled.
+  - 724 §10 (add 723 to 727's `Depends on`) and 747 §10 (note for #748): both targets
+    are done in this wave, so they no longer apply.
+- **Expected repeats, no action:** T5 prior-art row in every patch bundle (pending
+  #575); fitness-to-purpose rows are human-only by design; plan-advisory finding counts
+  (2-8, every brief revised) are telemetry; split-close confirmations are by design.
+
+## Process deltas
+
+- **No instance delta warranted.** Every recurring gap in this wave is in harness
+  machinery (`assemble.py`, `flow.py`, `integrate.py`, the planner agent) and is
+  already tracked upstream; a local edit would be overwritten by `copier update`.
+
+## Follow-ups routed (not process deltas — work handed to an owner)
+
+Filed on eduralph/pdca-harness with label `bug` and no milestone (the human sets
+milestones). Prior-art check first, by issue search: `_hold_work`, backwards hold,
+`_clash`, `build_bundle_base`, `integ_lock`, `regate_between_waves`, pinned line base,
+build-notes withheld, restated, base-hold warning, stranded. Near matches were #739,
+#747, #748, #749, #756, #757 (fold-clash and stranded-partner work); none covers these.
+
+1. 672: a hold reaches back into a held bundle's clean prerequisite, and the message says
+   it was built the wrong way round (`integrate.py:1044`, `flow.py:1003`)
+   → https://github.com/eduralph/pdca-harness/issues/762
+2. 694: `_clash` returns on a pairwise partner before checking the final line, so the
+   re-issue advice asks for a needless rebuild (`integrate.py:1231` vs `:1234`)
+   → https://github.com/eduralph/pdca-harness/issues/763
+3. 727: `regate_between_waves` re-gates only the line tip, not the per-bundle bases
+   (`flow.py:1078`, `09-parallel-lanes.md:72`)
+   → https://github.com/eduralph/pdca-harness/issues/764
+4. 727: per-bundle bases start from a freshly fetched `origin/main`, so mid-run main
+   commits enter dependents' PRs (`integrate.py:829`, `:849`; `flow.py:738`)
+   → https://github.com/eduralph/pdca-harness/issues/765
+5. 727 (also 728): the reviewer cannot verify a brief's restated-assertion list because
+   `build-notes.md` is withheld → https://github.com/eduralph/pdca-harness/issues/766
+6. 738: the base-hold "next fold stops the run" warning is decided before the wave, so a
+   mid-wave split can make it missing or wrong
+   → https://github.com/eduralph/pdca-harness/issues/767
+7. 739: a stranded line bundle holds every later bundle, after spending a build on each
+   (`results/issue_739/SUMMARY.md:49`; related 738 note at `SUMMARY.md:92`)
+   → https://github.com/eduralph/pdca-harness/issues/768
+
+Open Act items (owner: the human; revisit at the next review):
+
+- **#624:** cleared — closed upstream.
+- **#630:** still needs the criterion (b)/(c) call: close it as a duplicate of #463, or
+  keep it open. Carried.
+- **653:** rebase onto the current base, re-Check, then publish. Carried.
+- **#656 priority:** the convergence measure failed this wave (above); decide whether to
+  raise #656/#706 ahead of the remaining stack-mode work.
+- Carried, unchanged: the triage rubric should state five buckets explicitly (issue_316
+  §10).
+- Carried, open upstream, no new filing: #556, #573, #575, #586, #606, #607, #608, #626,
+  #634, #636, #640–#645, #650–#656, #671–#673, #691, #692, #696, #697, #706, #719, #750,
+  #758, #761.
+
+## How effectiveness will be judged
+
+- #692: the first Check's §6 holds only plan findings with no Plan disposition. Today a
+  patch bundle's §6 is 8-22 rows.
+- #656/#706/#719: median rounds to pass per wave. This wave: 4 (10 of 12 bundles took 3
+  or more). Target: 2 or fewer.
+- #761: split children reach Plan advisory with `notes.json` / `sources/`, and the
+  "tracker record is missing" row stops appearing.
+- #762–#768: no measure until each lands; check at the next review that none recurs in
+  a new bundle's §6/§10 under a new key.
+- Open Act items: #630 decided and 653 published by the next review.
