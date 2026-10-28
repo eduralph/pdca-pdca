@@ -1228,6 +1228,17 @@ cmd = "gh --version"
 hint = "install the GitHub CLI (https://cli.github.com) — publish opens draft PRs with gh"
 required = true
 
+# The live stack-mode check (#625) runs against a pre-provisioned private sandbox repo with
+# a fine-grained token kept outside the checkout. Only that live run needs it, not any gate,
+# so WARN. The check proves the token reads the repo and can push to it; it does not prove
+# the pull-request scopes (merge, update-branch) — the tool reports a refusal as INCOMPLETE.
+[[doctor.checks]]
+group = "engine"
+id = "sandbox-gh-token"
+cmd = "test -s \"$HOME/.config/pdca/sandbox-gh-token\" && GH_TOKEN=\"$(cat \"$HOME/.config/pdca/sandbox-gh-token\")\" gh api repos/eduralph/pdca-stack-sandbox --jq '.private and .permissions.push' | grep -qx true"
+hint = "put a fine-grained token with Contents + Pull requests read/write on eduralph/pdca-stack-sandbox (private) in ~/.config/pdca/sandbox-gh-token (mode 600)"
+level = "WARN"
+
 
 # Deterministic Check gates (docs 04). Each check runs a shell command; it PASSES
 # iff the command exits 0. `scope = "repo"` runs against the working tree (and is
