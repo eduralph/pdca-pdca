@@ -146,6 +146,10 @@ if [ "${#PROD[@]}" -eq 0 ]; then
   echo "PDCA-UNVERIFIABLE: no behavioral production change to revert (test-only or docs-only patch)"; exit 77
 fi
 
+# Each leg needs an isolated bytecode cache. A reverted source can retain the same size and
+# second-resolution mtime, causing Python to reuse the green leg's fixed .pyc.
+CACHE_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/pdca-c4-pyc.XXXXXX")"
+
 # --- what actually EXECUTED, not just what exited (issue #31 item 7) ----------------
 # An exit status alone cannot carry either leg's verdict, and Python's unittest has its
 # own version of the problem a compiled runner has:
@@ -177,14 +181,15 @@ run_tests() {
   local rc=0 t mod out sub_rc
   TESTS_RAN=0
   LOAD_FAILED=0
+  RUN_CACHE="$(mktemp -d "$CACHE_ROOT/leg.XXXXXX")"
   for t in "${TESTS[@]}"; do
     mod="tests.$(basename "$t" .py)"
     sub_rc=0
     # Captured rather than streamed: the counts and the loader marker below are only
     # readable off the output. Echoed straight back so the gate log is unchanged.
     case "$t" in
-      template/tests/*) out="$( (cd template && PYTHONPATH=src "$PY" -m unittest "$mod") 2>&1 )" || sub_rc=$? ;;
-      tests/*)          out="$("$PY" -m unittest "$mod" 2>&1)" || sub_rc=$? ;;
+      template/tests/*) out="$( (cd template && PYTHONPYCACHEPREFIX="$RUN_CACHE" PYTHONPATH=src "$PY" -m unittest "$mod") 2>&1 )" || sub_rc=$? ;;
+      tests/*)          out="$(PYTHONPYCACHEPREFIX="$RUN_CACHE" "$PY" -m unittest "$mod" 2>&1)" || sub_rc=$? ;;
     esac
     printf '%s\n' "$out"
     [ "$sub_rc" -eq 0 ] || rc=1
