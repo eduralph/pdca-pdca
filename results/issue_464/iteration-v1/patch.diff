@@ -1,0 +1,750 @@
+diff --git a/docs/07-crosscutting.md b/docs/07-crosscutting.md
+index 1fc1759..20d0e7f 100644
+--- a/docs/07-crosscutting.md
++++ b/docs/07-crosscutting.md
+@@ -641,7 +641,9 @@ they set their own.
+ shape — `Depends on` / `Conflicts with` on the brief. This is what the driver
+ does with that declaration once a batch actually runs: bundles in the same wave
+ build in parallel; each wave's *accepted* result then becomes the base the next
+-wave builds on, via `[driver].wave_mode`:
++wave builds on, via `[driver].wave_mode` (unless it is `"none"`, the last
++option below). Any other value is named on stderr when the config loads, and
++the run uses `"stack"`:
+ 
+ - **`"stack"`** (default, fork-safe) — merges each wave's accepted, published PR
+   branches onto a run-scoped integration branch the next wave builds on, and
+@@ -909,6 +911,33 @@ wave builds on, via `[driver].wave_mode`:
+   remain, both in issue #778: a group declared only in the brief of a bundle
+   outside the run is not seen, and a split does not carry `Merges with` to its
+   children. Declare it on every member.
++- **`"none"`** — neither. Every accepted bundle publishes as a draft PR against
++  its real target base, as a one-bundle run does, and nothing happens at a wave
++  boundary: no `pdca-integration/*` line is created or pushed, nothing is
++  folded, readied or merged, and the pre-wave carry of finished ids does not
++  run. A `Stacks on` edge does not stack either: the bundle is built on, cut
++  from and opened against its target base, never its prerequisite's branch.
++  Waves still decide the build order. A bundle whose prerequisite has not
++  merged into the bundle's own target base (the repo and branch of its `Repo +
++  branch target`) is held, whichever edge names the prerequisite (`Depends
++  on`, `Depends on (merged)` or `Stacks on`) and whether or not it is in the
++  run. It is named on one line with the prerequisite and the way out: merge
++  that PR, then re-run. A merge counts as it does above for a prerequisite the
++  run does not drive: into that base, not an `Onto branch` commit, and a PR
++  whose state cannot be read does not count. The base as fetched must then
++  have the merge too, since the bundle is built from it: a fetched base without
++  it, or a checkout that cannot be fetched, holds the bundle as well. A held
++  bundle stays PLANNED and the run exits **3**, as for a bundle held before it
++  was built because its own base could not be built; a bundle that depends on
++  a held one is skipped as not ready, so that run exits 1. A batch of
++  independent bundles runs as it would in one run each; a batch with
++  dependencies builds its first wave and holds the rest, and each merge and
++  re-run builds the next wave. A bundle with no usable target of its own takes
++  a merge into any branch, and is skipped as not ready until then. With
++  `--no-publish` nothing waits for a merge: as in the other modes, a dependent
++  builds once its prerequisite is accepted, on the unchanged base. `Merges with`
++  is ignored here: nothing is merged for you. `pdca waves` prints `none mode` and
++  does not claim a wave builds on the one before.
+ 
+ In merge mode the merge is unattended, so **publish refuses to open a PR against
+ any branch this run produced** — the work must land on a base that exists
+diff --git a/template/pdca.toml.jinja b/template/pdca.toml.jinja
+index 89ebb92..d2851d1 100644
+--- a/template/pdca.toml.jinja
++++ b/template/pdca.toml.jinja
+@@ -111,7 +111,7 @@ overflow = 0
+ # Wave-based batch sequencing (#wave-model). When `{{ cli_name }} flow` is given several ids it runs
+ # them as an ordered sequence of dependency waves (computed from each brief's `Depends on`
+ # / `Conflicts with`): a wave's bundles build in parallel, then its accepted work reaches
+-# the NEXT wave's base one of two ways.
++# the NEXT wave's base one of two ways — or, with "none", does not.
+ #   wave_mode = "stack"  (default) — merge each wave's accepted, published PR branches onto a
+ #       run-scoped integration branch the next wave builds on; every PR targets the real
+ #       base. This is PUSH-ONLY (a fork has push), keeps the STOP discipline (the harness
+@@ -124,6 +124,14 @@ overflow = 0
+ #       on pdca-integration/*), later folds push without force. A bundle whose publish pushed
+ #       no branch holds only its dependents and its `Conflicts with` partners. The fork-safe
+ #       default.
++#   wave_mode = "none"  — neither: every accepted bundle publishes as a draft PR against its
++#       real base, as a one-bundle run does, and nothing happens at a wave boundary (no
++#       integration line, no fold, no carry of finished ids, nothing readied or merged).
++#       Waves still order the build: a bundle whose prerequisite (`Depends on`, `Depends on
++#       (merged)` or `Stacks on`, in the batch or not) has not merged into its own target
++#       base is held, named with the way out — merge that PR, then re-run (`flow` exits 3).
++#       So a batch with dependencies takes one run per wave. Any value other than these
++#       three is named when the config loads, and runs as "stack".
+ #   wave_mode = "merge"  (own-repo / continuous-delivery ONLY) — `gh pr merge` each
+ #       non-final wave's PRs so the next wave builds on the genuinely-merged base. Needs
+ #       MERGE RIGHTS on the base remote (a fork contributor lacks them upstream — keep
+diff --git a/template/src/pdca_harness/cli.py b/template/src/pdca_harness/cli.py
+index 2c36431..1140217 100644
+--- a/template/src/pdca_harness/cli.py
++++ b/template/src/pdca_harness/cli.py
+@@ -690,7 +690,8 @@ _FLOW_OK = (state.COMPLETE, state.RESOLVED)
+ 
+ 
+ #: Exit code of a flow run whose every bundle finished, or was held: held out of its line
+-#: once finished (#693), or held before it was built, its own base not buildable (#738).
++#: once finished (#693), or held before it was built, its own base not buildable (#738)
++#: or, under ``wave_mode = "none"``, a prerequisite's PR not merged into it (#464).
+ _RC_HELD = 3
+ 
+ #: The ``holds`` reason of a bundle held before it was built, because its own base could
+@@ -698,6 +699,15 @@ _RC_HELD = 3
+ #: and still a hold, not a failure.
+ _BASE_HOLD = "base"
+ 
++#: The ``holds`` reason of a bundle held before it was built under ``wave_mode = "none"``
++#: (#464), because a prerequisite's PR has not merged into its own target base: PLANNED in
++#: the results map, and a hold, not a failure — like :data:`_BASE_HOLD`.
++_UNMERGED_HOLD = "unmerged"
++
++#: The ``holds`` reasons of a bundle held BEFORE it was built — it is not finished in the
++#: results map, and that is not a failure (:func:`_results_rc`).
++_UNBUILT_HOLDS = frozenset({_BASE_HOLD, _UNMERGED_HOLD})
++
+ #: ``holds`` reasons that FAIL the run (exit 1) rather than hold a bundle (#695): a branch a
+ #: fold of the run carried, rewritten after the run's last fold read it — or one the run
+ #: could not check for that at its end (``flow._report_late_rewrites``).
+@@ -709,7 +719,8 @@ def _results_rc(results: dict[str, str], ok: tuple[str, ...] = _FLOW_OK,
+     """The ONE exit-code rule over a flow results map (issue #468), in precedence order:
+ 
+     - **1** — a bundle in the map did not reach a successful terminal, other than one
+-      ``holds`` names as held before it was built (``"base"``, below): a bundle that
++      ``holds`` names as held before it was built (``"base"`` or ``"unmerged"``, below,
++      :data:`_UNBUILT_HOLDS`): a bundle that
+       depends on one, or is its ``Conflicts with`` partner, left PLANNED with no hold of
+       its own, is such a failure. Or ``holds`` names a bundle whose branch a fold of this
+       run carried and that was rewritten after the run's last fold read it
+@@ -724,7 +735,10 @@ def _results_rc(results: dict[str, str], ok: tuple[str, ...] = _FLOW_OK,
+       in the map, so the map alone read it as success while its work is on no line of the
+       run. Or a bundle was held before it was built, because its own base could not be
+       built (#738, ``"base"``): it is not COMPLETE in the map (PLANNED, for one not built
+-      yet), but held, with the cause and the fix named on stderr — not failed. 3 lets a
++      yet), but held, with the cause and the fix named on stderr — not failed. So is one
++      held under ``wave_mode = "none"`` because a prerequisite's PR has not merged into its
++      own target base (#464, ``"unmerged"``): PLANNED, named on stderr with the
++      prerequisite and the way out. 3 lets a
+       script or CI job tell that run from a clean one without parsing stderr. ``holds`` is
+       the collector ``_flow`` passes to :func:`flow.flow_ids` / :func:`flow.flow_batch`.
+     - **0** — every bundle reached a successful terminal and nothing was held.
+@@ -738,7 +752,7 @@ def _results_rc(results: dict[str, str], ok: tuple[str, ...] = _FLOW_OK,
+     because stopping for the human who just typed the command is the intended end of that
+     run, not a failure. A multi-id set keeps the batch rule (rc 0 iff all COMPLETE/RESOLVED).
+     """
+-    held_unbuilt = {k for k, why in (holds or {}).items() if why == _BASE_HOLD}
++    held_unbuilt = {k for k, why in (holds or {}).items() if why in _UNBUILT_HOLDS}
+     if not all(s in ok or k in held_unbuilt for k, s in results.items()):
+         return 1
+     if holds and any(why in _FAILED_REASONS for why in holds.values()):
+@@ -1096,8 +1110,11 @@ def _waves(cfg: Config, ids: list[str]) -> int:
+     except ValueError as exc:
+         print(f"unschedulable: {exc}", file=sys.stderr)
+         return 1
+-    print(f"{len(bundles)} bundle(s) → {len(plan)} wave(s) ({cfg.wave_mode} mode; "
+-          f"each wave builds on the prior's accepted work):")
++    # "none" (#464) carries nothing between waves: say what it does instead.
++    how = ("every PR against its base; a dependent waits for its prerequisites' PRs to "
++           "merge" if cfg.wave_mode == "none"
++           else "each wave builds on the prior's accepted work")
++    print(f"{len(bundles)} bundle(s) → {len(plan)} wave(s) ({cfg.wave_mode} mode; {how}):")
+     for k, wave in enumerate(plan):
+         print(f"  wave {k}: " + ", ".join(d.name.removeprefix("issue_") for d in wave))
+     return 0
+diff --git a/template/src/pdca_harness/config.py b/template/src/pdca_harness/config.py
+index 8da9640..75e46c6 100644
+--- a/template/src/pdca_harness/config.py
++++ b/template/src/pdca_harness/config.py
+@@ -36,6 +36,11 @@ DEFAULT_CLOSE_DISPOSITIONS = [
+     # `driver._close_class` honours outright — no hint token is needed for it (#323 review).
+ ]
+ 
++# The values `[driver].wave_mode` takes (#wave-model, #464): how a batch's accepted work
++# reaches the next wave's base — folded onto a run-scoped line ("stack", the default),
++# merged into the base ("merge"), or not at all ("none": every PR against its real base).
++WAVE_MODES = ("stack", "merge", "none")
++
+ # A leaf memory bound (issue #420) as systemd's resource-control grammar writes it: a
+ # byte value with an optional K/M/G/T/P/E suffix, a percentage of physical RAM, the
+ # literal `infinity`, or `off` (an explicit "no bound here", the per-leaf opt-out).
+@@ -358,8 +363,10 @@ class Config:
+     # ordered sequence of dependency waves; `wave_mode` selects how each wave's accepted
+     # work reaches the next: "stack" (default) folds it onto a run-scoped integration
+     # branch the next wave builds on — push-only, fork-safe, STOP discipline intact;
+-    # "merge" (own-repo / CD) instead `gh pr merge`s each wave before the next.
+-    # [driver].wave_mode in pdca.toml.
++    # "merge" (own-repo / CD) instead `gh pr merge`s each wave before the next; "none"
++    # (#464) does neither — every PR opens against its real base, nothing happens at a
++    # wave boundary, and a dependent waits until its prerequisite's PR has merged into its
++    # base. One of :data:`WAVE_MODES`. [driver].wave_mode in pdca.toml.
+     wave_mode: str = "stack"
+     # The `gh pr merge` strategy for wave_mode="merge" (issue #wave-model): merge | squash |
+     # rebase. Default "merge" (a merge commit — auditable, bisectable). [driver].merge_method.
+@@ -730,7 +737,14 @@ class Config:
+         worktree = bool(driver_cfg.get("worktree", True))  # issue #94; on by default
+         overflow = max(0, int(driver_cfg.get("overflow", 0)))  # issue #226; 0 ⇒ heal in place
+         lane_preflight = driver_cfg.get("lane_preflight", "")  # issue #213
+-        wave_mode = driver_cfg.get("wave_mode", "stack")  # #wave-model: stack | merge
++        # #wave-model: stack | merge | none (#464). An unknown value falls back to "stack"
++        # with a note — what it already ran as, unreported: every check reads "merge" or
++        # "none" exactly, so a near-miss ("Merge", " none") must not now buy either.
++        wave_mode = driver_cfg.get("wave_mode", "stack")
++        if wave_mode not in WAVE_MODES:
++            print(f"config: unknown [driver].wave_mode '{wave_mode}' — expected "
++                  f"{' | '.join(WAVE_MODES)}; using 'stack'", file=sys.stderr)
++            wave_mode = "stack"
+         merge_method = driver_cfg.get("merge_method", "merge")  # merge | squash | rebase
+         # Check-rollup policy for merge mode (issue #413). An unknown value falls back to
+         # "all" with a note — the fail-safe direction is the STRICTER reading (verify the
+diff --git a/template/src/pdca_harness/flow.py b/template/src/pdca_harness/flow.py
+index b92ef34..da21128 100644
+--- a/template/src/pdca_harness/flow.py
++++ b/template/src/pdca_harness/flow.py
+@@ -687,7 +687,9 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
+               conflict_held: Mapping[str, Collection[str]] | None = None,
+               lines: Mapping[tuple[str, str], tuple[str, str | None]] | None = None,
+               on_line: Collection[str] | None = None,
+-              unbuilt: Collection[str] = frozenset()
++              unbuilt: Collection[str] = frozenset(),
++              wait_for_merge: bool = False,
++              waiting: set[str] | None = None
+               ) -> list[Path]:
+     """Drop a wave bundle whose declared prerequisite isn't ready to build on top of.
+ 
+@@ -754,7 +756,18 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
+     from the base as fetched, so the line is not read (#729): the base as this check
+     fetches it, failing closed, must have the merge (:func:`_base_lacks_merge`), since Do
+     and Check refresh it only best-effort. Else d is held, named on ONE stderr line. A
+-    target with no line (or no recorded tip: a dry-run) is judged as before."""
++    target with no line (or no recorded tip: a dry-run) is judged as before.
++
++    ``wait_for_merge`` (``wave_mode = "none"``, publishing on, #464): no line exists and
++    nothing is folded, carried or merged, so every COMPLETE prerequisite — in this batch or
++    not, by any edge (``Depends on``, ``Depends on (merged)``, ``Stacks on``) — is ready only
++    once its PR has merged into d's own target base (``merged.merged_into``), and then only
++    when the base as fetched has that merge (:func:`_base_lacks_merge`, #729), since d is
++    built from that base. Until then d is held, named on ONE stderr line with the
++    prerequisites and the way out (merge their PR, then re-run), and added to ``waiting``
++    (bundle dir names; the caller records it as an ``"unmerged"`` hold) unless a
++    prerequisite is not ready at all. A d with no usable target keeps #186's answer: any
++    merge counts, and a prerequisite not merged is "not ready"."""
+     asked = set(requested) if requested is not None else set(batch_names)
+     unpushed_set = set(unpushed)
+     unbuilt_set = set(unbuilt)
+@@ -784,12 +797,30 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
+         off_line: list[tuple[str, str, bool]] = []  # merged, not on d's line (#655)
+         off_base: list[tuple[str, str, bool]] = []  # merged, not on the base as fetched (#729)
+         carryable: list[str] = []  # … of those, ones a line of d's target would carry
++        unlanded: list[str] = []   # wave_mode "none": PR not merged into d's base (#464)
+         for dep in deps:
+             p = cfg.find_bundle(dep)
+             out_of_batch = p.name not in batch_names
+             if state.state(p) != state.COMPLETE:  # archived prereq too (#171)
+                 unmet.append(dep)  # not ready, whichever field names it
+                 continue
++            if wait_for_merge:
++                # No line carries it, in batch or not, by any edge: only its PR's merge into
++                # d's base does (#464) — and d is built from that base as fetched (#729).
++                if not merged.merged_into(cfg, dep, repo, base):
++                    if targeted:
++                        unlanded.append(p.name)
++                    else:
++                        unmet.append(dep)   # no base of d's own to wait for (#186)
++                    continue
++                if targeted and integrate._has_patch(p):
++                    key = (p.name, repo, f"{cfg.base_remote}/{base}")
++                    if key not in lacks:
++                        lacks[key] = _base_lacks_merge(cfg, dep, repo, base, views)
++                    lack = lacks[key]
++                    if lack is not None:
++                        off_base.append((p.name, *lack))
++                continue
+             # A plain `Depends on` prereq the run was not asked for, which a line would
+             # carry: no line of this run does (#647).
+             cand = (integrate._fold_candidates([p])
+@@ -839,6 +870,11 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
+                   f"into {base} ({repo}), and no line of this run carries them; not built "
+                   f"on a base missing them. To build it, {todo} until their PR merges into "
+                   f"{base}, then re-run.", file=sys.stderr)
++        if unlanded:
++            print(f"flow: {d.name} held — prerequisite(s) {', '.join(unlanded)} not merged "
++                  f"into {base} ({repo}); wave_mode = \"none\" builds every bundle on {base} "
++                  f"itself, so it is not built on a base missing them. To build it, merge "
++                  f"their PR into {base}, then re-run.", file=sys.stderr)
+         if off_line:
+             branch, tip = (lines or {})[(repo, base)]  # off_line: only when d has one
+             has = ("does not have" if all(known for _n, _w, known in off_line)
+@@ -887,8 +923,10 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
+                   f"it. To build it, wait until {p} is built, once what its hold line names is "
+                   f"fixed, and its PR merges{into}, then re-run.", file=sys.stderr)
+         if (not unmet and not unmerged and not off_line and not off_base and not partners
+-                and not clashed and not unbuilt_partners):
++                and not clashed and not unbuilt_partners and not unlanded):
+             runnable.append(d)
++        elif wait_for_merge and waiting is not None and not unmet:
++            waiting.add(d.name)   # held for a merge, not failed (#464)
+     return runnable
+ 
+ 
+@@ -2729,6 +2767,9 @@ def _drive_and_act(
+     (:func:`integrate.fold`) the **next** wave builds on. So a dependent builds on its
+     prerequisite's accepted result within one run, as a reviewable PR stack the human
+     merges (the harness never merges). Act runs **once** across the batch at the end.
++    Under ``wave_mode = "none"`` (#464) nothing happens between waves — no fold, no merge,
++    no pre-wave carry — so every PR is against its real base, and a dependent waits until
++    its prerequisite's PR has merged into that base (:func:`_runnable`); a later run builds it.
+ 
+     The drive set is no longer frozen (#469): a bundle that reaches
+     ``close-disposition = split`` while this run is driving it hands its children back to
+@@ -2776,7 +2817,10 @@ def _drive_and_act(
+     COMPLETE in the returned map, which therefore cannot say it was held.
+     ``"base"`` (#738) for one held before it was built, because its own base could not be
+     built (:func:`_bundle_bases`): not driven this run — PLANNED in the map, for one not
+-    built yet — and named on stderr with the cause and the fix. ``cli._flow`` reads this to
++    built yet — and named on stderr with the cause and the fix. ``"unmerged"`` (#464) for
++    one held before it was built under ``wave_mode = "none"``, because a prerequisite's PR
++    has not merged into its own target base, or the base as fetched lacks that merge
++    (:func:`_runnable`): PLANNED in the map, named on stderr. ``cli._flow`` reads this to
+     exit 3 instead of 0 (``cli._results_rc``). It also names each bundle whose carried
+     branch was rewritten after the run's last fold read it (#695,
+     :func:`_report_late_rewrites`), a branch a base's refusal named included:
+@@ -2879,13 +2923,14 @@ def _drive_and_act(
+             return {}
+     # A re-issued run's finished named ids (#646): carried onto the line before wave 0 when
+     # clean, else named in `held_finished`, which holds only their plain `Depends on`
+-    # dependents. Only where a fold would run: stack mode, publishing on.
++    # dependents. Only where a fold would run: stack mode, publishing on — not in merge
++    # mode, nor in "none" (#464), where no line exists.
+     held_finished: set[str] = set()
+     # Each finished id the carry put on the line → the head it put there (#747): an in-run
+     # fold may pin a bundle's conflict on one, as on a bundle it took itself.
+     finished_heads: dict[str, str] = {}
+     finished = _finished_named(cfg, batch, batch_names)
+-    if do_publish and cfg.wave_mode != "merge":
++    if do_publish and cfg.wave_mode not in ("merge", "none"):
+         _carry_finished(cfg, bundles, finished,
+                         batch=run_batch, integ=integ, folded_tips=folded_tips,
+                         held=held_finished, finished_heads=finished_heads)
+@@ -2898,11 +2943,16 @@ def _drive_and_act(
+     # so its dependent waits for its merge into the dependent's base (#647). Only where a
+     # fold would run (stack mode, publishing on), and not in a dry-run, which asks no host
+     # and holds nothing. The ids asked for are normalised as `_finished_named` does.
+-    hold_unmerged = (do_publish and cfg.wave_mode != "merge"
++    hold_unmerged = (do_publish and cfg.wave_mode not in ("merge", "none")
+                      and cfg.publisher.mode != "stub")
+     # Where a bundle can get a base of its own (#727): where the line folds for real — the
+     # same three conditions. Elsewhere every bundle is pointed as before.
+     own_bases = hold_unmerged
++    # wave_mode = "none" (#464): nothing is folded, carried or merged, so every bundle is
++    # built on its real base, and a prerequisite counts only once its PR has merged into the
++    # dependent's base: `_runnable` holds the dependent until then, named in `held_waiting`.
++    wait_for_merge = do_publish and cfg.wave_mode == "none"
++    held_waiting: set[str] = set()
+     requested = set(named) | {cfg.bundle(str(i).removeprefix("issue_")).name
+                               for i in (batch or ())}
+     # The loop stopped on a fold error or a red re-gate: that run already ends non-zero, and
+@@ -2941,7 +2991,8 @@ def _drive_and_act(
+                              # and the bundles cut from it (#729).
+                              lines={tgt: (branch, folded_tips.get(tgt))
+                                     for tgt, branch in integ.items()},
+-                             on_line=on_line, unbuilt=held_base)
++                             on_line=on_line, unbuilt=held_base,
++                             wait_for_merge=wait_for_merge, waiting=held_waiting)
+         if not runnable:
+             continue
+         # The pool, read off the schedule as it stands NOW — so a splice below has already
+@@ -3074,8 +3125,10 @@ def _drive_and_act(
+         # wave, and by --no-publish). Default "stack": fold onto a run-scoped integration
+         # branch the next wave builds on (fork-safe, no merge). Opt-in "merge": gh-merge the
+         # wave's PRs so the next wave builds on the genuinely-merged base. Dry-run (stubbed
+-        # publisher: offline rehearse / CI) prints the plan and changes nothing.
+-        if k < len(wave_list) - 1 and do_publish:
++        # publisher: offline rehearse / CI) prints the plan and changes nothing. "none"
++        # (#464): nothing at all — every PR is against its real base already, and the next
++        # wave's dependents wait for those PRs to merge (`_runnable`).
++        if k < len(wave_list) - 1 and do_publish and cfg.wave_mode != "none":
+             dry = cfg.publisher.mode == "stub"
+             if cfg.wave_mode == "merge":
+                 if merge.merge_wave(cfg, complete, dry_run=dry, method=cfg.merge_method):
+@@ -3174,6 +3227,7 @@ def _drive_and_act(
+         holds.update({n.replace("issue_", ""): "unpushed" for n in sorted(held_unpushed)})
+         holds.update({n.replace("issue_", ""): "conflict" for n in held_conflict})
+         holds.update({n.replace("issue_", ""): "base" for n in sorted(held_base)})
++        holds.update({n.replace("issue_", ""): "unmerged" for n in sorted(held_waiting)})
+         holds.update({n.replace("issue_", ""): why for n, why in late.items()})
+     return results
+ 
+diff --git a/template/src/pdca_harness/publish.py b/template/src/pdca_harness/publish.py
+index 4df6486..0045aa7 100644
+--- a/template/src/pdca_harness/publish.py
++++ b/template/src/pdca_harness/publish.py
+@@ -232,11 +232,12 @@ def publish(
+     # separate stacked PR), not on the target base. Distinct from `Onto branch` (#54), which
+     # appends a commit to one existing PR. The base is derived from the prereq's publish.json
+     # (never hand-written — it doesn't exist at Plan time). A wave's recorded stack base wins,
+-    # as in :func:`_stack_base_branch`.
++    # as in :func:`_stack_base_branch`. Under wave_mode = "none" (#464) a `Stacks on` edge
++    # names no branch: the bundle is cut from and opened against its target base.
+     wave_base = _read_stack_base(d)
+     wave_tip = read_stack_base_tip(d)
+     stack_branch = wave_base or _stacks_on_branch(cfg, d)
+-    if brief.stacks_on(d / "brief.md") and not stack_branch:
++    if brief.stacks_on(d / "brief.md") and not stack_branch and cfg.wave_mode != "none":
+         print(f"publish: {d.name} `Stacks on` a prereq with no published branch yet — the "
+               "prereq must publish first (the flow schedules this).", file=sys.stderr)
+         return 1
+@@ -760,9 +761,13 @@ def _stack_base_branch(cfg: Config, d: Path) -> str | None:
+ 
+ 
+ def _stacks_on_branch(cfg: Config, d: Path) -> str | None:
+-    """A legacy ``Stacks on:`` (#123) parent's published branch, or None."""
++    """A legacy ``Stacks on:`` (#123) parent's published branch, or None.
++
++    None under ``wave_mode = "none"`` (#464): there the edge only orders the build. The
++    flow holds the bundle until the parent's PR has merged into its own target base, so it
++    is built on, cut from and opened against that base — never the parent's branch."""
+     parents = brief.stacks_on(d / "brief.md")
+-    if not parents:
++    if not parents or cfg.wave_mode == "none":
+         return None
+     rec = _publish_record(cfg.bundle(parents[0]))
+     return rec.get("branch") if rec else None
+diff --git a/template/tests/test_flow_wave_mode_none.py b/template/tests/test_flow_wave_mode_none.py
+new file mode 100644
+index 0000000..6654414
+--- /dev/null
++++ b/template/tests/test_flow_wave_mode_none.py
+@@ -0,0 +1,334 @@
++"""`[driver].wave_mode = "none"`: every PR against its real base, nothing at a wave boundary (#464).
++
++`"stack"` folds each wave onto a run-scoped integration line and `"merge"` readies and merges
++the wave's PRs. `"none"` does neither: every accepted bundle publishes as a draft PR against
++its real target base, as a one-bundle run does, and at a wave boundary nothing happens — no
++`pdca-integration/*` branch is created or pushed, nothing is folded, readied or merged, and
++the pre-wave carry of finished ids does not run. Waves still order the build, so a bundle
++whose prerequisite (`Depends on`, `Depends on (merged)` or `Stacks on`) has not merged into
++its own target base is held, named on one line with the way out, and recorded in the run's
++``holds`` as ``"unmerged"`` (exit 3). Once the prerequisite's PR has merged and the base as
++fetched has that merge, a re-run builds it on the base and opens its PR against the base. An
++unknown `wave_mode` is reported at config load and falls back to `"stack"`.
++
++These cases drive ``flow._drive_and_act`` the way tests/test_flow_same_wave_conflict.py
++does, on the ``StackFoldGit`` fixture of tests/test_integrate_stack_bases.py (a bare
++``origin`` and a primary checkout, real git), loaded by path. The build and sign-off leaves
++are stubbed (the build records the base ``worktree._target`` gives its Do worktree, writes a
++``patch.diff`` and the publish texts, and accepts). Publish is the REAL one: the publisher is
++in ``command`` mode, ``flow._publish_bundle`` runs ``publish.publish``, which cuts, commits
++and pushes to the bare origin, and only ``gh`` is answered by a stub in front of
++``subprocess.run`` — so the ``gh pr create --base`` asserted on is the one publish builds.
++
++Only modules are imported (never a symbol the fix adds), so with the production change
++reverted these cases still load and run — and fail on their assertions.
++    cd template && PYTHONPATH=src python3 -m unittest tests.test_flow_wave_mode_none
++"""
++
++from __future__ import annotations
++
++import dataclasses
++import importlib.util
++import io
++import json
++import shutil
++import subprocess
++import tempfile
++import unittest
++from contextlib import ExitStack, redirect_stderr, redirect_stdout
++from pathlib import Path
++from unittest import mock
++
++from pdca_harness import cli, config, flow, publish, state, worktree
++
++_SPEC = importlib.util.spec_from_file_location(
++    "stack_bases_fixture", Path(__file__).with_name("test_integrate_stack_bases.py"))
++sb = importlib.util.module_from_spec(_SPEC)
++_SPEC.loader.exec_module(sb)
++
++TODAY = "2026-10-30"
++PR_URL = "https://example.test/pr/"
++
++
++class WaveModeNone(unittest.TestCase):
++
++    def setUp(self) -> None:
++        self.fx = sb.StackFoldGit()          # the fixture's real-git setUp/tearDown and helpers
++        self.fx.setUp()
++        self.addCleanup(self.fx.tearDown)
++        self.cfg = self.fx.cfg
++        self.cfg.publisher = dataclasses.replace(self.cfg.publisher, mode="command")
++        self.cfg.wave_mode = "none"
++        self.changes: dict[str, dict[str, str]] = {}     # id → the files its build adds
++        self.merged_prs: dict[str, tuple[str, str]] = {}  # PR url → (head, merge commit)
++        self.gh_calls: list[list[str]] = []
++        # id → (the base its Do worktree is cut from, its recorded stack base) when built
++        self.built: dict[str, tuple[str | None, str]] = {}
++        self._real_run = subprocess.run
++
++    # -- fixture ---------------------------------------------------------------------------
++
++    def _plan(self, iid: str, files: dict[str, str], *, depends_on: str = "",
++              stacks_on: str = "") -> Path:
++        d = self.cfg.bundle(iid)
++        sb._brief(d, extra=(f"- **Depends on:** {depends_on}\n" if depends_on else "")
++                  + (f"- **Stacks on:** {stacks_on}\n" if stacks_on else ""))
++        self.changes[iid] = files
++        return d
++
++    def _merge_pr(self, iid: str) -> None:
++        """The maintainer merges ``iid``'s PR into main with a merge commit; ``gh`` then
++        reads it MERGED, with its head and that merge commit."""
++        branch = json.loads((self.cfg.bundle(iid) / "publish.json")
++                            .read_text(encoding="utf-8"))["branch"]
++        head = self.fx._tip(branch)
++        h = self.fx.human
++        sb._git(h, "fetch", "-q", "origin")
++        sb._git(h, "checkout", "-q", "-B", "main", "origin/main")
++        sb._git(h, "merge", "-q", "--no-ff", "--no-edit", f"origin/{branch}")
++        sb._git(h, "push", "-q", "origin", "main")
++        self.merged_prs[PR_URL + iid] = (head, sb._git(h, "rev-parse", "HEAD").strip())
++
++    # -- stubs -----------------------------------------------------------------------------
++
++    def _gh_stub(self, args, *a, **kw):
++        """Every ``gh`` call is recorded. ``gh pr create`` opens a PR (its URL names the id
++        of the ``--head`` branch); ``gh pr view`` reads a PR of ``merged_prs`` MERGED, any
++        other OPEN; any other ``gh`` call fails. Everything else runs for real."""
++        if not (isinstance(args, list) and args[:1] == ["gh"]):
++            return self._real_run(args, *a, **kw)
++        self.gh_calls.append(list(args))
++        if args[1:3] == ["pr", "create"]:
++            return subprocess.CompletedProcess(args, 0, f"{PR_URL}{self._pr_id(args)}\n", "")
++        if args[1:3] == ["pr", "view"]:
++            got = self.merged_prs.get(str(args[3]))
++            info = ({"state": "MERGED", "headRefOid": got[0], "mergeCommit": {"oid": got[1]}}
++                    if got else {"state": "OPEN", "headRefOid": ""})
++            return subprocess.CompletedProcess(args, 0, json.dumps(info), "")
++        return subprocess.CompletedProcess(args, 1, "", "gh: not stubbed")
++
++    @staticmethod
++    def _pr_id(create: list[str]) -> str:
++        """The bundle id of a ``gh pr create`` call: from its ``--head OWNER:fix/<id>-<slug>``."""
++        branch = create[create.index("--head") + 1].split(":", 1)[-1]
++        return branch.removeprefix("fix/").split("-", 1)[0]
++
++    def _drive_wave(self, cfg, wave: list[Path], **_kw) -> int:
++        """Build and accept each bundle, recording what its Do worktree is cut from."""
++        for d in wave:
++            iid = d.name.removeprefix("issue_")
++            target = worktree._target(d, cfg)
++            self.built[iid] = (target[1] if target else None, publish.read_stack_base(d))
++            (d / "patch.diff").write_text(
++                "".join(sb._new_file_patch(n, t.rstrip("\n"))
++                        for n, t in self.changes[iid].items()), encoding="utf-8")
++            (d / publish.COMMIT_MSG).write_text(f"fix {iid}\n\nFixes #{iid}\n",
++                                                encoding="utf-8")
++            (d / publish.PR_BODY).write_text(f"**User impact:** {iid}\n\nFixes #{iid}\n",
++                                             encoding="utf-8")
++            sb._accept(d)
++        return 1
++
++    def _run(self, drive: list[str], batch: list[str]) -> None:
++        """One run asked for ``batch``, driving ``drive`` (a re-run drives what the earlier
++        one left, as ``flow_ids`` does)."""
++        bundles = [self.cfg.bundle(i) for i in drive]
++        self._err = io.StringIO()
++        self.holds: dict[str, str] = {}
++        self.calls_before = len(self.gh_calls)
++        with ExitStack() as stack:
++            stack.enter_context(mock.patch.object(subprocess, "run", self._gh_stub))
++            stack.enter_context(mock.patch.object(flow, "_drive_wave", self._drive_wave))
++            stack.enter_context(mock.patch.object(publish, "draft_texts",
++                                                  lambda *a, **k: True))
++            stack.enter_context(redirect_stdout(io.StringIO()))
++            stack.enter_context(redirect_stderr(self._err))
++            self.results = flow._drive_and_act(self.cfg, bundles, do_publish=True,
++                                               do_act=False, by="T", today=TODAY,
++                                               batch=batch, holds=self.holds)
++        self.err = self._err.getvalue()
++        self.rc = cli._results_rc(self.results, holds=self.holds)
++        self.assertNotIn("Traceback", self.err)
++
++    # -- assertions ------------------------------------------------------------------------
++
++    def _pr_bases(self) -> dict[str, str]:
++        """id → the ``--base`` of each ``gh pr create`` the last run made."""
++        return {self._pr_id(c): c[c.index("--base") + 1]
++                for c in self.gh_calls[self.calls_before:] if c[1:3] == ["pr", "create"]}
++
++    def _integration_branches(self) -> list[str]:
++        return sb._git(self.fx.origin, "for-each-ref", "--format=%(refname)",
++                       "refs/heads/pdca-integration").split()
++
++    def _nothing_at_the_boundary(self) -> None:
++        """No integration line on origin; nothing readied or merged."""
++        self.assertEqual(self._integration_branches(), [], self.err)
++        self.assertEqual([c for c in self.gh_calls if c[1:3] in (["pr", "ready"],
++                                                                 ["pr", "merge"])], [])
++
++    def _held_lines(self, iid: str) -> list[str]:
++        return [x for x in self.err.splitlines() if x.startswith(f"flow: issue_{iid} held")]
++
++    def _held_unmerged(self, iid: str, prereq: str) -> None:
++        """``iid`` was not built, is PLANNED, and is named on ONE line as held for
++        ``prereq``'s PR not merged into main — with no advice about a line."""
++        self.assertNotIn(iid, self.built, self.err)
++        self.assertEqual(self.results[iid], state.PLANNED, self.err)
++        held = self._held_lines(iid)
++        self.assertEqual(len(held), 1, self.err)
++        self.assertIn(f"issue_{prereq}", held[0])
++        self.assertIn("not merged into main", held[0])
++        self.assertIn("merge", held[0].split("To build it,", 1)[-1])
++        self.assertNotIn("line of this run", held[0])
++        self.assertNotIn("carries them", held[0])
++
++    def _published_on_the_base(self, iid: str) -> dict:
++        """``iid`` was built from origin/main, and its PR branch cut from origin's main and
++        published as a plain PR against main."""
++        self.assertEqual(self.built.get(iid), ("origin/main", ""), self.err)
++        rec = json.loads((self.cfg.bundle(iid) / "publish.json").read_text(encoding="utf-8"))
++        self.assertEqual((rec["mode"], rec["base"]), ("new-pr", "main"))
++        self.assertEqual(rec["cut_from"], self.fx._tip("main"))
++        self.assertEqual(rec["pr_url"], PR_URL + iid)
++        return rec
++
++    # -- (a): independent bundles publish against the base; the dependent waits -----------
++
++    def test_independent_bundles_publish_on_the_base_and_a_dependent_is_held(self):
++        self._plan("10", {"a.txt": "a\n"})
++        self._plan("12", {"c.txt": "c\n"})
++        self._plan("11", {"b.txt": "b\n"}, depends_on="10")
++        self._run(["10", "11", "12"], ["10", "11", "12"])
++
++        self.assertEqual(self._pr_bases(), {"10": "main", "12": "main"}, self.err)
++        self._published_on_the_base("10")
++        self._published_on_the_base("12")
++        self.assertEqual((self.results["10"], self.results["12"]),
++                         (state.COMPLETE, state.COMPLETE))
++        self._nothing_at_the_boundary()
++        self._held_unmerged("11", "10")
++        self.assertEqual(self.holds, {"11": "unmerged"})
++        self.assertEqual(self.rc, 3)
++
++    # -- (b): once the prerequisite merged, a re-run builds it on the fetched base ----------
++
++    def test_once_the_prerequisite_merged_a_rerun_builds_the_dependent_on_the_base(self):
++        self._plan("10", {"a.txt": "a\n"})
++        self._plan("11", {"b.txt": "b\n"}, depends_on="10")
++        self._run(["10", "11"], ["10", "11"])
++        self._held_unmerged("11", "10")
++
++        self._merge_pr("10")
++        self._run(["11"], ["10", "11"])
++        self.assertEqual(self.results, {"11": state.COMPLETE}, self.err)
++        self.assertEqual(self._pr_bases(), {"11": "main"}, self.err)
++        rec = self._published_on_the_base("11")
++        # The base it was cut from has the prerequisite's merge.
++        self.assertTrue(self.fx._ancestor(self.merged_prs[PR_URL + "10"][1], rec["cut_from"]))
++        self.assertEqual(self._held_lines("11"), [], self.err)
++        self._nothing_at_the_boundary()
++        self.assertEqual((self.holds, self.rc), ({}, 0))
++
++    # -- (a2): a `Stacks on` edge is held the same way, and released onto the base ---------
++
++    def test_a_stacks_on_dependent_waits_for_the_merge_and_publishes_against_the_base(self):
++        self._plan("10", {"a.txt": "a\n"})
++        self._plan("11", {"b.txt": "b\n"}, stacks_on="10")
++        self._run(["10", "11"], ["10", "11"])
++        self.assertEqual(self._pr_bases(), {"10": "main"}, self.err)
++        self._nothing_at_the_boundary()
++        self._held_unmerged("11", "10")
++        self.assertEqual((self.holds, self.rc), ({"11": "unmerged"}, 3))
++
++        self._merge_pr("10")
++        self._run(["11"], ["10", "11"])
++        self.assertEqual(self.results, {"11": state.COMPLETE}, self.err)
++        # Built from, cut from, and opened against the base — never 10's branch.
++        self.assertEqual(self._pr_bases(), {"11": "main"}, self.err)
++        self._published_on_the_base("11")
++        self._nothing_at_the_boundary()
++        self.assertEqual((self.holds, self.rc), ({}, 0))
++
++    # -- (b2): merged, but the base as fetched lacks the merge: still held -----------------
++
++    def test_a_merged_prerequisite_the_fetched_base_lacks_still_holds_the_dependent(self):
++        self._plan("10", {"a.txt": "a\n"})
++        self._plan("11", {"b.txt": "b\n"}, depends_on="10")
++        self._run(["10", "11"], ["10", "11"])
++        self._held_unmerged("11", "10")
++
++        # gh reads 10's PR MERGED, but origin's main has neither its merge commit nor head.
++        branch = json.loads((self.cfg.bundle("10") / "publish.json")
++                            .read_text(encoding="utf-8"))["branch"]
++        self.merged_prs[PR_URL + "10"] = (self.fx._tip(branch), sb.ABSENT)
++        self.assertFalse(self.fx._ancestor(self.fx._tip(branch), "main"))
++        self._run(["11"], ["10", "11"])
++        self.assertNotIn("11", self.built, self.err)
++        self.assertEqual(self.results, {"11": state.PLANNED}, self.err)
++        self.assertEqual(self._pr_bases(), {}, self.err)
++        held = self._held_lines("11")
++        self.assertEqual(len(held), 1, self.err)
++        self.assertIn("issue_10", held[0])
++        self.assertIn("origin/main as fetched", held[0])
++        self._nothing_at_the_boundary()
++        self.assertEqual((self.holds, self.rc), ({"11": "unmerged"}, 3))
++
++    # -- control: the same batch in stack mode still folds (the fixture can show a line) ---
++
++    def test_the_same_batch_in_stack_mode_still_folds_a_line_and_builds_the_dependent(self):
++        self.cfg.wave_mode = "stack"
++        self._plan("10", {"a.txt": "a\n"})
++        self._plan("11", {"b.txt": "b\n"}, depends_on="10")
++        self._run(["10", "11"], ["10", "11"])
++        self.assertNotEqual(self._integration_branches(), [], self.err)   # a line, pushed
++        self.assertEqual(self.results, {"10": state.COMPLETE, "11": state.COMPLETE}, self.err)
++        self.assertEqual((self.holds, self.rc), ({}, 0))
++
++    # -- `pdca waves` says what "none" does, not what stack mode does -----------------------
++
++    def test_the_waves_preview_does_not_claim_a_wave_builds_on_the_prior(self):
++        self._plan("10", {"a.txt": "a\n"})
++        self._plan("11", {"b.txt": "b\n"}, depends_on="10")
++        out = io.StringIO()
++        with redirect_stdout(out), redirect_stderr(io.StringIO()):
++            rc = cli._waves(self.cfg, ["10", "11"])
++        self.assertEqual(rc, 0)
++        self.assertIn("(none mode", out.getvalue())
++        self.assertNotIn("builds on the prior's accepted work", out.getvalue())
++
++
++class WaveModeAtLoad(unittest.TestCase):
++    """(c): `[driver].wave_mode` through the REAL loader."""
++
++    def setUp(self) -> None:
++        self.root = Path(tempfile.mkdtemp())
++        self.addCleanup(shutil.rmtree, self.root, True)
++
++    def _load(self, value: str) -> tuple[config.Config, str]:
++        (self.root / "pdca.toml").write_text(
++            f'[paths]\nbundle_root = "results"\n\n[driver]\nwave_mode = "{value}"\n',
++            encoding="utf-8")
++        err = io.StringIO()
++        with redirect_stderr(err):
++            cfg = config.Config.load(self.root)
++        return cfg, err.getvalue()
++
++    def test_an_unknown_wave_mode_is_named_and_falls_back_to_stack(self):
++        cfg, err = self._load("bogus")
++        self.assertEqual(cfg.wave_mode, "stack")
++        note = [x for x in err.splitlines() if "wave_mode" in x]
++        self.assertEqual(len(note), 1, err)
++        for part in ("'bogus'", "stack", "merge", "none"):
++            self.assertIn(part, note[0])
++
++    def test_each_known_wave_mode_loads_as_written_without_a_note(self):
++        for value in ("stack", "merge", "none"):
++            with self.subTest(value=value):
++                cfg, err = self._load(value)
++                self.assertEqual(cfg.wave_mode, value)
++                self.assertNotIn("wave_mode", err)
++
++
++if __name__ == "__main__":
++    unittest.main()

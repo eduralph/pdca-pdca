@@ -1,0 +1,19 @@
+{
+  "band": "oversized",
+  "independent_outcomes": [
+    "Core \"none\" mode: at a wave boundary, skip the integration fold, the merge step and the pre-wave carry, and publish each accepted bundle as a draft PR against its real target base.",
+    "Dependency hold for \"none\": hold a dependent until its prerequisite has merged into the dependent's own base, for every edge kind, in-batch or not, with the #729 fetched-base check running without an integration line.",
+    "Stacks on in \"none\": cut the branch from and open the PR against the target base, not the prerequisite's branch (publish.py:238, :265, :282).",
+    "Config validation of wave_mode: an unknown value prints a note naming the allowed values and falls back to \"stack\". This applies to any value, so it could ship before \"none\" exists.",
+    "Failure accounting in \"none\": failed publishes, unreadable PR state (gh errors), chained holds, and re-published PRs each still mis-report or mis-hold. The carry-forward review findings name several of these, and each is its own defect."
+  ],
+  "proposed_seams": [
+    "Cut 1, config validation alone: reject unknown wave_mode values at Config.load (config.py:733, modelled on merge_requires at :738-742). It has its own defect (silent fallback) and its own test (leg c). Ship it first, with \"stack\" and \"merge\" as the only allowed values.",
+    "Cut 2, the \"none\" core: add the value, gate the wave-boundary checks (flow.py:2888, :2901, :3080) and the pdca waves summary (cli.py:1099-1100), and publish independent bundles against the target base. Test with legs (a) and (d) using bundles that have no dependencies.",
+    "Cut 3, the dependency hold: add the new _runnable branch (flow.py:786-841) with the \"unmerged\" hold kind and the exit-3 rule in cli._results_rc (cli.py:707, :741). Test with legs (a), (a2), (b) and (b2), covering every edge kind.",
+    "Keep Stacks on (leg a2) with Cut 3, because it depends on the hold. Keep the failure-accounting follow-ups out of this issue: each carry-forward finding (failed-publish holds, gh read errors, chains, re-published PRs) should be its own issue, or a follow-up after Cut 3 merges.",
+    "Ask the human at Plan whether leg (c) belongs in this issue or in Cut 1's own PR. The brief already flags it as outside the issue."
+  ],
+  "confidence": "medium",
+  "brief_sha": "2558783997c096e6"
+}
