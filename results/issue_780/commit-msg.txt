@@ -1,0 +1,31 @@
+fix: standalone signoff consumes a stale flow decision file
+
+A `pdca flow` sign-off session writes the human's decision to the
+bundle's `signoff-decision` file, and the flow deletes that file once
+it has recorded the decision in SUMMARY.md §9. The standalone
+`pdca signoff <id> --accept|--iterate-do|--iterate-plan|--discontinue`
+recorded §9 and ran the transition too, but never deleted the file.
+
+So a decision left behind by an earlier flow session outlived the
+attempt it was made about. The common case: a flow `accept` that C6
+refused (§6 NEEDS-HUMAN still open) stays on disk as `accept`. The
+human then runs `pdca signoff <id> --iterate-plan`; the bundle is
+archived, re-planned and rebuilt. If the rebuilt SUMMARY's §6 is
+clear, the next `pdca flow` run reads the old `accept` before offering
+a session and marks the rebuilt bundle COMPLETE: a build nobody
+reviewed, accepted by a decision made about a different build. With
+§6 still open, C6 refuses the stale accept and hides the bug.
+
+`cli._signoff` now deletes `signoff-decision` once `signoff.record`
+has succeeded and before `driver.run_issue`, the same consume-on-record
+that `flow._apply_decision` already does. A C6-refused accept or a
+failed record still exits earlier and consumes nothing, since nothing
+was recorded. A held or failing transition cannot leave the stale
+decision behind either, because the delete comes first.
+
+The new test `template/tests/test_signoff_consumes_decision.py` drives
+the full scenario (iterate-plan, rebuild with §6 clear, next flow wave)
+and fails on main with the rebuilt bundle reaching COMPLETE without a
+sign-off session.
+
+Fixes #780

@@ -1,0 +1,30 @@
+fix(waves): read Git-quoted paths in diff --git headers
+
+A patch that edits a file whose name holds a non-ASCII character
+(`café.txt`), a double quote, a backslash or a control character was read
+as touching no file at all. Git writes such a name C-quoted in the header
+(`diff --git "a/caf\303\251.txt" "b/caf\303\251.txt"`), and the header
+parser behind `waves.diff_files` accepted only the unquoted form, so the
+path was dropped. A rename with one quoted side lost both names.
+
+Two things read that result and were quietly wrong for those files. The
+same-wave overlap audit did not see two bundles editing the same
+quoted-name file, so an undeclared conflict went unreported. The size
+backstop's `patch_files` count came out low; that count is shared with the
+wave scheduler and `size-calibrate`, so all three now agree on the real
+number.
+
+`diff_files` now decodes a quoted side the way Git wrote it: the one-letter
+escapes (`\t`, `\n`, `\"`, `\\`, ...) and three-digit octal byte escapes,
+read back as UTF-8. A header with no quoted side still goes through the old
+regex unchanged. A quoted header whose quoting is malformed (a bad escape,
+no closing quote) is skipped rather than raised on, so the overlap audit,
+which has no exception guard, cannot crash on patch content. Octal bytes
+that are not valid UTF-8 decode with U+FFFD instead of dropping the file,
+which matches how the patch text itself is read.
+
+The new test module builds its patches with real git and quoting pinned on
+(`-c core.quotePath=true`), so a host with quoting turned off in its global
+config cannot make the tests pass for the wrong reason.
+
+Fixes #781

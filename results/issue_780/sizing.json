@@ -1,0 +1,14 @@
+{
+  "band": "ok",
+  "independent_outcomes": [
+    "Standalone `pdca signoff` consumes the signoff-decision file once it records a decision, so a stale decision from an earlier flow session cannot be applied to a rebuilt bundle."
+  ],
+  "proposed_seams": [
+    "None proposed. The brief's fix is one deletion in cli._signoff, placed after signoff.record succeeds and before driver.run_issue. The tests (legs a through e) all check that one behavior from different angles, so they would ship together.",
+    "Considered and rejected: splitting the ordering test (leg e) into its own PR. It tests the same line of code, so it would not stand on its own.",
+    "Considered and rejected: splitting the flow consumer side (flow._drive_wave pre-apply) into its own PR. The brief keeps flow._apply_decision and the pre-apply unchanged, so there is no second fix to ship.",
+    "Out of scope per the brief, so not a seam here: the session carry-forward capture (state.SESSION_CARRY), adding signoff-decision to state.DOWNSTREAM_OF_BRIEF, and the #395 same-wave trial."
+  ],
+  "confidence": "medium",
+  "brief_sha": "0e79cd64ea44636b"
+}
