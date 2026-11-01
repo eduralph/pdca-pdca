@@ -1,0 +1,41 @@
+Stack mode: name a squash/rebase-merged prerequisite, warn up front
+
+Stack mode needs merge commits: a squash or rebase merge puts a PR's
+change on the base as new commits, not the ones its dependents carry. When
+that happened anyway, nothing had warned beforehand and nothing afterwards
+said what had happened:
+
+- publish warned "does not allow merge commits" only for a PR cut from a
+  stack base, so the first PR of a stack - the one most likely to be
+  squashed - never got the warning;
+- the next fold stopped with "merged somewhere other than <base>", one of
+  two guesses, with no step to take;
+- a re-issue held every dependent built on it with "get issue_P carried",
+  which cannot work: P was reviewed and merged.
+
+Now, in stack mode, publish warns for any bundle another bundle names in
+`Depends on`, `Depends on (merged)` or `Stacks on` (an `Onto branch` commit
+included), not only for one cut from a stack base. Merge mode is untouched.
+
+The fold and the re-issue carry recognise the shape by the merge commit:
+the PR is MERGED, the base has the merge commit GitHub reports, and the
+PR's head is on neither the base nor the line. Both say so, name the merge
+commit, and give the same way out: update each branch built on it from the
+base ("Update branch") or rebuild it, then re-issue without it. Dependents
+stay held until that is done. A record that can never count as merged into
+the base (an `Onto branch` commit, a legacy `Stacks on:` PR, a record for
+another repo) also gets the two extra steps: drop the edge from the briefs
+of the re-issued batch, and delete the line that batch would continue on
+origin, named for that batch, so a re-run does not silently build on a line
+that lacks the merge. The flow's readiness check gives a dependent of such
+a record the same steps instead of "wait for the merge", which never ends.
+
+An empty or unreadable merge commit, or one the base lacks, keeps today's
+messages: the fold's generic stop and the carry's "remove the edge" hint.
+A head already on the line is carried as before, with no extra read.
+
+Docs: the stack-mode section of docs/07-crosscutting.md states the rule,
+the two messages and the way out, and narrows the Known-limits line to a
+prerequisite whose head is on neither the base nor the line.
+
+Fixes #626

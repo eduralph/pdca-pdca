@@ -1,0 +1,15 @@
+{
+  "band": "oversized",
+  "independent_outcomes": [
+    "Publish warns, in stack mode, when a repo disallows merge commits and another bundle declares a dependency on this PR, even when the PR has no stack base (publish.py; criterion a, d, d2, e). It needs no fold or carry change and has its own test.",
+    "The fold names a squash or rebase merge when a gone branch's PR is MERGED and its merge commit is on the base, instead of the generic 'merged somewhere other than <base>' message (integrate.py _gone_branch; criterion b, c3). It has its own test and needs only the fold's read of mergeCommit.",
+    "The re-issue carry holds a finished dependent of a squash- or rebase-merged prerequisite with advice that points the right way, not 'get issue_P carried' (flow.py _finished_head, _cascade_not_clean, _CARRY_HINTS; criterion c, c2, c3). It has its own test and needs the same mergeCommit read as the fold."
+  ],
+  "proposed_seams": [
+    "Seam 1: the publish warning alone (publish.py, the warning path near :370-373 and the Onto-branch return at :225-228). It is a standalone PR that touches one module, and it stops new PRs from being squash-merged unnoticed before the fold or carry changes exist.",
+    "Seam 2: the fold and the carry together, as one PR. The two sites share the squash-merged classification (merged.merge_and_head, merged.py:151) and the wording in integrate.DROP_PREREQ, and the review rounds show they must give the same advice for the same shape. Splitting them would reopen the 'opposite advice at two sites' problem.",
+    "If a smaller first step is wanted, ship Seam 1 and then Seam 2. The docs edits (docs/07-crosscutting.md:646-652, :686-691, :809-811) follow whichever seam ships the behaviour they describe. Do not ship the docs sentence about holding dependents before the carry change lands."
+  ],
+  "confidence": "medium",
+  "brief_sha": "5b6809c891a43743"
+}

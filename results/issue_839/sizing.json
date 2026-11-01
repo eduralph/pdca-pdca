@@ -1,0 +1,14 @@
+{
+  "band": "oversized",
+  "independent_outcomes": [
+    "Bug fix: in merge mode, a dependent whose prerequisite is unmerged is held instead of built on a base without that work. This covers out-of-batch and named prerequisites, turning hold_unmerged on, splitting own_bases off it, the merge-mode hold text with the merge-by-hand way out, and the test_merge_mode_holds_nothing rewrite (criteria 1, 1b, 1c, 3b, 4, 5, 6). It needs no marker and no merge step.",
+    "Enhancement: a merge-mode run merges a prerequisite PR that an earlier merge-mode run opened as a non-final wave, before the dependent builds, so the chain continues with no human merge. This covers the merge_eligible marker and its patch hash, the pre-wave merge step, the prerequisite-of-prerequisite check, the refusal outcome with its parameterised trailing text, and the docs on the wider merge rule (criteria 2, 2b, 3, 3c, 3d). Today's Depends on (merged) hold already judges with merged_into, so this could ship alone for that edge kind; plain edges only benefit once the bug fix is in."
+  ],
+  "proposed_seams": [
+    "Cut between holding and merging. Child 1 makes merge mode hold on any unmerged prerequisite and tells the human to merge by hand. Child 2 adds the marker and the pre-wave merge that clears those holds automatically. The brief's own (a) bug and (b) gap labels and its 'bug + enhancement' kind fall on this line. Why: child 1 alone stops wrong builds, and most of the review findings across iterations (unattended merges of the wrong PR, stale heads, refusal wording) belong to child 2's risk, not child 1's.",
+    "Order child 1 first. Child 2 can be built alone only for the (merged) edge, and its plain-edge legs in criterion 2 need child 1's hold_unmerged change, so it should declare Depends on child 1. The hold text is the one shared seam: child 1 says merge by hand, and child 2 adds 'let a merge-mode run merge it (it is marked)'.",
+    "Weigh this against where the bundle stands: this is iteration 4, and the last sign-off accepted the attempt as is except for one patch-hash guard. A split now means re-cutting and re-reviewing accepted work, so the human may reasonably keep it whole. The seam is real, but its value is mostly as a lesson for Plan rather than an action on this attempt."
+  ],
+  "confidence": "medium",
+  "brief_sha": "92be0bc6de57a873"
+}

@@ -1,0 +1,50 @@
+Bash was unavailable in this run (`apply-seccomp: write /proc/self/setgroups ... Permission denied`); this review used Read, Grep and Glob only.
+
+# Plan review: merge-mode-resume-or-hold-out-of-batch-prerequisite
+
+All `path:line` citations are under `$PDCA_TARGET`. Paths without a directory are in `template/src/pdca_harness/`.
+
+- NEEDS-HUMAN — **The problem statement cannot be checked against the tracker, and the brief admits its reproduction is unconfirmed.** This sandbox has no `notes.json`, `sources/` or `dependency-state.json`; only `brief.md` is present. So I could not test the defect, any failed prior attempt or any maintainer constraint against the thread. The brief also says "**Before building:** confirm with the human which edge type the getwyrd/wyrd #772 chain used and which harness version ran it", so its link to the real incident is an open question. Grep finds no `has_contribution` under `template/`, which fits the brief's claim that the mechanism is not on main (I could not run `git log -S`). Resolve the edge type and version at sign-off, before Do. If the chain used `has_contribution` on another version, the framing of leg (a) may not describe the reported failure.
+
+- NEEDS-HUMAN — **Criterion (2) requires "threads resolved", but nothing on main reads threads and the brief excludes that work.** The criterion says a prerequisite that is "clean (threads resolved, rollup green) is merged through `_merge_one`'s gates". `_merge_one` (`merge.py:535-732`) has no thread gate, and grep finds no `reviewThreads` or `isResolved` under `template/`. The scope line puts "reading review threads (child-1)" out of scope, and the brief declares no `Depends on` for child-1. As written, a PR with unresolved threads and a green rollup would be auto-merged, and the "threads resolved" clause is untestable. Choose one: declare the child-1 dependency, or drop the clause and state that a stranded PR can merge over unresolved threads. `Conflicts with` only orders work; it does not supply the gate.
+
+- NEEDS-HUMAN — **The fix leaves unmerged any stranded PR that predates the marker, possibly including the incident's chain.** The brief scopes out "PRs published before the marker existed (they hold...)". Any PR already open from the chain carries no marker, so after this change the `(merged)` edge still holds with no step that merges it, which is gap (b) again, now with a different explanation. The human needs to decide whether a manual merge or backfill path is acceptable, and the docs and hold line should name it. The current text (`flow.py:836-841`) only says to wait.
+
+- NEEDS-HUMAN — **Leg (1) misses a route that still builds on a base without the prerequisite: naming it in the command.** Hold candidates require `p.name not in asked` (`flow.py:795-797`). In merge mode `_carry_finished` is skipped (`flow.py:2888`) and `held_finished` stays empty, so with `pdca flow P D` the code computes no `cand`, does not reach `unmet` at `flow.py:831-834`, and D builds without P. The stack-mode hold message makes this worse: "name X in the same `pdca flow <ids>` command so the run's line carries them" (`flow.py:836-837`). In merge mode there is no line, so following that advice releases the hold and reproduces the bug. Add a named-prerequisite case to the criterion, and require a merge-mode-specific hold message.
+
+- NEEDS-HUMAN — **The obvious fix for leg (1) drags in a second behaviour.** `own_bases = hold_unmerged` (`flow.py:2905`) and that flag also gates `_base_plans` and `_bundle_bases` (`flow.py:2924-2927`, `2994-3000`). Enabling `hold_unmerged` for merge mode by removing `cfg.wave_mode != "merge"` would also switch on per-bundle bases, which the comment at `flow.py:2903-2904` reserves for "where the line folds for real". The brief cites `hold_unmerged` as a peer callsite without this warning. State that the two flags must be separated, and add a check that merge mode still does not use own bases.
+
+- NEEDS-HUMAN — **An existing test pins the behaviour leg (1) reverses, and the brief does not mention it.** `template/tests/test_flow_out_of_batch_prereq_hold.py:350-356`, `test_merge_mode_holds_nothing`, sets merge mode with an OPEN prerequisite and asserts `_built("D", "U")` and `gh_calls == []`. The brief's "RED offline" section and test file imply a purely additive change, but this test must be deliberately rewritten. Holding also requires a `gh` read (`merged.merged_into`), so the no-`gh` assertion cannot survive. Name this reversal of the #647 merge-mode exemption in scope so a reviewer does not read it as weakening a guard. Check the thread for whether the exemption was deliberate.
+
+- NEEDS-HUMAN — **Criterion (3) implies an unscoped refactor of `_merge_one`.** It requires the dependent to be held "with the refusal reason", but `_merge_one` returns only an `int` and prints each reason directly to stderr (for example `merge.py:549`, `559-566`, `591-594`, `684-692`, `718-725`). Those messages also say "STOP: later waves are NOT run", which is false if the new path holds one dependent and continues. Surfacing the reason means changing the signature or return of every refusal site, or capturing stderr. Either way it is a second change that scope omits. The brief must specify the mechanism, and whether a refusal holds only the dependent or stops the run as `flow.py:3081-3084` does. The criterion is ambiguous on that second point.
+
+- NEEDS-HUMAN — **The marker is not specified well enough for leg (3b), its guard against over-merging, to mean anything.** The brief says it is written "when a merge-mode run publishes or merges a non-final wave PR" and "at publish/merge time", which are two different designs:
+  - **Timing:** `merge_wave` runs only after publish and only for `k < len(wave_list) - 1` (`flow.py:3078-3081`), and `_publish_bundle` receives no wave information (`flow.py:3064`).
+  - **Stranded PRs:** a marker written only at merge time must be written before the merge attempt, or PRs refused there are not marked.
+  - **Lifetime:** the brief is silent on whether the marker survives an iterate and re-publish, or a manual `pdca publish <id>`, given that `publish.json` survives an iterate (`integrate.py:260`).
+  - **Human intent:** a refusal returns the PR to draft (`merge.py:460-482`). The marker cannot distinguish that draft from a human later choosing to hold the PR, yet the next run re-readies and merges it unattended.
+
+  Fix the write point and lifetime, and add a test for each.
+
+- NEEDS-HUMAN — **Chains and run modes have no criterion, though the incident is described as a chain.**
+  - **Transitive prerequisites:** `_merge_one` checks no prerequisites of its own, so merging marked P while P's own prerequisite is unmerged would land P on the base out of order. No leg covers P→Q.
+  - **Wrong base:** `_merge_one` returns 0 when `is_merged` is true, whatever the base (`merge.py:573-574`), and `merged.py:76-83` documents that this can differ from `merged_into`. The dependent must be re-judged after the merge, not released on `rc == 0`.
+  - **Dry-run and `--no-publish`:** existing tests require these to hold nothing and call no `gh` (`test_flow_out_of_batch_prereq_hold.py:343-348`, `358-364`), and `_merge_one`'s dry run returns 0 without merging (`merge.py:569-571`). The brief does not exclude the new merge path from either mode.
+
+  Add a leg for each.
+
+- NEEDS-HUMAN — **The brief says nothing about a network-blocking merge inside a decision function.** Scope places the merge call in the `flow._runnable` decision. That function currently only reads state and prints holds, and it runs for every wave before the pass-budget check (`flow.py:2931`, `2950`). One `_merge_one` can wait up to about `merge_wait_secs` for the update and rollup (`merge.py:660-674`) and mutates the host (`gh pr ready`, `update-branch`). It could also run for a dependent that the budget check then abandons. Say whether the merge belongs in a pre-wave step instead, as `_carry_finished` does at `flow.py:2888-2891`. That choice changes the size of the review surface.
+
+- NEEDS-HUMAN — **Three `merge.py` citations and the `Conflicts with` note do not resolve.**
+  - `merge._merge_one` is cited at `merge.py:463`; it is at `merge.py:535` (line 463 is `_undo_ready`'s docstring).
+  - The "only the PRs this run opened" rule is cited at `merge.py:481-482`; it is at `merge.py:553-554` (481-482 are the end of `_refuse`).
+  - The "keeps its draft" rule is cited at `merge.py:515-517`; it is at `merge.py:605-607` (515-517 are in `_target_base`).
+  - The ordering note says "464 is in `Conflicts with:`", but that field lists only `838, 843, 844`.
+
+  Fix the citations, because Check drops those that do not resolve (`template/PCDA/quality-cycle/06-quality-cycle-guidelines.md:148`). Then either add 464 or correct the note. The flow citations I checked do match. I could not verify the status of 500, 412, 464, 838, 843 or 844, or the child-1 and child-3 references, without tracker data. `.git` in the target is a file, not a directory, and I did not resolve the repo target from it, so `eduralph/pdca-harness @ main` is also unverified.
+
+- NEEDS-HUMAN — **The docs change is under-scoped.** The brief names only the merge-mode bullet from `docs/07-crosscutting.md:858` and the "this run's PRs" rule. `docs/07-crosscutting.md:902-904` also says of the final wave that "a later merge-mode run can still pick up its open PRs one at a time", which contradicts leg (3b), where unmarked final-wave PRs are never merged. The comments and error text at `merge.py:553-554` and `merge.py:603-608` ("the final wave never reaches here"), and the `hold_unmerged` docstring at `flow.py:711`, also go stale. Add them to scope.
+
+> **pdca:** Bash was unavailable to this reviewer. The vendor sandbox could not start on this host, so every Bash call it made failed before running (`apply-seccomp: write /proc/self/setgroups (nested userns is capability-restricted; caller must provide CAP_SYS_ADMIN): Permission denied`) and it ran no commands; this review was delivered without Bash.
+
+<!-- pdca:leaf-complete -->

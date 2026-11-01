@@ -1,0 +1,47 @@
+Merge mode: merge marked prerequisites before wave 0, hold the rest
+
+In merge mode, a dependent whose prerequisite was finished and published
+by an earlier run, but whose PR is still open, was handled wrongly. On a
+plain `Depends on` edge (or when the prerequisite was named in the same
+`pdca flow` command) the dependent was built on a base that did not
+contain the prerequisite's change, because the out-of-batch hold was
+switched off in merge mode and a named id was never a hold candidate.
+On a `Depends on (merged)` edge the dependent was held, but no step ever
+merged the prerequisite, so the chain stayed stuck until a human merged
+by hand, and the hold line gave stack-mode advice ("name it in the same
+command so the line carries it") that means nothing in merge mode.
+
+Now a merge-mode run merges, before wave 0, the prerequisites the
+bundles it drives are waiting for, and holds the dependent on anything
+it may not merge:
+
+- `merge_wave` marks each PR it pushes and tries to merge as a non-final
+  wave (`merge_eligible` in `publish.json`, with a hash of the
+  `patch.diff` it was published from). The mark means a later merge-mode
+  run may ready and merge that PR unattended once its gates pass, as
+  long as the bundle still holds that patch. Publish never writes it, so
+  a re-publish clears it; a final-wave or single-bundle PR is never
+  marked and stays the human's to merge.
+- Before wave 0 the run walks down from each dependent and merges, deepest
+  first, the marked, open PRs on the dependent's base, through the same
+  gates as a wave merge. A refusal holds only that dependent (and its
+  dependents); the run goes on with the rest. The refusal text says who
+  is held and what clears it, instead of "STOP: later waves are NOT run".
+- The hold applies in merge mode to a plain edge, a `(merged)` edge and
+  a named prerequisite alike. Release still goes only through the
+  publish record (`merged.merged_into`): the work must be merged into
+  the dependent's own base, never just "somewhere".
+- The hold line names the prerequisite, the base, and a way out that
+  fits that record: let a later run merge it, merge it by hand, reopen a
+  closed PR, re-publish an old head, or land the work and drop the edge.
+- A prerequisite in a broken state (no brief, a brief with no target, a
+  patch that cannot be read) holds its dependent instead of crashing the
+  run or building without it.
+- `hold_unmerged` and `own_bases` are split: the hold is on in merge mode,
+  per-bundle bases stay stack-only.
+
+Dry runs and `--no-publish` still merge nothing, hold nothing and ask
+`gh` nothing. `test_merge_mode_holds_nothing` is rewritten on purpose: it
+pinned the merge-mode exemption from #647 that this change reverses.
+
+Fixes #839

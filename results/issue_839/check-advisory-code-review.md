@@ -1,0 +1,13 @@
+# Advisory code review — issue 839, iteration 3
+
+I read the code and did not run any probes for these findings. The gates I can see are green (C4, T3, C5, T2). T4 is deferred to publish.
+
+- NEEDS-HUMAN [human] — `template/src/pdca_harness/merge.py:171-172`: the old-head risk rejected at sign-off is closed on the pre-wave walk but still open at the wave boundary in the same run. If P is rebuilt in a non-final wave and its re-publish fails before the push, `mark` is False, but `mark` only controls the marker. `_merge_one` still readies and merges the PR on the old record, and the next wave builds on that older attempt. `flow.py:3282` still calls `merge_wave` in that state. The test helper at `template/tests/test_merge_resume_stranded_prereq.py:1361` says the wave "attempts the old PR" and that only the red rollup stops the merge. A green rollup would merge it. This behaviour predates the patch, and the sign-off said "change nothing else", so it needs a ruling: skip that bundle at the wave boundary, and STOP or hold, the way stack mode uses `integrate.unpublished` (`flow.py:3296`), or file it separately.
+
+- NEEDS-HUMAN [impl] — `template/docs/fork-discipline.md.jinja:74`: "A non-final wave's PR that did not merge stays marked" is false in two cases. `merge_wave` returns at the first refusal (`template/src/pdca_harness/merge.py:173-174`), so in a wave `[A, B]` with A refused, B is pushed but never attempted and never marked. A PR whose re-publish failed is also not marked (`merge.py:172`). `template/pdca.toml.jinja:131` ("Each PR it tries is marked") has the second problem. In both cases the dependents hold and are told to merge by hand, so this is safe, but a reader who trusts the docs expects a later run to pick the PR up. `docs/07-crosscutting.md` ("marks each PR it pushes and then tries to merge") is accurate, so copy that wording. I found no test for the unattempted sibling. Add one that pins B unmarked, so the behaviour is deliberate.
+
+No other correctness bugs turned up in the iteration's change, which is the patch hash written in `_merge_one` (`merge.py:824-826`), checked in `takes` (`flow.py:1556-1557`), and reported by `_merge_way_out`. A missing or unreadable hash counts as not marked, so that PR holds its dependents. The `pushed` argument uses the same record-write check as stack mode.
+
+No reuse, simplification or efficiency changes are worth making. `merged.has_patch` overlaps `integrate._has_patch` (`integrate.py:194`), but only `has_patch` separates an unreadable patch from an empty one, so the overlap is justified.
+
+<!-- pdca:leaf-complete -->

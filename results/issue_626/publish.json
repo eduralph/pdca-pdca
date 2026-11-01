@@ -1,0 +1,12 @@
+{
+  "mode": "stacked-pr",
+  "branch": "enhancement/626-stack-squash-rebase-merge-recognised-and-refused-up-front",
+  "pr_url": "https://github.com/eduralph/pdca-harness/pull/858",
+  "base": "main",
+  "repo": "eduralph/pdca-harness",
+  "by": "Eduard Ralph",
+  "date": "2026-10-30",
+  "id_pending": false,
+  "host_ci_base": "f5321ab294bf630984f31d6bbd0bbe11ef028019",
+  "stacks_on": []
+}

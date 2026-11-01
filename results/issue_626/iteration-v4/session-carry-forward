@@ -1,0 +1,15 @@
+Rejected only for two findings where following the printed advice can produce a wrong build. Change nothing else; the rest of attempt 4 is accepted as-is.
+
+1. Code-review finding at template/src/pdca_harness/flow.py:855 (builder's "What this does not cover", first bullet): the "drop issue_P from issue_D's brief, then re-run" advice can build D without P's work when the run's line is older than the squash merge. Reproduced by the reviewer: an earlier run of `R, D` folded R onto D's line, then P (an `Onto branch` record) was squash-merged; D naming `R, P` was told to drop P; after the drop D reached COMPLETE at the line's tip, which lacks the squash commit, with no warning. With a record that counts, the same setup holds D and says to delete the line on origin first. Fix: when the run's line lacks the merge commit, have D's hold line and the docs (`docs/07-crosscutting.md:916`) give the delete-the-line step too, the same step `_line_lacks_merge` already gives for a counting record. Add this case as a test (`test_stack_squash_merge.py:970` covers only a run with no older line).
+
+2. Adversary finding at template/src/pdca_harness/flow.py:853: D's line says "so {base} has the PR's work", but `integrate._squash_merged` only shows the merge commit is an ancestor of the base. After a revert of the squash commit on main, the line still says main has the work and tells the user to drop P; D then builds without it. Fix: say the PR was merged into the base, not that the base has its work. Add the revert case as a test.
+
+Rulings on the rest, so the next round does not reopen them:
+- Keep "drop the edge" over "count the merge" (brief says refuse; #647: an `Onto branch` record is never trusted).
+- Keep D's own hold line and its one extra `gh` read on a hold.
+- Criterion (c)'s ban on the `edge` hint text does NOT ban `integrate.DROP_PREREQ` wording on P's line for a never-counting record.
+- The hold is advice, not enforced until the dependent is updated (adversary/deferred findings on brief.md:40): accepted as built and documented; do not add enforcement.
+- Publish warns for declared dependents only, per criterion (d); the Goal's "later wave" wording does not stand. No change.
+- The recovery run with P's head already on the line stays silent (criterion (c) as written). No change.
+- "Update branch" after a reverted squash keeps the reverted change: accepted as a known limit; no code change this round.
+- Offline GitHub metadata contract accepted; live validation is #625's.
