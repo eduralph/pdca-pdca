@@ -1,226 +1,241 @@
-# Build notes — issue 839, iteration 4
+# Build notes — issue 839, iteration 5
 
-Line numbers are against the worktree, whose base is `f5321ab` (`main` with 838 stacked on it).
-They run later than the brief's citations, which were taken before 838.
+Line numbers are against the worktree as I left it: `origin/main` at `b19b5c1` plus this patch.
+Nothing was committed or pushed.
 
-I applied the previous attempt's patch unchanged (it applied cleanly), then added the guard the
-sign-off asked for. Everything you accepted last round is still there.
+## Do this first: the bundle still points at the old base
 
-## The one thing to look at first: I added something the sign-off did not list
+**The gates cannot run on this patch until you clear a stale marker, so the Check that follows this
+build will fail with "worktree mismatch".**
 
-**The hash alone did not stop the old head being merged, so I also added a `pushed` check at the
-wave boundary.** You said "change nothing else". I read that as covering the accepted work, not a
-gap in the guard itself, but it is your call.
+`results/issue_839/stack-base` still names `pdca-integration/main-re715db900335` (tip `f5321ab`), left
+by the Oct 31 run. A `flow` run clears a stale marker (`flow.py:1098`, `:1244`), but a standalone
+`signoff --iterate-do` does not. So the driver gave me a worktree at `f5321ab`, and it will rebuild
+on `f5321ab` for the gates too (`worktree.py:96-98`, `:280-288`).
 
-The gap: the wave boundary runs `merge_wave` over every accepted bundle of the wave, including one
-whose publish just failed (`flow.py:3282`). If that bundle's old PR was not marked yet, `_merge_one`
-marks it now and records the hash of the **new** patch on a record whose PR still holds the **old**
-head. The hashes then match, so the guard passes.
+You asked for a rebuild on `main` with #626, so I moved the worktree to `origin/main` and built there.
+The patch cannot satisfy both bases:
 
-I built exactly what the sign-off described first, then probed this path. P has an unmarked PR from
-an earlier run, this run rebuilds P in a non-final wave, its publish fails, and the rollup is red,
-so nothing merges yet. Then the old head goes green and a later `pdca flow D` runs:
+| Base | `git apply --check` |
+|---|---|
+| `f5321ab` (what the marker pins) | fails in `flow.py` and `merged.py` |
+| `origin/main` `b19b5c1` | clean |
+
+**I left the marker alone.** It is the driver's state and it decides which base the gates vouch for, so
+changing it is your call. I also did not shape the patch to apply on both bases: a green on `f5321ab`
+would say nothing about the code #626 changed. I did not use the `NEEDS-HUMAN external dependency`
+marker either, because this is not an external dependency.
+
+**What happens next:** the running `pdca-pdca signoff 839 --iterate-do` goes straight into Check. No gate
+runs, and you get one failed row, `C4 Verification (worktree mismatch)`. The reviewer still runs and is
+paid for, on a lane left at `f5321ab` with no patch applied. Expect it to say the patch does not apply,
+and ignore that.
+
+**To get a real Check, once that process has stopped:**
 
 ```
-marker after the refused wave: True
-recorded hash == current patch: True
-events of the later run: ['ready issue_P', 'merge issue_P', 'build issue_D', 'build issue_U']
-old head on origin/main: True
+cd /home/eddie/pdca/pdca-pdca/results/issue_839
+rm stack-base stack-base-tip check-gates.json SUMMARY.md
+cd ../.. && pdca-pdca run 839
 ```
 
-That is the harm you rejected, reached by a different route.
+I checked two steps of this on a scratch copy of the bundle with the real config: without the marker the
+base is `origin/main`, and with the last two files gone the state is back to `BUILT`. I did not run the
+whole recipe on the real bundle.
 
-The fix is the check stack mode already uses, which your note cited: the wave boundary marks only a
-bundle whose branch this run pushed.
+**Worth filing (Act):** a standalone `signoff --iterate-do` keeps a stale `stack-base`, so "rebuild on
+main" silently rebuilds on the old line.
+
+## Before you publish
+
+- **The PR texts are stale.** `commit-msg.txt` and `pr-description.md` are still in the bundle from the
+  last publish, and publish drafts them only if absent (`publish.py:73`). They do not mention the claim
+  step. Delete or edit them.
+- **Close #859 first.** You said the rebuilt PR replaces it. Publish force-pushes to the same branch name,
+  and if `gh pr create` then fails because #859 is still open, the record gets an empty `pr_url`
+  (`publish.py:413-439`). Not tested on a live host: that failure is GitHub behaviour as I understand it.
+
+## What changed this round
+
+**1. Rebuilt on `main`.** The previous patch went on with `git apply --3way`. Only two docstrings
+conflicted, and I kept both sides of each (`flow.py:712-734`, the `merged.py` module docstring). One small
+change of my own: `_merge_way_out` now asks `merged.counts_into` (`flow.py:1631`), #626's single rule,
+instead of comparing the fields itself. Behaviour is the same at that point, because a `"stacked"` record
+has already returned.
+
+`main` moved again while I worked, from `fcc18c9` to `b19b5c1`. That was docs only, in files this patch
+does not touch, and `patch.diff` came out byte-identical on the new tip.
+
+**2. The claim, as you and Codex asked.**
 
 | Where | Change |
 |---|---|
-| `flow.py:3283` | passes `pushed=pushed` |
-| `merge.py:161` | new parameter, `pushed: set[str] \| None = None` |
-| `merge.py:172` | `mark=pushed is None or d.name in pushed` |
+| `flow.py:3295` | `_drive_and_act` passes the run's `claims` to the pre-wave step |
+| `flow.py:1735` | `visit` takes the claim before anything reads the prerequisite: state, record or `gh` |
+| `flow.py:1736-1741` | if refused, it records a note and the key in `busy`, and goes no further down |
+| `flow.py:1760-1763` | a refused prerequisite blocks the merge of the one above it, with no read |
+| `flow.py:1791-1793` | claims this walk took are let go when it ends |
+| `flow.py:827-829`, `:896-900`, `:978` | `_runnable` holds the dependent, on its own line, with no `gh` read |
+| `drive_claim.py:227-230` | new `Run.holds`, so the walk never lets go of a claim it did not take |
 
-With it, the same probe ends with P unmarked and D held. `flow._publish_bundle` already computes
-`pushed` (`flow.py:649-655`). A bundle not marked here holds its dependents until a human merges,
-which the brief calls the safe default. Nothing changes for a publish that worked.
+The hold line:
 
-**To drop it:** undo those three lines, remove `test_a_wave_does_not_mark_a_pr_whose_re_publish_failed`
-(the only test that goes red without it), and drop "it pushes" from `docs/07-crosscutting.md:905` and
-"that this run pushed" from the `merge.py` module docstring. The hash guard keeps working for a PR
-that was already marked, which is the case in your note.
+> flow: issue_D held — prerequisite(s) issue_P not known to be merged into main (org/repo); not built on
+> a base that may be missing them. issue_P: it is held by another live `flow` run (pid 12), so this run did
+> not judge or merge it; let that run finish (or stop it), then re-run.
 
-## What changed, as you asked
+A claim that cannot be recorded takes the same path, with its own reason and remedy, because
+`drive_claim.py:21-26` says that fails closed.
 
-- **The marker now carries a hash.** `_merge_one` writes `merge_eligible_patch` beside
-  `merge_eligible` (`merge.py:824-826`). It is the sha256 of `patch.diff`'s bytes (`merged.py:228`,
-  key at `merged.py:47`). A record already marked keeps the hash it has.
-- **The walk compares it.** `takes` does not take a prerequisite whose current patch differs
-  (`flow.py:1557`), and it checks this before its `gh` read, so such a PR costs the walk no read.
-  The comparison lives in one function (`merged.py:237`), so the walk and the hold line cannot
-  disagree. A marker with no hash, or a patch that cannot be read, is not trusted.
-- **The hold line says what to do** (`flow.py:1507`):
-  > issue_P: its PR was published for a different patch.diff, so its head may be an older attempt
-  > and no merge-mode run merges it; close it, re-publish (`pdca publish P`) and merge the new PR by
-  > hand, or merge this PR by hand as it stands, then re-run.
-- **The marker still survives an iterate**, as the brief says. A test checks this after a real iterate.
-- **Docs and docstrings** say the same: `docs/07-crosscutting.md:905-909` and `:925-928`, the `merge.py`
-  module docstring, and the docstrings of `merge_wave`, `_merge_way_out` and `_merge_prereqs`.
-  I did not touch `fork-discipline.md.jinja` or `pdca.toml.jinja`. Their sentences are still true as
-  summaries.
+Docs: `docs/07-crosscutting.md:584-590` and `:996-1001`, `docs/11-troubleshooting.md:94-96`, and the
+docstrings at `drive_claim.py:8`, `:19-20`, `merge.py:111` and `flow.py:1690-1698`.
 
-### Where the hold line goes further than your wording
+## Two calls you may want to overrule
 
-Your note says the PR "must be re-published (or merged by hand) before a run trusts it". The code
-does not quite allow "a run trusts it" after a re-publish, so the line says what really releases D:
+**1. A claimed prerequisite holds its dependent even if its PR has merged or it ships nothing.** That is
+your wording ("hold its dependents when another run holds the claim") and Codex's. It has a real cost. A
+run keeps its drive-set claims for its whole life, so if run A merges P at a wave boundary and then builds
+for hours, run B's D waits until A ends, though P is already on `main`. The hold is safe, and a re-run
+clears it.
 
-- **A re-publish writes no marker**, as the brief requires, and a COMPLETE bundle is never driven
-  again, so no later run marks it. The new PR still needs a human's merge.
-- **"Close it" comes first.** `gh pr create` fails while the old PR is open, and publish then records
-  an empty `pr_url` (`publish.py:428-438`, documented at `flow.py:651-652`). The dependent would then
-  be held with no PR on record, and merging the old PR by hand would not release it.
+To release on a merge instead, move the check below the merge read in `_runnable`, three lines moved:
 
-`test_closing_re_publishing_and_merging_by_hand_releases_the_dependent` and
-`test_merging_a_pr_for_another_patch_by_hand_releases_the_dependent` follow each way out to the end,
-with D building. **Not tested on a live host:** the "fails while open" part is the repo's own
-docstring plus my knowledge of GitHub, and the test stub lets a second PR open.
+```diff
+-                if (p.name, repo, base) in merge_busy:
+-                    busy.append(p.name)
+-                    continue
+                 if merged.merged_into(cfg, dep, repo, base):
+                     ...
+                     continue
++                if (p.name, repo, base) in merge_busy:
++                    busy.append(p.name)
++                    continue
+```
 
-## Left as is, and you may want issues for them
+That adds one `gh` read of a bundle another run holds, and readies or merges nothing.
+`test_a_merged_prereq_another_run_holds_holds_too` and `test_a_close_prereq_another_run_holds_holds_too`
+(`test_merge_resume_stranded_prereq.py:1923`, `:1937`) would flip. I did not build this.
 
-Both of these behave the same on an untouched copy of the base. I ran the same probe on both trees,
-so this patch did not introduce them, but both are close to what you rejected.
-
-1. **The wave boundary can still merge an old head, in the same run as the failed publish.** Same
-   setup as the probe above, with a green rollup: `build issue_P`, `ready issue_P`, `merge issue_P`,
-   `build issue_E`, and E's base has the old file. The publish failure is printed just above it. Only
-   the later-run path is guarded. Now that `merge_wave` receives `pushed`, a refusal there would be
-   about 5 lines plus a test. I left it because the brief keeps the wave boundary as it is and you
-   said to change nothing else. **This is the one I would file.**
-2. **An old PR that already merged releases the dependent.** P's first PR is merged by hand, then P is
-   rebuilt and accepted and never re-published. D builds, and its base has the old file but not the
-   rebuilt one. `merged_into` (`merged.py:80`) reads the old record and does not look at the hash. The
-   walk is not involved.
-
-A human who pushes to the PR branch by hand is not caught by the hash, by design: the patch is
-unchanged and the gates judge whatever head is there.
-
-## Other things you should know
-
-- **Size.** `patch.diff` is 152 KB, up from 131 KB, against the 125 KB backstop, so that §6 item will
-  fire again. Most of the growth is tests (314 more lines). Production grew by far less, and part of
-  its count is rewrapped docstrings: `flow.py` +24/-12, `merge.py` +26/-17, `merged.py` +26/-1.
-- **Still open from last round, unchanged:** a marked `Merges with` member can merge alone; siblings
-  after a refusal stay unmarked; a hold line costs one more `gh pr view`; a split child adopted mid-run
-  is held; stack mode still crashes on a briefless prerequisite. See `iteration-v3/build-notes.md`.
+**2. The walk keeps every claim it took until it ends, including on prerequisites it will not merge.** So
+during that step another run naming one of those bundles is refused, and a sweep skips it. With
+`merge_wait_secs = 300`, each marked prerequisite can add about 5 minutes or more to that window. Letting
+go early saves that, but it needs the `claimed` cache and `ours` list reworked and a re-take before the
+blocker read, which I estimate at 8-10 lines. I kept it simple because the window is short and a re-run
+clears it.
 
 ## What I ruled out
 
-- **Recording the hash at publish instead.** This removes the cause more directly than the `pushed`
-  check: the record would say which patch it was published from, whatever happens later. It is about
-  2 lines in `publish.py:436-441`, against 3 for `pushed`, and `_merge_one` would hash nothing. I did
-  not do it because your note says `_merge_one` writes the hash. It would also touch a file this
-  bundle has left alone, and a PR published before it landed would hold if marked later. If you
-  prefer it, this is the swap to make.
-- **Clearing the marker when a new attempt starts.** The reviewer's other option. It contradicts the
-  brief's "survives an iterate", and you chose the hash.
-- **Comparing the PR's real diff with `patch.diff` on the host.** About 15 to 25 lines and one more
-  `gh` read per prerequisite. It also could not match exactly after `gh pr update-branch`, which puts
-  a merge commit on the head.
-- **Checking the hash inside `_merge_one`.** That would change wave-boundary behaviour too, which the
-  brief wants unchanged. The walk is where the licence is read.
-- **Hashing normalised text.** Any byte change counts. A false hold costs a human merge, which is safe.
+- **Checking drive-set names instead of adding `Run.holds`.** `{b.name for b in bundles}` is about 2 lines
+  against about 6 for `holds` and its call, but `drive_claim.py:39-40` says a symlinked alias shares its
+  bundle's claim. Name matching would release a drive-set claim reached through an alias. `holds` reads
+  the fact itself. No test uses an alias: that part follows from `_claim_file`, and I did not exercise it.
+- **Keeping prerequisite claims for the whole run**, as drive-set claims are kept. Run A would then hold
+  up every other run's dependents of P for hours, after A has already finished with P.
+- **Printing the claim hold on the existing `not merged` line.** Nothing was read, so "not merged" could be
+  false. Likewise the chain note says "not known to be merged" only when a blocker is claimed
+  (`flow.py:1768`), and keeps the text you accepted otherwise.
+
+## Left as is
+
+- **Reads outside the claim.** A split child adopted mid-run is not walked, so `_runnable` reads its
+  prerequisite's record with no claim. That is a read only, and it merges nothing. The walk runs once.
+- **Single-step verbs.** `pdca publish` and `pdca signoff` take no claim, as `drive_claim.py:43-47` already
+  documents.
+- **Your §10 follow-ups are unchanged:** the same-run wave-boundary merge of an old head, `merged_into` not
+  checking the hash, and the `fork-discipline.md.jinja:74` wording.
+
+## Size
+
+`patch.diff` is 180 KB against the 125 KB backstop, up from 152 KB, so that §6 item fires again. Most of it
+is the test file (2,185 lines, 375 of them new). `sizing.json` already proposes the split.
 
 ## Refutation
 
-**(a) Genuine red? Yes.** `run-verify.sh` reverted the production hunks and reported
-`C4 PASS — red without the fix, green with it`:
+**(a) Genuine red? Yes.** `run-verify.sh` reverted the production hunks and reported `C4 PASS — red without
+the fix, green with it`:
 
 | Module | Green leg | Red leg |
 |---|---|---|
-| `test_merge_resume_stranded_prereq` | 107 tests, OK | `failures=146, errors=11` (counts include subtests) |
+| `test_merge_resume_stranded_prereq` | 128 tests, OK | `failures=159, errors=14` (counts include subtests) |
 | `test_flow_out_of_batch_prereq_hold` | 31 tests, OK | `failures=1` (the rewrite the brief names) |
 | `test_merge_review_remarks` | 30 tests, OK | 30 tests, OK (only its count was narrowed) |
 
-93 of the 107 tests go red. I read all 11 errors:
+109 of the 128 tests go red. I read the errors. Most are behaviour: a dependent built when it should be
+held, or a merge that never happened. Some come from symbols the fix adds (`merged.patch_hash`,
+`merged.has_patch`, `_merge_one(held=…)`), so those fail on the missing symbol, not on behaviour.
 
-- 6 are behaviour: 3 `ValueError` from `list.index` because the merge never happened, 2 `WorktreeError`
-  because a dependent built when it should have been held, and 1 real `UnicodeDecodeError`.
-- 5 fail on something the fix adds, not on behaviour: 2 `AttributeError` (`merged.patch_hash`,
-  `merged.has_patch`) and 3 `TypeError` (`_merge_one(held=…)`).
+16 of the 21 new tests go red. The 5 that stay green are guards against doing too much, or only bind
+against code that claims:
 
-The 14 that stay green do so by design. They are legs (4) and (5), the no-out-of-batch half of (1c),
-the wave-boundary text tests (which prove that text is unchanged), and guards against merging or
-holding too much. Two of them only bind against code that merges or marks, so they pass on plain
-`main`: `test_the_walk_stops_at_a_prereq_already_merged` and the new
-`test_merge_wave_never_re_stamps_a_marked_record`.
+- `test_a_merged_prereq_keeps_the_walk_off_one_another_run_holds_below_it`
+- `test_a_named_prereq_another_run_holds_refuses_the_run_before_the_walk`
+- `test_a_run_that_publishes_nothing_is_not_held_by_a_claim`
+- `test_the_walk_claims_a_prereq_it_will_not_merge_and_lets_that_go_too`
+- `test_the_walk_never_lets_go_of_what_the_run_drives`
 
-**The check that matters for this round.** Against the **previous attempt's production code**, 17 of
-the 18 new tests go red, and so does the new table row for a marker with no hash. The one that stays
-green is `test_merge_wave_never_re_stamps_a_marked_record`, because that rule already existed.
+**The check that matters for this round.** With only the claim hand-off removed, which is the last attempt's
+logic on the new base, the module gives `failures=15, errors=1`.
 
-**Mutation pass.** I broke 17 new production decisions one at a time, each on a copy of the source, and
-the module caught all 17. The first pass caught 16, and the survivor is why that last test exists. The
-mutants include: the walk ignoring the hash, the walk reading `gh` first, no hash written, the caller
-not passing `pushed`, each wrong reading of `pushed`, a shortened hash, and the hold line losing each
-way out.
+**Mutation pass.** I broke 21 claim decisions one at a time, each on a copy of the source, and the module
+caught all 21. They include: claims not passed, a refusal ignored, the claim taken after judging, `_runnable`
+ignoring it, blockers ignoring it, claims never let go, drive-set claims let go, `holds` always true or false,
+a peek instead of a real claim, and the hold line losing its reason or way out.
 
-**(b) Production path? Yes.** The tests go through `flow.flow_ids` into the real `_drive_and_act`,
-`_merge_prereqs`, `_runnable`, `_merge_one`, `merged_into` and `worktree.ensure`. This round adds:
+**(b) Production path? Yes.** Most new tests go through the real `cli._flow`, which makes the run's claim
+scope, into `flow_ids`, `_drive_and_act`, `_merge_prereqs`, `_runnable`, `_merge_one`, `merged_into` and
+`worktree.ensure`, with real `drive_claim.Run` locks on real files. The sweep has its own case through
+`flow_batch`. Only `gh`, the build leaf's work and the publish leaf are stubbed.
 
-- the real iterate (`signoff.record` then `driver.advance`, which your reviewer's probe stood in for by hand);
-- the real `publish.publish`, including a real failure at `git apply`;
-- the real `flow._publish_bundle`, which decides `pushed`;
-- the real wave-boundary writer for the marker, so a mismatch between what is written and what the
-  walk compares goes red (`test_the_marker_a_wave_wrote_licenses_the_patch_it_was_written_for`).
+**(c) Fixture includes the fault? Yes.** Another run holds P's real lock while P is marked and open with a
+green rollup, so only the claim stops the merge. That is Codex's probe
+(`test_a_prereq_another_run_holds_is_not_touched_and_holds_its_dependent`, `:1880`). One case uses a real
+second process, and its pid must appear on the line (`:1886`). `test_two_runs_reaching_one_marked_pr_never_both_touch_it`
+(`:2076`) runs the race itself: a second run starts during the first run's `gh pr ready` on P. It is held, P
+is readied and merged once, and it builds after a re-run.
 
-Only `gh`, the build leaf's work and, outside those cases, the publish leaf are stubbed.
-
-**(c) Fixture includes the fault? Yes.** P has a real older head on a real bare `origin`, a different
-`patch.diff`, and a **green** rollup, so the gates would pass it and only the guard stops the merge.
-`test_a_marked_pr_published_for_another_patch_is_not_merged` is your probe: mark P, replace
-`patch.diff`, run `flow D`, and assert no ready or merge call for P and D held naming P.
+**Not tested on a live host:** the `gh` calls are stubbed, as in every earlier round.
 
 ## What I ran
 
-All through the project's own scripts, on the final patch:
+The driver's gates cannot run yet (see the top), so I ran the same scripts by hand, from the instance root
+with `PDCA_BUNDLE` and `PDCA_WORKTREE` set.
 
-| Check | Result |
-|---|---|
-| `engine/scripts/run-verify.sh` (C4) | pass |
-| `engine/scripts/run-suite.sh` (T3) | root suite 50 tests OK, driver suite 2804 OK (skipped=2) |
-| `engine/scripts/run-docs-check.sh` (T2) | docs lint, site render and link audit clean |
-| `engine/scripts/run-host-ci.sh` | clean, run from the worktree |
-| `engine/scripts/run-prod-path.py` (C5) | pass |
-| `git diff --check` | clean |
-| New module, 3 more runs to look for flakiness | OK each time |
+| Check | Tree | Result |
+|---|---|---|
+| `engine/scripts/run-verify.sh` (C4) | `fcc18c9` + final patch | pass |
+| `engine/scripts/run-suite.sh` (T3) | `fcc18c9` + final patch | root suite 50 tests OK, driver suite 2945 OK (skipped=2) |
+| `engine/scripts/run-host-ci.sh` | `fcc18c9` + final patch | clean |
+| `engine/scripts/run-prod-path.py` (C5) | `fcc18c9` + final patch | pass |
+| `engine/scripts/run-docs-check.sh` (T2) | `b19b5c1` + final patch | docs lint, site render and link audit clean |
+| The 3 changed modules plus `test_flow_single_driver` | `b19b5c1` + final patch | 212 tests OK |
+| Claim module, 2 more runs to look for flakiness | before the last test was added | OK each time |
+
+I did not re-run the full suite on `b19b5c1`. The commits since `fcc18c9` are docs only.
 
 **Not run:** T4 (`contribcheck`), which needs the publish texts and runs at publish.
 
 **Formatter and hooks:** the target has no pre-commit or ruff config, and `docs/INTEGRATION.md` names no
-formatter, so there was nothing to run. I checked the changed Python files for unused imports with a
-short `ast` script (pyflakes is not installed) and checked added lines for length. The DCO `Signed-off-by` is for the commit at publish.
+formatter, so there was nothing to run. `git diff --check` is clean, an `ast` script found no unused imports
+in the changed Python files (pyflakes is not installed), and no added line is over 100 columns. The DCO
+`Signed-off-by` is added by publish's commit.
 
 ## Process notes
 
-- **I read beyond the brief.** The carry-forward points at `iteration-v3/`, so I read that attempt's
-  patch, notes, reviews, gates and `SUMMARY.md`. To place the fix I read more of the target than the
-  brief cites: `publish.py`, `driver.py`, `integrate.py`, `state.py` and the test fixture. I read
-  `pdca.toml` and `docs/INTEGRATION.md` for the runner. `sizing.json` and `loop-telemetry.json` were
-  printed when I listed the bundle. I did not read `deferred-findings.json` this round.
-- **I broke the "no cleanup" rule on my own scratch files.** The builder rules say no `rm`-style
-  command is ever warranted. I used `rm -rf` and `find … -exec rm -rf` on my source copies and their
-  `__pycache__` under the worktree's `.cache/`, and the mutation script uses `shutil.rmtree` on its
-  copy there. Nothing else was removed, and the commands were not refused, but I should have written
-  each copy to a new directory instead.
-- **The builder guard blocked one command**, because a `grep` pattern had `gh pr` next to a backtick.
-  It ran nothing. I was not running `gh`, and I did the lookup with the Grep tool instead.
-- **The production source was not edited for checks,** except by `run-verify.sh` itself, which restores
-  it. The mutation pass and the run against the previous attempt used copies under `.cache/`. After the
-  gates I confirmed the tree matches `patch.diff` (`cmp` on the full diff).
-- **Left behind:**
-  - gitignored working files in the worktree's `.cache/`: gate logs, probes, the mutation script, the
-    source copies, a private git index;
-  - `git add -N` on the new test, so `git diff` includes it;
-  - the empty `prod.tmp.diff` in the bundle and `/tmp/issue839-prod-before-revert.diff`, both from
-    earlier attempts.
-
-  Nothing was committed or pushed.
+- **I read beyond the brief.** The carry-forward points at `iteration-v4/`, so I read that attempt's patch,
+  notes, reviews and `SUMMARY.md`. I read Codex's finding on #859 with read-only `gh` calls. To place the
+  fix and trace the marker I read much more of the target than the brief cites, plus `pdca.toml`,
+  `docs/INTEGRATION.md` and the engine scripts. Listing the bundle also printed `sizing.json`,
+  `loop-telemetry.json` and `deferred-findings.json` (which is empty).
+- **I moved the worktree's HEAD**, from `f5321ab` to `origin/main`, with `git checkout --detach`. The next
+  gate read resets it anyway.
+- **The builder guard blocked one command**, because a Python heredoc editing a docstring had `gh pr` next to
+  backticks. It ran nothing. I made those edits with the Edit tool instead.
+- **A delete in my mutation script.** Its first version had a `shutil.rmtree` for a mutant folder left by an
+  earlier run. No such folder existed, so it never fired, and I removed it. Mutants now go in a new folder
+  each run.
+- **Production source was not edited for checks,** except by `run-verify.sh` itself, which restores it. After
+  the gates I confirmed the tree matches `patch.diff` (`cmp` on the full diff).
+- **Left behind:** gitignored working files in the worktree's `.cache/v5/` (logs, mutants, scripts, a private
+  git index), which the next gate read wipes, so the tables above are the record; `git add -N` on the new
+  test, so `git diff` includes it; and the empty `prod.tmp.diff` in the bundle from an earlier attempt.
 - The bundle also holds a copy of the test file, identical to the one in `patch.diff`.

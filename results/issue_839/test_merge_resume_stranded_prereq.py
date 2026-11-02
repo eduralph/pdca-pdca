@@ -16,6 +16,8 @@ any state a bundle can be left in (no ``brief.md``, a brief with no target, a ``
 that cannot be read) holds that dependent instead of ending the run or building without it.
 The marker survives an iterate but is tied to the patch its PR was published from, so a
 rebuilt attempt that never reached the PR holds the dependent instead of merging the old head.
+The walk claims each prerequisite before it reads it (#565): one another live run holds is
+neither judged nor merged, and holds its dependents.
 
 Real git (the ``StackFoldGit`` fixture of tests/test_integrate_stack_bases.py: a bare
 ``origin`` and a primary checkout), the real ``_merge_one`` and ``_runnable``, and the real
@@ -31,19 +33,23 @@ reverted these cases still load and run — and fail on their assertions.
 from __future__ import annotations
 
 import dataclasses
+import errno
 import hashlib
 import importlib.util
 import io
 import json
+import os
 import shutil
 import subprocess
+import sys
 import unittest
 from contextlib import ExitStack, redirect_stderr, redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
-from pdca_harness import (cli, driver, flow, leaves, merge, merged, publish, signoff, state,
-                          worktree)
+from pdca_harness import (act, cli, drive_claim, driver, flow, leaves, merge, merged, publish,
+                          signoff, state, worktree)
 
 _SPEC = importlib.util.spec_from_file_location(
     "stack_bases_fixture", Path(__file__).with_name("test_integrate_stack_bases.py"))
@@ -263,8 +269,8 @@ class MergeResume(unittest.TestCase):
                                  texts_prevalidated=True)
         return rc, err.getvalue()
 
-    def _run(self, ids: list[str], *, do_publish: bool = True, stack=(),
-             sweep: bool = False) -> None:
+    def _driven(self, drive, stack=()):
+        """What ``drive()`` returns, with the leaves and ``gh`` stubbed; stderr in ``self.err``."""
         err = io.StringIO()
         with ExitStack() as ctx:
             ctx.enter_context(mock.patch.object(subprocess, "run", self._gh))
@@ -276,14 +282,27 @@ class MergeResume(unittest.TestCase):
                 ctx.enter_context(patcher)
             ctx.enter_context(redirect_stdout(io.StringIO()))
             ctx.enter_context(redirect_stderr(err))
-            if sweep:
-                self.results = flow.flow_batch(self.cfg, do_publish=do_publish, do_act=False,
-                                               by="T", today=TODAY)
-            else:
-                self.results = flow.flow_ids(self.cfg, ids, do_publish=do_publish, do_act=False,
-                                             by="T", today=TODAY)
+            got = drive()
         self.err = err.getvalue()
         self.assertNotIn("Traceback", self.err)
+        return got
+
+    def _run(self, ids: list[str], *, do_publish: bool = True, stack=(), sweep: bool = False,
+             claims: drive_claim.Run | None = None) -> None:
+        how = {"do_publish": do_publish, "do_act": False, "by": "T", "today": TODAY,
+               "claims": claims}
+        self.results = self._driven((lambda: flow.flow_batch(self.cfg, **how)) if sweep else
+                                    (lambda: flow.flow_ids(self.cfg, ids, **how)), stack)
+
+    def _cli(self, ids: list[str], *, do_publish: bool = True, stack=()) -> int:
+        """``pdca flow <ids>`` through the CLI's own entry point, which makes the run's claim
+        scope and claims the ids it names. Its exit code; ``self.results`` as ``_run`` fills it."""
+        args = SimpleNamespace(issue_ids=ids, from_csv=None, from_briefs=None,
+                               no_publish=not do_publish, no_act=True, by="T", lanes=None,
+                               max_passes=None)
+        rc = self._driven(lambda: cli._flow(self.cfg, args), stack)
+        self.results = {iid: state.state(self.cfg.bundle(iid)) for iid in ids}
+        return rc
 
     # -- assertions ------------------------------------------------------------------------
 
@@ -1804,6 +1823,362 @@ class MergeResume(unittest.TestCase):
         self._run(["D", "U"], stack=[no])
         self.assertIn("issue_P: let a merge-mode run merge it (it is marked), or merge the PR by "
                       "hand, then re-run.", self._held_line())
+
+    # -- the claim: one live run on a prerequisite before wave 0 (#565) --------------------
+
+    def _another_run_holds(self, *iids: str) -> drive_claim.Run:
+        """Another live run's claim on each of ``iids``: the real lock on its own handle, which
+        refuses this run as another process does (`drive_claim.py`, "The RUN owns its claims";
+        `test_another_process_holding_a_prereq_is_named_with_its_pid` uses a real process)."""
+        other = drive_claim.Run(self.cfg)
+        self.addCleanup(other.close)
+        for iid in iids:
+            self.assertIsNone(other.take(self.cfg.find_bundle(iid)))
+        return other
+
+    def _claim_is_free(self, iid: str) -> bool:
+        """Could another run claim ``iid`` right now? Asked with the same lock, then let go."""
+        probe = drive_claim.Run(self.cfg)
+        try:
+            return probe.take(self.cfg.find_bundle(iid)) is None
+        finally:
+            probe.close()
+
+    def _claim_held_line(self, dependent: str = "D", prereq: str = "issue_P",
+                         base: str = "main") -> str:
+        """``dependent`` was not built and ONE line says who holds ``prereq`` and the way out."""
+        self.assertNotIn(f"issue_{dependent}", self.built, self.err)
+        self.assertEqual(self.results[dependent], state.PLANNED)
+        lines = [x for x in self.err.splitlines()
+                 if f"flow: issue_{dependent} held" in x and prereq in x]
+        self.assertEqual(len(lines), 1, self.err)
+        line = lines[0]
+        self.assertIn(f"{prereq} not known to be merged into {base} (org/repo)", line)
+        self.assertIn(f"{prereq}: it is held by another live `flow` run", line)
+        self.assertIn("did not judge or merge it", line)
+        self.assertIn("let that run finish (or stop it), then re-run", line)
+        for wrong in ("line of this run", "carries them", "by hand", "merge gates"):
+            self.assertNotIn(wrong, line)
+        return line
+
+    def _another_run_holds_p(self, field: str) -> None:
+        # The race the claim closes: everything else about P says "merge it".
+        d = self._opened("P", marked=True)
+        self._du(field)
+        record = (d / "publish.json").read_bytes()
+        self._another_run_holds("P")
+        rc = self._cli(["D", "U"])
+        self._claim_held_line()
+        self.assertEqual(self.gh_calls, [])     # never judged, let alone readied or merged
+        self.assertEqual(self.events.count("ready issue_P"), 0)
+        self.assertEqual(self.events.count("merge issue_P"), 0)
+        self.assertEqual((d / "publish.json").read_bytes(), record)
+        self.assertFalse(self._on_main("P"))
+        self.assertIn("issue_U", self.built)
+        self.assertEqual(rc, 1)
+
+    def test_a_prereq_another_run_holds_is_not_touched_and_holds_its_dependent(self):
+        self._another_run_holds_p(PLAIN)
+
+    def test_a_prereq_another_run_holds_holds_the_same_on_a_merged_edge(self):
+        self._another_run_holds_p(ON_MERGED)
+
+    def test_another_process_holding_a_prereq_is_named_with_its_pid(self):
+        # A claim could be per-process, so one case has the competing driver be a real one.
+        d = self._opened("P", marked=True)
+        self._du()
+        code = ("import pathlib, sys, types\n"
+                "from pdca_harness import drive_claim\n"
+                "cfg = types.SimpleNamespace(process_dir=pathlib.Path(sys.argv[1]))\n"
+                "run = drive_claim.Run(cfg)\n"
+                "assert run.take(pathlib.Path(sys.argv[2])) is None\n"
+                "print('held', flush=True)\n"
+                "sys.stdin.read()\n")
+        env = {**os.environ, "PYTHONPATH": str(Path(drive_claim.__file__).resolve().parents[1])}
+        child = subprocess.Popen([sys.executable, "-c", code, str(self.cfg.process_dir), str(d)],
+                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, env=env)
+        self.addCleanup(child.stdout.close)
+        self.addCleanup(child.wait, timeout=30)
+        self.addCleanup(child.stdin.close)
+        self.assertEqual(child.stdout.readline().strip(), "held")
+        rc = self._cli(["D", "U"])
+        self.assertIn(f"held by another live `flow` run (pid {child.pid})",
+                      self._claim_held_line())
+        self.assertEqual(self.gh_calls, [])
+        self.assertIn("issue_U", self.built)
+        self.assertEqual(rc, 1)
+
+    def test_the_way_out_of_a_claim_hold_works(self):
+        self._opened("P", marked=True)
+        self._du()
+        other = self._another_run_holds("P")
+        self._cli(["D", "U"])
+        self._claim_held_line()
+        other.close()
+        self.assertEqual(self._cli(["D"]), 0, self.err)
+        self.assertTrue(self._on_main("P"), self.err)
+        self.assertLess(self.events.index("merge issue_P"), self.events.index("build issue_D"))
+        self.assertIn("P.txt", self.base_files["issue_D"], self.err)
+
+    def test_a_merged_prereq_another_run_holds_holds_too(self):
+        # Not judged means not judged: this run reads nothing of a bundle another run holds.
+        self._opened("P", marked=True)
+        self._du()
+        self._merged_by_hand("P")
+        other = self._another_run_holds("P")
+        self._cli(["D", "U"])
+        self._claim_held_line()
+        self.assertEqual(self.gh_calls, [])
+        other.close()
+        self.assertEqual(self._cli(["D"]), 0, self.err)
+        self.assertIn("P.txt", self.base_files["issue_D"], self.err)
+        self.assertEqual(self.events.count("merge issue_P"), 0)
+
+    def test_a_close_prereq_another_run_holds_holds_too(self):
+        p = self._planned("P")
+        (p / "patch.diff").write_text("", encoding="utf-8")
+        sb._accept(p)
+        self._du()
+        self._another_run_holds("P")
+        self._cli(["D", "U"])
+        self._claim_held_line()
+        self.assertEqual(self.gh_calls, [])
+
+    def test_a_prereq_this_run_cannot_claim_holds_the_same(self):
+        # Fail closed (`drive_claim.py`): a claim that cannot be recorded is no claim.
+        self._opened("P", marked=True)
+        self._du()
+        real_lock = act._lock_exclusive
+
+        def no_lock_for_p(fh, *, wait: bool = True) -> None:
+            if "issue_P" in str(fh.name):
+                raise OSError(errno.ENOLCK, "No locks available")
+            real_lock(fh, wait=wait)
+
+        locks = mock.patch.object(act, "_lock_exclusive", no_lock_for_p)
+        rc = self._cli(["D", "U"], stack=[locks])
+        line = next(x for x in self.err.splitlines() if "flow: issue_D held" in x)
+        self.assertIn("issue_P not known to be merged into main (org/repo)", line)
+        self.assertIn("could not record its claim on it", line)
+        self.assertIn("No locks available", line)
+        self.assertIn("a writable directory on a filesystem that supports file locks", line)
+        self.assertNotIn("issue_D", self.built)
+        self.assertEqual(self.gh_calls, [])
+        self.assertIn("issue_U", self.built)
+        self.assertEqual(rc, 1)
+
+    def test_the_sweep_holds_a_dependent_of_a_prereq_another_run_holds(self):
+        self._opened("P", marked=True)
+        self._du()
+        self._another_run_holds("P")
+        with drive_claim.run(self.cfg) as claims:
+            self._run([], sweep=True, claims=claims)
+        self._claim_held_line()
+        self.assertEqual(self.gh_calls, [])
+        self.assertIn("issue_U", self.built)
+
+    def test_a_prereq_of_a_prereq_another_run_holds_stops_the_merge_above_it(self):
+        self._opened("Q", marked=True)
+        self._opened("P", edges=f"- **{PLAIN}:** Q\n", marked=True)
+        self._du()
+        self._another_run_holds("Q")
+        self._cli(["D", "U"])
+        line = self._held_line()
+        self.assertIn("issue_P", line)
+        self.assertIn("its own prerequisite(s) issue_Q are not known to be merged into main", line)
+        self.assertIn("issue_Q: it is held by another live `flow` run", line)
+        self.assertEqual([e for e in self.events if not e.startswith("build")], [])
+        # P was judged, under its own claim; Q was not read at all.
+        self.assertTrue(self.gh_calls)
+        for call in self.gh_calls:
+            self.assertEqual(call[:4], ["gh", "pr", "view", "https://example.test/pr/P"], call)
+        self.assertIn("issue_U", self.built)
+
+    def test_a_merged_prereq_keeps_the_walk_off_one_another_run_holds_below_it(self):
+        # The walk stops at a merged prerequisite, so what is below it holds nobody.
+        self._opened("Q", marked=True)
+        self._opened("P", edges=f"- **{PLAIN}:** Q\n", marked=True)
+        self._du()
+        self._merged_by_hand("P")
+        self._another_run_holds("Q")
+        self.assertEqual(self._cli(["D"]), 0, self.err)
+        self.assertIn("issue_D", self.built)
+        self.assertEqual([e for e in self.events if not e.startswith("build")], [])
+
+    def test_each_edge_is_judged_on_its_own_when_another_run_holds_one(self):
+        self._opened("P", marked=True)
+        self._opened("R", marked=True)
+        self._planned("D", f"- **{PLAIN}:** P, R\n")
+        self._planned("U")
+        self._another_run_holds("R")
+        self._cli(["D", "U"])
+        self._claim_held_line(prereq="issue_R")
+        self.assertTrue(self._on_main("P"), self.err)
+        self.assertFalse(self._on_main("R"))
+        self.assertEqual(self.events.count("merge issue_R"), 0)
+
+    def test_a_dependent_held_for_a_claim_and_a_merge_gets_a_line_for_each(self):
+        self._opened("P")
+        self._opened("R", marked=True)
+        self._planned("D", f"- **{PLAIN}:** P, R\n")
+        self._another_run_holds("R")
+        self._cli(["D"])
+        self._claim_held_line(prereq="issue_R")
+        lines = [x for x in self.err.splitlines()
+                 if "flow: issue_D held" in x and "issue_P not merged into main (org/repo)" in x]
+        self.assertEqual(len(lines), 1, self.err)
+        self.assertIn("merge the PR by hand", lines[0])
+
+    def test_two_dependents_on_two_bases_each_get_their_own_line(self):
+        self._opened("P", marked=True)
+        self._du()
+        e = self._planned("E", f"- **{PLAIN}:** P\n")
+        self._targets(e, "rel")
+        self._another_run_holds("P")
+        self._cli(["D", "E", "U"])
+        self._claim_held_line()
+        self._claim_held_line("E", base="rel")
+        self.assertEqual(self.gh_calls, [])
+        self.assertIn("issue_U", self.built)
+
+    def test_a_dependent_of_a_dependent_held_for_a_claim_is_not_built_either(self):
+        self._opened("P", marked=True)
+        self._du()
+        self._planned("E", f"- **{PLAIN}:** D\n")
+        self._another_run_holds("P")
+        self.assertEqual(self._cli(["D", "E"]), 1, self.err)
+        self._claim_held_line()
+        self.assertEqual(self.built, [])
+
+    def test_the_walk_holds_a_claim_while_it_works_and_lets_go_when_it_ends(self):
+        self._opened("P", marked=True)
+        self._du()
+        free_at: dict[str, bool] = {}
+        real_gh, real_wave = self._gh, self._drive_wave
+
+        def gh(args, *a, **kw):
+            if isinstance(args, list) and args[:2] == ["gh", "pr"] and args[3].endswith("/P"):
+                free_at.setdefault(args[2], self._claim_is_free("P"))
+            return real_gh(args, *a, **kw)
+
+        def wave(cfg, bundles, **kw):
+            for d in bundles:
+                free_at.setdefault(d.name, self._claim_is_free("P"))
+            return real_wave(cfg, bundles, **kw)
+
+        self._gh, self._drive_wave = gh, wave
+        self.assertEqual(self._cli(["D"]), 0, self.err)
+        self.assertLessEqual({"view", "ready", "checks", "merge"}, set(free_at), free_at)
+        for verb in ("view", "ready", "checks", "merge"):
+            self.assertFalse(free_at[verb], verb)   # another run is refused all the while
+        self.assertTrue(free_at["issue_D"], self.err)   # … and not for the rest of this run
+
+    def test_two_runs_reaching_one_marked_pr_never_both_touch_it(self):
+        # The race itself: a second run starts while the first is part-way through P's merge.
+        self._opened("P", marked=True)
+        self._du()
+        self._planned("E", f"- **{PLAIN}:** P\n")
+        second: list[tuple[int, str]] = []
+        real_gh = self._gh
+
+        def gh(args, *a, **kw):
+            if isinstance(args, list) and args[:3] == ["gh", "pr", "ready"] and not second:
+                second.append((0, ""))
+                before = len(self.gh_calls)
+                rc = self._cli(["E"])
+                second[0] = (rc, self.err)
+                self.assertEqual(self.gh_calls[before:], [], self.err)
+            return real_gh(args, *a, **kw)
+
+        self._gh = gh
+        self.assertEqual(self._cli(["D"]), 0, self.err)
+        rc, err = second[0]
+        self.assertEqual(rc, 1, err)
+        self.assertIn("flow: issue_E held — prerequisite(s) issue_P not known to be merged", err)
+        self.assertIn("held by another live `flow` run", err)
+        self.assertEqual(self.events.count("ready issue_P"), 1)
+        self.assertEqual(self.events.count("merge issue_P"), 1)
+        self.assertEqual(self.events.count("undo issue_P"), 0)
+        self.assertEqual(self.built, ["issue_D"])
+        self.assertIn("P.txt", self.base_files["issue_D"], self.err)
+        # Its way out: E builds on the merged base once it is re-run.
+        self.assertEqual(self._cli(["E"]), 0, self.err)
+        self.assertIn("P.txt", self.base_files["issue_E"], self.err)
+        self.assertEqual(self.events.count("merge issue_P"), 1)
+
+    def test_the_walk_claims_a_prereq_it_will_not_merge_and_lets_that_go_too(self):
+        self._opened("P")
+        self._du()
+        free_at: dict[str, bool] = {}
+        real_wave = self._drive_wave
+
+        def wave(cfg, bundles, **kw):
+            free_at["P"] = self._claim_is_free("P")
+            return real_wave(cfg, bundles, **kw)
+
+        self._drive_wave = wave
+        self._cli(["D", "U"])
+        self.assertTrue(free_at["P"], self.err)     # U's build, with D held
+
+    def test_the_walk_never_lets_go_of_what_the_run_drives(self):
+        # D's prerequisite is in the run, so the walk reaches a bundle the run holds already.
+        self.finish["A"] = {"A.txt": "A\n"}
+        self._planned("A")
+        self._planned("D", f"- **{PLAIN}:** A\n")
+        free_at: dict[str, tuple[bool, bool]] = {}
+        real_wave = self._drive_wave
+
+        def wave(cfg, bundles, **kw):
+            for d in bundles:
+                free_at[d.name] = (self._claim_is_free("A"), self._claim_is_free("D"))
+            return real_wave(cfg, bundles, **kw)
+
+        self._drive_wave = wave
+        self.assertEqual(self._cli(["A", "D"]), 0, self.err)
+        self.assertEqual(free_at, {"issue_A": (False, False), "issue_D": (False, False)})
+        self.assertTrue(self._claim_is_free("A"))   # the scope let go when the run ended
+
+    def test_a_finished_named_prereq_is_claimed_again_for_its_merge(self):
+        # The CLI claims a named id and `flow_ids` lets a finished one go; the walk takes it back.
+        self._opened("P", marked=True)
+        self._du()
+        free_at: dict[str, bool] = {}
+        real_gh = self._gh
+
+        def gh(args, *a, **kw):
+            if isinstance(args, list) and args[:3] == ["gh", "pr", "merge"]:
+                free_at["merge"] = self._claim_is_free("P")
+            return real_gh(args, *a, **kw)
+
+        self._gh = gh
+        self.assertEqual(self._cli(["P", "D"]), 0, self.err)
+        self.assertEqual(free_at, {"merge": False})
+        self.assertIn("P.txt", self.base_files["issue_D"], self.err)
+
+    def test_a_named_prereq_another_run_holds_refuses_the_run_before_the_walk(self):
+        self._opened("P", marked=True)
+        self._du()
+        self._another_run_holds("P")
+        self.assertEqual(self._cli(["P", "D"]), 1)
+        self.assertIn("refusing to start a second driver", self.err)
+        self.assertEqual(self.built, [])
+        self.assertEqual(self.gh_calls, [])
+
+    def test_a_run_that_publishes_nothing_is_not_held_by_a_claim(self):
+        # (5) again: no merge, no hold and no `gh` call, so nothing here to serialize.
+        for tag, stub in (("no-publish", False), ("dry-run", True)):
+            with self.subTest(tag):
+                if stub:
+                    self.cfg.publisher = dataclasses.replace(self.cfg.publisher, mode="stub")
+                iid = f"P{int(stub)}"
+                self._opened(iid, marked=True)
+                self._planned(f"D{int(stub)}", f"- **{PLAIN}:** {iid}\n")
+                other = self._another_run_holds(iid)
+                rc = self._cli([f"D{int(stub)}"], do_publish=stub)
+                self.assertEqual(rc, 0, self.err)
+                self.assertIn(f"issue_D{int(stub)}", self.built, self.err)
+                self.assertEqual(self.gh_calls, [])
+                other.close()
 
 
 if __name__ == "__main__":

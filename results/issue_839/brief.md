@@ -66,3 +66,8 @@ field. The docs list is widened.
   Change nothing else. The rest of the attempt is accepted as-is: design, hold text, docs, the three unnamed files the builder touched, and the loosened count in test_merge_review_remarks.py:759.
 - Full previous attempt preserved in `iteration-v3/` (patch.diff, build-notes.md, SUMMARY.md, check-*).
 - Address the above; do NOT re-attempt the rejected approach unchanged. Satisfy the brief's Success criterion (the end result).
+
+## Iteration 4 — carry-forward (from the previous attempt)
+- Sign-off rationale: rebuild on main with #626 merged (#858; the old patch conflicts with it in flow.py and merged.py); take each prerequisite's claim in _merge_prereqs before judging or ready/merge, and hold its dependents when another run holds the claim (Codex on #859)
+- Full previous attempt preserved in `iteration-v4/` (patch.diff, build-notes.md, SUMMARY.md, check-*).
+- Address the above; do NOT re-attempt the rejected approach unchanged. Satisfy the brief's Success criterion (the end result).

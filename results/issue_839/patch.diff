@@ -1,8 +1,25 @@
 diff --git a/docs/07-crosscutting.md b/docs/07-crosscutting.md
-index 32f03bf..28bc49c 100644
+index 3631341..3c05278 100644
 --- a/docs/07-crosscutting.md
 +++ b/docs/07-crosscutting.md
-@@ -902,6 +902,40 @@ wave builds on, via `[driver].wave_mode`:
+@@ -581,10 +581,14 @@ with a lock the OS drops when the run ends, however it ends (a return, an
+ exception, `SIGKILL`). It keeps the claim for the rest of the run, except on a
+ bundle it then decides not to drive (a named id it skips, a swept bundle held on
+ an unresolved dependency, a child the reschedule holds), which it lets go at
+-once. A second run whose *named* ids include a bundle a live run holds is
++once. In merge mode it also claims each prerequisite it reaches before wave 0,
++though it drives none of them, and lets those go when that step ends. A second
++run whose *named* ids include a bundle a live run holds is
+ refused before it touches anything, naming that bundle; a bundle it would only
+ have reached *implicitly* (the sweep, an adopted child) is named and left to the
+-run that holds it, and the rest of the run goes on. A claim the run cannot
++run that holds it, and the rest of the run goes on. A prerequisite it would only
++have merged is left alone too, and the bundles waiting for it are held. A claim
++the run cannot
+ record at all — an unwritable `process/`, a filesystem without file locks — is
+ treated the same way: the bundle is never driven unclaimed. The claim files
+ live under `process/.drive-claims/`, outside every bundle, and are gitignored.
+@@ -962,6 +966,45 @@ wave builds on, via `[driver].wave_mode`:
    Needs merge rights on the base remote and relaxes STOP discipline for the
    batch; fails closed if a PR turns out non-mergeable. `[driver].merge_method`
    picks the merge strategy (`"merge"` / `"squash"` / `"rebase"`).
@@ -33,7 +50,12 @@ index 32f03bf..28bc49c 100644
 +  the run cannot merge for the dependent, because it has no `brief.md`, a brief
 +  that names no target, or a `patch.diff` that cannot be read (merge its PR by
 +  hand). A prerequisite that ships nothing (a close or no-fix, with no patch)
-+  holds nobody. A dependent is released only when the prerequisite's publish
++  holds nobody. The run claims each prerequisite before it reads it, so two runs
++  never ready or merge one PR together. One it cannot claim (another live run
++  holds it, or no claim can be recorded) is not judged or merged, even if its PR
++  has merged or it ships nothing, and the dependent is held on its own line,
++  which names who holds it: let that run finish (or stop it), then re-run.
++  A dependent is released only when the prerequisite's publish
 +  record says it is merged into the dependent's own target base. So an `Onto
 +  branch` commit, or a PR on record for another base, never releases it, even
 +  once merged: get that work onto the base and remove the edge from the
@@ -43,7 +65,7 @@ index 32f03bf..28bc49c 100644
    Before each merge the driver reads that PR's **full check rollup** itself —
    after the ready-mark, immediately before merging — and refuses (the run STOPs)
    on any failing check, any still-running one, and on a rollup with nothing in it
-@@ -949,10 +983,10 @@ wave builds on, via `[driver].wave_mode`:
+@@ -1009,10 +1052,10 @@ wave builds on, via `[driver].wave_mode`:
    it builds no group member the run can see, meaning a bundle in the run whose
    brief declares `Merges with`, or that another brief in the run names there.
    That holds even when the whole group would sit in the final wave, which the
@@ -59,21 +81,23 @@ index 32f03bf..28bc49c 100644
    the sweep holds, as it already does for an unresolved `Depends on`. Two gaps
    remain, both in issue #778: a group declared only in the brief of a bundle
 diff --git a/docs/11-troubleshooting.md b/docs/11-troubleshooting.md
-index 45ea8fa..0506349 100644
+index 45ea8fa..f114a11 100644
 --- a/docs/11-troubleshooting.md
 +++ b/docs/11-troubleshooting.md
-@@ -89,7 +89,9 @@ that run to end, or pin lanes with `PDCA_LANE` for runs that share a workspace
+@@ -89,7 +89,11 @@ that run to end, or pin lanes with `PDCA_LANE` for runs that share a workspace
  names a bundle this run is not driving, and its PR has not merged into the
  dependent's base. Name the prerequisite in the same `pdca flow <ids>` so the run
  carries it onto its line, or wait for the merge and re-run
 -([07](07-crosscutting.md#waves-in-execution)).
 +([07](07-crosscutting.md#waves-in-execution)). In merge mode there is no line, so
 +naming it does not help. The hold line gives the way out that fits that PR, and
-+it holds for a `Depends on (merged)` edge or a named prerequisite too.
++it holds for a `Depends on (merged)` edge or a named prerequisite too. When it
++says `not known to be merged`, another live `pdca flow` holds that prerequisite's
++claim, so this run did not read it: let that run finish (or stop it), then re-run.
  
  **`flow: <bundle> held — it `Conflicts with` …`**, **`held out of this run's
  integration line`**, and a run that **exits 3** with every bundle `COMPLETE`.
-@@ -110,7 +112,8 @@ and what to do; the common fix is to restore the branch or delete the stale
+@@ -110,7 +114,8 @@ and what to do; the common fix is to restore the branch or delete the stale
  red, pending or empty check rollup, the branch update failed, or the PR's base
  was not the bundle's target base. The PR is returned to draft; fix CI or the
  base and re-run. Raise `[driver].merge_wait_secs` if your checks are slow to
@@ -113,21 +137,57 @@ index 89ebb92..4ee7bfc 100644
  #       A wave's PRs merge one after another, so under merge_requires = "all" a PR found
  #       BEHIND its base (an earlier PR of the wave just merged) is first brought up to date
  #       and its new head verified again before it merges — see merge_requires. Turn on
+diff --git a/template/src/pdca_harness/drive_claim.py b/template/src/pdca_harness/drive_claim.py
+index 7bfa8e3..f6fb430 100644
+--- a/template/src/pdca_harness/drive_claim.py
++++ b/template/src/pdca_harness/drive_claim.py
+@@ -5,7 +5,7 @@ in a database" — so two ``pdca flow`` runs over the same bundle have nothing t
+ on: they write the same artifacts with no ordering between them. Act's session lock
+ (:func:`act.act_session`) states the rule for Act's one shared resource; this module states
+ it for bundles, on every CLI drive path (named ids, the CSV batch's in-flight sweep, split
+-adoption):
++adoption) and on merge mode's merge of a prerequisite before wave 0 (#839):
+ 
+ * **A run claims a bundle before it drives it, and keeps the claim for the rest of its
+   life.** A claim is an exclusive, NON-blocking advisory lock (the cross-platform
+@@ -16,7 +16,8 @@ adoption):
+   run claimed and then decided NOT to drive (a named id it skips, a swept bundle the
+   scheduler holds, an adopted child the reschedule drops): the run never touches it again,
+   and the resume command it prints for that bundle must not be refused by the run that
+-  printed it.
++  printed it. Merge mode's pre-wave step (``flow._merge_prereqs``) is the other: it drives no
++  prerequisite, it only judges and merges one, so a claim it took lasts as long as that step.
+ * **A claim that cannot be recorded refuses, exactly as a claim another run holds does.**
+   A bundle driven without a claim has nothing keeping a second run off it, so a claim file
+   that cannot be opened or locked (an unwritable process dir, a filesystem without locks)
+@@ -223,6 +224,11 @@ class Run:
+                        f"make {path.parent} a writable directory on a filesystem that "
+                        "supports file locks")
+ 
++    def holds(self, d: Path) -> bool:
++        """Whether this run holds the claim on ``d`` already, under any alias of it: a caller
++        that takes a claim for a moment must not let go of one it found here (#839)."""
++        return _claim_file(self.cfg, d) in self._held
++
+     def release(self, d: Path) -> None:
+         """Give up the claim on ``d`` — a bundle this run claimed and then decided not to
+         drive, so the resume command it prints for it is not refused by this very run."""
 diff --git a/template/src/pdca_harness/flow.py b/template/src/pdca_harness/flow.py
-index b92ef34..264f5f4 100644
+index 4573a62..f0f3b4f 100644
 --- a/template/src/pdca_harness/flow.py
 +++ b/template/src/pdca_harness/flow.py
-@@ -687,7 +687,8 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
+@@ -687,7 +687,9 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
                conflict_held: Mapping[str, Collection[str]] | None = None,
                lines: Mapping[tuple[str, str], tuple[str, str | None]] | None = None,
                on_line: Collection[str] | None = None,
 -              unbuilt: Collection[str] = frozenset()
 +              unbuilt: Collection[str] = frozenset(),
-+              merge_notes: Mapping[tuple[str, str, str], str] | None = None
++              merge_notes: Mapping[tuple[str, str, str], str] | None = None,
++              merge_busy: Collection[tuple[str, str, str]] = frozenset()
                ) -> list[Path]:
      """Drop a wave bundle whose declared prerequisite isn't ready to build on top of.
  
-@@ -708,12 +709,18 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
+@@ -708,20 +710,29 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
      prerequisite. It must wait until the PR is genuinely merged into the DEPENDENT's target
      base — its repo and branch (``publish._resolve_target``), not just some branch
      (``merged.merged_into``, #647) — a later ``pdca flow`` run then picks it up. With
@@ -135,24 +195,38 @@ index b92ef34..264f5f4 100644
 -    on`` prerequisite the run was NOT asked for — not in ``requested`` (bundle dir names;
 -    ``None``: ``batch_names``) — waits the same way when a line would carry it (a non-empty
 -    patch and a usable target, ``integrate._fold_candidates``): no line of this run does.
--    Either way the dependent is named on ONE stderr line, with what to do. A dependent with
--    no usable target of its own (publish skips it) has no base to wait for: no #647 hold,
+-    Either way the dependent is named on ONE stderr line, with what to do: in stack mode, for
+-    a prerequisite squash- or rebase-merged into that base whose record never counts as
+-    merged there (:func:`_uncounted_squash`, #626), to drop the edge, since no wait ends that
+-    hold, and, when the bundle is cut from a line of this run that lacks the merge
 +    ``hold_unmerged`` (publishing on, not a dry-run, #647; in merge mode too, #839) a plain
 +    ``Depends on`` prerequisite the run was NOT asked for — not in ``requested`` (bundle dir
 +    names; ``None``: ``batch_names``) — waits the same way when a line would carry it (a
 +    non-empty patch and a usable target, ``integrate._fold_candidates``): no line of this run
-+    does. Either way the dependent is named on ONE stderr line, with what to do.
++    does. Either way the dependent is named on ONE stderr line, with what to do: in stack
++    mode, for a prerequisite squash- or rebase-merged into that base whose record never counts
++    as merged there (:func:`_uncounted_squash`, #626), to drop the edge, since no wait ends
++    that hold, and, when the bundle is cut from a line of this run that lacks the merge
+     (:func:`_line_lacks_merge`), to delete that line too, since with the edge gone nothing
+     checks it. Where no such line was judged but a re-run may continue one, because the bundle
+     is held for something else too (the carry or fold that would give it a line failed, say),
+     it is told that line was not checked, and to delete it if it is there. It is told the same
+     of the line of a re-run naming a prerequisite it is told to name, which is another line.
+-    A dependent with no usable target of its own (publish skips it) has no base to
 +    ``merge_notes`` is not ``None`` in merge mode (#839), where the run has no line at all, so
 +    no prerequisite is on one: a plain ``Depends on`` one waits whether or not the run was
 +    asked for it, whatever its brief says, unless it ships nothing. It maps ``(prerequisite,
 +    repo, base)`` to what the pre-wave merge found (:func:`_merge_prereqs`); the line gives
 +    that, or the way out the prerequisite's record leaves (:func:`_merge_way_out`), never a
-+    line's. A dependent with no usable target of its own (publish skips it) has no base to
-+    wait for: no #647 hold,
-     and its ``Depends on (merged)`` keeps #186's answer — any merge counts. A finished named
++    line's. ``merge_busy`` is those of its keys whose prerequisite that step could not claim
++    (another live run holds it, or no claim can be recorded): nothing has judged it, so
++    whatever its record says it holds the dependent on a line of its own, with no ``gh`` read
++    and no way out read off the record. A dependent with no usable target of its own (publish
++    skips it) has no base to
+     wait for: no #647 hold, and its ``Depends on (merged)`` keeps #186's answer — any merge
+     counts. A finished named
      id (an id the run was asked for that an earlier run finished, #646) is carried onto the
-     line before wave 0 when it is clean (:func:`_carry_finished`); when it is not, it is
-@@ -756,6 +763,7 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
+@@ -765,6 +776,7 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
      and Check refresh it only best-effort. Else d is held, named on ONE stderr line. A
      target with no line (or no recorded tip: a dry-run) is judged as before."""
      asked = set(requested) if requested is not None else set(batch_names)
@@ -160,7 +234,15 @@ index b92ef34..264f5f4 100644
      unpushed_set = set(unpushed)
      unbuilt_set = set(unbuilt)
      views: dict[str, Path | str] = {}   # repo → its fetched checkout, or why not (#655)
-@@ -791,11 +799,14 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
+@@ -796,6 +808,7 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
+         squashed: list[tuple[str, str]] = []   # … not those: merged there, never counted (#626)
+         stale: list[tuple[str, str, bool]] = []  # … of those, not on d's line: off_line's shape
+         unjudged = False                         # … of those, no line was judged for d
++        busy: list[str] = []       # could not be claimed before wave 0, so not judged (#839)
+         for dep in deps:
+             p = cfg.find_bundle(dep)
+             out_of_batch = p.name not in batch_names
+@@ -803,11 +816,17 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
                  unmet.append(dep)  # not ready, whichever field names it
                  continue
              # A plain `Depends on` prereq the run was not asked for, which a line would
@@ -177,10 +259,13 @@ index b92ef34..264f5f4 100644
 +                     and (in_merge_mode or p.name not in asked))
 +            cand = integrate._fold_candidates([p]) if waits and not in_merge_mode else []
 +            if out_of_batch and (dep in merged_deps or cand or (waits and in_merge_mode)):
++                if (p.name, repo, base) in merge_busy:
++                    busy.append(p.name)
++                    continue
                  # Only a merge INTO d's base puts it there (#186 for `Depends on (merged)`,
                  # #647 for the plain edge above). With no target of d's own, #186's answer
                  # and its "not ready" line stand.
-@@ -832,7 +843,14 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
+@@ -860,13 +879,25 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
                  # In batch: accepted, but no branch pushed this run: nothing to fold (#593).
                  # Out of batch: a finished named id the carry could not put on the line (#646).
                  unmet.append(dep)
@@ -196,7 +281,29 @@ index b92ef34..264f5f4 100644
              todo = (f"name {', '.join(carryable)} in the same `pdca flow <ids>` command so "
                      f"the run's line carries them, or wait" if carryable else "wait")
              print(f"flow: {d.name} held — prerequisite(s) {', '.join(unmerged)} not merged "
-@@ -1422,6 +1440,182 @@ def _cascade_not_clean(cfg: Config, ids: list[Path], why: dict[str, tuple[str, s
+                   f"into {base} ({repo}), and no line of this run carries them; not built "
+                   f"on a base missing them. To build it, {todo} until their PR merges into "
+                   f"{base}, then re-run.", file=sys.stderr)
++        if busy:
++            ways = "; ".join(f"{n}: {(merge_notes or {})[n, repo, base]}" for n in busy)
++            print(f"flow: {d.name} held — prerequisite(s) {', '.join(busy)} not known to be "
++                  f"merged into {base} ({repo}); not built on a base that may be missing them. "
++                  f"{ways}.", file=sys.stderr)
+         if squashed:
+             drop = f"drop {', '.join(n for n, _oid in squashed)} from {d.name}'s brief"
+             step = f"{drop}, then re-run"
+@@ -944,8 +975,8 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
+                   f"no line or base of this run holds that work; not built on a base missing "
+                   f"it. To build it, wait until {p} is built, once what its hold line names is "
+                   f"fixed, and its PR merges{into}, then re-run.", file=sys.stderr)
+-        if (not unmet and not unmerged and not squashed and not off_line and not off_base
+-                and not partners and not clashed and not unbuilt_partners):
++        if (not unmet and not unmerged and not busy and not squashed and not off_line
++                and not off_base and not partners and not clashed and not unbuilt_partners):
+             runnable.append(d)
+     return runnable
+ 
+@@ -1549,6 +1580,220 @@ def _cascade_not_clean(cfg: Config, ids: list[Path], why: dict[str, tuple[str, s
      return causes
  
  
@@ -248,7 +355,7 @@ index b92ef34..264f5f4 100644
 +            return f"it has no PR on record and its brief does not target {base} ({repo}); {land}"
 +        return (f"it has no PR on record; publish it (`pdca publish {iid}`), merge the PR by "
 +                f"hand, then re-run")
-+    if (rec.get("repo"), rec.get("base")) != (repo, base):
++    if not merged.counts_into(rec, repo, base):
 +        return (f"its PR is on record for {rec.get('base') or '?'} ({rec.get('repo') or '?'}), "
 +                f"so its merge does not count as one into {base}; {land}")
 +    pr = merged.pr_state(str(rec["pr_url"]))
@@ -272,12 +379,14 @@ index b92ef34..264f5f4 100644
 +    return f"let a merge-mode run merge it (it is marked), or {by_hand}"
 +
 +
-+def _merge_prereqs(cfg: Config, bundles: list[Path]) -> dict[tuple[str, str, str], str]:
++def _merge_prereqs(cfg: Config, bundles: list[Path], claims: drive_claim.Run | None = None
++                   ) -> tuple[dict[tuple[str, str, str], str], set[tuple[str, str, str]]]:
 +    """Before wave 0 of a publishing merge-mode run, merge the marked prerequisites the drive
 +    set waits for (#839) — the merge-mode analogue of :func:`_carry_finished`. Returns what
 +    happened to each one left unmerged, ``(prerequisite name, repo, base)`` → the way out for
 +    the hold line of its dependents on that base (:func:`_runnable`, which alone decides, with
-+    ``merged.merged_into``, whether a dependent is released; a return code never does).
++    ``merged.merged_into``, whether a dependent is released; a return code never does), and
++    which of those keys it could not claim (``claims`` below).
 +
 +    The walk starts at each drive-set bundle with a usable target, along its plain ``Depends
 +    on`` and ``Depends on (merged)`` edges (those :func:`_runnable` holds on), then along
@@ -303,10 +412,34 @@ index b92ef34..264f5f4 100644
 +    all) when its own declared prerequisites are each merged into that base. A refusal, or
 +    anything ``_merge_one`` raises, holds only its dependents: the run goes on, each message
 +    ending with who is held. It runs once, before the waves: a split child adopted later is
-+    held, not merged for."""
++    held, not merged for.
++
++    ``claims`` is the CLI run's claim scope (#565). The walk claims each prerequisite it reaches
++    before it reads it, so two runs cannot update one PR, undo each other's ready-mark or
++    rewrite its record at once. A prerequisite it cannot claim, because another live run holds
++    it or no claim can be recorded, is not judged, gone past or merged, and its dependents
++    hold (:func:`_runnable`), even if its PR has merged: that run may be part-way through it,
++    and all the hold costs is a re-run. Claims the walk took are let go when it ends, because
++    this run writes nothing to those bundles again and must not hold up another run's
++    dependents of them for the rest of its life. A bundle this run already held (the drive
++    set) stays held. ``None`` — a library call — claims nothing."""
 +    order: dict[str, tuple[Path, tuple[str, str]]] = {}     # deepest first: name → …
 +    reach: dict[str, list[str]] = {}    # prerequisite name → the drive-set bundles waiting
 +    taken: dict[tuple[str, tuple[str, str]], bool] = {}     # (name, target) → takes()'s answer
++    notes: dict[tuple[str, str, str], str] = {}
++    busy: set[tuple[str, str, str]] = set()     # keys of `notes` whose bundle it could not claim
++    claimed: dict[str, drive_claim.Refusal | None] = {}     # name → `take`'s answer, asked once
++    ours: list[Path] = []                       # what this walk claimed, to let go of at its end
++
++    def refusal(p: Path) -> drive_claim.Refusal | None:
++        if claims is None:
++            return None
++        if p.name not in claimed:
++            already = claims.holds(p)
++            claimed[p.name] = claims.take(p)
++            if claimed[p.name] is None and not already:
++                ours.append(p)
++        return claimed[p.name]
 +
 +    def takes(p: Path, target: tuple[str, str]) -> bool:
 +        if (p.name, target) not in taken:
@@ -326,6 +459,13 @@ index b92ef34..264f5f4 100644
 +        if p.name in seen:
 +            return
 +        seen.add(p.name)
++        why = refusal(p)
++        if why is not None:
++            key = (p.name, *target)
++            busy.add(key)
++            notes[key] = (f"it is {why.reason}, so this run did not judge or merge it; "
++                          f"{why.remedy}, then re-run")
++            return
 +        if not takes(p, target):
 +            return
 +        for dep in waves.declared_deps(p / "brief.md"):
@@ -342,18 +482,20 @@ index b92ef34..264f5f4 100644
 +        for dep in [*brief.depends_on(bp), *brief.depends_on_merged(bp)]:
 +            visit(dep, target, b.name, seen)
 +
-+    notes: dict[tuple[str, str, str], str] = {}
 +    fetched: set[str] = set()
 +    for name, (p, (repo, base)) in order.items():
 +        blockers = list(dict.fromkeys(
 +            cfg.find_bundle(dep).name for dep in waves.declared_deps(p / "brief.md")
-+            if not merged.merged_into(cfg, dep, repo, base)))
++            if (cfg.find_bundle(dep).name, repo, base) in busy
++            or not merged.merged_into(cfg, dep, repo, base)))
 +        if blockers:
 +            ways = "; ".join(f"{q}: " + (notes.get((q, repo, base))
 +                                         or _merge_way_out(cfg, q, name, repo, base))
 +                             for q in blockers)
++            known = ("not known to be merged" if any((q, repo, base) in busy for q in blockers)
++                     else "not merged")
 +            notes[name, repo, base] = (f"it was not merged, because its own prerequisite(s) "
-+                                       f"{', '.join(blockers)} are not merged into {base} — "
++                                       f"{', '.join(blockers)} are {known} into {base} — "
 +                                       f"{ways}")
 +            continue
 +        who = reach[name]
@@ -373,13 +515,16 @@ index b92ef34..264f5f4 100644
 +        elif rc:
 +            notes[name, repo, base] = ("its PR did not pass the merge gates, see the `merge:` "
 +                                       "lines above; resolve that, then re-run")
-+    return notes
++    if claims is not None:
++        for p in ours:
++            claims.release(p)
++    return notes, busy
 +
 +
  def _carry_finished(cfg: Config, bundles: list[Path], finished: list[Path], *,
                      batch: list[str], integ: dict[tuple[str, str], str],
                      folded_tips: dict[tuple[str, str], str | None], held: set[str],
-@@ -2895,14 +3089,20 @@ def _drive_and_act(
+@@ -3033,14 +3278,22 @@ def _drive_and_act(
      # read live below (never cached in a `last`), and an adopted child's wave is driven,
      # published and folded by exactly the code every other wave goes through.
      # A plain `Depends on` prerequisite the run was not asked for is on no line of this run,
@@ -401,21 +546,23 @@ index b92ef34..264f5f4 100644
 +    own_bases = hold_unmerged and not merge_mode
 +    # Merge mode's pre-wave step (#839), not in `_runnable`, which runs for every wave and
 +    # only reads state: a merge can wait `merge_wait_secs` and changes the host.
-+    merge_notes = None
++    merge_notes: dict[tuple[str, str, str], str] | None = None
++    merge_busy: set[tuple[str, str, str]] = set()
 +    if merge_mode:
-+        merge_notes = _merge_prereqs(cfg, bundles) if hold_unmerged else {}
++        merge_notes, merge_busy = (_merge_prereqs(cfg, bundles, claims) if hold_unmerged
++                                   else ({}, set()))
      requested = set(named) | {cfg.bundle(str(i).removeprefix("issue_")).name
                                for i in (batch or ())}
      # The loop stopped on a fold error or a red re-gate: that run already ends non-zero, and
-@@ -2932,6 +3132,7 @@ def _drive_and_act(
+@@ -3070,6 +3323,7 @@ def _drive_and_act(
                               held=held_unpushed | held_finished | set(held_conflict)
                               | held_base,
                               requested=requested, hold_unmerged=hold_unmerged,
-+                             merge_notes=merge_notes,
++                             merge_notes=merge_notes, merge_busy=merge_busy,
                               unpushed=held_unpushed,
                               conflicts=(waves.conflict_map(cfg, bundles)
                                          if held_unpushed or held_conflict or held_base
-@@ -3078,7 +3279,8 @@ def _drive_and_act(
+@@ -3216,7 +3470,8 @@ def _drive_and_act(
          if k < len(wave_list) - 1 and do_publish:
              dry = cfg.publisher.mode == "stub"
              if cfg.wave_mode == "merge":
@@ -426,7 +573,7 @@ index b92ef34..264f5f4 100644
                            file=sys.stderr)
                      break
 diff --git a/template/src/pdca_harness/merge.py b/template/src/pdca_harness/merge.py
-index 178b1a3..480b40c 100644
+index 178b1a3..79d7be2 100644
 --- a/template/src/pdca_harness/merge.py
 +++ b/template/src/pdca_harness/merge.py
 @@ -9,12 +9,12 @@ non-final wave's PRs (``gh pr merge``) and fetches the base, so the next wave's
@@ -448,7 +595,7 @@ index 178b1a3..480b40c 100644
  
  "Never on an unmerged base" is only half the rule: the next wave must never build on a
  base whose verification was not GREEN either, and ``gh pr merge``'s own refusal cannot
-@@ -101,12 +101,21 @@ bundle's ``"stacked"`` record names the remote it pushed to, which may be a thir
+@@ -101,12 +101,22 @@ bundle's ``"stacked"`` record names the remote it pushed to, which may be a thir
  not reached from ``_merge_one``, which refuses a ``"stacked"`` record (issue #658) before
  it reads the head.
  
@@ -465,18 +612,19 @@ index 178b1a3..480b40c 100644
 +beside it (``merged.MARKED_PATCH``), before the first ``gh pr ready``, and a later merge-mode
 +run may ready and merge a marked PR that is still open, and whose bundle still holds that
 +patch, once its gates pass (``flow._merge_prereqs``, before wave 0, for a prerequisite of a
-+bundle it drives). A re-publish writes a fresh record without either key. An unmarked PR, a
-+final-wave or single-bundle PR waiting for the human among them, is never readied or merged
-+on that path. A refusal on it holds only the dependents, so its message says who is held and
-+what clears it (``_next``) instead of "later waves are NOT run". A ``"stacked"`` record is
-+one commit added to an EXISTING PR — possibly someone else's, with other work on it and any
-+base — so ``_merge_one`` refuses it (issue #658) before any ``gh`` call for that PR, in a dry
-+run too, and whether or not the PR already reads merged, as ``merged.merged_into`` and the
-+fold (``integrate._gone_branch``) never trust such a record either.
++bundle it drives, while it holds that prerequisite's claim). A re-publish writes a fresh
++record without either key. An unmarked PR, a final-wave or single-bundle PR waiting for the
++human among them, is never readied or merged on that path. A refusal on it holds only the
++dependents, so its message says who is held and what clears it (``_next``) instead of "later
++waves are NOT run". A ``"stacked"`` record is one commit added to an EXISTING PR — possibly
++someone else's, with other work on it and any base — so ``_merge_one`` refuses it (issue
++#658) before any ``gh`` call for that PR, in a dry run too, and whether or not the PR already
++reads merged, as ``merged.merged_into`` and the fold (``integrate._gone_branch``) never trust
++such a record either.
  
  A PR merges only into its bundle's own target base (issue #500), the ``Repo + branch
  target`` publish resolves (``publish._resolve_target``), and only when that base exists
-@@ -149,12 +158,18 @@ _ROLLUP_PENDING = frozenset({"pending"})
+@@ -149,12 +159,18 @@ _ROLLUP_PENDING = frozenset({"pending"})
  
  
  def merge_wave(cfg: Config, bundles: list[Path], *, dry_run: bool = False,
@@ -498,7 +646,7 @@ index 178b1a3..480b40c 100644
          if rc:
              return rc
      return 0
-@@ -493,12 +508,27 @@ def _undo_ready(pr_url: str) -> None:
+@@ -493,12 +509,27 @@ def _undo_ready(pr_url: str) -> None:
                "— it is left marked ready; a human must re-draft it.", file=sys.stderr)
  
  
@@ -532,7 +680,7 @@ index 178b1a3..480b40c 100644
      _undo_ready(pr_url)
      return 1
  
-@@ -729,9 +759,12 @@ def _target_base(cfg: Config, d: Path, pr_url: str) -> tuple[str, str]:
+@@ -729,9 +760,12 @@ def _target_base(cfg: Config, d: Path, pr_url: str) -> tuple[str, str]:
  
  
  def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
@@ -547,7 +695,7 @@ index 178b1a3..480b40c 100644
      if state.state(d) != state.COMPLETE:
          return 0  # not accepted — nothing of this bundle's to merge
      patch = d / "patch.diff"
-@@ -748,24 +781,28 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
+@@ -748,24 +782,28 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
      pr_url = rec.get("pr_url") if rec else None
      repo_spec = rec.get("repo") if rec else None
      if not pr_url:
@@ -587,7 +735,7 @@ index 178b1a3..480b40c 100644
          return 1
  
      cmd = ["gh", "pr", "merge", str(pr_url), f"--{method}"]
-@@ -775,14 +812,33 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
+@@ -775,14 +813,33 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
      iid = d.name.removeprefix("issue_")
      if merged.is_merged(cfg, iid):
          return 0  # already merged (a resumed run) — idempotent
@@ -623,7 +771,7 @@ index 178b1a3..480b40c 100644
          return 1
      # Issue #500: merge only into the bundle's own target base, and only when that base
      # exists independently of this run (#411) — never into whatever base the PR carries.
-@@ -791,9 +847,12 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
+@@ -791,9 +848,12 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
      # ready-mark to undo: not `_refuse`, which always undoes one.
      target, why = _target_base(cfg, d, str(pr_url))
      if why:
@@ -639,7 +787,7 @@ index 178b1a3..480b40c 100644
          return 1
      # The host now reports the PR on `target`, so the record must too: `merged.merged_into`
      # compares the record's `base` with a dependent's target, and a record still naming the
-@@ -805,16 +864,18 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
+@@ -805,16 +865,18 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
  
      # The publisher opens every PR as a draft (STOP discipline), but `gh pr merge` refuses a
      # draft — so in merge mode a non-final wave's PRs must be readied before they can advance
@@ -664,7 +812,7 @@ index 178b1a3..480b40c 100644
                file=sys.stderr)
          return 1
  
-@@ -840,7 +901,7 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
+@@ -840,7 +902,7 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
          # rollup of the combination that merges.
          if not repo_spec:
              return _refuse(d, pr_url, "its publish record names no repo, so there is no "
@@ -673,7 +821,7 @@ index 178b1a3..480b40c 100644
          repo = publish._checkout_path(cfg, repo_spec)
          # Issue #650: the head is read where publish put the branch, from the record as the
          # fold reads it. A `"stacked"` record (whose remote may be neither the base remote
-@@ -851,7 +912,7 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
+@@ -851,7 +913,7 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
          # a base edited on the host since is refused before anything is updated against it.
          head, tip, behind, why = _base_read(cfg, repo, pub, str(pr_url), target=target)
          if behind is None:
@@ -682,7 +830,7 @@ index 178b1a3..480b40c 100644
          if behind:
              print(f"   head {head[:12]} lacks base commit {tip[:12]} — bringing it up to date")
              print(f"→ gh pr update-branch {pr_url}")
-@@ -861,13 +922,13 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
+@@ -861,13 +923,13 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
                  print((up.stderr or up.stdout).strip(), file=sys.stderr)
                  return _refuse(d, pr_url, "it is behind its base and could not be brought up "
                                 "to date (`gh pr update-branch` failed: a conflict with the "
@@ -698,7 +846,7 @@ index 178b1a3..480b40c 100644
              print(f"   updated: head {head[:12]} contains base commit {tip[:12]}")
          else:
              print(f"   head {head[:12]} contains base commit {tip[:12]} — up to date")
-@@ -888,13 +949,19 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
+@@ -888,13 +950,19 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
                           f"— {detail}; absence of evidence is not green",
                  "unreadable": f"the check rollup could not be read — {detail}",
              }[verdict]
@@ -725,7 +873,7 @@ index 178b1a3..480b40c 100644
              _undo_ready(pr_url)
              return 1
          # Positive evidence in the run log that this merge was gated, not merged blind.
-@@ -907,15 +974,15 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
+@@ -907,15 +975,15 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
          # whatever branch the PR was moved to during the wait.
          after, _, behind, why = _base_read(cfg, repo, pub, str(pr_url), target=target)
          if behind is None:
@@ -744,7 +892,7 @@ index 178b1a3..480b40c 100644
          cmd += ["--match-head-commit", head]
  
      print(f"→ {' '.join(cmd)}")
-@@ -930,13 +997,13 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
+@@ -930,13 +998,13 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
          # below.
          why = _remarks_block(d, str(pr_url), cfg.merge_wait_secs - waited, merge_error)
          if why:
@@ -762,13 +910,13 @@ index 178b1a3..480b40c 100644
          return 1
      # Refresh the base so the NEXT wave's worktree resets to the merged result.
 diff --git a/template/src/pdca_harness/merged.py b/template/src/pdca_harness/merged.py
-index a3167a2..da47c52 100644
+index 356918f..bf662d4 100644
 --- a/template/src/pdca_harness/merged.py
 +++ b/template/src/pdca_harness/merged.py
-@@ -26,10 +26,14 @@ for that base (#655): which commit did the merge put on the base, and which head
- merge — so the flow can ask whether the line has either? Only a dependent built on the line
- — one a seam keeps there (#727) — is asked it (#729): one on a base of its own, or on the
- real base, is built from the base as fetched, so :func:`merged_into` is the whole answer.
+@@ -30,10 +30,14 @@ The fold and the pre-wave carry ask it too, for a merged PR whose head is on nei
+ nor the line: a merge commit on the base then means a squash or rebase merge
+ (``integrate._squash_merged``, #626). So does the flow's readiness check, for a merge whose
+ record does not count (:func:`counts_into`): only a drop of the edge ends that hold.
 +:func:`has_patch` answers what comes before all of these (#839): does a bundle ship anything
 +to merge, and can that even be read? :func:`marked_for_this_patch` answers the one after it:
 +is that still the patch a PR's merge marker was written for?
@@ -780,7 +928,7 @@ index a3167a2..da47c52 100644
  import json
  import subprocess
  import sys
-@@ -38,6 +42,10 @@ from pathlib import Path
+@@ -42,6 +46,10 @@ from pathlib import Path
  from . import state
  from .config import Config
  
@@ -791,7 +939,7 @@ index a3167a2..da47c52 100644
  
  def is_merged(cfg: Config, dep_id: str) -> bool:
      """True iff prerequisite ``dep_id``'s contribution is merged into its base.
-@@ -85,13 +93,14 @@ def merged_into(cfg: Config, dep_id: str, repo: str, base: str) -> bool:
+@@ -88,13 +96,14 @@ def merged_into(cfg: Config, dep_id: str, repo: str, base: str) -> bool:
      Otherwise as :func:`is_merged`: a close/no-fix prereq (COMPLETE, empty or no patch) ⇒
      ``True``; not COMPLETE, or no recorded PR ⇒ ``False``. Fail-closed: a ``gh`` failure,
      ``gh`` missing included (:func:`pr_state` guards it), is "not merged", said on stderr —
@@ -810,7 +958,7 @@ index a3167a2..da47c52 100644
          return True  # close/no-fix disposition — no contribution to wait on
      rec = _publish_record(d)
      pr_url = rec.get("pr_url") if isinstance(rec, dict) else None
-@@ -203,6 +212,38 @@ def _pr_view(pr_url: str, fields: str) -> dict | None:
+@@ -216,6 +225,38 @@ def _pr_view(pr_url: str, fields: str) -> dict | None:
      return info if isinstance(info, dict) else None
  
  
@@ -884,10 +1032,10 @@ index a9f1236..24a811c 100644
          self.cfg = _cfg(self.tmp, publisher="stub")
 diff --git a/template/tests/test_merge_resume_stranded_prereq.py b/template/tests/test_merge_resume_stranded_prereq.py
 new file mode 100644
-index 0000000..8ae03dd
+index 0000000..8827169
 --- /dev/null
 +++ b/template/tests/test_merge_resume_stranded_prereq.py
-@@ -0,0 +1,1810 @@
+@@ -0,0 +1,2185 @@
 +"""Merge mode merges a marked prerequisite before wave 0, and holds on anything else (#839).
 +
 +A dependent whose prerequisite is COMPLETE, published by an earlier run and still unmerged
@@ -906,6 +1054,8 @@ index 0000000..8ae03dd
 +that cannot be read) holds that dependent instead of ending the run or building without it.
 +The marker survives an iterate but is tied to the patch its PR was published from, so a
 +rebuilt attempt that never reached the PR holds the dependent instead of merging the old head.
++The walk claims each prerequisite before it reads it (#565): one another live run holds is
++neither judged nor merged, and holds its dependents.
 +
 +Real git (the ``StackFoldGit`` fixture of tests/test_integrate_stack_bases.py: a bare
 +``origin`` and a primary checkout), the real ``_merge_one`` and ``_runnable``, and the real
@@ -921,19 +1071,23 @@ index 0000000..8ae03dd
 +from __future__ import annotations
 +
 +import dataclasses
++import errno
 +import hashlib
 +import importlib.util
 +import io
 +import json
++import os
 +import shutil
 +import subprocess
++import sys
 +import unittest
 +from contextlib import ExitStack, redirect_stderr, redirect_stdout
 +from pathlib import Path
++from types import SimpleNamespace
 +from unittest import mock
 +
-+from pdca_harness import (cli, driver, flow, leaves, merge, merged, publish, signoff, state,
-+                          worktree)
++from pdca_harness import (act, cli, drive_claim, driver, flow, leaves, merge, merged, publish,
++                          signoff, state, worktree)
 +
 +_SPEC = importlib.util.spec_from_file_location(
 +    "stack_bases_fixture", Path(__file__).with_name("test_integrate_stack_bases.py"))
@@ -1153,8 +1307,8 @@ index 0000000..8ae03dd
 +                                 texts_prevalidated=True)
 +        return rc, err.getvalue()
 +
-+    def _run(self, ids: list[str], *, do_publish: bool = True, stack=(),
-+             sweep: bool = False) -> None:
++    def _driven(self, drive, stack=()):
++        """What ``drive()`` returns, with the leaves and ``gh`` stubbed; stderr in ``self.err``."""
 +        err = io.StringIO()
 +        with ExitStack() as ctx:
 +            ctx.enter_context(mock.patch.object(subprocess, "run", self._gh))
@@ -1166,14 +1320,27 @@ index 0000000..8ae03dd
 +                ctx.enter_context(patcher)
 +            ctx.enter_context(redirect_stdout(io.StringIO()))
 +            ctx.enter_context(redirect_stderr(err))
-+            if sweep:
-+                self.results = flow.flow_batch(self.cfg, do_publish=do_publish, do_act=False,
-+                                               by="T", today=TODAY)
-+            else:
-+                self.results = flow.flow_ids(self.cfg, ids, do_publish=do_publish, do_act=False,
-+                                             by="T", today=TODAY)
++            got = drive()
 +        self.err = err.getvalue()
 +        self.assertNotIn("Traceback", self.err)
++        return got
++
++    def _run(self, ids: list[str], *, do_publish: bool = True, stack=(), sweep: bool = False,
++             claims: drive_claim.Run | None = None) -> None:
++        how = {"do_publish": do_publish, "do_act": False, "by": "T", "today": TODAY,
++               "claims": claims}
++        self.results = self._driven((lambda: flow.flow_batch(self.cfg, **how)) if sweep else
++                                    (lambda: flow.flow_ids(self.cfg, ids, **how)), stack)
++
++    def _cli(self, ids: list[str], *, do_publish: bool = True, stack=()) -> int:
++        """``pdca flow <ids>`` through the CLI's own entry point, which makes the run's claim
++        scope and claims the ids it names. Its exit code; ``self.results`` as ``_run`` fills it."""
++        args = SimpleNamespace(issue_ids=ids, from_csv=None, from_briefs=None,
++                               no_publish=not do_publish, no_act=True, by="T", lanes=None,
++                               max_passes=None)
++        rc = self._driven(lambda: cli._flow(self.cfg, args), stack)
++        self.results = {iid: state.state(self.cfg.bundle(iid)) for iid in ids}
++        return rc
 +
 +    # -- assertions ------------------------------------------------------------------------
 +
@@ -2694,6 +2861,362 @@ index 0000000..8ae03dd
 +        self._run(["D", "U"], stack=[no])
 +        self.assertIn("issue_P: let a merge-mode run merge it (it is marked), or merge the PR by "
 +                      "hand, then re-run.", self._held_line())
++
++    # -- the claim: one live run on a prerequisite before wave 0 (#565) --------------------
++
++    def _another_run_holds(self, *iids: str) -> drive_claim.Run:
++        """Another live run's claim on each of ``iids``: the real lock on its own handle, which
++        refuses this run as another process does (`drive_claim.py`, "The RUN owns its claims";
++        `test_another_process_holding_a_prereq_is_named_with_its_pid` uses a real process)."""
++        other = drive_claim.Run(self.cfg)
++        self.addCleanup(other.close)
++        for iid in iids:
++            self.assertIsNone(other.take(self.cfg.find_bundle(iid)))
++        return other
++
++    def _claim_is_free(self, iid: str) -> bool:
++        """Could another run claim ``iid`` right now? Asked with the same lock, then let go."""
++        probe = drive_claim.Run(self.cfg)
++        try:
++            return probe.take(self.cfg.find_bundle(iid)) is None
++        finally:
++            probe.close()
++
++    def _claim_held_line(self, dependent: str = "D", prereq: str = "issue_P",
++                         base: str = "main") -> str:
++        """``dependent`` was not built and ONE line says who holds ``prereq`` and the way out."""
++        self.assertNotIn(f"issue_{dependent}", self.built, self.err)
++        self.assertEqual(self.results[dependent], state.PLANNED)
++        lines = [x for x in self.err.splitlines()
++                 if f"flow: issue_{dependent} held" in x and prereq in x]
++        self.assertEqual(len(lines), 1, self.err)
++        line = lines[0]
++        self.assertIn(f"{prereq} not known to be merged into {base} (org/repo)", line)
++        self.assertIn(f"{prereq}: it is held by another live `flow` run", line)
++        self.assertIn("did not judge or merge it", line)
++        self.assertIn("let that run finish (or stop it), then re-run", line)
++        for wrong in ("line of this run", "carries them", "by hand", "merge gates"):
++            self.assertNotIn(wrong, line)
++        return line
++
++    def _another_run_holds_p(self, field: str) -> None:
++        # The race the claim closes: everything else about P says "merge it".
++        d = self._opened("P", marked=True)
++        self._du(field)
++        record = (d / "publish.json").read_bytes()
++        self._another_run_holds("P")
++        rc = self._cli(["D", "U"])
++        self._claim_held_line()
++        self.assertEqual(self.gh_calls, [])     # never judged, let alone readied or merged
++        self.assertEqual(self.events.count("ready issue_P"), 0)
++        self.assertEqual(self.events.count("merge issue_P"), 0)
++        self.assertEqual((d / "publish.json").read_bytes(), record)
++        self.assertFalse(self._on_main("P"))
++        self.assertIn("issue_U", self.built)
++        self.assertEqual(rc, 1)
++
++    def test_a_prereq_another_run_holds_is_not_touched_and_holds_its_dependent(self):
++        self._another_run_holds_p(PLAIN)
++
++    def test_a_prereq_another_run_holds_holds_the_same_on_a_merged_edge(self):
++        self._another_run_holds_p(ON_MERGED)
++
++    def test_another_process_holding_a_prereq_is_named_with_its_pid(self):
++        # A claim could be per-process, so one case has the competing driver be a real one.
++        d = self._opened("P", marked=True)
++        self._du()
++        code = ("import pathlib, sys, types\n"
++                "from pdca_harness import drive_claim\n"
++                "cfg = types.SimpleNamespace(process_dir=pathlib.Path(sys.argv[1]))\n"
++                "run = drive_claim.Run(cfg)\n"
++                "assert run.take(pathlib.Path(sys.argv[2])) is None\n"
++                "print('held', flush=True)\n"
++                "sys.stdin.read()\n")
++        env = {**os.environ, "PYTHONPATH": str(Path(drive_claim.__file__).resolve().parents[1])}
++        child = subprocess.Popen([sys.executable, "-c", code, str(self.cfg.process_dir), str(d)],
++                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, env=env)
++        self.addCleanup(child.stdout.close)
++        self.addCleanup(child.wait, timeout=30)
++        self.addCleanup(child.stdin.close)
++        self.assertEqual(child.stdout.readline().strip(), "held")
++        rc = self._cli(["D", "U"])
++        self.assertIn(f"held by another live `flow` run (pid {child.pid})",
++                      self._claim_held_line())
++        self.assertEqual(self.gh_calls, [])
++        self.assertIn("issue_U", self.built)
++        self.assertEqual(rc, 1)
++
++    def test_the_way_out_of_a_claim_hold_works(self):
++        self._opened("P", marked=True)
++        self._du()
++        other = self._another_run_holds("P")
++        self._cli(["D", "U"])
++        self._claim_held_line()
++        other.close()
++        self.assertEqual(self._cli(["D"]), 0, self.err)
++        self.assertTrue(self._on_main("P"), self.err)
++        self.assertLess(self.events.index("merge issue_P"), self.events.index("build issue_D"))
++        self.assertIn("P.txt", self.base_files["issue_D"], self.err)
++
++    def test_a_merged_prereq_another_run_holds_holds_too(self):
++        # Not judged means not judged: this run reads nothing of a bundle another run holds.
++        self._opened("P", marked=True)
++        self._du()
++        self._merged_by_hand("P")
++        other = self._another_run_holds("P")
++        self._cli(["D", "U"])
++        self._claim_held_line()
++        self.assertEqual(self.gh_calls, [])
++        other.close()
++        self.assertEqual(self._cli(["D"]), 0, self.err)
++        self.assertIn("P.txt", self.base_files["issue_D"], self.err)
++        self.assertEqual(self.events.count("merge issue_P"), 0)
++
++    def test_a_close_prereq_another_run_holds_holds_too(self):
++        p = self._planned("P")
++        (p / "patch.diff").write_text("", encoding="utf-8")
++        sb._accept(p)
++        self._du()
++        self._another_run_holds("P")
++        self._cli(["D", "U"])
++        self._claim_held_line()
++        self.assertEqual(self.gh_calls, [])
++
++    def test_a_prereq_this_run_cannot_claim_holds_the_same(self):
++        # Fail closed (`drive_claim.py`): a claim that cannot be recorded is no claim.
++        self._opened("P", marked=True)
++        self._du()
++        real_lock = act._lock_exclusive
++
++        def no_lock_for_p(fh, *, wait: bool = True) -> None:
++            if "issue_P" in str(fh.name):
++                raise OSError(errno.ENOLCK, "No locks available")
++            real_lock(fh, wait=wait)
++
++        locks = mock.patch.object(act, "_lock_exclusive", no_lock_for_p)
++        rc = self._cli(["D", "U"], stack=[locks])
++        line = next(x for x in self.err.splitlines() if "flow: issue_D held" in x)
++        self.assertIn("issue_P not known to be merged into main (org/repo)", line)
++        self.assertIn("could not record its claim on it", line)
++        self.assertIn("No locks available", line)
++        self.assertIn("a writable directory on a filesystem that supports file locks", line)
++        self.assertNotIn("issue_D", self.built)
++        self.assertEqual(self.gh_calls, [])
++        self.assertIn("issue_U", self.built)
++        self.assertEqual(rc, 1)
++
++    def test_the_sweep_holds_a_dependent_of_a_prereq_another_run_holds(self):
++        self._opened("P", marked=True)
++        self._du()
++        self._another_run_holds("P")
++        with drive_claim.run(self.cfg) as claims:
++            self._run([], sweep=True, claims=claims)
++        self._claim_held_line()
++        self.assertEqual(self.gh_calls, [])
++        self.assertIn("issue_U", self.built)
++
++    def test_a_prereq_of_a_prereq_another_run_holds_stops_the_merge_above_it(self):
++        self._opened("Q", marked=True)
++        self._opened("P", edges=f"- **{PLAIN}:** Q\n", marked=True)
++        self._du()
++        self._another_run_holds("Q")
++        self._cli(["D", "U"])
++        line = self._held_line()
++        self.assertIn("issue_P", line)
++        self.assertIn("its own prerequisite(s) issue_Q are not known to be merged into main", line)
++        self.assertIn("issue_Q: it is held by another live `flow` run", line)
++        self.assertEqual([e for e in self.events if not e.startswith("build")], [])
++        # P was judged, under its own claim; Q was not read at all.
++        self.assertTrue(self.gh_calls)
++        for call in self.gh_calls:
++            self.assertEqual(call[:4], ["gh", "pr", "view", "https://example.test/pr/P"], call)
++        self.assertIn("issue_U", self.built)
++
++    def test_a_merged_prereq_keeps_the_walk_off_one_another_run_holds_below_it(self):
++        # The walk stops at a merged prerequisite, so what is below it holds nobody.
++        self._opened("Q", marked=True)
++        self._opened("P", edges=f"- **{PLAIN}:** Q\n", marked=True)
++        self._du()
++        self._merged_by_hand("P")
++        self._another_run_holds("Q")
++        self.assertEqual(self._cli(["D"]), 0, self.err)
++        self.assertIn("issue_D", self.built)
++        self.assertEqual([e for e in self.events if not e.startswith("build")], [])
++
++    def test_each_edge_is_judged_on_its_own_when_another_run_holds_one(self):
++        self._opened("P", marked=True)
++        self._opened("R", marked=True)
++        self._planned("D", f"- **{PLAIN}:** P, R\n")
++        self._planned("U")
++        self._another_run_holds("R")
++        self._cli(["D", "U"])
++        self._claim_held_line(prereq="issue_R")
++        self.assertTrue(self._on_main("P"), self.err)
++        self.assertFalse(self._on_main("R"))
++        self.assertEqual(self.events.count("merge issue_R"), 0)
++
++    def test_a_dependent_held_for_a_claim_and_a_merge_gets_a_line_for_each(self):
++        self._opened("P")
++        self._opened("R", marked=True)
++        self._planned("D", f"- **{PLAIN}:** P, R\n")
++        self._another_run_holds("R")
++        self._cli(["D"])
++        self._claim_held_line(prereq="issue_R")
++        lines = [x for x in self.err.splitlines()
++                 if "flow: issue_D held" in x and "issue_P not merged into main (org/repo)" in x]
++        self.assertEqual(len(lines), 1, self.err)
++        self.assertIn("merge the PR by hand", lines[0])
++
++    def test_two_dependents_on_two_bases_each_get_their_own_line(self):
++        self._opened("P", marked=True)
++        self._du()
++        e = self._planned("E", f"- **{PLAIN}:** P\n")
++        self._targets(e, "rel")
++        self._another_run_holds("P")
++        self._cli(["D", "E", "U"])
++        self._claim_held_line()
++        self._claim_held_line("E", base="rel")
++        self.assertEqual(self.gh_calls, [])
++        self.assertIn("issue_U", self.built)
++
++    def test_a_dependent_of_a_dependent_held_for_a_claim_is_not_built_either(self):
++        self._opened("P", marked=True)
++        self._du()
++        self._planned("E", f"- **{PLAIN}:** D\n")
++        self._another_run_holds("P")
++        self.assertEqual(self._cli(["D", "E"]), 1, self.err)
++        self._claim_held_line()
++        self.assertEqual(self.built, [])
++
++    def test_the_walk_holds_a_claim_while_it_works_and_lets_go_when_it_ends(self):
++        self._opened("P", marked=True)
++        self._du()
++        free_at: dict[str, bool] = {}
++        real_gh, real_wave = self._gh, self._drive_wave
++
++        def gh(args, *a, **kw):
++            if isinstance(args, list) and args[:2] == ["gh", "pr"] and args[3].endswith("/P"):
++                free_at.setdefault(args[2], self._claim_is_free("P"))
++            return real_gh(args, *a, **kw)
++
++        def wave(cfg, bundles, **kw):
++            for d in bundles:
++                free_at.setdefault(d.name, self._claim_is_free("P"))
++            return real_wave(cfg, bundles, **kw)
++
++        self._gh, self._drive_wave = gh, wave
++        self.assertEqual(self._cli(["D"]), 0, self.err)
++        self.assertLessEqual({"view", "ready", "checks", "merge"}, set(free_at), free_at)
++        for verb in ("view", "ready", "checks", "merge"):
++            self.assertFalse(free_at[verb], verb)   # another run is refused all the while
++        self.assertTrue(free_at["issue_D"], self.err)   # … and not for the rest of this run
++
++    def test_two_runs_reaching_one_marked_pr_never_both_touch_it(self):
++        # The race itself: a second run starts while the first is part-way through P's merge.
++        self._opened("P", marked=True)
++        self._du()
++        self._planned("E", f"- **{PLAIN}:** P\n")
++        second: list[tuple[int, str]] = []
++        real_gh = self._gh
++
++        def gh(args, *a, **kw):
++            if isinstance(args, list) and args[:3] == ["gh", "pr", "ready"] and not second:
++                second.append((0, ""))
++                before = len(self.gh_calls)
++                rc = self._cli(["E"])
++                second[0] = (rc, self.err)
++                self.assertEqual(self.gh_calls[before:], [], self.err)
++            return real_gh(args, *a, **kw)
++
++        self._gh = gh
++        self.assertEqual(self._cli(["D"]), 0, self.err)
++        rc, err = second[0]
++        self.assertEqual(rc, 1, err)
++        self.assertIn("flow: issue_E held — prerequisite(s) issue_P not known to be merged", err)
++        self.assertIn("held by another live `flow` run", err)
++        self.assertEqual(self.events.count("ready issue_P"), 1)
++        self.assertEqual(self.events.count("merge issue_P"), 1)
++        self.assertEqual(self.events.count("undo issue_P"), 0)
++        self.assertEqual(self.built, ["issue_D"])
++        self.assertIn("P.txt", self.base_files["issue_D"], self.err)
++        # Its way out: E builds on the merged base once it is re-run.
++        self.assertEqual(self._cli(["E"]), 0, self.err)
++        self.assertIn("P.txt", self.base_files["issue_E"], self.err)
++        self.assertEqual(self.events.count("merge issue_P"), 1)
++
++    def test_the_walk_claims_a_prereq_it_will_not_merge_and_lets_that_go_too(self):
++        self._opened("P")
++        self._du()
++        free_at: dict[str, bool] = {}
++        real_wave = self._drive_wave
++
++        def wave(cfg, bundles, **kw):
++            free_at["P"] = self._claim_is_free("P")
++            return real_wave(cfg, bundles, **kw)
++
++        self._drive_wave = wave
++        self._cli(["D", "U"])
++        self.assertTrue(free_at["P"], self.err)     # U's build, with D held
++
++    def test_the_walk_never_lets_go_of_what_the_run_drives(self):
++        # D's prerequisite is in the run, so the walk reaches a bundle the run holds already.
++        self.finish["A"] = {"A.txt": "A\n"}
++        self._planned("A")
++        self._planned("D", f"- **{PLAIN}:** A\n")
++        free_at: dict[str, tuple[bool, bool]] = {}
++        real_wave = self._drive_wave
++
++        def wave(cfg, bundles, **kw):
++            for d in bundles:
++                free_at[d.name] = (self._claim_is_free("A"), self._claim_is_free("D"))
++            return real_wave(cfg, bundles, **kw)
++
++        self._drive_wave = wave
++        self.assertEqual(self._cli(["A", "D"]), 0, self.err)
++        self.assertEqual(free_at, {"issue_A": (False, False), "issue_D": (False, False)})
++        self.assertTrue(self._claim_is_free("A"))   # the scope let go when the run ended
++
++    def test_a_finished_named_prereq_is_claimed_again_for_its_merge(self):
++        # The CLI claims a named id and `flow_ids` lets a finished one go; the walk takes it back.
++        self._opened("P", marked=True)
++        self._du()
++        free_at: dict[str, bool] = {}
++        real_gh = self._gh
++
++        def gh(args, *a, **kw):
++            if isinstance(args, list) and args[:3] == ["gh", "pr", "merge"]:
++                free_at["merge"] = self._claim_is_free("P")
++            return real_gh(args, *a, **kw)
++
++        self._gh = gh
++        self.assertEqual(self._cli(["P", "D"]), 0, self.err)
++        self.assertEqual(free_at, {"merge": False})
++        self.assertIn("P.txt", self.base_files["issue_D"], self.err)
++
++    def test_a_named_prereq_another_run_holds_refuses_the_run_before_the_walk(self):
++        self._opened("P", marked=True)
++        self._du()
++        self._another_run_holds("P")
++        self.assertEqual(self._cli(["P", "D"]), 1)
++        self.assertIn("refusing to start a second driver", self.err)
++        self.assertEqual(self.built, [])
++        self.assertEqual(self.gh_calls, [])
++
++    def test_a_run_that_publishes_nothing_is_not_held_by_a_claim(self):
++        # (5) again: no merge, no hold and no `gh` call, so nothing here to serialize.
++        for tag, stub in (("no-publish", False), ("dry-run", True)):
++            with self.subTest(tag):
++                if stub:
++                    self.cfg.publisher = dataclasses.replace(self.cfg.publisher, mode="stub")
++                iid = f"P{int(stub)}"
++                self._opened(iid, marked=True)
++                self._planned(f"D{int(stub)}", f"- **{PLAIN}:** {iid}\n")
++                other = self._another_run_holds(iid)
++                rc = self._cli([f"D{int(stub)}"], do_publish=stub)
++                self.assertEqual(rc, 0, self.err)
++                self.assertIn(f"issue_D{int(stub)}", self.built, self.err)
++                self.assertEqual(self.gh_calls, [])
++                other.close()
 +
 +
 +if __name__ == "__main__":
