@@ -31,15 +31,34 @@
   planner reads the full issue thread via `gh`; no scrape script exists or is needed.
 
 ## 2. Branch-target rules
-- **Per-area branch map:** everything → `main` of `eduralph/pdca-harness` (single-line
-  history; releases are annotated `vX.Y.0` tags, no maintenance branches).
+- **Per-area branch map** (both in `eduralph/pdca-harness`):
+  - A bug fix that qualifies for maintenance (see the rule below) → both `main` and
+    `release/<X.Y>` of the latest release, currently **`release/0.59`**, in either order
+    (see the cross-version rules).
+  - Everything else → `main`.
+
   Changes to **this instance itself** (pdca.toml, engine/, docs/) are ordinary
   pdca-pdca PRs to its own `main`, outside the cycle machinery.
 - **Override convention:** the brief's `Repo + branch target` field; disputes in
   the PR review thread.
-- **Cross-version cherry-pick rules:** none — one shipping line.
-- **Master-vs-maintenance rule:** not applicable; the target README §Releases is
-  the normative statement (tags off `main`, one open milestone).
+- **Cross-version rules:** a fix can travel in either direction, as ADR-0020 §4 of the target
+  allows; the brief says which.
+  - **Main first:** fix on `main`, then backport to the release branch with the same test.
+  - **Release first,** when the fix has to ship before `main` can: fix on the release branch,
+    then merge it forward to `main`, not a cherry-pick, so `git log main..release/<X.Y>` shows
+    what has not arrived. A bug that does not reproduce on `main` still merges forward,
+    resolved to `main`'s code.
+
+  A change that applies cleanly can still be wrong: run both suites on the result and read
+  any related code that differs between the two lines.
+- **Master-vs-maintenance rule:** a fix qualifies only if it reproduces on the release's
+  tag and is either `priority:P1` or was actually hit by an instance. Only the latest
+  release is maintained; its branch is retired when the next `vX.Y.0` ships. Patch releases
+  are tagged `vX.Y.Z` on the release branch. This extends the target README §Releases,
+  which covers `main` (`vX.Y.0` tags, one open milestone).
+- **Closing issues:** GitHub's closing keywords fire only on merges to the default branch,
+  so a PR to a release branch uses `Refs #N`. Close the issue through the change that lands on
+  `main`, and keep it open until the fix is on both lines if the backport is still to come.
 
 ## 3. Reproduction fixtures and runners
 - **Canonical fixture path:** the target's own test corpus — `tests/` at the
