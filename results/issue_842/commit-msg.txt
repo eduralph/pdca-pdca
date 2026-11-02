@@ -1,0 +1,32 @@
+fix(config): refuse an unknown [driver].wave_mode with exit 2
+
+A typo in `[driver].wave_mode` — `"bogus"`, `"Merge"`, `"merge "` — was kept
+as given and raised nothing. Every mode check compares against `"merge"`, so
+such an instance quietly ran in stack mode; the only trace was `pdca waves`
+echoing the odd word. An operator who believed they had turned on merge mode
+got stacked PRs and no warning.
+
+`Config.load` now raises `ValueError` for any value other than exactly
+`"stack"` or `"merge"`, including non-string TOML values (an integer, a
+boolean, an array, an inline table — the type is checked before membership so
+an unhashable value is refused the same way and never becomes a `TypeError`
+traceback). The CLI already turns a `ValueError` from the loader into one
+stderr line and exit 2, so every subcommand now stops with
+
+pdca: invalid pdca.toml — [driver].wave_mode 'bogus' is not one of stack | merge
+
+until the file is fixed. There is no fallback: the sign-off of 2026-10-30
+ruled that a mis-configured `pdca.toml` must fail, not continue with a
+substituted value. The issue body still describes the earlier note-and-fall-
+back criterion; the comment on the issue records the ruling that replaced it.
+
+Matching stays exact — no case or whitespace folding. Neither `"Merge"` nor
+`"merge "` enables merge mode today, and folding would start merging PRs for
+an instance that does not merge now.
+
+`"stack"`, `"merge"` and an absent key behave as before. `"none"` is refused
+here; the follow-up that adds it to the allowed set builds on this check.
+Other `[driver]` keys that still note and fall back are left for a separate
+issue.
+
+Fixes #842

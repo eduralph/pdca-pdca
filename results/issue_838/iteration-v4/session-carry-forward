@@ -1,0 +1,4 @@
+Human overrode the size backstop: this is one outcome, so do not split it. Keep the current approach and wording, and fix these two findings:
+- Half-written file (`template/src/pdca_harness/merge.py:640`): `Path.write_text` can leave a partial `merge-remarks.json` behind a message saying it could not be written. Write a sibling temp file, then `os.replace`, and remove the temp on failure, as `leaves._replace_record` and `autoiterate._write_ledger` do. Add a test where the write creates a partial file and then raises; the current test at `template/tests/test_merge_review_remarks.py:700` cannot catch this.
+- Wrong host (`template/src/pdca_harness/merge.py:562`): `gh api graphql` does not follow the PR URL's host. Pass `--hostname` with the host parsed from `pr_url`, and assert it in the `_Gh` stub (`template/tests/test_merge_review_remarks.py:120`).
+The live read-only GitHub check stays held for the rebuilt change; it is not build work.

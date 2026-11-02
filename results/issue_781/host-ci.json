@@ -1,0 +1,6 @@
+{
+  "overall": "fail",
+  "reason": "no pushed-tree to run against (issue_781: patch.diff does not apply onto the fetched base 333990ebcc37 \u2014 the base advanced past the fix; rebase/re-Check the bundle, then retry)",
+  "base": "333990ebcc372fceefe8becdc5b274bf7cc7b542",
+  "rows": []
+}

@@ -1,0 +1,16 @@
+Too big for one slice: findings per round have not fallen (4, 4, 8, 6), the patch grew from 45 to 137 KB over four rounds, and sizing found five separate outcomes. Split it in the re-plan rather than rebuild it again. Start from the seams in `sizing.json`: the mistyped-value warning, the core "none" mode, the dependency hold including `Stacks on`, and failure handling as follow-ups.
+
+Five bugs were reproduced on the current patch (simulated GitHub) and must be fixed in whichever child owns them:
+- A re-run exits 0 for a bundle with no PR (§6 items at SUMMARY lines 107, 111).
+- A `Depends on (merged)` edge to a prerequisite with no target is ignored in a real run, but enforced in a dry run and in stack mode (108).
+- After a hand-merged PR, the dependent fails on every run and `pdca publish` fails too (109).
+- `pdca publish` under "none" still uses an old `stack-base` file, so a PR can carry another bundle's work (110).
+- A `Stacks on` bundle is refused once its merged parent is archived (112).
+
+Still to decide in the re-plan, because the human did not rule on them at sign-off:
+- Exit 3 for chains (122, 126, 131).
+- Exit 3 and a hold, not an up-front refusal, for prerequisites on another branch or repo (123, 130, 133).
+- Whether the mistyped-value warning stays in this issue (104, 119, 121, 128, 132).
+- The manual merge workflow and trust in older records (106).
+
+Do not re-raise these as new findings: 105, 113-118, 124, 125, 127 and 129 were cleared at sign-off.

@@ -1,0 +1,2298 @@
+diff --git a/docs/07-crosscutting.md b/docs/07-crosscutting.md
+index 1fc1759..ac72b13 100644
+--- a/docs/07-crosscutting.md
++++ b/docs/07-crosscutting.md
+@@ -641,7 +641,9 @@ they set their own.
+ shape — `Depends on` / `Conflicts with` on the brief. This is what the driver
+ does with that declaration once a batch actually runs: bundles in the same wave
+ build in parallel; each wave's *accepted* result then becomes the base the next
+-wave builds on, via `[driver].wave_mode`:
++wave builds on, via `[driver].wave_mode` (unless it is `"none"`, the last
++option below). Any other value is named on stderr when the config loads, and
++the run uses `"stack"`:
+ 
+ - **`"stack"`** (default, fork-safe) — merges each wave's accepted, published PR
+   branches onto a run-scoped integration branch the next wave builds on, and
+@@ -909,6 +911,66 @@ wave builds on, via `[driver].wave_mode`:
+   remain, both in issue #778: a group declared only in the brief of a bundle
+   outside the run is not seen, and a split does not carry `Merges with` to its
+   children. Declare it on every member.
++- **`"none"`** — neither. Every accepted bundle publishes as a draft PR
++  against its real target base, as a one-bundle run does, and nothing happens
++  at a wave boundary: no `pdca-integration/*` line is created or pushed,
++  nothing is folded, readied or merged, and the pre-wave carry of finished ids
++  does not run. A `Stacks on` edge does not stack either: the bundle is built
++  on, cut from and opened against its target base, never its prerequisite's
++  branch. Waves still decide the build order. A bundle whose prerequisite has
++  not merged into the bundle's own target base (the repo and branch of its
++  `Repo + branch target`) is held, whichever edge names the prerequisite
++  (`Depends on`, `Depends on (merged)` or `Stacks on`) and whether or not it
++  is in the run. It is named on one line with the prerequisite and the way
++  out: merge that PR (re-opened first, if it was closed), then re-run. A merge
++  counts as it does above for a prerequisite the run does not drive: into that
++  base, not an `Onto branch` commit, and a PR whose state cannot be read does
++  not count. The base as fetched must then have the merge too, since the
++  bundle is built from it: a fetched base without it, or a checkout that
++  cannot be fetched, holds the bundle as well. A held bundle stays PLANNED and
++  the run exits **3**, as for a bundle held before it was built because its
++  own base could not be built. A chain is held the same way: a bundle whose
++  prerequisite is itself held for a merge is named with every step that
++  releases it, in order, each as it stands: a merge to make, a PR to re-open,
++  a fetch to fix. A prerequisite whose PR can never count for that base (on
++  record against another base or repo, bound for one by its brief, or an `Onto
++  branch` commit) holds the bundle too, still exit 3, on a line that says no
++  merge of it will release the bundle: the way out is to remove the edge or
++  rebuild the prerequisite against that base. A prerequisite no PR of which
++  can exist has nothing to wait for: one with no patch, or one with no usable
++  target, which publish skips. The second is named on stderr, since the bundle
++  is built without its work. A prerequisite with no PR of its accepted work on
++  record has nothing to merge either: this run pushed no branch of it (its
++  texts or its publish failed), its publish opened no PR, or the PR on record
++  is an earlier attempt's. Every publish record keeps the hash of the
++  `patch.diff` it published (`patch_sha256`), so that last case holds on every
++  later run too, and a merge of the old PR does not release the bundle; a
++  record written before that field counts as current. The bundle is held on
++  one line with that way out — publish the prerequisite, merge its PR, then
++  re-run — and the run exits 1, since a publish failed. So it does when a
++  prerequisite's PR cannot be read, or the fetched base cannot be checked for
++  its merge: that is a fault to fix, not a merge to wait for. An iterated
++  bundle whose PR is still open is none of these: `gh pr create` refuses a
++  second PR for that branch and base, the push has already updated the open
++  one, and publish records that one (its title and description stay as they
++  were). Any accepted bundle whose publish leaves no PR of its work is
++  reported in every wave, the last one too, whether or not anything depends on
++  it: its `holds` reason is `"unpushed"` (no branch pushed this run) or
++  `"no-pr"` (branch pushed, no PR on record), and the run does not exit 0. A
++  batch of independent bundles runs as it would in one run each; a batch with
++  dependencies builds its first wave and holds the rest, and each merge and
++  re-run builds the next wave. A bundle with no usable target of its own takes
++  a merge into any branch, and until then is skipped as not ready (exit 1).
++  With `--no-publish`, or in a dry-run (the stub publisher), nothing waits for
++  a merge and no host is asked: as in the other modes, a dependent builds once
++  its prerequisite is accepted, on the unchanged base. The one exception is
++  the same in every mode: a `Depends on (merged)` edge to a bundle outside the
++  run keeps its own gate, so it reads that PR with `gh`, holds the bundle
++  until it has merged, and exits 1. A `Conflicts with` edge only orders the
++  build: the later bundle is built on the base without its partner's work, so
++  a clash shows when the second PR is merged. `Merges with` is ignored here:
++  nothing is merged for you. `pdca waves` prints `none mode` and does not
++  claim a wave builds on the one before.
+ 
+ In merge mode the merge is unattended, so **publish refuses to open a PR against
+ any branch this run produced** — the work must land on a base that exists
+diff --git a/template/pdca.toml.jinja b/template/pdca.toml.jinja
+index 89ebb92..9d7ea4d 100644
+--- a/template/pdca.toml.jinja
++++ b/template/pdca.toml.jinja
+@@ -111,7 +111,7 @@ overflow = 0
+ # Wave-based batch sequencing (#wave-model). When `{{ cli_name }} flow` is given several ids it runs
+ # them as an ordered sequence of dependency waves (computed from each brief's `Depends on`
+ # / `Conflicts with`): a wave's bundles build in parallel, then its accepted work reaches
+-# the NEXT wave's base one of two ways.
++# the NEXT wave's base one of two ways — or, with "none", does not.
+ #   wave_mode = "stack"  (default) — merge each wave's accepted, published PR branches onto a
+ #       run-scoped integration branch the next wave builds on; every PR targets the real
+ #       base. This is PUSH-ONLY (a fork has push), keeps the STOP discipline (the harness
+@@ -124,6 +124,18 @@ overflow = 0
+ #       on pdca-integration/*), later folds push without force. A bundle whose publish pushed
+ #       no branch holds only its dependents and its `Conflicts with` partners. The fork-safe
+ #       default.
++#   wave_mode = "none"  — no carrying at all: every accepted bundle publishes as a draft PR
++#       against its real base, as a one-bundle run does, and nothing happens at a wave boundary
++#       (no integration line, no fold, no carry of finished ids, nothing readied or merged).
++#       Waves still order the build: a bundle whose prerequisite (`Depends on`, `Depends on
++#       (merged)` or `Stacks on`, in the batch or not) has not merged into its own target
++#       base is held, named with the way out — merge that PR, then re-run (a PR that can never
++#       land on that base is named as such: change the edge). `flow` exits 3 for
++#       such a hold, chains included, and 1 when a prerequisite has no PR to merge, or its PR
++#       or the fetched base cannot be read. An accepted bundle left with no PR is never a
++#       clean run (exit 3), even in the last wave. So a batch with dependencies takes one run
++#       per wave. Any value other than these three is named when the config loads, and runs
++#       as "stack".
+ #   wave_mode = "merge"  (own-repo / continuous-delivery ONLY) — `gh pr merge` each
+ #       non-final wave's PRs so the next wave builds on the genuinely-merged base. Needs
+ #       MERGE RIGHTS on the base remote (a fork contributor lacks them upstream — keep
+diff --git a/template/src/pdca_harness/cli.py b/template/src/pdca_harness/cli.py
+index 2c36431..6fb3b78 100644
+--- a/template/src/pdca_harness/cli.py
++++ b/template/src/pdca_harness/cli.py
+@@ -690,7 +690,9 @@ _FLOW_OK = (state.COMPLETE, state.RESOLVED)
+ 
+ 
+ #: Exit code of a flow run whose every bundle finished, or was held: held out of its line
+-#: once finished (#693), or held before it was built, its own base not buildable (#738).
++#: once finished (#693), or held before it was built, its own base not buildable (#738)
++#: or, under ``wave_mode = "none"``, a prerequisite's PR not merged into it (#464). Under
++#: that mode a finished bundle left with no PR counts as held too.
+ _RC_HELD = 3
+ 
+ #: The ``holds`` reason of a bundle held before it was built, because its own base could
+@@ -698,6 +700,15 @@ _RC_HELD = 3
+ #: and still a hold, not a failure.
+ _BASE_HOLD = "base"
+ 
++#: The ``holds`` reason of a bundle held before it was built under ``wave_mode = "none"``
++#: (#464), because a prerequisite's PR has not merged into its own target base: PLANNED in
++#: the results map, and a hold, not a failure — like :data:`_BASE_HOLD`.
++_UNMERGED_HOLD = "unmerged"
++
++#: The ``holds`` reasons of a bundle held BEFORE it was built — it is not finished in the
++#: results map, and that is not a failure (:func:`_results_rc`).
++_UNBUILT_HOLDS = frozenset({_BASE_HOLD, _UNMERGED_HOLD})
++
+ #: ``holds`` reasons that FAIL the run (exit 1) rather than hold a bundle (#695): a branch a
+ #: fold of the run carried, rewritten after the run's last fold read it — or one the run
+ #: could not check for that at its end (``flow._report_late_rewrites``).
+@@ -709,9 +720,12 @@ def _results_rc(results: dict[str, str], ok: tuple[str, ...] = _FLOW_OK,
+     """The ONE exit-code rule over a flow results map (issue #468), in precedence order:
+ 
+     - **1** — a bundle in the map did not reach a successful terminal, other than one
+-      ``holds`` names as held before it was built (``"base"``, below): a bundle that
+-      depends on one, or is its ``Conflicts with`` partner, left PLANNED with no hold of
+-      its own, is such a failure. Or ``holds`` names a bundle whose branch a fold of this
++      ``holds`` names as held before it was built (:data:`_UNBUILT_HOLDS`: ``"base"`` or
++      ``"unmerged"``, below): a bundle that depends on one, or is its ``Conflicts with``
++      partner, left PLANNED with no hold of its own, is such a failure — so, under
++      ``wave_mode = "none"`` (#464), is one whose prerequisite has no PR to merge (its
++      publish failed), or whose PR or fetched base could not be read. Or ``holds`` names a
++      bundle whose branch a fold of this
+       run carried and that was rewritten after the run's last fold read it
+       (``"rewritten"``, #695) — the line carries commits no PR holds any more, though every
+       bundle reached a successful terminal; so too when a base's refusal named that
+@@ -722,11 +736,16 @@ def _results_rc(results: dict[str, str], ok: tuple[str, ...] = _FLOW_OK,
+       line — it pushed no branch (#593, ``"unpushed"``) or its branch conflicts with a
+       same-wave bundle merged before it (#674, ``"conflict"``). Such a bundle is COMPLETE
+       in the map, so the map alone read it as success while its work is on no line of the
+-      run. Or a bundle was held before it was built, because its own base could not be
+-      built (#738, ``"base"``): it is not COMPLETE in the map (PLANNED, for one not built
+-      yet), but held, with the cause and the fix named on stderr — not failed. 3 lets a
+-      script or CI job tell that run from a clean one without parsing stderr. ``holds`` is
+-      the collector ``_flow`` passes to :func:`flow.flow_ids` / :func:`flow.flow_batch`.
++      run. Under ``wave_mode = "none"`` (#464), with no fold, the same goes for one whose
++      work no PR holds, in any wave, the last one too: it pushed no branch (``"unpushed"``),
++      or pushed it with no PR on record (``"no-pr"``). Or a bundle was held before it was
++      built, because its own base could not be built (#738, ``"base"``): it is not COMPLETE
++      in the map (PLANNED, for one not built yet), but held, with the cause and the fix
++      named on stderr — not failed. So is one held under ``wave_mode = "none"`` because a
++      prerequisite's PR has not merged into its own target base (#464, ``"unmerged"``):
++      PLANNED, named on stderr with the prerequisite and the way out. 3 lets a script or CI
++      job tell that run from a clean one without parsing stderr. ``holds`` is the collector
++      ``_flow`` passes to :func:`flow.flow_ids` / :func:`flow.flow_batch`.
+     - **0** — every bundle reached a successful terminal and nothing was held.
+ 
+     An EMPTY map — nothing was asked for, or nothing driven — is 0: a no-op is not a
+@@ -738,7 +757,7 @@ def _results_rc(results: dict[str, str], ok: tuple[str, ...] = _FLOW_OK,
+     because stopping for the human who just typed the command is the intended end of that
+     run, not a failure. A multi-id set keeps the batch rule (rc 0 iff all COMPLETE/RESOLVED).
+     """
+-    held_unbuilt = {k for k, why in (holds or {}).items() if why == _BASE_HOLD}
++    held_unbuilt = {k for k, why in (holds or {}).items() if why in _UNBUILT_HOLDS}
+     if not all(s in ok or k in held_unbuilt for k, s in results.items()):
+         return 1
+     if holds and any(why in _FAILED_REASONS for why in holds.values()):
+@@ -1096,8 +1115,11 @@ def _waves(cfg: Config, ids: list[str]) -> int:
+     except ValueError as exc:
+         print(f"unschedulable: {exc}", file=sys.stderr)
+         return 1
+-    print(f"{len(bundles)} bundle(s) → {len(plan)} wave(s) ({cfg.wave_mode} mode; "
+-          f"each wave builds on the prior's accepted work):")
++    # "none" (#464) carries nothing between waves: say what it does instead.
++    how = ("every PR against its base; a dependent waits for its prerequisites' PRs to "
++           "merge" if cfg.wave_mode == "none"
++           else "each wave builds on the prior's accepted work")
++    print(f"{len(bundles)} bundle(s) → {len(plan)} wave(s) ({cfg.wave_mode} mode; {how}):")
+     for k, wave in enumerate(plan):
+         print(f"  wave {k}: " + ", ".join(d.name.removeprefix("issue_") for d in wave))
+     return 0
+diff --git a/template/src/pdca_harness/config.py b/template/src/pdca_harness/config.py
+index 8da9640..75e46c6 100644
+--- a/template/src/pdca_harness/config.py
++++ b/template/src/pdca_harness/config.py
+@@ -36,6 +36,11 @@ DEFAULT_CLOSE_DISPOSITIONS = [
+     # `driver._close_class` honours outright — no hint token is needed for it (#323 review).
+ ]
+ 
++# The values `[driver].wave_mode` takes (#wave-model, #464): how a batch's accepted work
++# reaches the next wave's base — folded onto a run-scoped line ("stack", the default),
++# merged into the base ("merge"), or not at all ("none": every PR against its real base).
++WAVE_MODES = ("stack", "merge", "none")
++
+ # A leaf memory bound (issue #420) as systemd's resource-control grammar writes it: a
+ # byte value with an optional K/M/G/T/P/E suffix, a percentage of physical RAM, the
+ # literal `infinity`, or `off` (an explicit "no bound here", the per-leaf opt-out).
+@@ -358,8 +363,10 @@ class Config:
+     # ordered sequence of dependency waves; `wave_mode` selects how each wave's accepted
+     # work reaches the next: "stack" (default) folds it onto a run-scoped integration
+     # branch the next wave builds on — push-only, fork-safe, STOP discipline intact;
+-    # "merge" (own-repo / CD) instead `gh pr merge`s each wave before the next.
+-    # [driver].wave_mode in pdca.toml.
++    # "merge" (own-repo / CD) instead `gh pr merge`s each wave before the next; "none"
++    # (#464) does neither — every PR opens against its real base, nothing happens at a
++    # wave boundary, and a dependent waits until its prerequisite's PR has merged into its
++    # base. One of :data:`WAVE_MODES`. [driver].wave_mode in pdca.toml.
+     wave_mode: str = "stack"
+     # The `gh pr merge` strategy for wave_mode="merge" (issue #wave-model): merge | squash |
+     # rebase. Default "merge" (a merge commit — auditable, bisectable). [driver].merge_method.
+@@ -730,7 +737,14 @@ class Config:
+         worktree = bool(driver_cfg.get("worktree", True))  # issue #94; on by default
+         overflow = max(0, int(driver_cfg.get("overflow", 0)))  # issue #226; 0 ⇒ heal in place
+         lane_preflight = driver_cfg.get("lane_preflight", "")  # issue #213
+-        wave_mode = driver_cfg.get("wave_mode", "stack")  # #wave-model: stack | merge
++        # #wave-model: stack | merge | none (#464). An unknown value falls back to "stack"
++        # with a note — what it already ran as, unreported: every check reads "merge" or
++        # "none" exactly, so a near-miss ("Merge", " none") must not now buy either.
++        wave_mode = driver_cfg.get("wave_mode", "stack")
++        if wave_mode not in WAVE_MODES:
++            print(f"config: unknown [driver].wave_mode '{wave_mode}' — expected "
++                  f"{' | '.join(WAVE_MODES)}; using 'stack'", file=sys.stderr)
++            wave_mode = "stack"
+         merge_method = driver_cfg.get("merge_method", "merge")  # merge | squash | rebase
+         # Check-rollup policy for merge mode (issue #413). An unknown value falls back to
+         # "all" with a note — the fail-safe direction is the STRICTER reading (verify the
+diff --git a/template/src/pdca_harness/flow.py b/template/src/pdca_harness/flow.py
+index b92ef34..4911a65 100644
+--- a/template/src/pdca_harness/flow.py
++++ b/template/src/pdca_harness/flow.py
+@@ -649,7 +649,8 @@ def _publish_bundle(cfg: Config, d: Path, *, by: str, today: str,
+     Returns whether this call pushed the bundle's branch, so the wave fold has it to merge
+     (#593). Read off ``publish.json``: both publish paths write it only once every step,
+     the push included, has succeeded — also when ``gh pr create`` then fails (rc 1, e.g. an
+-    iterated bundle whose old draft PR is still open), and that pushed branch is folded. So
++    iterated bundle whose old draft PR is still open; under ``wave_mode = "none"`` that PR
++    is recorded instead, rc 0, #464), and that pushed branch is folded. So
+     True iff, after the call, the record exists and either did not exist before it or its
+     ``st_mtime_ns`` changed. An earlier run's record, which an iterate keeps, never counts,
+     nor does a call that raised (``_isolate`` logged it): that errs toward holding."""
+@@ -674,6 +675,51 @@ def _record_mtime(d: Path) -> int | None:
+         return None
+ 
+ 
++def _hold_without_pr(complete: list[Path], *, pushed: Collection[str], unpushed: set[str],
++                     no_pr: set[str]) -> None:
++    """Under ``wave_mode = "none"`` (#464) a PR is the only place an accepted bundle's work
++    goes, so record each bundle of the wave's ``complete`` publish contributes (a patch and
++    a usable target, :func:`integrate._fold_candidates`) that has none, named on stderr: in
++    ``unpushed`` when this run pushed no branch of it (:func:`integrate.unpublished`: a
++    record an earlier attempt left does not count), in ``no_pr`` when it pushed the branch
++    and no PR of it is on record (``gh pr create`` failed, and no open PR of that branch
++    was found). The caller reports both in ``holds``, so the run does not read as clean;
++    ``_runnable`` holds their dependents."""
++    for d in integrate.unpublished(complete, pushed=pushed):
++        unpushed.add(d.name)
++        print(f"flow: {d.name} pushed no branch this run — no PR holds its accepted work; "
++              f"bundles that depend on it are held this run.", file=sys.stderr)
++    for d, *_where in integrate._fold_candidates(complete):
++        if d.name not in unpushed and not publish.accepted_pr(d):
++            no_pr.add(d.name)
++            print(f"flow: {d.name} pushed its branch this run, but no PR of it is on record; "
++                  f"bundles that depend on it are held this run.", file=sys.stderr)
++
++
++def _no_merge_counts(p: Path, repo: str, base: str) -> str:
++    """Why no merge of prerequisite ``p``'s PR can count as landing on ``repo`` @ ``base``,
++    or "" when one can (#464, :func:`merged.lands_on`): its publish record says where its
++    PR went, and until a PR of its accepted work is on record, its brief says where one
++    will go. Asks no host: this does not depend on the PR's state."""
++    rec = publish._publish_record(p) if publish.accepted_pr(p) else None
++    if rec is None:
++        pr_repo, pr_base = publish._resolve_target(p)[:2]
++        rec = {"repo": pr_repo, "base": pr_base,
++               "mode": "stacked" if brief.onto_branch(p / "brief.md") else "new-pr"}
++    if merged.lands_on(rec, repo, base):
++        return ""
++    if rec.get("mode") == "stacked":
++        return "an `Onto branch` commit on another PR"
++    return f"its PR goes to {rec.get('base') or '?'} on {rec.get('repo') or '?'}"
++
++
++def _edge_step(d: Path, p: Path, repo: str, base: str) -> str:
++    """The step that releases ``d`` from a prerequisite whose PR cannot land on its base
++    (:func:`_no_merge_counts`), for any bundle waiting behind ``d``."""
++    return (f"remove the edge to {p.name} from {d.name}'s brief, or rebuild {p.name} with its "
++            f"PR against {repo} @ {base}")
++
++
+ # ----------------------------------------------------------------------------
+ # Shared multi-bundle driver: compute waves → per wave (drive → cheap-first sign-off →
+ # publish → fold onto the integration branch the next wave builds on) → Act once (docs 09).
+@@ -687,7 +733,9 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
+               conflict_held: Mapping[str, Collection[str]] | None = None,
+               lines: Mapping[tuple[str, str], tuple[str, str | None]] | None = None,
+               on_line: Collection[str] | None = None,
+-              unbuilt: Collection[str] = frozenset()
++              unbuilt: Collection[str] = frozenset(),
++              wait_for_merge: bool = False,
++              waiting: dict[str, list[str]] | None = None
+               ) -> list[Path]:
+     """Drop a wave bundle whose declared prerequisite isn't ready to build on top of.
+ 
+@@ -754,10 +802,42 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
+     from the base as fetched, so the line is not read (#729): the base as this check
+     fetches it, failing closed, must have the merge (:func:`_base_lacks_merge`), since Do
+     and Check refresh it only best-effort. Else d is held, named on ONE stderr line. A
+-    target with no line (or no recorded tip: a dry-run) is judged as before."""
++    target with no line (or no recorded tip: a dry-run) is judged as before.
++
++    ``wait_for_merge`` (``wave_mode = "none"``, publishing on, not a dry-run, #464): no line
++    exists and nothing is folded, carried or merged, so every COMPLETE prerequisite — in
++    this batch or not, by any edge (``Depends on``, ``Depends on (merged)``, ``Stacks on``)
++    — is ready only once its PR has merged into d's own target base (the record's target,
++    :func:`merged.lands_on`, and the PR's state, read once, :func:`merged.pr_state`: together
++    what ``merged.merged_into`` asks), and then only when the base as fetched has that merge
++    (:func:`_base_lacks_merge`, #729), since d is built from that base. Until then d is
++    held, named on ONE stderr line with the prerequisites and the way out (merge their PR,
++    re-opened first if it was closed, then re-run), and added to ``waiting``: bundle dir name
++    → the steps that release it, in order (the caller records it as an ``"unmerged"``
++    hold). A chain counts: a prerequisite already in ``waiting`` never completes this run,
++    for the same reason, so d waits behind it, told every step as it stands: a merge to
++    make, a PR to re-open, a fetch to fix. A prerequisite whose PR can never count
++    (:func:`_no_merge_counts`: on record, or bound by its brief, for another base or repo, or
++    an ``Onto branch`` commit) holds d the same way, but on a line of its own, since merging
++    that PR would not release d: the way out is to drop the edge or rebuild the
++    prerequisite for d's base. A prerequisite no PR of which can exist has nothing to wait
++    for and is ready: no patch (a close/no-fix), or no usable target (publish skips it; d,
++    built without its work, says so on stderr). Anything else that stops d is not a wait
++    for a merge, so d is not added to ``waiting`` and the run fails (exit 1): a patched
++    prerequisite with no PR of its accepted work on record (:func:`publish.accepted_pr`; or
++    in ``unpushed``: in batch, this run pushed no branch of it) holds d on its own line with
++    the way out (publish it, merge its PR, then re-run); a PR the host cannot be asked about
++    holds it on its own line too (way out: let ``gh`` read it, then re-run); a fetched base
++    that cannot be checked for the merge holds it on the #729 line ("is not known to
++    have"); and a prerequisite not ready at all skips it, as above. A d with no usable
++    target keeps #186's answer: any merge counts, and a prerequisite not merged is "not
++    ready". With ``wait_for_merge`` off under ``"none"`` (``--no-publish``, or a dry-run),
++    only the gate on an out-of-batch ``Depends on (merged)`` applies, as in the other
++    modes, and its line speaks of no line."""
+     asked = set(requested) if requested is not None else set(batch_names)
+     unpushed_set = set(unpushed)
+     unbuilt_set = set(unbuilt)
++    held_for = {} if waiting is None else waiting
+     views: dict[str, Path | str] = {}   # repo → its fetched checkout, or why not (#655)
+     lacks: dict[tuple[str, str, str], tuple[str, bool] | None] = {}  # (prereq, repo, ref)
+     runnable: list[Path] = []
+@@ -784,11 +864,75 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
+         off_line: list[tuple[str, str, bool]] = []  # merged, not on d's line (#655)
+         off_base: list[tuple[str, str, bool]] = []  # merged, not on the base as fetched (#729)
+         carryable: list[str] = []  # … of those, ones a line of d's target would carry
++        unlanded: list[str] = []   # wave_mode "none": PR not merged into d's base (#464)
++        elsewhere: list[tuple[str, str]] = []  # … no merge of its PR can count, and why
++        behind: list[str] = []     # … not built: it is held for a merge itself (a chain)
++        steps: list[str] = []      # … what releases d, in order
++        unpublished: list[str] = []  # … no PR of its accepted work on record: none to merge
++        unreadable: list[str] = []   # … its PR's state could not be read: not known
+         for dep in deps:
+             p = cfg.find_bundle(dep)
+             out_of_batch = p.name not in batch_names
+             if state.state(p) != state.COMPLETE:  # archived prereq too (#171)
+-                unmet.append(dep)  # not ready, whichever field names it
++                if targeted and p.name in held_for:  # held for a merge, not failed: so is d (#464)
++                    why = _no_merge_counts(p, repo, base)
++                    if why:
++                        elsewhere.append((p.name, why))
++                        steps.append(_edge_step(d, p, repo, base))
++                    else:
++                        behind.append(p.name)
++                        steps += [*held_for[p.name], f"merge the PR of {p.name} into {base}"]
++                else:
++                    unmet.append(dep)  # not ready, whichever field names it
++                continue
++            if wait_for_merge:
++                # No line carries it, in batch or not, by any edge: only its PR's merge into
++                # d's base does (#464) — and d is built from that base as fetched (#729).
++                # Without a patch or a usable target no PR of it can exist (publish skips it,
++                # `integrate.unpublished` holds nothing for it): nothing to wait for.
++                if not integrate._fold_candidates([p]):
++                    if integrate._has_patch(p):
++                        print(f"flow: {d.name} — prerequisite {p.name} has no usable `Repo + "
++                              f"branch target`, so no PR of it can merge; not waiting for it, "
++                              f"and built without its work.", file=sys.stderr)
++                    continue
++                # A PR that can never land on d's base: merging it would not release d.
++                why = _no_merge_counts(p, repo, base) if targeted else ""
++                if why:
++                    elsewhere.append((p.name, why))
++                    steps.append(_edge_step(d, p, repo, base))
++                    continue
++                # A patched prereq with no PR of its accepted work has nothing to merge: this
++                # run pushed no branch of it, its publish recorded no PR, or the PR on record
++                # is an earlier attempt's.
++                pr_url = publish.accepted_pr(p)
++                if p.name in unpushed_set or not pr_url:
++                    unpublished.append(p.name)
++                    continue
++                # One read decides: a PR that cannot be read is not known to be waiting for a
++                # merge, and a second read could only contradict this one.
++                pr = merged.pr_state(pr_url)
++                if pr is None:
++                    unreadable.append(p.name)
++                    continue
++                if pr[0] != "MERGED":
++                    if targeted:
++                        unlanded.append(p.name)
++                        steps.append(f"re-open the PR of {p.name} and merge it into {base}"
++                                     if pr[0] == "CLOSED"
++                                     else f"merge the PR of {p.name} into {base}")
++                    else:
++                        unmet.append(dep)   # no base of d's own to wait for (#186)
++                    continue
++                if targeted:
++                    key = (p.name, repo, f"{cfg.base_remote}/{base}")
++                    if key not in lacks:
++                        lacks[key] = _base_lacks_merge(cfg, dep, repo, base, views)
++                    lack = lacks[key]
++                    if lack is not None:    # its PR has merged: the fetch is what is left
++                        off_base.append((p.name, *lack))
++                        steps.append(f"make sure {repo}'s checkout can fetch {cfg.base_remote}, "
++                                     f"so {cfg.base_remote}/{base} has the merge of {p.name}")
+                 continue
+             # A plain `Depends on` prereq the run was not asked for, which a line would
+             # carry: no line of this run does (#647).
+@@ -835,10 +979,40 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
+         if unmerged:
+             todo = (f"name {', '.join(carryable)} in the same `pdca flow <ids>` command so "
+                     f"the run's line carries them, or wait" if carryable else "wait")
++            no_line = "" if cfg.wave_mode == "none" else ", and no line of this run carries them"
+             print(f"flow: {d.name} held — prerequisite(s) {', '.join(unmerged)} not merged "
+-                  f"into {base} ({repo}), and no line of this run carries them; not built "
++                  f"into {base} ({repo}){no_line}; not built "
+                   f"on a base missing them. To build it, {todo} until their PR merges into "
+                   f"{base}, then re-run.", file=sys.stderr)
++        if unlanded or behind:
++            why = f" ({', '.join(behind)} not built yet, held too)" if behind else ""
++            order = list(dict.fromkeys(steps))
++            todo = (", then ".join(order) + ", re-running after each step" if behind
++                    else " and ".join(order) + ", then re-run")
++            print(f"flow: {d.name} held — prerequisite(s) {', '.join([*unlanded, *behind])} not "
++                  f"merged into {base} ({repo}){why}; wave_mode = \"none\" builds every bundle "
++                  f"on {base} itself, so it is not built on a base missing them. To build it, "
++                  f"{todo}.", file=sys.stderr)
++        if elsewhere:
++            print(f"flow: {d.name} held — prerequisite(s) "
++                  f"{', '.join(f'{n} ({why})' for n, why in elsewhere)}: no merge of their PR "
++                  f"counts as landing on {base} ({repo}), so none will release {d.name}; not "
++                  f"built on a base missing them. To build it, remove that edge from "
++                  f"{d.name}'s brief, or rebuild them with their PR against {repo} @ {base} (no "
++                  f"`Onto branch`), then re-run.", file=sys.stderr)
++        if unreadable:
++            print(f"flow: {d.name} held — the PR of prerequisite(s) {', '.join(unreadable)} "
++                  f"could not be read, so it is not known whether they merged; not built on a "
++                  f"base that may miss them. To build it, make sure `gh` can read their PR, "
++                  f"then re-run.", file=sys.stderr)
++        if unpublished:
++            ids = " ".join(n.removeprefix("issue_") for n in unpublished)
++            into = f" into {base} ({repo})" if targeted else ""
++            print(f"flow: {d.name} held — prerequisite(s) {', '.join(unpublished)} accepted, "
++                  f"but no PR of that work is on record (their publish did not push it, or "
++                  f"opened no PR), so there is nothing to merge; not built on a base missing "
++                  f"them. To build it, publish them (`pdca publish <id>` for {ids}), merge "
++                  f"their PR{into}, then re-run.", file=sys.stderr)
+         if off_line:
+             branch, tip = (lines or {})[(repo, base)]  # off_line: only when d has one
+             has = ("does not have" if all(known for _n, _w, known in off_line)
+@@ -887,8 +1061,12 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
+                   f"it. To build it, wait until {p} is built, once what its hold line names is "
+                   f"fixed, and its PR merges{into}, then re-run.", file=sys.stderr)
+         if (not unmet and not unmerged and not off_line and not off_base and not partners
+-                and not clashed and not unbuilt_partners):
++                and not clashed and not unbuilt_partners and not unlanded and not behind
++                and not elsewhere and not unpublished and not unreadable):
+             runnable.append(d)
++        elif (wait_for_merge and not unmet and not unpublished and not unreadable
++              and all(known for _n, _w, known in off_base)):
++            held_for[d.name] = list(dict.fromkeys(steps))  # held only for a merge (#464)
+     return runnable
+ 
+ 
+@@ -2729,6 +2907,9 @@ def _drive_and_act(
+     (:func:`integrate.fold`) the **next** wave builds on. So a dependent builds on its
+     prerequisite's accepted result within one run, as a reviewable PR stack the human
+     merges (the harness never merges). Act runs **once** across the batch at the end.
++    Under ``wave_mode = "none"`` (#464) nothing happens between waves — no fold, no merge,
++    no pre-wave carry — so every PR is against its real base, and a dependent waits until
++    its prerequisite's PR has merged into that base (:func:`_runnable`); a later run builds it.
+ 
+     The drive set is no longer frozen (#469): a bundle that reaches
+     ``close-disposition = split`` while this run is driving it hands its children back to
+@@ -2773,10 +2954,17 @@ def _drive_and_act(
+     integration line: ``"unpushed"`` for one that pushed no branch (#593) and ``"conflict"``
+     for one whose branch conflicts with a same-wave bundle merged before it (#674), or with
+     bundles already on the line that explain the whole clash (#747). Such a bundle is
+-    COMPLETE in the returned map, which therefore cannot say it was held.
++    COMPLETE in the returned map, which therefore cannot say it was held. Under
++    ``wave_mode = "none"`` (#464) there is no fold, but a bundle that pushed no branch is
++    still ``"unpushed"``, and one that pushed it with no PR on record is ``"no-pr"``, in any
++    wave, the last one too (:func:`_hold_without_pr`).
+     ``"base"`` (#738) for one held before it was built, because its own base could not be
+     built (:func:`_bundle_bases`): not driven this run — PLANNED in the map, for one not
+-    built yet — and named on stderr with the cause and the fix. ``cli._flow`` reads this to
++    built yet — and named on stderr with the cause and the fix. ``"unmerged"`` (#464) for
++    one held before it was built under ``wave_mode = "none"``, because a prerequisite's PR
++    has not merged into its own target base, the base as fetched lacks that merge, or a
++    prerequisite is itself held for one (:func:`_runnable`): PLANNED in the map, named on
++    stderr. ``cli._flow`` reads this to
+     exit 3 instead of 0 (``cli._results_rc``). It also names each bundle whose carried
+     branch was rewritten after the run's last fold read it (#695,
+     :func:`_report_late_rewrites`), a branch a base's refusal named included:
+@@ -2879,13 +3067,14 @@ def _drive_and_act(
+             return {}
+     # A re-issued run's finished named ids (#646): carried onto the line before wave 0 when
+     # clean, else named in `held_finished`, which holds only their plain `Depends on`
+-    # dependents. Only where a fold would run: stack mode, publishing on.
++    # dependents. Only where a fold would run: stack mode, publishing on — not in merge
++    # mode, nor in "none" (#464), where no line exists.
+     held_finished: set[str] = set()
+     # Each finished id the carry put on the line → the head it put there (#747): an in-run
+     # fold may pin a bundle's conflict on one, as on a bundle it took itself.
+     finished_heads: dict[str, str] = {}
+     finished = _finished_named(cfg, batch, batch_names)
+-    if do_publish and cfg.wave_mode != "merge":
++    if do_publish and cfg.wave_mode not in ("merge", "none"):
+         _carry_finished(cfg, bundles, finished,
+                         batch=run_batch, integ=integ, folded_tips=folded_tips,
+                         held=held_finished, finished_heads=finished_heads)
+@@ -2898,11 +3087,22 @@ def _drive_and_act(
+     # so its dependent waits for its merge into the dependent's base (#647). Only where a
+     # fold would run (stack mode, publishing on), and not in a dry-run, which asks no host
+     # and holds nothing. The ids asked for are normalised as `_finished_named` does.
+-    hold_unmerged = (do_publish and cfg.wave_mode != "merge"
++    hold_unmerged = (do_publish and cfg.wave_mode not in ("merge", "none")
+                      and cfg.publisher.mode != "stub")
+     # Where a bundle can get a base of its own (#727): where the line folds for real — the
+     # same three conditions. Elsewhere every bundle is pointed as before.
+     own_bases = hold_unmerged
++    # wave_mode = "none" (#464): nothing is folded, carried or merged, so every bundle is
++    # built on its real base, and a prerequisite counts only once its PR has merged into the
++    # dependent's base: `_runnable` holds the dependent until then, named in `held_waiting`.
++    # Not in a dry-run: there, as with --no-publish, a dependent builds once its prerequisite
++    # is accepted, on the unchanged base (only #186's gate on an out-of-batch `Depends on
++    # (merged)` still holds it and asks the host, as in the other modes).
++    wait_for_merge = (do_publish and cfg.wave_mode == "none"
++                      and cfg.publisher.mode != "stub")
++    held_waiting: dict[str, list[str]] = {}
++    # … and one that pushed its branch this run with no PR on record (`_hold_without_pr`).
++    held_no_pr: set[str] = set()
+     requested = set(named) | {cfg.bundle(str(i).removeprefix("issue_")).name
+                               for i in (batch or ())}
+     # The loop stopped on a fold error or a red re-gate: that run already ends non-zero, and
+@@ -2927,21 +3127,23 @@ def _drive_and_act(
+                    if own_bases else None)
+         # `Conflicts with` partners of `held_unpushed` are held too (#629), and so are those
+         # of `held_conflict` (#674) and of `held_base` (#738). The relation is read off the
+-        # LIVE `bundles` each wave: an adopted split child adds its edges.
++        # LIVE `bundles` each wave: an adopted split child adds its edges. Not in "none"
++        # (#464): no bundle there is built on a partner's work, so the edge only orders.
+         runnable = _runnable(cfg, wave, batch_names,
+                              held=held_unpushed | held_finished | set(held_conflict)
+                              | held_base,
+                              requested=requested, hold_unmerged=hold_unmerged,
+                              unpushed=held_unpushed,
+                              conflicts=(waves.conflict_map(cfg, bundles)
+-                                        if held_unpushed or held_conflict or held_base
+-                                        else None),
++                                        if (held_unpushed or held_conflict or held_base)
++                                        and cfg.wave_mode != "none" else None),
+                              conflict_held={n: ps for n, (ps, _paths) in held_conflict.items()},
+                              # The line each target's bundles are cut from, if any (#655),
+                              # and the bundles cut from it (#729).
+                              lines={tgt: (branch, folded_tips.get(tgt))
+                                     for tgt, branch in integ.items()},
+-                             on_line=on_line, unbuilt=held_base)
++                             on_line=on_line, unbuilt=held_base,
++                             wait_for_merge=wait_for_merge, waiting=held_waiting)
+         if not runnable:
+             continue
+         # The pool, read off the schedule as it stands NOW — so a splice below has already
+@@ -3070,6 +3272,15 @@ def _drive_and_act(
+                 published.add(d.name)
+         accepted += complete
+         wave_of.update({d.name: k for d in complete})
++        # wave_mode = "none" (#464): nothing to carry. Every PR is against its real base
++        # already, and the next wave's dependents wait for those PRs to merge (`_runnable`).
++        # A bundle whose PR did not get opened is still the run's to report, on EVERY wave,
++        # the last one too: here no fold and no later wave would ever notice it.
++        if cfg.wave_mode == "none":
++            if wait_for_merge:
++                _hold_without_pr(complete, pushed=pushed, unpushed=held_unpushed,
++                                 no_pr=held_no_pr)
++            continue
+         # Carry this wave's accepted work to the NEXT wave's base (skipped on the final
+         # wave, and by --no-publish). Default "stack": fold onto a run-scoped integration
+         # branch the next wave builds on (fork-safe, no merge). Opt-in "merge": gh-merge the
+@@ -3174,6 +3385,8 @@ def _drive_and_act(
+         holds.update({n.replace("issue_", ""): "unpushed" for n in sorted(held_unpushed)})
+         holds.update({n.replace("issue_", ""): "conflict" for n in held_conflict})
+         holds.update({n.replace("issue_", ""): "base" for n in sorted(held_base)})
++        holds.update({n.replace("issue_", ""): "unmerged" for n in sorted(held_waiting)})
++        holds.update({n.replace("issue_", ""): "no-pr" for n in sorted(held_no_pr)})
+         holds.update({n.replace("issue_", ""): why for n, why in late.items()})
+     return results
+ 
+diff --git a/template/src/pdca_harness/merged.py b/template/src/pdca_harness/merged.py
+index a3167a2..e2c9b37 100644
+--- a/template/src/pdca_harness/merged.py
++++ b/template/src/pdca_harness/merged.py
+@@ -20,7 +20,8 @@ itself is gone (deleted on merge), so the answer is a commit, never a commit mes
+ open, merged or closed, and at which head commit?
+ :func:`merged_into` answers the flow's readiness question for a prerequisite no line of the
+ run carries (#647): is it merged into the DEPENDENT's target base — that repo and branch,
+-not just some branch?
++not just some branch? :func:`lands_on` is the record's half of that answer, which needs no
++host.
+ :func:`merge_and_head` answers the follow-up when the dependent is cut from the run's line
+ for that base (#655): which commit did the merge put on the base, and which head did it
+ merge — so the flow can ask whether the line has either? Only a dependent built on the line
+@@ -106,8 +107,7 @@ def merged_into(cfg: Config, dep_id: str, repo: str, base: str) -> bool:
+         return False
+     if st[0] != "MERGED":
+         return False
+-    if targeted and (rec.get("mode") == "stacked" or rec.get("repo") != repo
+-                     or rec.get("base") != base):
++    if targeted and not lands_on(rec, repo, base):
+         onto = " (an `Onto branch` commit)" if rec.get("mode") == "stacked" else ""
+         print(f"merged: {dep_id}'s PR ({pr_url}) merged, but into "
+               f"{rec.get('repo') or '?'} @ {rec.get('base') or '?'}{onto}; "
+@@ -116,6 +116,16 @@ def merged_into(cfg: Config, dep_id: str, repo: str, base: str) -> bool:
+     return True
+ 
+ 
++def lands_on(rec: dict, repo: str, base: str) -> bool:
++    """Does a merge of the PR in publish record ``rec`` count as landing on ``repo`` @
++    ``base``? Only when the record's ``repo`` and ``base`` are those and its mode is not
++    ``"stacked"`` (an ``Onto branch`` commit): the rule of :func:`merged_into`, which
++    ``flow._runnable`` also applies under ``wave_mode = "none"`` (#464) to the one state it
++    has read, whatever that state is."""
++    return (rec.get("mode") != "stacked" and rec.get("repo") == repo
++            and rec.get("base") == base)
++
++
+ def merged_head(cfg: Config, dep_id: str) -> str | None:
+     """The head commit bundle ``dep_id``'s recorded PR merged with, or ``None`` (#593).
+ 
+diff --git a/template/src/pdca_harness/publish.py b/template/src/pdca_harness/publish.py
+index 4df6486..172f129 100644
+--- a/template/src/pdca_harness/publish.py
++++ b/template/src/pdca_harness/publish.py
+@@ -23,6 +23,7 @@ fallback). The issue trailer the T4 gate enforces is ``[tracker].issue_trailer``
+ from __future__ import annotations
+ 
+ import datetime
++import hashlib
+ import json
+ import os
+ import re
+@@ -232,11 +233,13 @@ def publish(
+     # separate stacked PR), not on the target base. Distinct from `Onto branch` (#54), which
+     # appends a commit to one existing PR. The base is derived from the prereq's publish.json
+     # (never hand-written — it doesn't exist at Plan time). A wave's recorded stack base wins,
+-    # as in :func:`_stack_base_branch`.
++    # as in :func:`_stack_base_branch`. Under wave_mode = "none" (#464) a `Stacks on` edge
++    # names no branch (:func:`_stacks_on_branch` answers None there, so the refusal below
++    # skips that mode): the bundle is cut from and opened against its target base.
+     wave_base = _read_stack_base(d)
+     wave_tip = read_stack_base_tip(d)
+     stack_branch = wave_base or _stacks_on_branch(cfg, d)
+-    if brief.stacks_on(d / "brief.md") and not stack_branch:
++    if brief.stacks_on(d / "brief.md") and not stack_branch and cfg.wave_mode != "none":
+         print(f"publish: {d.name} `Stacks on` a prereq with no published branch yet — the "
+               "prereq must publish first (the flow schedules this).", file=sys.stderr)
+         return 1
+@@ -323,7 +326,8 @@ def publish(
+     # A fork-based PR's --head must be OWNER:BRANCH — `gh` resolves a bare branch name
+     # against the *base* repo (where the fork branch doesn't exist) and fails with
+     # "Head ref must be a branch". The branch lives on origin (the fork).
+-    head = f"{_fork_owner(repo) or repo_spec.split('/')[0]}:{branch}"
++    owner = _fork_owner(repo) or repo_spec.split("/")[0]
++    head = f"{owner}:{branch}"
+     # Normalize the PR body's tracker refs (#233 + #238 review): bare the closing-keyword
+     # trailer so GitHub auto-closes on merge, and deterministically ensure a clickable
+     # `[#id](url)` reference off that trailer when a URL pattern is configured. Done AFTER
+@@ -421,12 +425,23 @@ def publish(
+             r = subprocess.CompletedProcess(pr_cmd, 1, "",
+                                             f"{type(exc).__name__}: {exc}")
+         out = (r.stdout or "").strip()
+-        if r.returncode != 0:
++        # Under wave_mode = "none" (#464) the recorded PR is what releases a dependent, and
++        # `gh pr create` refuses a head that already has an open PR: an iterated bundle's,
++        # which the push above has just updated. That PR holds this work, so it is the one
++        # to record. The other modes record what they always did.
++        if r.returncode != 0 and cfg.wave_mode == "none":
++            pr_url = _open_pr_of_branch(repo_spec, branch, pr_base, owner)
++        if pr_url:
++            print(f"→ {pr_url} is already open for {branch} against {pr_base}, and the push "
++                  "above updated it; its title and description stay as they were.")
++        elif r.returncode != 0:
+             pr_failed = True
+             print(r.stderr, file=sys.stderr)
++            by_hand = (" A PR opened by hand counts only once that re-run records it, so "
++                       "re-run it before such a PR merges." if cfg.wave_mode == "none" else "")
+             print(f"\n!!! publish: branch {branch} is pushed to origin, but "
+                   "`gh pr create` FAILED — no draft PR was opened.\n"
+-                  f"    Open the draft PR by hand, or re-run `pdca publish {issue_id}`. "
++                  f"    Open the draft PR by hand, or re-run `pdca publish {issue_id}`.{by_hand} "
+                   "This is NOT done.\n",
+                   file=sys.stderr)
+         else:
+@@ -437,7 +452,7 @@ def publish(
+         "mode": "stacked-pr" if stack_branch else "new-pr",
+         "branch": branch, "pr_url": pr_url, "base": pr_base, "repo": repo_spec,
+         "by": by or _signoff_by(d) or cfg.author or "unknown", "date": today,
+-        "id_pending": pending_id,
++        "id_pending": pending_id, "patch_sha256": _patch_digest(d),
+     }
+     if ci_base:
+         # The base commit the host-CI gate certified — and, via _pin_checkout, the exact
+@@ -559,7 +574,7 @@ def _publish_stacked(
+         "mode": "stacked",
+         "branch": branch, "pr_url": pr_url, "base": base_ref, "repo": repo_spec,
+         "by": by or _signoff_by(d) or cfg.author or "unknown", "date": today,
+-        "id_pending": pending_id,
++        "id_pending": pending_id, "patch_sha256": _patch_digest(d),
+     }
+     if ci_base:
+         rec["host_ci_base"] = ci_base  # certified == pushed, auditable (#311)
+@@ -600,6 +615,18 @@ def _existing_pr(pr_list_cmd: list[str], branch: str, owner: str) -> str:
+     return ""
+ 
+ 
++def _open_pr_of_branch(repo_spec: str, branch: str, base: str, owner: str) -> str:
++    """The URL of the open PR of ``owner:branch`` against ``base`` (:func:`_existing_pr`),
++    or ``""`` — also when ``gh`` cannot be run or answers nonsense: it is asked after the
++    push, so a raise here would lose the record of the pushed branch (#632)."""
++    cmd = ["gh", "pr", "list", "--repo", repo_spec, "--head", branch, "--base", base,
++           "--state", "open", "--json", "url,number,headRefName,headRepositoryOwner"]
++    try:
++        return _existing_pr(cmd, branch, owner)
++    except Exception:  # noqa: BLE001 — any raise here comes after the push
++        return ""
++
++
+ # ----------------------------------------------------------------------------
+ def _resolve_target(d: Path) -> tuple[str, str, str]:
+     """``(repo_spec, base_branch, slug)`` from the brief, e.g.
+@@ -654,6 +681,28 @@ def _publish_record(d: Path) -> dict | None:
+         return None
+ 
+ 
++def _patch_digest(d: Path) -> str:
++    """The sha256 of the bundle's ``patch.diff``, or ``""`` with none. Each publish record
++    keeps the one it published (``patch_sha256``), so :func:`accepted_pr` can tell."""
++    patch = d / "patch.diff"
++    return hashlib.sha256(patch.read_bytes()).hexdigest() if patch.is_file() else ""
++
++
++def accepted_pr(d: Path) -> str:
++    """The URL of the PR holding bundle ``d``'s accepted work, or ``""`` (#464): the
++    ``pr_url`` of its ``publish.json``, unless that record's ``patch_sha256`` shows it was
++    written for another ``patch.diff``. An iterate keeps the record, so a rebuilt bundle
++    whose re-publish failed before its push still names the rejected attempt's PR, in this
++    run and every later one. A record older than that field cannot tell, and counts: most
++    such PRs hold the work they were opened for, and treating them as gone would leave a
++    long-merged prerequisite with no way to release its dependents."""
++    rec = _publish_record(d)
++    if not isinstance(rec, dict) or not rec.get("pr_url"):
++        return ""
++    digest = rec.get("patch_sha256")
++    return "" if digest and digest != _patch_digest(d) else str(rec["pr_url"])
++
++
+ def write_stack_base(d: Path, branch: str, tip: str | None = None) -> None:
+     """Record the integration branch a wave>0 bundle stacks on, so its Do worktree is cut
+     from the prior waves' folded work (read by :func:`_stack_base_branch`).
+@@ -760,9 +809,13 @@ def _stack_base_branch(cfg: Config, d: Path) -> str | None:
+ 
+ 
+ def _stacks_on_branch(cfg: Config, d: Path) -> str | None:
+-    """A legacy ``Stacks on:`` (#123) parent's published branch, or None."""
++    """A legacy ``Stacks on:`` (#123) parent's published branch, or None.
++
++    None under ``wave_mode = "none"`` (#464): there the edge only orders the build. The
++    flow holds the bundle until the parent's PR has merged into its own target base, so it
++    is built on, cut from and opened against that base — never the parent's branch."""
+     parents = brief.stacks_on(d / "brief.md")
+-    if not parents:
++    if not parents or cfg.wave_mode == "none":
+         return None
+     rec = _publish_record(cfg.bundle(parents[0]))
+     return rec.get("branch") if rec else None
+diff --git a/template/tests/test_flow_wave_mode_none.py b/template/tests/test_flow_wave_mode_none.py
+new file mode 100644
+index 0000000..a1069f1
+--- /dev/null
++++ b/template/tests/test_flow_wave_mode_none.py
+@@ -0,0 +1,1476 @@
++"""`[driver].wave_mode = "none"`: every PR against its real base, nothing at a wave boundary (#464).
++
++`"stack"` folds each wave onto a run-scoped integration line and `"merge"` readies and merges
++the wave's PRs. `"none"` does neither: every accepted bundle publishes as a draft PR against
++its real target base, as a one-bundle run does, and at a wave boundary nothing happens — no
++`pdca-integration/*` branch is created or pushed, nothing is folded, readied or merged, and
++the pre-wave carry of finished ids does not run. Waves still order the build, so a bundle
++whose prerequisite (`Depends on`, `Depends on (merged)` or `Stacks on`, in the batch or not)
++has not merged into its own target base is held, named on one line with the way out, and
++recorded in the run's ``holds`` as ``"unmerged"`` (exit 3). Once the prerequisite's PR has
++merged and the base as fetched has that merge, a re-run builds it on the base and opens its
++PR against the base. A chain is held the same way, link by link, each told every step that
++releases it, as that step stands: a merge to make, a PR to re-open, a fetch to fix. A
++prerequisite whose PR can never count for the base (another base or repo, an `Onto branch`
++commit) is named as such, never with "merge it". A prerequisite with no PR of its accepted
++work on record — its texts failed, its PR was not opened, or an iterate left an older
++attempt's PR on record, in this run and every later one — has nothing to merge: its dependent
++is held with "publish it first", never as waiting for a merge, and the run fails (exit 1), as
++the same failed publish does in stack mode. So it fails when a prerequisite's PR cannot be
++read, or the fetched base cannot be checked, however far the reads got: that is a fault to
++fix, not a merge to wait for. An iterated bundle whose PR is still open keeps that PR: `gh pr
++create` refuses a second one, and the push has updated the first. A bundle left with no PR is
++reported in every wave, the last one too, whether or not anything depends on it
++(``"unpushed"`` or ``"no-pr"``, exit 3). A prerequisite no PR of which can exist (no patch, or
++no usable target) has nothing to wait for. A dependent with no target of its own keeps #186's
++"not ready", and a `Conflicts with` edge only orders the build. With ``--no-publish``, or in a
++dry-run (the stub publisher), nothing waits and no host is asked, but for the gate on a
++`Depends on (merged)` edge out of the run, the same in every mode.
++An unknown `wave_mode` is reported at config load and falls back to `"stack"`.
++
++These cases drive ``flow._drive_and_act`` the way tests/test_flow_same_wave_conflict.py
++does, on the ``StackFoldGit`` fixture of tests/test_integrate_stack_bases.py (a bare
++``origin`` and a primary checkout, real git), loaded by path. The build and sign-off leaves
++are stubbed (the build records the base ``worktree._target`` gives its Do worktree, writes a
++``patch.diff`` and the publish texts, and accepts), and so is the drafting of the publish
++texts (``publish.draft_texts``: ready, or failed for the ids a case names). Publish is the
++REAL one: the publisher is in ``command`` mode, ``flow._publish_bundle`` runs
++``publish.publish``, which cuts, commits and pushes to the bare origin, and only ``gh`` is
++answered by a stub in front of ``subprocess.run`` — so the ``gh pr create --base`` asserted
++on is the one publish builds. The stub keeps the PRs it opened and refuses a second open PR
++for one head and base, as the host does. An iterate is the real ``driver._archive_iteration``.
++The exit code is ``cli._results_rc``'s, and the ``test_pdca_flow_*`` cases take it from
++``cli._flow`` itself.
++
++Only modules are imported (never a symbol the fix adds), so with the production change
++reverted these cases still load and run — and fail on their assertions.
++    cd template && PYTHONPATH=src python3 -m unittest tests.test_flow_wave_mode_none
++"""
++
++from __future__ import annotations
++
++import dataclasses
++import importlib.util
++import io
++import json
++import shutil
++import subprocess
++import tempfile
++import unittest
++from contextlib import ExitStack, redirect_stderr, redirect_stdout
++from pathlib import Path
++from types import SimpleNamespace
++from unittest import mock
++
++from pdca_harness import cli, config, driver, flow, publish, state, worktree
++
++_SPEC = importlib.util.spec_from_file_location(
++    "stack_bases_fixture", Path(__file__).with_name("test_integrate_stack_bases.py"))
++sb = importlib.util.module_from_spec(_SPEC)
++_SPEC.loader.exec_module(sb)
++
++TODAY = "2026-10-30"
++PR_URL = "https://example.test/pr/"
++
++
++class WaveModeNone(unittest.TestCase):
++
++    def setUp(self) -> None:
++        self.fx = sb.StackFoldGit()          # the fixture's real-git setUp/tearDown and helpers
++        self.fx.setUp()
++        self.addCleanup(self.fx.tearDown)
++        self.cfg = self.fx.cfg
++        self.cfg.publisher = dataclasses.replace(self.cfg.publisher, mode="command")
++        self.cfg.wave_mode = "none"
++        self.changes: dict[str, dict[str, str]] = {}     # id → the files its build adds
++        self.merged_prs: dict[str, tuple[str, str]] = {}  # PR url → (head, merge commit)
++        self.texts_fail: set[str] = set()     # ids whose publish texts fail draft/T4
++        self.create_fails: set[str] = set()   # ids whose `gh pr create` fails after the push
++        self.opened: dict[str, tuple[str, str, str]] = {}  # PR url → (owner, branch, its base)
++        self.closed_prs: set[str] = set()     # PR urls `gh pr view` reads CLOSED
++        self.view_fails = False               # every `gh pr view` fails (expired auth, say)
++        self.view_reads_left: int | None = None  # … or all but this many, from now on
++        self.list_fails = False               # `gh pr list` fails
++        self.gh_missing = False               # `gh` itself cannot be run
++        self.gh_calls: list[list[str]] = []
++        # id → (the base its Do worktree is cut from, its recorded stack base) when built
++        self.built: dict[str, tuple[str | None, str]] = {}
++        self._real_run = subprocess.run
++
++    # -- fixture ---------------------------------------------------------------------------
++
++    def _plan(self, iid: str, files: dict[str, str], *, depends_on: str = "",
++              depends_on_merged: str = "", stacks_on: str = "", conflicts_with: str = "",
++              onto_branch: str = "", target: bool = True, base: str = "main") -> Path:
++        d = self.cfg.bundle(iid)
++        extra = "".join(f"- **{name}:** {ids}\n" for name, ids in (
++            ("Depends on", depends_on), ("Depends on (merged)", depends_on_merged),
++            ("Stacks on", stacks_on), ("Conflicts with", conflicts_with),
++            ("Onto branch", onto_branch)) if ids)
++        if target and base == "main":
++            sb._brief(d, extra=extra)
++        else:   # no `Repo + branch target` (publish skips it: #186's answer), or another base
++            d.mkdir(parents=True, exist_ok=True)
++            where = f"- **Repo + branch target:** org/repo @ {base}\n" if target else ""
++            (d / "brief.md").write_text(f"- **Slug:** {iid}\n{where}{extra}", encoding="utf-8")
++        self.changes[iid] = files
++        return d
++
++    def _iterate(self, iid: str, files: dict[str, str]) -> None:
++        """``signoff --iterate-do`` of an accepted bundle: the attempt moves to
++        ``iteration-v<N>/`` and ``publish.json`` stays; the next build writes ``files``."""
++        d = self.cfg.bundle(iid)
++        driver._archive_iteration(d, driver._next_iteration_no(d), include_brief=False)
++        self.assertEqual(state.state(d), state.PLANNED)
++        self.assertTrue((d / "publish.json").is_file())
++        self.changes[iid] = files
++
++    def _record(self, iid: str) -> dict:
++        return json.loads((self.cfg.bundle(iid) / "publish.json").read_text(encoding="utf-8"))
++
++    def _publish(self, iid: str) -> int:
++        """``pdca publish <id>``: the way out the hold lines name."""
++        with self._stubbed():
++            rc = publish.publish(self.cfg, iid, by="T", today=TODAY)
++        self.err, self.out = self._err.getvalue(), self._out.getvalue()
++        self.assertNotIn("Traceback", self.err)
++        return rc
++
++    def _merge_pr(self, iid: str, *, squash: bool = False, into: str = "main") -> None:
++        """The maintainer merges ``iid``'s recorded PR into ``into``, with a merge commit or
++        squashed; ``gh`` then reads it MERGED, with its head and the commit the merge put on
++        that branch."""
++        rec = self._record(iid)
++        branch = rec["branch"]
++        head = self.fx._tip(branch)
++        h = self.fx.human
++        sb._git(h, "fetch", "-q", "origin")
++        sb._git(h, "checkout", "-q", "-B", into, f"origin/{into}")
++        if squash:
++            sb._git(h, "merge", "-q", "--squash", f"origin/{branch}")
++            sb._git(h, "commit", "-q", "-m", f"fix {iid}, squashed")
++        else:
++            sb._git(h, "merge", "-q", "--no-ff", "--no-edit", f"origin/{branch}")
++        sb._git(h, "push", "-q", "origin", into)
++        self.merged_prs[rec["pr_url"]] = (head, sb._git(h, "rev-parse", "HEAD").strip())
++
++    # -- stubs -----------------------------------------------------------------------------
++
++    def _is_open(self, url: str) -> bool:
++        return url not in self.merged_prs and url not in self.closed_prs
++
++    def _gh_stub(self, args, *a, **kw):
++        """Every ``gh`` call is recorded. ``gh pr create`` opens a PR (its URL names the id
++        of the ``--head`` branch, then a count), refuses a head and base that already have an
++        open PR, as the host does, and fails for an id in ``create_fails``; ``gh pr list``
++        answers with the open PRs of ``--head`` (and ``--base``, if given), or fails with
++        ``list_fails``; ``gh pr view`` reads a PR of ``merged_prs`` MERGED, of ``closed_prs``
++        CLOSED, any other OPEN, or fails with ``view_fails`` or once ``view_reads_left`` runs
++        out; any other ``gh`` call fails, and with ``gh_missing`` every one raises as a
++        missing executable does. Everything else runs for real."""
++        if not (isinstance(args, list) and args[:1] == ["gh"]):
++            return self._real_run(args, *a, **kw)
++        self.gh_calls.append(list(args))
++        if self.gh_missing:
++            raise FileNotFoundError(2, "No such file or directory", "gh")
++        if self.view_fails and args[1:3] == ["pr", "view"]:
++            return subprocess.CompletedProcess(args, 1, "", "gh: authentication expired")
++        if self.view_reads_left is not None and args[1:3] == ["pr", "view"]:
++            if self.view_reads_left == 0:
++                return subprocess.CompletedProcess(args, 1, "", "gh: authentication expired")
++            self.view_reads_left -= 1
++        if args[1:3] == ["pr", "create"]:
++            iid = self._pr_id(args)
++            if iid in self.create_fails:
++                return subprocess.CompletedProcess(args, 1, "", "gh: could not create the PR")
++            owner, branch = args[args.index("--head") + 1].split(":", 1)
++            base = args[args.index("--base") + 1]
++            if any(pr == (owner, branch, base) and self._is_open(u)
++                   for u, pr in self.opened.items()):
++                return subprocess.CompletedProcess(
++                    args, 1, "", f'a pull request for branch "{branch}" into branch "{base}" '
++                                 f'already exists')
++            count = sum(u.removeprefix(PR_URL).split("-")[0] == iid for u in self.opened)
++            url = f"{PR_URL}{iid}{f'-{count + 1}' if count else ''}"
++            self.opened[url] = (owner, branch, base)
++            return subprocess.CompletedProcess(args, 0, f"{url}\n", "")
++        if args[1:3] == ["pr", "list"]:
++            if self.list_fails:
++                return subprocess.CompletedProcess(args, 1, "", "gh: could not list the PRs")
++            head = args[args.index("--head") + 1]
++            base = args[args.index("--base") + 1] if "--base" in args else None
++            open_only = "--state" not in args or args[args.index("--state") + 1] == "open"
++            found = [{"url": u, "number": 1, "headRefName": br,
++                      "headRepositoryOwner": {"login": owner}}
++                     for u, (owner, br, on) in self.opened.items()
++                     if br == head and base in (None, on) and (self._is_open(u) or not open_only)]
++            return subprocess.CompletedProcess(args, 0, json.dumps(found), "")
++        if args[1:3] == ["pr", "view"]:
++            got = self.merged_prs.get(str(args[3]))
++            other = "CLOSED" if str(args[3]) in self.closed_prs else "OPEN"
++            info = ({"state": "MERGED", "headRefOid": got[0], "mergeCommit": {"oid": got[1]}}
++                    if got else {"state": other, "headRefOid": ""})
++            return subprocess.CompletedProcess(args, 0, json.dumps(info), "")
++        return subprocess.CompletedProcess(args, 1, "", "gh: not stubbed")
++
++    @staticmethod
++    def _pr_id(create: list[str]) -> str:
++        """The bundle id of a ``gh pr create`` call: from its ``--head OWNER:fix/<id>-<slug>``."""
++        branch = create[create.index("--head") + 1].split(":", 1)[-1]
++        return branch.removeprefix("fix/").split("-", 1)[0]
++
++    def _drive_wave(self, cfg, wave: list[Path], **_kw) -> int:
++        """Build and accept each bundle, recording what its Do worktree is cut from."""
++        for d in wave:
++            iid = d.name.removeprefix("issue_")
++            target = worktree._target(d, cfg)
++            self.built[iid] = (target[1] if target else None, publish.read_stack_base(d))
++            (d / "patch.diff").write_text(
++                "".join(sb._new_file_patch(n, t.rstrip("\n"))
++                        for n, t in self.changes[iid].items()), encoding="utf-8")
++            (d / publish.COMMIT_MSG).write_text(f"fix {iid}\n\nFixes #{iid}\n",
++                                                encoding="utf-8")
++            (d / publish.PR_BODY).write_text(f"**User impact:** {iid}\n\nFixes #{iid}\n",
++                                             encoding="utf-8")
++            sb._accept(d)
++        return 1
++
++    def _texts_ready(self, _cfg, d: Path, *_a, **_kw) -> bool:
++        """``publish.draft_texts``: ready, except for an id in ``texts_fail``."""
++        return d.name.removeprefix("issue_") not in self.texts_fail
++
++    def _run(self, drive: list[str], batch: list[str], *, do_publish: bool = True) -> None:
++        """One run asked for ``batch``, driving ``drive`` (a re-run drives what the earlier
++        one left, as ``flow_ids`` does)."""
++        bundles = [self.cfg.bundle(i) for i in drive]
++        self.holds: dict[str, str] = {}
++        with self._stubbed():
++            self.results = flow._drive_and_act(self.cfg, bundles, do_publish=do_publish,
++                                               do_act=False, by="T", today=TODAY,
++                                               batch=batch, holds=self.holds)
++        self.err, self.out = self._err.getvalue(), self._out.getvalue()
++        self.rc = cli._results_rc(self.results, holds=self.holds)
++        self.assertNotIn("Traceback", self.err)
++
++    def _stubbed(self) -> ExitStack:
++        """One run's stubs, with its stdout and stderr captured and its ``gh`` calls counted
++        from here."""
++        self._err, self._out = io.StringIO(), io.StringIO()
++        self.calls_before = len(self.gh_calls)
++        stack = ExitStack()
++        stack.enter_context(mock.patch.object(subprocess, "run", self._gh_stub))
++        stack.enter_context(mock.patch.object(flow, "_drive_wave", self._drive_wave))
++        stack.enter_context(mock.patch.object(publish, "draft_texts", self._texts_ready))
++        stack.enter_context(redirect_stdout(self._out))
++        stack.enter_context(redirect_stderr(self._err))
++        return stack
++
++    def _pdca_flow(self, *ids: str) -> int:
++        """``pdca flow <ids…>`` through ``cli._flow``, which returns the process's exit code
++        (publishing on, ``--no-act``)."""
++        args = SimpleNamespace(issue_ids=list(ids), from_csv=None, from_briefs=None,
++                               no_publish=False, no_act=True, by="T", lanes=None,
++                               max_passes=None)
++        with self._stubbed():
++            rc = cli._flow(self.cfg, args)
++        self.err, self.out = self._err.getvalue(), self._out.getvalue()
++        self.assertNotIn("Traceback", self.err)
++        return rc
++
++    # -- assertions ------------------------------------------------------------------------
++
++    def _gh(self, *sub: str) -> list[list[str]]:
++        """The last run's ``gh <sub…>`` calls."""
++        return [c for c in self.gh_calls[self.calls_before:] if c[1:1 + len(sub)] == list(sub)]
++
++    def _pr_bases(self) -> dict[str, str]:
++        """id → the ``--base`` of each ``gh pr create`` the last run made."""
++        return {self._pr_id(c): c[c.index("--base") + 1] for c in self._gh("pr", "create")}
++
++    def _integration_branches(self) -> list[str]:
++        return sb._git(self.fx.origin, "for-each-ref", "--format=%(refname)",
++                       "refs/heads/pdca-integration").split()
++
++    def _nothing_at_the_boundary(self) -> None:
++        """No integration line on origin; nothing readied or merged."""
++        self.assertEqual(self._integration_branches(), [], self.err)
++        self.assertEqual([c for c in self.gh_calls if c[1:3] in (["pr", "ready"],
++                                                                 ["pr", "merge"])], [])
++
++    def _held_lines(self, iid: str) -> list[str]:
++        return [x for x in self.err.splitlines() if x.startswith(f"flow: issue_{iid} held")]
++
++    def _held_line(self, iid: str) -> str:
++        """The ONE line naming ``iid`` as held."""
++        held = self._held_lines(iid)
++        self.assertEqual(len(held), 1, self.err)
++        return held[0]
++
++    def _held_unmerged(self, iid: str, prereq: str) -> None:
++        """``iid`` was not built, is PLANNED, and is named on ONE line as held for
++        ``prereq``'s PR not merged into main — with no advice about a line."""
++        self._held_unmerged_into("main", iid, prereq)
++
++    def _held_unmerged_into(self, base: str, iid: str, prereq: str) -> None:
++        self.assertNotIn(iid, self.built, self.err)
++        self.assertEqual(self.results[iid], state.PLANNED, self.err)
++        held = self._held_lines(iid)
++        self.assertEqual(len(held), 1, self.err)
++        self.assertIn(f"issue_{prereq}", held[0])
++        self.assertIn(f"not merged into {base}", held[0])
++        self.assertIn("merge", held[0].split("To build it,", 1)[-1])
++        self.assertNotIn("line of this run", held[0])
++        self.assertNotIn("carries them", held[0])
++
++    def _held_for_no_pr(self, iid: str, prereq: str) -> None:
++        """``iid`` was not built, is PLANNED, and is named on ONE line as held because
++        ``prereq`` has no PR of its accepted work to merge, with the way out (publish it,
++        then merge its PR) — never as waiting for a PR that exists; the run fails (1)."""
++        self.assertNotIn(iid, self.built, self.err)
++        self.assertEqual(self.results[iid], state.PLANNED, self.err)
++        held = self._held_lines(iid)
++        self.assertEqual(len(held), 1, self.err)
++        self.assertIn(f"issue_{prereq}", held[0])
++        self.assertIn("no PR of that work is on record", held[0])
++        self.assertIn(f"publish them (`pdca publish <id>` for {prereq})", held[0])
++        self.assertNotIn("not merged into", held[0])
++        self.assertNotIn("line of this run", held[0])
++        self.assertNotIn(iid, self.holds)
++        self.assertEqual(self.rc, 1)
++
++    def _held_for_no_landing(self, iid: str, prereq: str, why: str) -> None:
++        """``iid`` was not built, is PLANNED, and is named on ONE line as held because no
++        merge of ``prereq``'s PR can count for main, for reason ``why``, with a way out that
++        can work: never told to merge it. An ``"unmerged"`` hold: nothing failed (3)."""
++        self.assertNotIn(iid, self.built, self.err)
++        self.assertEqual(self.results[iid], state.PLANNED, self.err)
++        held = self._held_lines(iid)
++        self.assertEqual(len(held), 1, self.err)
++        self.assertIn(f"prerequisite(s) issue_{prereq} ({why}): no merge of their PR counts as "
++                      f"landing on main (org/repo), so none will release issue_{iid}", held[0])
++        self.assertIn(f"To build it, remove that edge from issue_{iid}'s brief, or rebuild them "
++                      f"with their PR against org/repo @ main", held[0])
++        self.assertNotIn("merge the PR", held[0])
++        self.assertNotIn("merge their PR", held[0])
++        self.assertEqual(self.holds.get(iid), "unmerged")
++        self.assertEqual(self.rc, 3)
++
++    def _published_on_the_base(self, iid: str) -> dict:
++        """``iid`` was built from origin/main, and its PR branch cut from origin's main and
++        published as a plain PR against main."""
++        self.assertEqual(self.built.get(iid), ("origin/main", ""), self.err)
++        rec = self._record(iid)
++        self.assertEqual((rec["mode"], rec["base"]), ("new-pr", "main"))
++        self.assertEqual(rec["cut_from"], self.fx._tip("main"))
++        self.assertEqual(rec["pr_url"], PR_URL + iid)
++        return rec
++
++    # -- (a): independent bundles publish against the base; the dependent waits -----------
++
++    def test_independent_bundles_publish_on_the_base_and_a_dependent_is_held(self):
++        self._plan("10", {"a.txt": "a\n"})
++        self._plan("12", {"c.txt": "c\n"})
++        self._plan("11", {"b.txt": "b\n"}, depends_on="10")
++        self._run(["10", "11", "12"], ["10", "11", "12"])
++
++        self.assertEqual(self._pr_bases(), {"10": "main", "12": "main"}, self.err)
++        self._published_on_the_base("10")
++        self._published_on_the_base("12")
++        self.assertEqual((self.results["10"], self.results["12"]),
++                         (state.COMPLETE, state.COMPLETE))
++        self._nothing_at_the_boundary()
++        self._held_unmerged("11", "10")
++        self.assertEqual(self.holds, {"11": "unmerged"})
++        self.assertEqual(self.rc, 3)
++
++    # -- (b): once the prerequisite merged, a re-run builds it on the fetched base ----------
++
++    def test_once_the_prerequisite_merged_a_rerun_builds_the_dependent_on_the_base(self):
++        self._plan("10", {"a.txt": "a\n"})
++        self._plan("11", {"b.txt": "b\n"}, depends_on="10")
++        self._run(["10", "11"], ["10", "11"])
++        self._held_unmerged("11", "10")
++
++        self._merge_pr("10")
++        self._run(["11"], ["10", "11"])
++        self.assertEqual(self.results, {"11": state.COMPLETE}, self.err)
++        self.assertEqual(self._pr_bases(), {"11": "main"}, self.err)
++        rec = self._published_on_the_base("11")
++        # The base it was cut from has the prerequisite's merge.
++        self.assertTrue(self.fx._ancestor(self.merged_prs[PR_URL + "10"][1], rec["cut_from"]))
++        self.assertEqual(self._held_lines("11"), [], self.err)
++        self._nothing_at_the_boundary()
++        self.assertEqual((self.holds, self.rc), ({}, 0))
++
++    # -- (a2): a `Stacks on` edge is held the same way, and released onto the base ---------
++
++    def test_a_stacks_on_dependent_waits_for_the_merge_and_publishes_against_the_base(self):
++        self._plan("10", {"a.txt": "a\n"})
++        self._plan("11", {"b.txt": "b\n"}, stacks_on="10")
++        self._run(["10", "11"], ["10", "11"])
++        self.assertEqual(self._pr_bases(), {"10": "main"}, self.err)
++        self._nothing_at_the_boundary()
++        self._held_unmerged("11", "10")
++        self.assertEqual((self.holds, self.rc), ({"11": "unmerged"}, 3))
++
++        self._merge_pr("10")
++        self._run(["11"], ["10", "11"])
++        self.assertEqual(self.results, {"11": state.COMPLETE}, self.err)
++        # Built from, cut from, and opened against the base — never 10's branch.
++        self.assertEqual(self._pr_bases(), {"11": "main"}, self.err)
++        self._published_on_the_base("11")
++        self._nothing_at_the_boundary()
++        self.assertEqual((self.holds, self.rc), ({}, 0))
++
++    # -- every edge, in the batch or not: `Depends on (merged)`, and a prior run's prereq --
++
++    def test_a_depends_on_merged_edge_in_the_batch_is_held_the_same_way(self):
++        self._plan("10", {"a.txt": "a\n"})
++        self._plan("11", {"b.txt": "b\n"}, depends_on_merged="10")
++        self._run(["10", "11"], ["10", "11"])
++        self.assertEqual(self._pr_bases(), {"10": "main"}, self.err)
++        self._nothing_at_the_boundary()
++        self._held_unmerged("11", "10")
++        self.assertEqual((self.holds, self.rc), ({"11": "unmerged"}, 3))
++
++        self._merge_pr("10")
++        self._run(["11"], ["10", "11"])
++        self.assertEqual(self.results, {"11": state.COMPLETE}, self.err)
++        self.assertEqual(self._pr_bases(), {"11": "main"}, self.err)
++        self._published_on_the_base("11")
++        self.assertEqual((self.holds, self.rc), ({}, 0))
++
++    def test_a_prerequisite_an_earlier_run_finished_holds_its_dependent_the_same_way(self):
++        # 10 is neither driven nor asked for: the path stack mode's #647 hold takes, with
++        # its "name it in the same command so the run's line carries it" advice.
++        self._plan("10", {"a.txt": "a\n"})
++        self._run(["10"], ["10"])
++        self.assertEqual(self._pr_bases(), {"10": "main"}, self.err)
++        self._plan("11", {"b.txt": "b\n"}, depends_on="10")
++        self._run(["11"], ["11"])
++        self._held_unmerged("11", "10")
++        self.assertNotIn("same `pdca flow <ids>` command", self.err)
++        self._nothing_at_the_boundary()
++        self.assertEqual((self.holds, self.rc), ({"11": "unmerged"}, 3))
++
++        self._merge_pr("10")
++        self._run(["11"], ["11"])
++        self.assertEqual(self.results, {"11": state.COMPLETE}, self.err)
++        self.assertEqual(self._pr_bases(), {"11": "main"}, self.err)
++        self._published_on_the_base("11")
++        self.assertEqual((self.holds, self.rc), ({}, 0))
++
++    def test_a_closed_pr_is_named_with_the_step_to_re_open_it(self):
++        self._plan("10", {"a.txt": "a\n"})
++        self._plan("11", {"b.txt": "b\n"}, depends_on="10")
++        self._run(["10", "11"], ["10", "11"])
++        self._held_unmerged("11", "10")
++        self.assertNotIn("re-open", self._held_line("11"))
++
++        self.closed_prs.add(PR_URL + "10")
++        self._run(["11"], ["10", "11"])
++        self._held_unmerged("11", "10")
++        self.assertIn("To build it, re-open the PR of issue_10 and merge it into main, then "
++                      "re-run.", self._held_line("11"))
++        self.assertEqual((self.holds, self.rc), ({"11": "unmerged"}, 3))
++
++    def test_a_squash_merge_with_its_branch_deleted_releases_the_dependent(self):
++        # Nothing here depends on the PR's own commits reaching the base: the commit the
++        # merge put on it is what counts, and the fetched base has that one.
++        self._plan("10", {"a.txt": "a\n"})
++        self._plan("11", {"b.txt": "b\n"}, depends_on="10")
++        self._run(["10", "11"], ["10", "11"])
++        branch = json.loads((self.cfg.bundle("10") / "publish.json")
++                            .read_text(encoding="utf-8"))["branch"]
++        self._merge_pr("10", squash=True)
++        self.fx._delete(branch)
++        self._run(["11"], ["10", "11"])
++        self.assertEqual(self.results, {"11": state.COMPLETE}, self.err)
++        rec = self._published_on_the_base("11")
++        self.assertTrue(self.fx._ancestor(self.merged_prs[PR_URL + "10"][1], rec["cut_from"]))
++        self.assertEqual((self.holds, self.rc), ({}, 0))
++
++    # -- a PR no merge of which can count for the base: named so, never "merge it" ------------
++
++    def test_a_pr_for_another_base_can_never_release_the_dependent(self):
++        # A real publish against `dev`. The state does not decide: open or merged, its merge
++        # is not on 11's base.
++        self.fx._push_from_human({"dev.txt": "dev\n"}, to="dev")
++        self._plan("10", {"a.txt": "a\n"}, base="dev")
++        self._plan("11", {"b.txt": "b\n"}, depends_on="10")
++        self._run(["10", "11"], ["10", "11"])
++        self.assertEqual(self._pr_bases(), {"10": "dev"}, self.err)
++        self._held_for_no_landing("11", "10", "its PR goes to dev on org/repo")
++        self.assertEqual(self._gh("pr", "view"), [])     # no state can change the answer
++        self.assertEqual(self.holds, {"11": "unmerged"})
++
++        self._merge_pr("10", into="dev")
++        self._run(["11"], ["10", "11"])
++        self._held_for_no_landing("11", "10", "its PR goes to dev on org/repo")
++        self.assertEqual(self.holds, {"11": "unmerged"})
++
++    def test_a_merge_into_the_bundles_own_base_counts_whichever_branch_that_is(self):
++        self.fx._push_from_human({"dev.txt": "dev\n"}, to="dev")
++        self._plan("10", {"a.txt": "a\n"}, base="dev")
++        self._plan("11", {"b.txt": "b\n"}, depends_on="10", base="dev")
++        self._run(["10", "11"], ["10", "11"])
++        self.assertEqual(self._pr_bases(), {"10": "dev"}, self.err)
++        self._held_unmerged_into("dev", "11", "10")
++        self.assertEqual((self.holds, self.rc), ({"11": "unmerged"}, 3))
++
++        self._merge_pr("10", into="dev")
++        self._run(["11"], ["10", "11"])
++        self.assertEqual(self.results, {"11": state.COMPLETE}, self.err)
++        self.assertEqual(self._pr_bases(), {"11": "dev"}, self.err)
++        self.assertEqual(self._record("11")["cut_from"], self.fx._tip("dev"))
++        self.assertEqual((self.holds, self.rc), ({}, 0))
++
++    def test_a_pr_on_record_for_another_repo_can_never_release_the_dependent(self):
++        self._plan("10", {"a.txt": "a\n"})
++        self._plan("11", {"b.txt": "b\n"}, depends_on="10")
++        self._run(["10", "11"], ["10", "11"])
++        pj = self.cfg.bundle("10") / "publish.json"
++        pj.write_text(json.dumps({**self._record("10"), "repo": "org/other"}), encoding="utf-8")
++        self._run(["11"], ["10", "11"])
++        self._held_for_no_landing("11", "10", "its PR goes to main on org/other")
++
++    def test_an_onto_branch_prerequisite_can_never_release_the_dependent(self):
++        # A real `Onto branch` publish: one commit on an existing PR's branch.
++        self.fx._push_from_human({"f.txt": "f\n"}, to="feature")
++        existing = f"{PR_URL}feature"
++        self.opened[existing] = (publish._fork_owner(self.fx.primary), "feature", "main")
++        self._plan("10", {"a.txt": "a\n"}, onto_branch="origin/feature")
++        self._plan("11", {"b.txt": "b\n"}, depends_on="10")
++        self._run(["10", "11"], ["10", "11"])
++        rec = self._record("10")
++        self.assertEqual((rec["mode"], rec["pr_url"]), ("stacked", existing))
++        self.assertEqual(self._pr_bases(), {}, self.err)
++        why = "an `Onto branch` commit on another PR"
++        self._held_for_no_landing("11", "10", why)
++        self.assertEqual(self.holds, {"11": "unmerged"})
++
++        # That PR merges into 11's own base: the printed step cannot be "merge it" now.
++        self._merge_pr("10")
++        self._run(["11"], ["10", "11"])
++        self._held_for_no_landing("11", "10", why)
++        self.assertEqual(self._gh("pr", "view"), [])
++
++    def test_a_prerequisite_with_no_pr_yet_is_judged_by_where_its_brief_sends_it(self):
++        # "Publish it, then merge its PR into main" could not work: its PR goes to dev.
++        self.texts_fail.add("10")
++        self._plan("10", {"a.txt": "a\n"}, base="dev")
++        self._plan("11", {"b.txt": "b\n"}, depends_on="10")
++        self._run(["10", "11"], ["10", "11"])
++        self._held_for_no_landing("11", "10", "its PR goes to dev on org/repo")
++        self.assertEqual(self.holds, {"10": "unpushed", "11": "unmerged"})
++
++    def test_an_onto_branch_prerequisite_with_no_pr_yet_is_named_by_its_brief(self):
++        # It targets main, as 11 does: only the `Onto branch` field says its PR cannot count.
++        self.texts_fail.add("10")
++        self._plan("10", {"a.txt": "a\n"}, onto_branch="origin/feature")
++        self._plan("11", {"b.txt": "b\n"}, depends_on="10")
++        self._run(["10", "11"], ["10", "11"])
++        self._held_for_no_landing("11", "10", "an `Onto branch` commit on another PR")
++        self.assertEqual(self.holds, {"10": "unpushed", "11": "unmerged"})
++
++    def test_a_prerequisite_rebuilt_for_the_bundles_base_is_not_judged_by_its_old_record(self):
++        # Published against dev, re-targeted to main and rebuilt, its texts failing: the record
++        # is the rejected attempt's, so it no longer says where a PR of this work goes.
++        self.fx._push_from_human({"dev.txt": "dev\n"}, to="dev")
++        self._plan("10", {"a.txt": "a\n"}, base="dev")
++        self._plan("11", {"b.txt": "b\n"}, depends_on="10")
++        self._run(["10", "11"], ["10", "11"])
++        self._held_for_no_landing("11", "10", "its PR goes to dev on org/repo")
++
++        self._plan("10", {"a.txt": "a\n"})       # the brief now says main
++        self._iterate("10", {"a.txt": "a, again\n"})
++        self.texts_fail.add("10")
++        self._run(["10", "11"], ["10", "11"])
++        self._held_for_no_pr("11", "10")
++        self.assertEqual(self.holds, {"10": "unpushed"})
++
++        self.assertEqual(self._publish("10"), 0, self.err)
++        self.assertEqual(self._record("10")["base"], "main")
++        self._run(["11"], ["10", "11"])
++        self._held_unmerged("11", "10")
++        self.assertEqual((self.holds, self.rc), ({"11": "unmerged"}, 3))
++
++    def test_a_link_of_a_chain_bound_for_another_base_is_named_before_it_is_built(self):
++        # 11 is on dev: held, for 10's PR goes to main. 12 is on main: 11's PR never will be.
++        self._plan("10", {"a.txt": "a\n"})
++        self._plan("11", {"b.txt": "b\n"}, depends_on="10", base="dev")
++        self._plan("12", {"c.txt": "c\n"}, depends_on="11")
++        self._run(["10", "11", "12"], ["10", "11", "12"])
++        self.assertIn("no merge of their PR counts as landing on dev (org/repo)",
++                      self._held_line("11"))
++        self._held_for_no_landing("12", "11", "its PR goes to dev on org/repo")
++        self.assertEqual(self.holds, {"11": "unmerged", "12": "unmerged"})
++
++    # -- a dependent with no target of its own: #186's "not ready", not a hold ---------------
++
++    def test_a_dependent_with_no_target_is_not_ready_until_its_prerequisite_merges(self):
++        self._plan("10", {"a.txt": "a\n"})
++        self._plan("11", {"b.txt": "b\n"}, depends_on="10", target=False)
++        self._run(["10", "11"], ["10", "11"])
++        self.assertNotIn("11", self.built, self.err)
++        self.assertEqual(self.results["11"], state.PLANNED)
++        self.assertEqual(self._held_lines("11"), [], self.err)
++        self.assertIn("flow: issue_11 skipped — prerequisite(s) not ready (10)", self.err)
++        self.assertEqual((self.holds, self.rc), ({}, 1))
++
++        self._merge_pr("10")
++        self._run(["11"], ["10", "11"])
++        self.assertEqual(self.results, {"11": state.COMPLETE}, self.err)
++        self.assertEqual(self.built["11"], (None, ""), self.err)   # no target, no PR
++        self.assertEqual(self._pr_bases(), {}, self.err)
++        self.assertEqual((self.holds, self.rc), ({}, 0))
++
++    # -- a prerequisite with no PR of its accepted work: nothing to merge, a failure -------
++
++    def test_a_prerequisite_whose_texts_failed_has_no_pr_and_its_dependent_fails(self):
++        self.texts_fail.add("10")
++        self._plan("10", {"a.txt": "a\n"})
++        self._plan("11", {"b.txt": "b\n"}, depends_on="10")
++        self._run(["10", "11"], ["10", "11"])
++        self.assertEqual(self.results["10"], state.COMPLETE)
++        self.assertFalse((self.cfg.bundle("10") / "publish.json").exists())
++        self.assertEqual(self._pr_bases(), {}, self.err)
++        self.assertIn("flow: issue_10 pushed no branch this run — no PR holds its accepted "
++                      "work; bundles that depend on it are held this run.", self.err)
++        self._held_for_no_pr("11", "10")
++        self.assertEqual(self.holds, {"10": "unpushed"})
++        self.assertEqual(self._gh("pr", "view"), [])
++        self._nothing_at_the_boundary()
++
++    def test_a_prerequisite_whose_pr_was_not_opened_has_no_pr_and_its_dependent_fails(self):
++        self.create_fails.add("10")
++        self._plan("10", {"a.txt": "a\n"})
++        self._plan("11", {"b.txt": "b\n"}, depends_on="10")
++        self._run(["10", "11"], ["10", "11"])
++        rec = self._record("10")
++        self.assertTrue(self.fx._has(rec["branch"]), self.err)   # its branch was pushed …
++        self.assertEqual(rec["pr_url"], "")                       # … but no PR was opened
++        self._held_for_no_pr("11", "10")
++        self.assertEqual(self.holds, {"10": "no-pr"})
++        self.assertEqual(self._gh("pr", "view"), [])
++        self._nothing_at_the_boundary()
++
++    def test_an_iterated_prerequisite_not_published_again_is_not_waited_on_by_its_old_pr(
++            self):
++        self._plan("10", {"a.txt": "a\n"})
++        self._plan("11", {"b.txt": "b\n"}, depends_on="10")
++        self._run(["10", "11"], ["10", "11"])
++        self._held_unmerged("11", "10")
++        # 10 is iterated, rebuilt and accepted, but its texts fail: PR 10 holds the old,
++        # rejected work.
++        self._iterate("10", {"a.txt": "a, again\n"})
++        self.texts_fail.add("10")
++        self._run(["10", "11"], ["10", "11"])
++        self.assertEqual(self._record("10")["pr_url"], PR_URL + "10")   # still on record
++        self._held_for_no_pr("11", "10")
++        self.assertEqual(self.holds, {"10": "unpushed"})
++        self.assertEqual(self._gh("pr", "view"), [])               # … and never asked about
++        self._nothing_at_the_boundary()
++
++        # A re-run does not drive 10 (it is COMPLETE) and has no memory of the last one: the
++        # record itself says it is an earlier attempt's.
++        self._run(["11"], ["10", "11"])
++        self.assertEqual(self.holds, {})
++        self._held_for_no_pr("11", "10")
++        self.assertEqual(self._gh("pr", "view"), [])
++
++        # … so the old PR's merge does not release 11: what merged is not what was accepted.
++        self._merge_pr("10")
++        self._run(["11"], ["10", "11"])
++        self.assertEqual(self.holds, {})
++        self._held_for_no_pr("11", "10")
++        self.assertNotIn("11", self.built, self.err)
++
++    def test_publishing_an_iterated_prerequisite_again_makes_its_pr_the_one_to_merge(self):
++        self._plan("10", {"a.txt": "a\n"})
++        self._plan("11", {"b.txt": "b\n"}, depends_on="10")
++        self._run(["10", "11"], ["10", "11"])
++        self._iterate("10", {"a.txt": "a, again\n"})
++        self.texts_fail.add("10")
++        self._run(["10", "11"], ["10", "11"])
++        self._held_for_no_pr("11", "10")
++
++        # The way out its line names: `pdca publish 10`. The open PR takes the rebuilt work.
++        self.assertEqual(self._publish("10"), 0, self.err)
++        rec = self._record("10")
++        self.assertEqual(rec["pr_url"], PR_URL + "10")
++        self.assertEqual(sb._git(self.fx.origin, "show", f"{rec['branch']}:a.txt"), "a, again\n")
++        self._run(["11"], ["10", "11"])
++        self._held_unmerged("11", "10")
++        self.assertEqual((self.holds, self.rc), ({"11": "unmerged"}, 3))
++
++        self._merge_pr("10")
++        self._run(["11"], ["10", "11"])
++        self.assertEqual(self.results, {"11": state.COMPLETE}, self.err)
++        self.assertEqual(sb._git(self.fx.origin, "show", "main:a.txt"), "a, again\n")
++        self.assertEqual((self.holds, self.rc), ({}, 0))
++
++    def test_a_rebuild_with_the_same_patch_keeps_its_pr_on_later_runs(self):
++        self._plan("10", {"a.txt": "a\n"})
++        self._plan("11", {"b.txt": "b\n"}, depends_on="10")
++        self._run(["10", "11"], ["10", "11"])
++        self._iterate("10", {"a.txt": "a\n"})
++        self.texts_fail.add("10")
++        self._run(["10", "11"], ["10", "11"])
++        self.assertEqual(self.holds, {"10": "unpushed"})   # this run pushed nothing of it …
++        self._run(["11"], ["10", "11"])
++        self._held_unmerged("11", "10")                    # … but PR 10 does hold that patch
++        self.assertEqual((self.holds, self.rc), ({"11": "unmerged"}, 3))
++
++    def test_a_record_written_before_the_patch_digest_counts_as_the_accepted_work(self):
++        # An instance switching to "none": its bundles were published by an older harness.
++        self._plan("10", {"a.txt": "a\n"})
++        self._plan("11", {"b.txt": "b\n"}, depends_on="10")
++        self._run(["10", "11"], ["10", "11"])
++        rec = self._record("10")
++        rec.pop("patch_sha256", None)
++        (self.cfg.bundle("10") / "publish.json").write_text(json.dumps(rec), encoding="utf-8")
++        self._run(["11"], ["10", "11"])
++        self._held_unmerged("11", "10")
++        self._merge_pr("10")
++        self._run(["11"], ["10", "11"])
++        self.assertEqual(self.results, {"11": state.COMPLETE}, self.err)
++        self.assertEqual((self.holds, self.rc), ({}, 0))
++
++    # -- an iterated bundle whose PR is still open: the push updated it, and it counts --------
++
++    def test_an_iterated_prerequisite_keeps_its_open_pr_and_its_merge_releases_the_dependent(
++            self):
++        self._plan("10", {"a.txt": "a\n"})
++        self._plan("11", {"b.txt": "b\n"}, depends_on="10")
++        self._run(["10", "11"], ["10", "11"])
++        self._iterate("10", {"a.txt": "a, again\n"})
++        self._run(["10", "11"], ["10", "11"])
++        self.assertEqual(len(self._gh("pr", "create")), 1, self.err)   # refused, as the host does
++        rec = self._record("10")
++        self.assertEqual(rec["pr_url"], PR_URL + "10", self.err)
++        self.assertEqual(sb._git(self.fx.origin, "show", f"{rec['branch']}:a.txt"), "a, again\n")
++        self.assertNotIn("FAILED", self.err)
++        self.assertIn("is already open for", self.out)
++        self._held_unmerged("11", "10")
++        self.assertEqual((self.holds, self.rc), ({"11": "unmerged"}, 3))
++
++        self._merge_pr("10")
++        self._run(["11"], ["10", "11"])
++        self.assertEqual(self.results, {"11": state.COMPLETE}, self.err)
++        self.assertEqual(sb._git(self.fx.origin, "show", "main:a.txt"), "a, again\n")
++        self.assertEqual((self.holds, self.rc), ({}, 0))
++
++    def test_a_lone_iterated_bundle_whose_pr_is_still_open_is_a_clean_run(self):
++        self._plan("10", {"a.txt": "a\n"})
++        self.assertEqual(self._pdca_flow("10"), 0, self.err)
++        self._iterate("10", {"a.txt": "a, again\n"})
++        self.assertEqual(self._pdca_flow("10"), 0, self.err)
++        self.assertEqual(self._record("10")["pr_url"], PR_URL + "10")
++
++    def test_an_iterated_bundle_whose_old_pr_merged_gets_a_new_pr(self):
++        self._plan("10", {"a.txt": "a\n"})
++        self._plan("11", {"b.txt": "b\n"}, depends_on="10")
++        self._run(["10", "11"], ["10", "11"])
++        self._merge_pr("10")
++        # A follow-up on the same bundle: the merged PR must not be taken for it.
++        self._iterate("10", {"z.txt": "z\n"})
++        self._run(["10", "11"], ["10", "11"])
++        self.assertEqual(self._record("10")["pr_url"], PR_URL + "10-2", self.err)
++        self._held_unmerged("11", "10")
++        self.assertEqual((self.holds, self.rc), ({"11": "unmerged"}, 3))
++
++    def test_an_old_pr_that_merged_is_not_taken_when_no_new_one_can_be_opened(self):
++        self._plan("10", {"a.txt": "a\n"})
++        self._run(["10"], ["10"])
++        self._merge_pr("10")
++        self._iterate("10", {"z.txt": "z\n"})
++        self.create_fails.add("10")
++        self._run(["10"], ["10"])
++        self.assertEqual(self._record("10")["pr_url"], "", self.err)
++        self.assertEqual((self.holds, self.rc), ({"10": "no-pr"}, 3))
++
++    def test_a_failed_lookup_leaves_no_pr_and_pdca_publish_is_the_way_out(self):
++        self._plan("10", {"a.txt": "a\n"})
++        self._plan("11", {"b.txt": "b\n"}, depends_on="10")
++        self._run(["10", "11"], ["10", "11"])
++        self._iterate("10", {"a.txt": "a, again\n"})
++        self.list_fails = True
++        self._run(["10", "11"], ["10", "11"])
++        self.assertEqual(self._record("10")["pr_url"], "")
++        self.assertIn("`gh pr create` FAILED", self.err)
++        self._held_for_no_pr("11", "10")
++        self.assertEqual(self.holds, {"10": "no-pr"})
++
++        self.list_fails = False
++        self.assertEqual(self._publish("10"), 0, self.err)
++        self.assertEqual(self._record("10")["pr_url"], PR_URL + "10")
++        self._run(["11"], ["10", "11"])
++        self._held_unmerged("11", "10")
++        self.assertEqual((self.holds, self.rc), ({"11": "unmerged"}, 3))
++
++    def test_a_pr_opened_by_hand_counts_once_pdca_publish_records_it(self):
++        self.create_fails.add("10")
++        self._plan("10", {"a.txt": "a\n"})
++        self._run(["10"], ["10"])
++        self.assertIn("A PR opened by hand counts only once that re-run records it", self.err)
++        rec = self._record("10")
++        self.assertEqual(rec["pr_url"], "")
++        by_hand = f"{PR_URL}by-hand"
++        self.opened[by_hand] = (publish._fork_owner(self.fx.primary), rec["branch"], "main")
++        self.assertEqual(self._publish("10"), 0, self.err)
++        self.assertEqual(self._record("10")["pr_url"], by_hand)
++
++    def test_a_missing_gh_on_the_lookup_still_records_the_pushed_branch(self):
++        self._plan("10", {"a.txt": "a\n"})
++        self._run(["10"], ["10"])
++        self._iterate("10", {"a.txt": "a, again\n"})
++        self.gh_missing = True
++        self._run(["10"], ["10"])
++        rec = self._record("10")
++        self.assertEqual(rec["pr_url"], "")
++        self.assertEqual(sb._git(self.fx.origin, "show", f"{rec['branch']}:a.txt"), "a, again\n")
++        self.assertEqual((self.holds, self.rc), ({"10": "no-pr"}, 3))
++
++    def test_an_open_pr_for_another_base_is_not_taken_for_the_bundles_own(self):
++        self._plan("10", {"a.txt": "a\n"})
++        self._run(["10"], ["10"])
++        rec = self._record("10")
++        self.opened[PR_URL + "10"] = (self.opened[PR_URL + "10"][0], rec["branch"], "dev")
++        self.create_fails.add("10")
++        self._iterate("10", {"a.txt": "a, again\n"})
++        self._run(["10"], ["10"])
++        self.assertEqual(self._record("10")["pr_url"], "", self.err)
++        self.assertEqual(self.holds, {"10": "no-pr"})
++
++    def test_an_open_pr_of_another_owner_is_not_taken_for_the_bundles_own(self):
++        self._plan("10", {"a.txt": "a\n"})
++        self._run(["10"], ["10"])
++        rec = self._record("10")
++        self.opened[PR_URL + "10"] = ("someone-else", rec["branch"], "main")
++        self.create_fails.add("10")
++        self._iterate("10", {"a.txt": "a, again\n"})
++        self._run(["10"], ["10"])
++        self.assertEqual(self._record("10")["pr_url"], "", self.err)
++        self.assertEqual(self.holds, {"10": "no-pr"})
++
++    def test_the_other_modes_keep_their_record_when_gh_pr_create_is_refused(self):
++        # (d): the lookup is "none"'s own. There, the PR's URL decides what is released.
++        for mode, iid in (("stack", "20"), ("merge", "30")):
++            with self.subTest(mode=mode):
++                self.cfg.wave_mode = mode
++                self._plan(iid, {f"{iid}.txt": "a\n"})
++                self._run([iid], [iid])
++                self.assertEqual(self._record(iid)["pr_url"], PR_URL + iid)
++                self._iterate(iid, {f"{iid}.txt": "a, again\n"})
++                self._run([iid], [iid])
++                self.assertEqual(self._record(iid)["pr_url"], "", self.err)
++                self.assertEqual(self._gh("pr", "list"), [])
++                self.assertIn("`gh pr create` FAILED", self.err)
++                self.assertNotIn("A PR opened by hand counts", self.err)
++                self.assertEqual((self.holds, self.rc), ({}, 0))
++
++    def test_a_conflicts_with_partner_of_a_bundle_that_pushed_no_branch_is_still_built(self):
++        # A `Conflicts with` edge only orders the build here: no bundle is built on its
++        # partner's work, so the partner of one that pushed no branch is not held for it
++        # (stack mode's #629 hold, with its advice about a line), and is built on the base.
++        self.texts_fail.add("10")
++        self._plan("10", {"a.txt": "a\n"})
++        self._plan("12", {"c.txt": "c\n"}, conflicts_with="10")
++        self._run(["10", "12"], ["10", "12"])
++        self.assertEqual(self.results, {"10": state.COMPLETE, "12": state.COMPLETE}, self.err)
++        self.assertEqual(self._held_lines("12"), [], self.err)
++        self.assertEqual(self._pr_bases(), {"12": "main"}, self.err)
++        self._published_on_the_base("12")
++        self.assertEqual((self.holds, self.rc), ({"10": "unpushed"}, 3))
++        self._nothing_at_the_boundary()
++
++    # -- a bundle left with no PR is never a clean run, in any wave, the last one too ------
++
++    def test_an_independent_bundle_whose_texts_failed_is_not_a_clean_run(self):
++        # One wave, so that wave is the last, and nothing depends on 10.
++        self.texts_fail.add("10")
++        self._plan("10", {"a.txt": "a\n"})
++        self._plan("12", {"c.txt": "c\n"})
++        self._run(["10", "12"], ["10", "12"])
++        self.assertEqual(self.results, {"10": state.COMPLETE, "12": state.COMPLETE}, self.err)
++        self.assertEqual(self._pr_bases(), {"12": "main"}, self.err)
++        self._published_on_the_base("12")
++        self.assertEqual(self.err.count("flow: issue_10 pushed no branch this run"), 1, self.err)
++        self.assertEqual((self.holds, self.rc), ({"10": "unpushed"}, 3))
++        self._nothing_at_the_boundary()
++
++    def test_an_independent_bundle_whose_pr_was_not_opened_is_not_a_clean_run(self):
++        # The branch is pushed, so "pushed no branch" cannot see this one.
++        self.create_fails.add("10")
++        self._plan("10", {"a.txt": "a\n"})
++        self._plan("12", {"c.txt": "c\n"})
++        self._run(["10", "12"], ["10", "12"])
++        rec = self._record("10")
++        self.assertTrue(self.fx._has(rec["branch"]), self.err)
++        self.assertEqual(rec["pr_url"], "")
++        self._published_on_the_base("12")
++        self.assertEqual(self.err.count("flow: issue_10 pushed its branch this run"), 1, self.err)
++        self.assertEqual((self.holds, self.rc), ({"10": "no-pr"}, 3))
++        self._nothing_at_the_boundary()
++
++    def test_a_one_bundle_run_whose_publish_failed_is_not_a_clean_run(self):
++        self.texts_fail.add("10")
++        self._plan("10", {"a.txt": "a\n"})
++        self._run(["10"], ["10"])
++        self.assertEqual((self.results, self.holds, self.rc),
++                         ({"10": state.COMPLETE}, {"10": "unpushed"}, 3), self.err)
++
++    def test_a_failed_publish_in_the_last_wave_of_a_batch_is_not_a_clean_run(self):
++        # 11 is released by 10's merge, in the batch's last wave, and its PR is not opened.
++        self.create_fails.add("11")
++        self._plan("10", {"a.txt": "a\n"})
++        self._plan("11", {"b.txt": "b\n"}, depends_on="10")
++        self._run(["10", "11"], ["10", "11"])
++        self._merge_pr("10")
++        self._run(["11"], ["10", "11"])
++        self.assertEqual(self.results, {"11": state.COMPLETE}, self.err)
++        self.assertEqual((self.holds, self.rc), ({"11": "no-pr"}, 3))
++
++    def test_a_bundle_publish_skips_is_not_reported_as_having_no_pr(self):
++        # No target: publish skips it. No patch: a close/no-fix, nothing to contribute.
++        self._plan("10", {"a.txt": "a\n"}, target=False)
++        self._plan("12", {})
++        self._run(["10", "12"], ["10", "12"])
++        self.assertEqual(self.results, {"10": state.COMPLETE, "12": state.COMPLETE}, self.err)
++        self.assertEqual(self._pr_bases(), {}, self.err)
++        self.assertEqual((self.holds, self.rc), ({}, 0))
++
++    def test_stack_mode_keeps_its_answer_for_a_failed_publish(self):
++        # (d): the accounting above is "none"'s own. With no later wave stack mode reports
++        # nothing (the fold it guards never runs); with one, its own line and hold stand.
++        self.cfg.wave_mode = "stack"
++        self.texts_fail.add("10")
++        self._plan("10", {"a.txt": "a\n"})
++        self._plan("12", {"c.txt": "c\n"})
++        self._run(["10", "12"], ["10", "12"])
++        self.assertEqual((self.holds, self.rc), ({}, 0))
++        self.assertNotIn("pushed no branch", self.err)
++
++        self._plan("20", {"d.txt": "d\n"})
++        self._plan("21", {"e.txt": "e\n"}, depends_on="20")
++        self.texts_fail.add("20")
++        self._run(["20", "21"], ["20", "21"])
++        self.assertIn("flow: issue_20 pushed no branch this run — left out of the integration "
++                      "fold; bundles that depend on it or are its `Conflicts with` partners "
++                      "are held this run.", self.err)
++        self.assertEqual((self.holds, self.rc), ({"20": "unpushed"}, 1))
++
++    # -- a prerequisite no PR of which can exist: nothing to wait for ------------------------
++
++    def test_a_prerequisite_with_no_target_has_no_pr_to_wait_for(self):
++        self._plan("10", {"a.txt": "a\n"}, target=False)
++        self._plan("11", {"b.txt": "b\n"}, depends_on="10")
++        self._run(["10", "11"], ["10", "11"])
++        self.assertEqual(self.results, {"10": state.COMPLETE, "11": state.COMPLETE}, self.err)
++        self.assertEqual(self._pr_bases(), {"11": "main"}, self.err)
++        self._published_on_the_base("11")
++        self.assertEqual(self._held_lines("11"), [], self.err)
++        self.assertIn("flow: issue_11 — prerequisite issue_10 has no usable `Repo + branch "
++                      "target`, so no PR of it can merge; not waiting for it, and built "
++                      "without its work.", self.err)
++        self.assertEqual(self._gh("pr", "view"), [])
++        self.assertEqual((self.holds, self.rc), ({}, 0))
++
++    def test_a_prerequisite_with_no_patch_has_nothing_to_wait_for(self):
++        self._plan("10", {})
++        self._plan("11", {"b.txt": "b\n"}, depends_on="10")
++        self._run(["10", "11"], ["10", "11"])
++        self.assertEqual(self.results, {"10": state.COMPLETE, "11": state.COMPLETE}, self.err)
++        self._published_on_the_base("11")
++        self.assertNotIn("no usable `Repo + branch target`", self.err)
++        self.assertEqual(self._gh("pr", "view"), [])
++        self.assertEqual((self.holds, self.rc), ({}, 0))
++
++    # -- a host that cannot be asked is a fault to fix, not a merge to wait for --------------
++
++    def _held_for_a_fault(self, iid: str, *needles: str) -> None:
++        """``iid`` was not built, is PLANNED, named on ONE line with ``needles``, and told
++        nothing about merging: no hold of its own, so the run fails (1)."""
++        self.assertNotIn(iid, self.built, self.err)
++        self.assertEqual(self.results[iid], state.PLANNED, self.err)
++        held = self._held_lines(iid)
++        self.assertEqual(len(held), 1, self.err)
++        for needle in needles:
++            self.assertIn(needle, held[0])
++        self.assertNotIn("merge the PR", held[0])
++        self.assertNotIn(iid, self.holds)
++        self.assertEqual(self.rc, 1)
++
++    def test_a_host_fault_after_a_good_read_is_not_a_wait_for_a_merge(self):
++        # The first read finds the PR MERGED; the host stops answering right after. What
++        # the run does not know must not turn into "merge it", an ordinary hold (exit 3).
++        self._plan("10", {"a.txt": "a\n"})
++        self._plan("11", {"b.txt": "b\n"}, depends_on="10")
++        self._run(["10", "11"], ["10", "11"])
++        self._merge_pr("10")
++        self.view_reads_left = 1
++        self._run(["11"], ["10", "11"])
++        self._held_for_a_fault("11", "issue_10", "is not known to have that merge")
++        self.assertEqual(self.holds, {})
++
++        # The host answers again: 11 is built.
++        self.view_reads_left = None
++        self._run(["11"], ["10", "11"])
++        self.assertEqual(self.results, {"11": state.COMPLETE}, self.err)
++        self.assertEqual((self.holds, self.rc), ({}, 0))
++
++    def test_a_pr_the_host_cannot_read_is_not_a_wait_for_a_merge(self):
++        self.view_fails = True
++        self._plan("10", {"a.txt": "a\n"})
++        self._plan("11", {"b.txt": "b\n"}, depends_on="10")
++        self._run(["10", "11"], ["10", "11"])
++        self._held_for_a_fault("11", "issue_10", "could not be read",
++                               "make sure `gh` can read their PR")
++        self.assertEqual(self.holds, {})
++
++        # `gh` works again: an ordinary wait for a merge.
++        self.view_fails = False
++        self._run(["11"], ["10", "11"])
++        self._held_unmerged("11", "10")
++        self.assertEqual((self.holds, self.rc), ({"11": "unmerged"}, 3))
++
++    def test_a_missing_gh_is_not_a_wait_for_a_merge(self):
++        self._plan("10", {"a.txt": "a\n"})
++        self._run(["10"], ["10"])
++        self._plan("11", {"b.txt": "b\n"}, depends_on="10")
++        self.gh_missing = True
++        self._run(["11"], ["11"])
++        self._held_for_a_fault("11", "issue_10", "could not be read")
++        self.assertEqual(self.holds, {})
++
++    def test_a_base_that_cannot_be_fetched_is_not_a_wait_for_a_merge(self):
++        self._plan("10", {"a.txt": "a\n"})
++        self._plan("11", {"b.txt": "b\n"}, depends_on="10")
++        self._run(["10", "11"], ["10", "11"])
++        self._merge_pr("10")
++        sb._git(self.fx.primary, "remote", "set-url", "origin", str(self.fx.tmp / "gone.git"))
++        self._run(["11"], ["10", "11"])
++        self._held_for_a_fault("11", "issue_10", "is not known to have that merge",
++                               "can fetch origin")
++        self.assertEqual(self.holds, {})
++
++    # -- a chain: every link is held for a merge, and each merge releases the next -----------
++
++    def test_a_chain_is_held_link_by_link_and_each_merge_releases_the_next(self):
++        self._plan("10", {"a.txt": "a\n"})
++        self._plan("11", {"b.txt": "b\n"}, depends_on="10")
++        self._plan("12", {"c.txt": "c\n"}, depends_on="11")
++        self._run(["10", "11", "12"], ["10", "11", "12"])
++        self.assertEqual(self._pr_bases(), {"10": "main"}, self.err)
++        self._held_unmerged("11", "10")
++        self._held_unmerged("12", "11")
++        held = self._held_line("12")
++        self.assertIn("(issue_11 not built yet, held too)", held)
++        self.assertIn("To build it, merge the PR of issue_10 into main, then merge the PR of "
++                      "issue_11 into main, re-running after each step.", held)
++        self.assertNotIn("skipped", self.err)
++        self._nothing_at_the_boundary()
++        self.assertEqual((self.holds, self.rc), ({"11": "unmerged", "12": "unmerged"}, 3))
++
++        self._merge_pr("10")
++        self._run(["11", "12"], ["10", "11", "12"])
++        self.assertEqual(self._pr_bases(), {"11": "main"}, self.err)
++        self._published_on_the_base("11")
++        self._held_unmerged("12", "11")
++        self.assertIn("To build it, merge the PR of issue_11 into main, then re-run.",
++                      self._held_line("12"))
++        self.assertEqual((self.holds, self.rc), ({"12": "unmerged"}, 3))
++
++        self._merge_pr("11")
++        self._run(["12"], ["10", "11", "12"])
++        self.assertEqual(self.results, {"12": state.COMPLETE}, self.err)
++        self.assertEqual(self._pr_bases(), {"12": "main"}, self.err)
++        self._published_on_the_base("12")
++        self._nothing_at_the_boundary()
++        self.assertEqual((self.holds, self.rc), ({}, 0))
++
++    def test_a_longer_chain_names_every_merge_in_order(self):
++        self._plan("10", {"a.txt": "a\n"})
++        self._plan("11", {"b.txt": "b\n"}, depends_on="10")
++        self._plan("12", {"c.txt": "c\n"}, depends_on="11")
++        self._plan("13", {"d.txt": "d\n"}, depends_on="12")
++        self._run(["10", "11", "12", "13"], ["10", "11", "12", "13"])
++        held = self._held_lines("13")
++        self.assertEqual(len(held), 1, self.err)
++        self.assertIn("(issue_12 not built yet, held too)", held[0])
++        self.assertIn("To build it, merge the PR of issue_10 into main, then merge the PR of "
++                      "issue_11 into main, then merge the PR of issue_12 into main, re-running "
++                      "after each step.", held[0])
++        self.assertEqual((self.holds, self.rc),
++                         ({"11": "unmerged", "12": "unmerged", "13": "unmerged"}, 3))
++
++    def test_a_chain_above_a_closed_pr_says_to_re_open_it(self):
++        self._plan("10", {"a.txt": "a\n"})
++        self._plan("11", {"b.txt": "b\n"}, depends_on="10")
++        self._plan("12", {"c.txt": "c\n"}, depends_on="11")
++        self._run(["10"], ["10", "11", "12"])
++        self.closed_prs.add(PR_URL + "10")
++        self._run(["11", "12"], ["10", "11", "12"])
++        self.assertIn("To build it, re-open the PR of issue_10 and merge it into main, then "
++                      "merge the PR of issue_11 into main, re-running after each step.",
++                      self._held_line("12"))
++        self.assertEqual((self.holds, self.rc), ({"11": "unmerged", "12": "unmerged"}, 3))
++
++    def test_a_chain_above_a_merge_the_fetched_base_lacks_is_told_about_the_fetch(self):
++        # 10's PR has merged: nobody can merge it again. The fault is the fetch, for 12 too.
++        self._plan("10", {"a.txt": "a\n"})
++        self._plan("11", {"b.txt": "b\n"}, depends_on="10")
++        self._plan("12", {"c.txt": "c\n"}, depends_on="11")
++        self._run(["10"], ["10", "11", "12"])
++        self.merged_prs[PR_URL + "10"] = (self.fx._tip(self._record("10")["branch"]), sb.ABSENT)
++        self._run(["11", "12"], ["10", "11", "12"])
++        self.assertIn("origin/main as fetched", self._held_line("11"))
++        held = self._held_line("12")
++        self.assertIn("(issue_11 not built yet, held too)", held)
++        self.assertIn("To build it, make sure org/repo's checkout can fetch origin, so "
++                      "origin/main has the merge of issue_10, then merge the PR of issue_11 "
++                      "into main, re-running after each step.", held)
++        self.assertNotIn("merge the PR of issue_10", held)
++        self.assertEqual((self.holds, self.rc), ({"11": "unmerged", "12": "unmerged"}, 3))
++
++    def test_a_chain_above_a_pr_that_cannot_land_names_the_edge_to_change(self):
++        self._plan("10", {"a.txt": "a\n"})
++        self._plan("11", {"b.txt": "b\n"}, depends_on="10")
++        self._plan("12", {"c.txt": "c\n"}, depends_on="11")
++        self._run(["10"], ["10", "11", "12"])
++        pj = self.cfg.bundle("10") / "publish.json"
++        pj.write_text(json.dumps({**self._record("10"), "base": "dev"}), encoding="utf-8")
++        self._run(["11", "12"], ["10", "11", "12"])
++        self._held_for_no_landing("11", "10", "its PR goes to dev on org/repo")
++        held = self._held_lines("12")
++        self.assertEqual(len(held), 1, self.err)
++        self.assertIn("To build it, remove the edge to issue_10 from issue_11's brief, or rebuild "
++                      "issue_10 with its PR against org/repo @ main, then merge the PR of "
++                      "issue_11 into main, re-running after each step.", held[0])
++        self.assertNotIn("merge the PR of issue_10", held[0])
++        self.assertEqual((self.holds, self.rc), ({"11": "unmerged", "12": "unmerged"}, 3))
++
++    def test_a_chain_is_held_through_every_edge_kind(self):
++        self._plan("10", {"a.txt": "a\n"})
++        self._plan("11", {"b.txt": "b\n"}, stacks_on="10")
++        self._plan("12", {"c.txt": "c\n"}, depends_on_merged="11")
++        self._run(["10", "11", "12"], ["10", "11", "12"])
++        self._held_unmerged("11", "10")
++        self._held_unmerged("12", "11")
++        self.assertEqual((self.holds, self.rc), ({"11": "unmerged", "12": "unmerged"}, 3))
++
++    def test_a_bundle_behind_two_paths_names_each_merge_once(self):
++        # 13 depends on 11 and 12, each held for 10, and on 10 itself.
++        self._plan("10", {"a.txt": "a\n"})
++        self._plan("11", {"b.txt": "b\n"}, depends_on="10")
++        self._plan("12", {"c.txt": "c\n"}, depends_on="10")
++        self._plan("13", {"d.txt": "d\n"}, depends_on="10, 11, 12")
++        self._run(["10", "11", "12", "13"], ["10", "11", "12", "13"])
++        held = self._held_lines("13")
++        self.assertEqual(len(held), 1, self.err)
++        self.assertIn("prerequisite(s) issue_10, issue_11, issue_12 not merged into main", held[0])
++        self.assertIn("(issue_11, issue_12 not built yet, held too)", held[0])
++        self.assertIn("To build it, merge the PR of issue_10 into main, then merge the PR of "
++                      "issue_11 into main, then merge the PR of issue_12 into main, re-running "
++                      "after each step.", held[0])
++        self.assertEqual(held[0].count("merge the PR of issue_10"), 1)
++        self.assertEqual(self.holds["13"], "unmerged")
++        self.assertEqual(self.rc, 3)
++
++    def test_a_chain_above_a_failed_publish_fails_the_run(self):
++        # 11 cannot wait for a merge, so neither can 12: this run failed, it is not waiting.
++        self.texts_fail.add("10")
++        self._plan("10", {"a.txt": "a\n"})
++        self._plan("11", {"b.txt": "b\n"}, depends_on="10")
++        self._plan("12", {"c.txt": "c\n"}, depends_on="11")
++        self._run(["10", "11", "12"], ["10", "11", "12"])
++        self._held_for_no_pr("11", "10")
++        self.assertNotIn("12", self.built, self.err)
++        self.assertEqual(self._held_lines("12"), [], self.err)
++        self.assertIn("flow: issue_12 skipped — prerequisite(s) not ready (11)", self.err)
++        self.assertEqual((self.holds, self.rc), ({"10": "unpushed"}, 1))
++
++    def test_a_chain_above_an_unreadable_pr_fails_the_run(self):
++        self.view_fails = True
++        self._plan("10", {"a.txt": "a\n"})
++        self._plan("11", {"b.txt": "b\n"}, depends_on="10")
++        self._plan("12", {"c.txt": "c\n"}, depends_on="11")
++        self._run(["10", "11", "12"], ["10", "11", "12"])
++        self._held_for_a_fault("11", "could not be read")
++        self.assertEqual(self._held_lines("12"), [], self.err)
++        self.assertIn("flow: issue_12 skipped — prerequisite(s) not ready (11)", self.err)
++        self.assertEqual((self.holds, self.rc), ({}, 1))
++
++    def test_a_bundle_behind_a_wait_and_a_failure_is_not_counted_as_waiting(self):
++        self.texts_fail.add("20")
++        self._plan("10", {"a.txt": "a\n"})
++        self._plan("11", {"b.txt": "b\n"}, depends_on="10")   # waits for 10's merge
++        self._plan("20", {"e.txt": "e\n"})
++        self._plan("21", {"f.txt": "f\n"}, depends_on="20")   # 20 has no PR: a failure
++        self._plan("30", {"g.txt": "g\n"}, depends_on="11, 21")
++        self._run(["10", "11", "20", "21", "30"], ["10", "11", "20", "21", "30"])
++        self.assertNotIn("30", self.built, self.err)
++        self.assertEqual(self.results["30"], state.PLANNED)
++        self.assertIn("flow: issue_30 skipped — prerequisite(s) not ready (21)", self.err)
++        self.assertEqual(self.holds, {"11": "unmerged", "20": "unpushed"})
++        self.assertEqual(self.rc, 1)
++
++    def test_a_dependent_with_no_target_behind_a_chain_is_not_ready(self):
++        self._plan("10", {"a.txt": "a\n"})
++        self._plan("11", {"b.txt": "b\n"}, depends_on="10")
++        self._plan("12", {"c.txt": "c\n"}, depends_on="11", target=False)
++        self._run(["10", "11", "12"], ["10", "11", "12"])
++        self.assertEqual(self._held_lines("12"), [], self.err)
++        self.assertIn("flow: issue_12 skipped — prerequisite(s) not ready (11)", self.err)
++        self.assertEqual((self.holds, self.rc), ({"11": "unmerged"}, 1))
++
++    # -- the exit code `pdca flow` itself returns, through `cli._flow` -----------------------
++
++    def test_pdca_flow_exits_3_while_a_chain_waits_and_0_once_it_has_merged(self):
++        self._plan("10", {"a.txt": "a\n"})
++        self._plan("11", {"b.txt": "b\n"}, depends_on="10")
++        self._plan("12", {"c.txt": "c\n"}, stacks_on="11")
++        ids = ("10", "11", "12")
++        self.assertEqual(self._pdca_flow(*ids), 3, self.err)
++        self.assertEqual(self._pr_bases(), {"10": "main"}, self.err)
++        self.assertEqual(self.out.splitlines()[-1], "flow: 1/3 complete")
++
++        self._merge_pr("10")
++        self.assertEqual(self._pdca_flow(*ids), 3, self.err)
++        self.assertEqual(self._pr_bases(), {"11": "main"}, self.err)
++        self.assertEqual(self.out.splitlines()[-1], "flow: 2/3 complete")
++
++        self._merge_pr("11")
++        self.assertEqual(self._pdca_flow(*ids), 0, self.err)
++        self.assertEqual(self._pr_bases(), {"12": "main"}, self.err)
++        self.assertEqual(self.out.splitlines()[-1], "flow: 3/3 complete")
++        self._nothing_at_the_boundary()
++
++    def test_pdca_flow_of_one_id_exits_3_when_held_and_when_left_with_no_pr(self):
++        self._plan("10", {"a.txt": "a\n"})
++        self.assertEqual(self._pdca_flow("10"), 0, self.err)
++        self._plan("11", {"b.txt": "b\n"}, depends_on="10")
++        self.assertEqual(self._pdca_flow("11"), 3, self.err)
++        self.assertEqual(self.out.splitlines()[0].split("\t")[0], state.PLANNED)
++
++        self._plan("20", {"e.txt": "e\n"})
++        self.texts_fail.add("20")
++        self.assertEqual(self._pdca_flow("20"), 3, self.err)
++        self.assertEqual(self.out.splitlines()[-1].split("\t")[0], state.COMPLETE)
++
++    def test_pdca_flow_exits_1_when_the_host_cannot_be_asked(self):
++        self._plan("10", {"a.txt": "a\n"})
++        self.assertEqual(self._pdca_flow("10"), 0, self.err)
++        self._plan("11", {"b.txt": "b\n"}, depends_on="10")
++        self.view_fails = True
++        self.assertEqual(self._pdca_flow("11"), 1, self.err)
++
++    def test_pdca_flow_exits_1_on_every_run_while_only_an_older_attempt_has_a_pr(self):
++        self._plan("10", {"a.txt": "a\n"})
++        self._plan("11", {"b.txt": "b\n"}, depends_on="10")
++        self.assertEqual(self._pdca_flow("10", "11"), 3, self.err)
++        self._iterate("10", {"a.txt": "a, again\n"})
++        self.texts_fail.add("10")
++        self.assertEqual(self._pdca_flow("10", "11"), 1, self.err)
++        self.assertEqual(self._pdca_flow("10", "11"), 1, self.err)   # 10 is not driven now
++        self._merge_pr("10")
++        self.assertEqual(self._pdca_flow("10", "11"), 1, self.err)   # … and the old PR merged
++        self.assertEqual(self._gh("pr", "view"), [])
++
++    # -- nothing waits, and no host is asked, with --no-publish or in a dry-run ------------
++
++    def test_with_no_publish_a_dependent_builds_on_the_unchanged_base(self):
++        self._plan("10", {"a.txt": "a\n"})
++        self._plan("11", {"b.txt": "b\n"}, depends_on="10")
++        self._run(["10", "11"], ["10", "11"], do_publish=False)
++        self.assertEqual(self.results, {"10": state.COMPLETE, "11": state.COMPLETE}, self.err)
++        self.assertEqual(self.built["11"], ("origin/main", ""), self.err)
++        self.assertEqual(self.gh_calls, [], self.err)
++        self.assertEqual(self._integration_branches(), [], self.err)
++        self.assertEqual((self.holds, self.rc), ({}, 0))
++
++    def test_a_dry_run_asks_no_host_holds_nothing_and_plans_every_pr_on_the_base(self):
++        self.cfg.publisher = dataclasses.replace(self.cfg.publisher, mode="stub")
++        self._plan("10", {"a.txt": "a\n"})
++        self._plan("11", {"b.txt": "b\n"}, stacks_on="10")
++        self._run(["10", "11"], ["10", "11"])
++        self.assertEqual(self.results, {"10": state.COMPLETE, "11": state.COMPLETE}, self.err)
++        self.assertEqual(self.built["11"], ("origin/main", ""), self.err)
++        self.assertEqual(self._held_lines("11"), [], self.err)
++        self.assertEqual(self.gh_calls, [], self.err)
++        self.assertFalse((self.cfg.bundle("10") / "publish.json").exists())
++        plan = [x for x in self.out.splitlines()
++                if x.startswith("publish --dry-run — issue_11 → ")]
++        self.assertEqual(len(plan), 1, self.out)
++        self.assertIn("draft PR on org/repo (", plan[0])
++        self.assertTrue(plan[0].endswith(" → main):"), plan[0])
++        self.assertEqual(self._integration_branches(), [], self.err)
++        self.assertEqual((self.holds, self.rc), ({}, 0))
++
++    def test_a_rehearsal_does_not_wait_for_a_merged_edge_inside_the_run(self):
++        for how, iid in (("no-publish", 20), ("stub", 30)):
++            with self.subTest(how=how):
++                self.cfg.publisher = dataclasses.replace(
++                    self.cfg.publisher, mode="stub" if how == "stub" else "command")
++                first, second = str(iid), str(iid + 1)
++                self._plan(first, {f"{first}.txt": "a\n"})
++                self._plan(second, {f"{second}.txt": "b\n"}, depends_on_merged=first)
++                self._run([first, second], [first, second], do_publish=how != "no-publish")
++                self.assertEqual(self.results, {first: state.COMPLETE, second: state.COMPLETE},
++                                 self.err)
++                self.assertEqual(self._gh("pr", "view"), [])
++                self.assertEqual((self.holds, self.rc), ({}, 0))
++
++    def test_a_rehearsal_keeps_the_gate_on_a_merged_edge_out_of_the_run(self):
++        # The exception to "nothing waits": #186's gate, the same in every mode. It asks the
++        # host, holds until the merge, exits 1, and under "none" speaks of no line.
++        for how, iid in (("no-publish", 20), ("stub", 30)):
++            with self.subTest(how=how):
++                do_publish = how != "no-publish"
++                first, second = str(iid), str(iid + 1)
++                self.cfg.publisher = dataclasses.replace(self.cfg.publisher, mode="command")
++                self._plan(first, {f"{first}.txt": "a\n"})
++                self._run([first], [first])                  # a real publish: its PR is open
++                self._plan(second, {f"{second}.txt": "b\n"}, depends_on_merged=first)
++                if how == "stub":
++                    self.cfg.publisher = dataclasses.replace(self.cfg.publisher, mode="stub")
++                self._run([second], [second], do_publish=do_publish)
++                self.assertEqual(self.results, {second: state.PLANNED}, self.err)
++                self.assertNotIn(second, self.built, self.err)
++                self.assertEqual(len(self._gh("pr", "view")), 1, self.err)
++                held = self._held_lines(second)
++                self.assertEqual(len(held), 1, self.err)
++                self.assertIn(f"prerequisite(s) issue_{first} not merged into main (org/repo); "
++                              f"not built on a base missing them. To build it, wait until their "
++                              f"PR merges into main, then re-run.", held[0])
++                self.assertNotIn("line of this run", held[0])
++                self.assertEqual((self.holds, self.rc), ({}, 1))
++
++                self.cfg.publisher = dataclasses.replace(self.cfg.publisher, mode="command")
++                self._merge_pr(first)
++                if how == "stub":
++                    self.cfg.publisher = dataclasses.replace(self.cfg.publisher, mode="stub")
++                self._run([second], [second], do_publish=do_publish)
++                self.assertEqual(self.results, {second: state.COMPLETE}, self.err)
++                self.assertEqual((self.holds, self.rc), ({}, 0))
++
++    def test_a_rehearsal_does_not_wait_for_a_plain_edge_out_of_the_run(self):
++        for how, iid in (("no-publish", 20), ("stub", 30)):
++            with self.subTest(how=how):
++                first, second = str(iid), str(iid + 1)
++                self.cfg.publisher = dataclasses.replace(self.cfg.publisher, mode="command")
++                self._plan(first, {f"{first}.txt": "a\n"})
++                self._run([first], [first])
++                self._plan(second, {f"{second}.txt": "b\n"}, depends_on=first)
++                if how == "stub":
++                    self.cfg.publisher = dataclasses.replace(self.cfg.publisher, mode="stub")
++                self._run([second], [second], do_publish=how != "no-publish")
++                self.assertEqual(self.results, {second: state.COMPLETE}, self.err)
++                self.assertEqual(self._gh("pr", "view"), [])
++                self.assertEqual((self.holds, self.rc), ({}, 0))
++
++    def test_stack_mode_keeps_its_line_for_a_merged_edge_out_of_the_run(self):
++        # (d): only "none" drops the words about a line.
++        self.cfg.wave_mode = "stack"
++        self._plan("10", {"a.txt": "a\n"})
++        self._run(["10"], ["10"])
++        self._plan("11", {"b.txt": "b\n"}, depends_on_merged="10")
++        self._run(["11"], ["11"], do_publish=False)
++        self.assertIn("prerequisite(s) issue_10 not merged into main (org/repo), and no line of "
++                      "this run carries them;", self._held_line("11"))
++        self.assertEqual((self.holds, self.rc), ({}, 1))
++
++    # -- (b2): merged, but the base as fetched lacks the merge: still held -----------------
++
++    def test_a_merged_prerequisite_the_fetched_base_lacks_still_holds_the_dependent(self):
++        self._plan("10", {"a.txt": "a\n"})
++        self._plan("11", {"b.txt": "b\n"}, depends_on="10")
++        self._run(["10", "11"], ["10", "11"])
++        self._held_unmerged("11", "10")
++
++        # gh reads 10's PR MERGED, but origin's main has neither its merge commit nor head.
++        branch = json.loads((self.cfg.bundle("10") / "publish.json")
++                            .read_text(encoding="utf-8"))["branch"]
++        self.merged_prs[PR_URL + "10"] = (self.fx._tip(branch), sb.ABSENT)
++        self.assertFalse(self.fx._ancestor(self.fx._tip(branch), "main"))
++        self._run(["11"], ["10", "11"])
++        self.assertNotIn("11", self.built, self.err)
++        self.assertEqual(self.results, {"11": state.PLANNED}, self.err)
++        self.assertEqual(self._pr_bases(), {}, self.err)
++        held = self._held_lines("11")
++        self.assertEqual(len(held), 1, self.err)
++        self.assertIn("issue_10", held[0])
++        self.assertIn("origin/main as fetched", held[0])
++        self._nothing_at_the_boundary()
++        self.assertEqual((self.holds, self.rc), ({"11": "unmerged"}, 3))
++
++    # -- control: the same batch in stack mode still folds (the fixture can show a line) ---
++
++    def test_the_same_batch_in_stack_mode_still_folds_a_line_and_builds_the_dependent(self):
++        self.cfg.wave_mode = "stack"
++        self._plan("10", {"a.txt": "a\n"})
++        self._plan("11", {"b.txt": "b\n"}, depends_on="10")
++        self._plan("12", {"c.txt": "c\n"}, depends_on="11")
++        self._run(["10", "11", "12"], ["10", "11", "12"])
++        self.assertNotEqual(self._integration_branches(), [], self.err)   # a line, pushed
++        self.assertEqual(self.results, {"10": state.COMPLETE, "11": state.COMPLETE,
++                                        "12": state.COMPLETE}, self.err)
++        self.assertEqual((self.holds, self.rc), ({}, 0))
++
++    def test_a_prerequisite_with_no_target_builds_its_dependent_in_stack_mode_too(self):
++        self.cfg.wave_mode = "stack"
++        self._plan("10", {"a.txt": "a\n"}, target=False)
++        self._plan("11", {"b.txt": "b\n"}, depends_on="10")
++        self._run(["10", "11"], ["10", "11"])
++        self.assertEqual(self.results, {"10": state.COMPLETE, "11": state.COMPLETE}, self.err)
++        self.assertNotIn("no usable `Repo + branch target`, so no PR", self.err)
++        self.assertEqual((self.holds, self.rc), ({}, 0))
++
++    # -- `pdca waves` says what "none" does, not what stack mode does -----------------------
++
++    def test_the_waves_preview_does_not_claim_a_wave_builds_on_the_prior(self):
++        self._plan("10", {"a.txt": "a\n"})
++        self._plan("11", {"b.txt": "b\n"}, depends_on="10")
++        out = io.StringIO()
++        with redirect_stdout(out), redirect_stderr(io.StringIO()):
++            rc = cli._waves(self.cfg, ["10", "11"])
++        self.assertEqual(rc, 0)
++        self.assertIn("(none mode", out.getvalue())
++        self.assertNotIn("builds on the prior's accepted work", out.getvalue())
++
++
++class WaveModeAtLoad(unittest.TestCase):
++    """(c): `[driver].wave_mode` through the REAL loader."""
++
++    def setUp(self) -> None:
++        self.root = Path(tempfile.mkdtemp())
++        self.addCleanup(shutil.rmtree, self.root, True)
++
++    def _load(self, value: str) -> tuple[config.Config, str]:
++        (self.root / "pdca.toml").write_text(
++            f'[paths]\nbundle_root = "results"\n\n[driver]\nwave_mode = "{value}"\n',
++            encoding="utf-8")
++        err = io.StringIO()
++        with redirect_stderr(err):
++            cfg = config.Config.load(self.root)
++        return cfg, err.getvalue()
++
++    def test_an_unknown_wave_mode_is_named_and_falls_back_to_stack(self):
++        cfg, err = self._load("bogus")
++        self.assertEqual(cfg.wave_mode, "stack")
++        note = [x for x in err.splitlines() if "wave_mode" in x]
++        self.assertEqual(len(note), 1, err)
++        for part in ("'bogus'", "stack", "merge", "none"):
++            self.assertIn(part, note[0])
++
++    def test_each_known_wave_mode_loads_as_written_without_a_note(self):
++        for value in ("stack", "merge", "none"):
++            with self.subTest(value=value):
++                cfg, err = self._load(value)
++                self.assertEqual(cfg.wave_mode, value)
++                self.assertNotIn("wave_mode", err)
++
++
++if __name__ == "__main__":
++    unittest.main()

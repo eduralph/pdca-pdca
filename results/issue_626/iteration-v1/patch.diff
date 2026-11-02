@@ -1,0 +1,889 @@
+diff --git a/docs/07-crosscutting.md b/docs/07-crosscutting.md
+index 32f03bf..0656366 100644
+--- a/docs/07-crosscutting.md
++++ b/docs/07-crosscutting.md
+@@ -691,8 +691,11 @@ wave builds on, via `[driver].wave_mode`:
+   no merge rights, and it keeps STOP discipline — the harness never merges
+   anything into your target; you merge the PR stack bottom-up with a merge commit
+   (never squash or rebase: they put a change on the base as new commits, not the
+-  ones its dependents carry). The fold puts every published branch of a target
+-  on its line, so a later wave's PR carries every earlier-wave branch on the
++  ones its dependents carry). Stack mode does not support those merges. Publish
++  warns when your repository does not allow merge commits, for a PR cut from a
++  stack base and for a PR another bundle names in `Depends on`,
++  `Depends on (merged)` or `Stacks on`. The fold puts every published branch of
++  a target on its line, so a later wave's PR carries every earlier-wave branch on the
+   line, not only its prerequisites', and shows their changes until they merge.
+   Once they have all merged, its diff is its own change when the line is a
+   plain chain: one branch per earlier wave, and no newer base taken in (your
+@@ -728,8 +731,13 @@ wave builds on, via `[driver].wave_mode`:
+   branch is deleted, the fold looks up the commit the PR merged with: a line
+   that has it already carries the PR; one that does not (say a fixup was pushed
+   after the fold) merges your base in, after checking that your base has that
+-  commit. If it does not (the PR merged into another branch, or was squashed or
+-  rebased), the run stops rather than build the next wave without that work. It
++  commit. If it does not, the run stops rather than build the next wave without
++  that work. When your base has the merge commit the host reports for the PR, the
++  PR was squashed or rebased: the stop says so, gives that commit, and tells you
++  to update the dependent PRs' branches from your base ("Update branch") or
++  re-drive the dependents on your base, then re-issue without that bundle. When
++  your base does not have it (the PR merged into another branch), or it cannot be
++  read, the stop says the PR merged somewhere other than your base. It
+   also stops, naming the bundle, when merging your base in would undo work a
+   bundle put on the line (say your base reverted a merged PR, so a file the
+   bundle added would disappear); a base that only edits such a file is merged
+@@ -803,7 +811,12 @@ wave builds on, via `[driver].wave_mode`:
+   prerequisites built on it (their plain `Depends on` names it, directly or
+   through others), since their branches carry its work: none of them is carried
+   or accounts for a commit on the line, and the bundles that depend on them are
+-  held, each named on one line with the cause. A prerequisite whose merge fails
++  held, each named on one line with the cause. A merged prerequisite whose head
++  is on neither your base nor the line, but whose merge commit your base has, was
++  squash- or rebase-merged, and its line says so. The finished prerequisites built
++  on it stay held, and each line names it as the cause and gives the way out:
++  update that branch from your base ("Update branch") or rebuild it from your
++  base, then re-issue without the merged prerequisite. A prerequisite whose merge fails
+   during the fold (a conflict, a branch that is gone, or any other failed merge)
+   also holds every finished prerequisite whose branch has any of its commits,
+   with a `Depends on` edge or without, merged before the failed one or after,
+@@ -850,8 +863,8 @@ wave builds on, via `[driver].wave_mode`:
+   (unless the run's own fold already replaced it) and re-issue. A line the run
+   did not carry onto is still replaced by its first fold, as above. Known limits,
+   each of which holds the dependents (or the publish) until you act: a
+-  prerequisite squash- or rebase-merged with its branch deleted; a closed PR
+-  that a newer PR replaced; a prerequisite with no recorded PR URL; a rejected
++  prerequisite squash- or rebase-merged (named, with the step, as above); a closed
++  PR that a newer PR replaced; a prerequisite with no recorded PR URL; a rejected
+   or force-pushed-over commit left on the old line; two finished prerequisites
+   that conflict with each other (named, with the step, as above); an old line
+   that still holds a prerequisite whose PR was closed since; and an accepted but
+diff --git a/template/src/pdca_harness/flow.py b/template/src/pdca_harness/flow.py
+index b92ef34..59b9d28 100644
+--- a/template/src/pdca_harness/flow.py
++++ b/template/src/pdca_harness/flow.py
+@@ -1280,12 +1280,14 @@ def _finished_named(cfg: Config, batch: Collection[str] | None,
+     return list(found.values())
+ 
+ 
+-def _finished_head(d: Path, ref: tuple[str, str, bool] | None, repo: Path, base_ref: str,
+-                   tip: str | None) -> str | tuple[str, str]:
++def _finished_head(cfg: Config, d: Path, ref: tuple[str, str, bool] | None, repo: Path,
++                   base_ref: str, tip: str | None) -> str | tuple[str, str]:
+     """Finished bundle ``d``'s PR head when it is state-clean (#646): its PR reads OPEN, or
+     MERGED with the head already on ``base_ref`` or on the line at ``tip``, and the head
+     resolves in ``repo``. Else ``(reason, hint)`` — fail-closed: no recorded PR or branch,
+-    or a state that cannot be read, is not clean."""
++    or a state that cannot be read, is not clean. A MERGED PR whose head is on neither, in
++    ``repo`` or not, is named as a squash or rebase merge when ``base_ref`` has its merge
++    commit (:func:`integrate._squash_merged`, #626), which only then is read."""
+     rec = publish._publish_record(d) if ref else None
+     pr_url = rec.get("pr_url") if isinstance(rec, dict) else None
+     if not pr_url:
+@@ -1296,10 +1298,17 @@ def _finished_head(d: Path, ref: tuple[str, str, bool] | None, repo: Path, base_
+     pr, head = st
+     if pr not in ("OPEN", "MERGED"):
+         return f"its PR is {pr}", "open"
++    off_both = pr == "MERGED" and bool(head) and not any(
++        integrate._carries(repo, head, f"{d.name}'s head", r, of=r)
++        for r in (base_ref, tip) if r)
++    if off_both:
++        oid = integrate._squash_merged(cfg, d, repo, base_ref)
++        if oid:
++            return (f"its PR was squash- or rebase-merged into {base_ref} as {oid[:12]}, and "
++                    f"its head {head[:12]} is on neither {base_ref} nor the line", "squashed")
+     if not head or integrate._rev(repo, head) is None:
+         return f"its PR head {head or '(none reported)'} is not in {repo}", "open"
+-    if pr == "MERGED" and not any(integrate._carries(repo, head, f"{d.name}'s head", r, of=r)
+-                                  for r in (base_ref, tip) if r):
++    if off_both:
+         return f"its PR merged at {head[:12]}, which neither {base_ref} nor the line has", "edge"
+     return head
+ 
+@@ -1321,6 +1330,15 @@ _CARRY_HINTS = {
+             "re-issue",
+     "built_on": "{name} was built on {cause}, which is not carried (see its line): get "
+                 "{cause} carried, or re-drive {name} on a base without it, then re-issue",
++    # A squash- or rebase-merged prerequisite (#626) and whatever was built on it. Its work is
++    # on the base, so no carry of it will ever come: the way out is a run without it.
++    "squashed": "stack mode needs merge commits: update each branch built on {name} from "
++                "{base} (GitHub's \"Update branch\") or rebuild it from {base}, then re-issue "
++                "without {name}",
++    "built_on_squashed": "{cause} was squash- or rebase-merged into {base}, so {name}'s branch "
++                         "holds commits {base} never got: update {name}'s branch from {base} "
++                         "(GitHub's \"Update branch\") or rebuild {name} from {base}, then "
++                         "re-issue without {cause}",
+     # A branch that conflicts with the line (#694, :func:`_clash_why`): with finished ids
+     # of the batch the line carries, or ones it does not; the base; or other work on it.
+     "conflict": "proposed, for you to confirm: " + _CONFLICT_STEP + ", then re-issue",
+@@ -1402,7 +1420,9 @@ def _cascade_not_clean(cfg: Config, ids: list[Path], why: dict[str, tuple[str, s
+     what that id builds on. Each one goes into ``why`` with the ``built_on`` hint. Returns
+     name → the not-clean id its ``Depends on`` reaches (the cause its held line gives). An
+     edge to an id outside ``ids`` and ``through`` is not followed, and neither is a ``Stacks
+-    on`` or ``Depends on (merged)`` edge."""
++    on`` or ``Depends on (merged)`` edge. Where that id was squash- or rebase-merged (#626),
++    directly or further down the chain, the hint is ``built_on_squashed`` and the cause is
++    the merged id: the way out is the same all along the chain, and it names that id."""
+     names = {d.name for d in ids}
+     prereqs = {d.name: _reached(cfg, d, names, through or {}) for d in ids}
+     causes: dict[str, str] = {}
+@@ -1416,8 +1436,10 @@ def _cascade_not_clean(cfg: Config, ids: list[Path], why: dict[str, tuple[str, s
+                 how = (f"reaches {cause}, whose work its branch carries, through "
+                        f"{', '.join(via)} (finished with no patch)" if via else
+                        f"names {cause}, whose work its branch carries")
+-                why[d.name] = (f"its `Depends on` {how}", "built_on")
+-                causes[d.name] = cause
++                squashed = why[cause][1] in ("squashed", "built_on_squashed")
++                why[d.name] = (f"its `Depends on` {how}",
++                               "built_on_squashed" if squashed else "built_on")
++                causes[d.name] = causes.get(cause, cause) if squashed else cause
+                 grew = True
+     return causes
+ 
+@@ -1444,10 +1466,12 @@ def _carry_finished(cfg: Config, bundles: list[Path], finished: list[Path], *,
+     makes every finished id built on it not clean too — its plain ``Depends on`` names it,
+     directly or through others, so its branch carries that work (:func:`_cascade_not_clean`,
+     #652): none of them is folded or accounts for a commit on origin's line, and their
+-    dependents wait too, each named with the cause. One the fold skips — its merge fails
+-    DURING the fold, whatever the error — spreads by commit instead (:func:`integrate.fold`,
+-    #672): a finished id whose branch holds any of its work, with a ``Depends on`` edge or
+-    without, merged before the skip or after, is held for it too (the ``built_on`` hint),
++    dependents wait too, each named with the cause. One squash- or rebase-merged into the
++    base is named as that, and the finished ids held for it say so too, with the way out:
++    update them from the base and re-issue without it (#626). One the fold skips — its merge
++    fails DURING the fold, whatever the error — spreads by commit instead
++    (:func:`integrate.fold`, #672): a finished id whose branch holds any of its work, with a
++    ``Depends on`` edge or without, merged before the skip or after, is held for it too (the ``built_on`` hint),
+     and so on through the ids held this way, their dependents with them; the fold takes
+     them off the line before its one push. So the carry adds none of a skipped id's
+     commits to the line; ones an earlier run already put on a line it continues stay
+@@ -1504,7 +1528,7 @@ def _carry_finished(cfg: Config, bundles: list[Path], finished: list[Path], *,
+                 cands[d.name][2][0] for d in ids if cands[d.name][2]])
+             for d in ids:
+                 try:
+-                    v = _finished_head(d, cands[d.name][2], repo, base_ref, tip)
++                    v = _finished_head(cfg, d, cands[d.name][2], repo, base_ref, tip)
+                 except integrate.IntegrationError as exc:
+                     v = (str(exc), "open")
+                 if isinstance(v, str):
+diff --git a/template/src/pdca_harness/integrate.py b/template/src/pdca_harness/integrate.py
+index f841f2f..91df635 100644
+--- a/template/src/pdca_harness/integrate.py
++++ b/template/src/pdca_harness/integrate.py
+@@ -52,11 +52,12 @@ counts as failed (#695). A branch deleted after its PR merged is judged by
+ the head commit the host says the PR merged with (``merged.merged_head``), never by a
+ commit message: a line that already has that commit skips it; one that does not (a fixup
+ pushed after the fold) takes the base in, once the base is checked to have that commit —
+-a PR merged somewhere else (its base edited on the host, a squash or rebase merge) stops
+-the run instead, and so does a base that would undo work already on the line (a revert of
+-a merged PR, #623). So does a bundle's own branch whose merge would undo it: one cut from,
+-or updated from, a base with such a revert brings the revert along (#673). A removal the
+-branch's own commits make is its change, never counted. Both checks judge each path
++a PR merged somewhere else (its base edited on the host) stops the run instead, and so does
++a squash or rebase merge, named as one when the host's merge commit is on the base (#626:
++stack mode needs merge commits), and a base that would undo work already on the line (a
++revert of a merged PR, #623). So does a bundle's own branch whose merge would undo it: one
++cut from, or updated from, a base with such a revert brings the revert along (#673). A
++removal the branch's own commits make is its change, never counted. Both checks judge each path
+ against where the line leaves the base, so they do not see a partial revert inside a file
+ the line also changed in other ways, nor a revert of work below that point, which the base
+ already has (a later wave's merged PR brings the line commits under it there): an accepted
+@@ -406,10 +407,10 @@ def fold(cfg: Config, accepted: list[Path], *, dry_run: bool = False,
+     a line that already has that head skips it; otherwise the line takes the base in
+     (:func:`_take_in_base`), so the work still reaches the next wave — but only once the
+     base is checked to have that head: a PR merged somewhere else (its base edited on the
+-    host, a squash or rebase merge) raises, and so does an ``Onto branch`` record, whose
+-    PR may have merged into another base. So does a base that would remove work a bundle
+-    put on the line (#623): the line is reset to its tip before the base merge, and the
+-    bundles of ``accepted`` and ``batch`` are what the message names. A bundle's branch
++    host) raises, a squash or rebase merge raises by that name (#626), and so does an ``Onto
++    branch`` record, whose PR may have merged into another base. So does a base that would
++    remove work a bundle put on the line (#623): the line is reset to its tip before the base
++    merge, and the bundles of ``accepted`` and ``batch`` are what the message names. A bundle's branch
+     whose merge would remove such work is refused the same way, unless the branch's own
+     commits make the removal (#673, :func:`_keep_merge`): one cut from, or updated from, a
+     base with a revert brings that revert along.
+@@ -1420,9 +1421,13 @@ def _gone_branch(cfg: Config, wt: Path, d: Path, ref: str, onto: bool, *, branch
+        branch (its base edited on the host), so the fold first checks that the base has the
+        head: then the line takes the base in (:func:`_take_in_base`), unless that would
+        remove work a bundle put on the line (#623), which raises. A base without it —
+-       or a clone without it, which, having fetched the base, means the same; a squash or
+-       rebase merge never puts it on the base either — raises, rather than build the next
+-       wave on a line that lacks the PR's work."""
++       or a clone without it, which, having fetched the base, means the same — raises,
++       rather than build the next wave on a line that lacks the PR's work. A squash or
++       rebase merge never puts the head on the base either: it is told apart by the merge
++       commit the host reports being on the base (:func:`_squash_merged`, #626), and the
++       message then says so and what to do. Stack mode needs merge commits, so the line
++       does not take the base in for it. A merge commit the base lacks, or one that cannot
++       be read, gets the message for a PR merged elsewhere."""
+     base_ref = f"{cfg.base_remote}/{base}"
+     head = merged.merged_head(cfg, d.name.removeprefix("issue_"))
+     if not head:
+@@ -1445,6 +1450,16 @@ def _gone_branch(cfg: Config, wt: Path, d: Path, ref: str, onto: bool, *, branch
+             f"other than {base_ref} — the fold cannot tell its work reaches {branch}; "
+             f"restore the branch, then re-run")
+     if not _carries(wt, head, f"{d.name}'s merged head {head}", base_ref, of=base_ref):
++        oid = _squash_merged(cfg, d, wt, base_ref)
++        if oid:
++            raise IntegrationError(
++                f"{d.name}'s branch {ref} is gone and its PR "
++                f"{rec.get('pr_url') or '(no recorded PR)'} was squash- or rebase-merged into "
++                f"{base_ref} as {oid}: neither {base_ref} nor {branch} has the head it merged "
++                f"({head}), so a branch built on {d.name} holds commits {base_ref} never got. "
++                f"Stack mode needs merge commits. Update each dependent PR's branch from "
++                f"{base_ref} (GitHub's \"Update branch\") or re-drive the dependents on "
++                f"{base_ref}, then re-issue without {d.name}")
+         raise IntegrationError(
+             f"{d.name}'s branch {ref} is gone and its PR "
+             f"{rec.get('pr_url') or '(no recorded PR)'} merged at {head}, a commit neither "
+@@ -1455,6 +1470,20 @@ def _gone_branch(cfg: Config, wt: Path, d: Path, ref: str, onto: bool, *, branch
+     _take_in_base(cfg, wt, d, ref, branch, base_ref, head, owners)
+ 
+ 
++def _squash_merged(cfg: Config, d: Path, wt: Path, base_ref: str) -> str:
++    """The merge commit of bundle ``d``'s merged PR when ``base_ref`` has it, else "" (#626).
++    The caller has found the PR's head on neither ``base_ref`` nor the line, so a merge commit
++    on the base means the merge put the work there as new commits: a squash or rebase merge.
++    Fail-closed: a merge commit that cannot be read or is empty
++    (:func:`merged.merge_and_head`), or one the base lacks (the PR merged into another
++    branch), is "". The host is asked only here, so only for such a PR."""
++    read = merged.merge_and_head(cfg, d.name.removeprefix("issue_"))
++    oid = read[0] if read else ""
++    if oid and _carries(wt, oid, f"{d.name}'s merge commit {oid}", base_ref, of=base_ref):
++        return oid
++    return ""
++
++
+ def _carries(wt: Path, commit: str, what: str, branch: str, *, of: str = "HEAD") -> bool:
+     """Whether ``of`` — by default the line checked out in ``wt`` — has ``commit``. A commit
+     this clone does not have is not in it — never an error (:func:`_in_line` would read
+diff --git a/template/src/pdca_harness/merged.py b/template/src/pdca_harness/merged.py
+index a3167a2..541c775 100644
+--- a/template/src/pdca_harness/merged.py
++++ b/template/src/pdca_harness/merged.py
+@@ -26,6 +26,9 @@ for that base (#655): which commit did the merge put on the base, and which head
+ merge — so the flow can ask whether the line has either? Only a dependent built on the line
+ — one a seam keeps there (#727) — is asked it (#729): one on a base of its own, or on the
+ real base, is built from the base as fetched, so :func:`merged_into` is the whole answer.
++The fold and the pre-wave carry ask it too, for a merged PR whose head is on neither the base
++nor the line: a merge commit on the base then means a squash or rebase merge
++(``integrate._squash_merged``, #626).
+ """
+ 
+ from __future__ import annotations
+@@ -159,8 +162,8 @@ def merge_and_head(cfg: Config, dep_id: str) -> tuple[str, str] | None:
+     the base only after a merge with a merge commit, but it is on any line a fold carried
+     the PR's branch onto. Either is "" when ``gh`` reports none. Fail-closed and silent, as
+     :func:`pr_state` is: no recorded PR, a PR not merged, a ``gh`` failure (``gh`` missing
+-    included) or output it cannot parse all return ``None``; ``flow._runnable`` names the
+-    bundle and the reason."""
++    included) or output it cannot parse all return ``None``; the caller names the bundle and
++    the reason."""
+     rec = _publish_record(cfg.find_bundle(dep_id))
+     pr_url = rec.get("pr_url") if isinstance(rec, dict) else None
+     info = _pr_view(str(pr_url), "state,headRefOid,mergeCommit") if pr_url else None
+@@ -188,7 +191,8 @@ def _pr_view(pr_url: str, fields: str) -> dict | None:
+     """``gh pr view <pr_url> --json <fields>`` read as a JSON object, or ``None`` when it
+     cannot be: ``gh`` missing (``OSError``), ``gh`` failing, or output that is not a JSON
+     object. Silent — :func:`pr_state` and :func:`merge_and_head` share it (#655; the latter
+-    is asked only for a dependent built on the run's line, #729)."""
++    is asked only for a dependent built on the run's line, #729, and for a merged PR whose
++    head is on neither the base nor the line, #626)."""
+     try:
+         r = subprocess.run(["gh", "pr", "view", pr_url, "--json", fields],
+                            capture_output=True, text=True)
+diff --git a/template/src/pdca_harness/publish.py b/template/src/pdca_harness/publish.py
+index 4df6486..6f68858 100644
+--- a/template/src/pdca_harness/publish.py
++++ b/template/src/pdca_harness/publish.py
+@@ -31,7 +31,7 @@ import subprocess
+ import sys
+ from pathlib import Path
+ 
+-from . import brief, gates, leaves, progress, state, worktree
++from . import brief, gates, leaves, progress, state, waves, worktree
+ # Aliased: `publish()` builds a local `record = {...}` (its publish.json payload,
+ # below) that would shadow the module name at the #317 call-in.
+ from . import record as record_mod
+@@ -369,8 +369,9 @@ def publish(
+         if refusal:
+             print(refusal, file=sys.stderr)
+             return 1
+-    if stack_branch:
+-        _warn_if_squash_only(repo_spec)  # a stacked PR must merge-commit, not squash (#123)
++    # A stacked PR, or one others build on, must merge-commit, not squash (#123, #626).
++    if stack_branch or (cfg.wave_mode == "stack" and _has_dependent(cfg, d)):
++        _warn_if_squash_only(repo_spec)
+ 
+     # Host-only CI parity gate ([gates] host_ci, issue #311): the declared commands must
+     # pass against the tree the push would publish, before anything is pushed. The T4
+@@ -827,13 +828,32 @@ def _batch_branch_producer(cfg: Config, d: Path, repo_spec: str, branch: str) ->
+     return ""
+ 
+ 
++def _has_dependent(cfg: Config, d: Path) -> bool:
++    """Whether another bundle under the results root names ``d`` as a prerequisite, in
++    ``Depends on``, ``Depends on (merged)`` or ``Stacks on`` (:func:`waves.declared_deps`,
++    #626). Reads the briefs, no network; one that cannot be read names nothing, as this only
++    decides whether to warn."""
++    iid = d.name.removeprefix("issue_")
++    for bp in sorted(cfg.bundle_root.glob("issue_*/brief.md")):
++        if bp.parent.name == d.name:
++            continue
++        try:
++            if iid in waves.declared_deps(bp):
++                return True
++        except (OSError, ValueError):
++            continue
++    return False
++
++
+ def _warn_if_squash_only(repo_spec: str) -> None:
+-    """Warn if the target repo can't merge a stacked PR with a merge commit (issue #123).
++    """Warn if the target repo can't merge a PR of a stack with a merge commit (#123, #626):
++    one cut from a stack base, or one other bundles build on.
+ 
+     Stacked PRs must be merged bottom-up with a merge commit: a squash or rebase merge puts
+     the parent's change on the base as NEW commits, not the ones the child carries, so the
+-    child keeps showing the parent's diff until its branch is updated from the base (#593).
+-    Best-effort via ``gh repo view``; any failure is silent."""
++    child keeps showing the parent's diff until its branch is updated from the base (#593),
++    and the fold and the re-issue carry stop on it. Best-effort via ``gh repo view``; any
++    failure is silent."""
+     try:
+         r = subprocess.run(
+             ["gh", "repo", "view", repo_spec, "--json", "mergeCommitAllowed,squashMergeAllowed"],
+@@ -847,9 +867,11 @@ def _warn_if_squash_only(repo_spec: str) -> None:
+     except ValueError:
+         return
+     if info.get("mergeCommitAllowed") is False:
+-        print(f"publish: ⚠ {repo_spec} does not allow merge commits — a stacked PR must be "
+-              "merged bottom-up with a MERGE COMMIT (not squash), or each child re-shows its "
+-              "parent's diff until rebased (#123).", file=sys.stderr)
++        print(f"publish: ⚠ {repo_spec} does not allow merge commits — a stacked PR, or one "
++              "others build on, must be merged bottom-up with a MERGE COMMIT (not squash or "
++              "rebase), or each child re-shows its parent's diff until its branch is updated "
++              "from the base, and the next fold or re-issue stops on it (#123, #626).",
++              file=sys.stderr)
+ 
+ 
+ def _fork_owner(repo: Path, remote: str = "origin") -> str:
+diff --git a/template/tests/test_integrate_stack_bases.py b/template/tests/test_integrate_stack_bases.py
+index 5e478d0..511d535 100644
+--- a/template/tests/test_integrate_stack_bases.py
++++ b/template/tests/test_integrate_stack_bases.py
+@@ -112,9 +112,12 @@ def _merged_heads(heads: dict[str, str | None]):
+     commit its PR merged with (absent / None: not merged). Patches the new
+     ``merged.merged_head`` (``create=True``: absent before the fix) and, consistently,
+     ``merged.is_merged`` — so a fold that asks only "is it merged?" is judged on the same
+-    facts. Yields the ``merged_head`` mock."""
++    facts. The merge commit reads as unknown, so no case here reaches a real ``gh``; a squash
++    merge has its own cases (tests/test_stack_squash_merge.py). Yields the ``merged_head``
++    mock."""
+     with mock.patch.object(merged, "merged_head", create=True,
+                            side_effect=lambda _cfg, iid: heads.get(iid)) as head, \
++            mock.patch.object(merged, "merge_and_head", return_value=None), \
+             mock.patch.object(merged, "is_merged",
+                               side_effect=lambda _cfg, iid: bool(heads.get(iid))):
+         yield head
+diff --git a/template/tests/test_stack_squash_merge.py b/template/tests/test_stack_squash_merge.py
+new file mode 100644
+index 0000000..136fb3d
+--- /dev/null
++++ b/template/tests/test_stack_squash_merge.py
+@@ -0,0 +1,495 @@
++"""Stack mode needs merge commits, and says so where it can help (#626).
++
++Stack mode is not changed to support a squash or rebase merge. It warns up front, and it
++recognises one by name when it happens:
++
++- publish warns about a repo without merge commits for a PR other bundles build on, not only
++  for a PR cut from a stack base;
++- the fold, meeting a gone branch whose PR's merge commit is on the base but whose head is on
++  neither the base nor the line, says it was a squash or rebase merge and what to do;
++- the re-issue carry names the same shape, and a finished dependent stays held, with advice
++  that points the right way. The way out it gives is followed here too.
++
++Real git: the ``StackFoldGit`` fixture of tests/test_integrate_stack_bases.py (a bare
++``origin``, a primary checkout and a scratch clone that plays the maintainer), loaded by path
++as tests/test_flow_merged_prereq_on_line.py does. ``gh`` is answered by a stub in front of
++``subprocess.run``, which follows ``merged.merge_and_head``'s documented contract.
++
++Only modules are imported (never a symbol the change adds), so with the production change
++reverted these cases still load and run — and fail on their assertions.
++    cd template && PYTHONPATH=src python3 -m unittest tests.test_stack_squash_merge
++"""
++
++from __future__ import annotations
++
++import dataclasses
++import importlib.util
++import io
++import json
++import subprocess
++import unittest
++from contextlib import ExitStack, redirect_stderr, redirect_stdout
++from pathlib import Path
++from unittest import mock
++
++from pdca_harness import flow, integrate, publish, state
++
++_SPEC = importlib.util.spec_from_file_location(
++    "stack_bases_fixture", Path(__file__).with_name("test_integrate_stack_bases.py"))
++sb = importlib.util.module_from_spec(_SPEC)
++_SPEC.loader.exec_module(sb)
++
++TODAY = "2026-10-14"
++TARGET = sb.TARGET
++ABSENT = sb.ABSENT
++ELSEWHERE = "merged somewhere other than"
++NO_MERGE_COMMITS = "does not allow merge commits"
++EDGE_HINT = "remove the `Depends on:"
++
++
++class _Git(unittest.TestCase):
++
++    def setUp(self) -> None:
++        self.fx = sb.StackFoldGit()          # the fixture's real-git setUp/tearDown and helpers
++        self.fx.setUp()
++        self.addCleanup(self.fx.tearDown)
++        self.cfg = self.fx.cfg
++        self.prs: dict[str, str] = {}         # PR state by id (absent: OPEN)
++        self.pr_heads: dict[str, str] = {}    # PR head by id, kept once its branch is gone
++        self.merge_oid: dict[str, str] = {}   # id → what `gh` reports as its merge commit
++        self.gh_fail_merge_commit = False     # `gh pr view … mergeCommit` exits 1
++        self.merge_commit_reads: list[str] = []
++        self.merge_commit_allowed: bool | None = False   # None: `gh repo view` exits 1
++        self.repo_views = 0
++        self._real_run = subprocess.run
++
++    def _gh_stub(self, args, *a, **kw):
++        """``gh pr view <url> --json <fields>`` and ``gh repo view``, answered from this
++        test's fields. Everything else runs for real."""
++        if not (isinstance(args, list) and args[:1] == ["gh"]):
++            return self._real_run(args, *a, **kw)
++        if args[1] == "repo":
++            self.repo_views += 1
++            if self.merge_commit_allowed is None:
++                return subprocess.CompletedProcess(args, 1, "", "gh: HTTP 502")
++            return subprocess.CompletedProcess(args, 0, json.dumps(
++                {"mergeCommitAllowed": self.merge_commit_allowed,
++                 "squashMergeAllowed": True}), "")
++        iid = str(args[3]).rsplit("/", 1)[-1]
++        if "mergeCommit" in str(args[-1]):
++            self.merge_commit_reads.append(iid)
++            if self.gh_fail_merge_commit:
++                return subprocess.CompletedProcess(args, 1, "", "gh: HTTP 502")
++        head = self.pr_heads.get(iid) or (
++            self.fx._tip(f"fix/{iid}") if self.fx._has(f"fix/{iid}") else "")
++        oid = self.merge_oid.get(iid)
++        out = json.dumps({"state": self.prs.get(iid, "OPEN"), "headRefOid": head,
++                          "mergeCommit": {"oid": oid} if oid else None})
++        return subprocess.CompletedProcess(args, 0, out, "")
++
++    def _squash(self, iid: str, *, into: str = "main") -> str:
++        """The maintainer squash-merges ``iid``'s PR into ``into``: the branch gets one new
++        commit, and the PR's head is never on it. Returns that commit."""
++        h = self.fx.human
++        sb._git(h, "fetch", "-q", "origin")
++        sb._git(h, "checkout", "-q", "-B", into, f"origin/{into}")
++        sb._git(h, "merge", "-q", "--squash", f"origin/fix/{iid}")
++        sb._git(h, "commit", "-q", "-s", "-m", f"fix {iid} (#{iid})")
++        sb._git(h, "push", "-q", "origin", into)
++        oid = self.fx._tip(into)
++        self.prs[iid], self.merge_oid[iid] = "MERGED", oid
++        self.pr_heads[iid] = self.fx._tip(f"fix/{iid}")
++        self.assertFalse(self.fx._ancestor(self.pr_heads[iid], into))
++        return oid
++
++
++class PublishWarning(_Git):
++    """(a), (d), (d2), (e): a real ``publish.publish``; no PR opened, ``gh repo view`` stubbed."""
++
++    def _publish(self, d: Path) -> tuple[int, str]:
++        err = io.StringIO()
++        with mock.patch.object(subprocess, "run", self._gh_stub), \
++                redirect_stdout(io.StringIO()), redirect_stderr(err):
++            rc = publish.publish(self.cfg, d.name.removeprefix("issue_"), open_pr=False,
++                                 by="T", today=TODAY)
++        self.assertEqual(rc, 0, err.getvalue())
++        return rc, err.getvalue()
++
++    def _dependent(self, field: str, value: str = "P") -> None:
++        sb._brief(self.cfg.bundle("D"), extra=f"- **{field}:** {value}\n")
++
++    def test_a_wave_0_pr_another_bundle_depends_on_warns(self):
++        # (a) P has no stack base. Before: only a PR with one warned.
++        p = self.fx._bundle("P", {"p.txt": "p\n"})
++        self._dependent("Depends on")
++        _rc, err = self._publish(p)
++        self.assertEqual(publish.read_stack_base(p), "")
++        self.assertIn(NO_MERGE_COMMITS, err)
++        self.assertEqual(self.repo_views, 1)
++
++    def test_every_declared_edge_counts_however_the_id_is_written(self):
++        # `waves.declared_deps`: all three fields, and the forms a brief may write an id in.
++        for field, value in (("Depends on (merged)", "P"), ("Stacks on", "P"),
++                             ("Depends on", "#P"), ("Depends on", "issue_P"),
++                             ("Depends on", "A1, P")):
++            with self.subTest(field=field, value=value):
++                p = self.fx._bundle("P", {"p.txt": "p\n"})
++                self._dependent(field, value)
++                _rc, err = self._publish(p)
++                self.assertIn(NO_MERGE_COMMITS, err)
++
++    def test_a_wave_0_pr_nothing_depends_on_does_not_warn(self):
++        # (d) No new noise, and no `gh` call for it: another bundle names some other id.
++        p = self.fx._bundle("P", {"p.txt": "p\n"})
++        self._dependent("Depends on", "P2")
++        _rc, err = self._publish(p)
++        self.assertNotIn(NO_MERGE_COMMITS, err)
++        self.assertEqual(self.repo_views, 0)
++
++    def test_a_brief_naming_itself_is_no_dependent(self):
++        p = self.fx._bundle("P", {"p.txt": "p\n"})
++        sb._brief(p, extra="- **Depends on:** P\n")
++        _rc, err = self._publish(p)
++        self.assertNotIn(NO_MERGE_COMMITS, err)
++
++    def test_an_unreadable_brief_is_skipped(self):
++        # Best-effort: another bundle's brief that cannot be read never stops a publish.
++        p = self.fx._bundle("P", {"p.txt": "p\n"})
++        d = self.cfg.bundle("D")
++        d.mkdir(parents=True)
++        (d / "brief.md").write_bytes(b"\xff\xfe not utf-8")
++        _rc, err = self._publish(p)
++        self.assertNotIn(NO_MERGE_COMMITS, err)
++
++    def test_a_pr_cut_from_a_stack_base_still_warns_with_no_dependent(self):
++        # (d2) As before (#123): nothing names W, but its PR is cut from a stack base.
++        a = self.fx._publish("A", {"a.txt": "a\n"})
++        with redirect_stderr(io.StringIO()):
++            integrate.fold(self.cfg, [a])
++        w = self.fx._bundle("W", {"w.txt": "w\n"})
++        publish.write_stack_base(w, sb.LINE)
++        _rc, err = self._publish(w)
++        self.assertIn(NO_MERGE_COMMITS, err)
++
++    def test_merge_mode_does_not_warn(self):
++        # (e) Merge mode picks its own method.
++        self.cfg.wave_mode = "merge"
++        p = self.fx._bundle("P", {"p.txt": "p\n"})
++        self._dependent("Depends on")
++        _rc, err = self._publish(p)
++        self.assertNotIn(NO_MERGE_COMMITS, err)
++        self.assertEqual(self.repo_views, 0)
++
++    def test_a_repo_that_allows_merge_commits_does_not_warn(self):
++        self.merge_commit_allowed = True
++        p = self.fx._bundle("P", {"p.txt": "p\n"})
++        self._dependent("Depends on")
++        _rc, err = self._publish(p)
++        self.assertEqual(self.repo_views, 1)
++        self.assertNotIn(NO_MERGE_COMMITS, err)
++
++    def test_a_gh_failure_is_silent(self):
++        self.merge_commit_allowed = None
++        p = self.fx._bundle("P", {"p.txt": "p\n"})
++        self._dependent("Depends on")
++        _rc, err = self._publish(p)
++        self.assertEqual(self.repo_views, 1)
++        self.assertNotIn(NO_MERGE_COMMITS, err)
++
++
++class FoldOfAGoneBranch(_Git):
++    """(b), (c3): ``integrate.fold`` over a bundle whose branch is gone."""
++
++    def setUp(self) -> None:
++        super().setUp()
++        z = self.fx._publish("Z", {"z.txt": "z\n"})
++        with redirect_stderr(io.StringIO()):
++            integrate.fold(self.cfg, [z], folded_this_run={})
++        self.z, self.t = z, self.fx._tip(sb.LINE)
++
++    def _stopped(self, a: Path) -> str:
++        """The fold stops on ``a``, names it and pushes nothing. Returns the message."""
++        with mock.patch.object(subprocess, "run", self._gh_stub), \
++                redirect_stderr(io.StringIO()):
++            with self.assertRaises(integrate.IntegrationError) as ctx:
++                integrate.fold(self.cfg, [self.z, a], folded_this_run={TARGET: self.t})
++        self.assertEqual(self.fx._tip(sb.LINE), self.t)     # nothing pushed
++        msg = str(ctx.exception)
++        self.assertIn(a.name, msg)
++        return msg
++
++    def test_a_squash_merge_is_named_with_its_merge_commit_and_the_step(self):
++        # (b) Before: the generic "merged somewhere other than" message.
++        a = self.fx._publish("A", {"a.txt": "a\n"})
++        oid = self._squash("A")
++        self.fx._delete("fix/A")
++        msg = self._stopped(a)
++        self.assertRegex(msg, "squash|rebase")
++        self.assertIn(oid, msg)
++        self.assertNotIn(ELSEWHERE, msg)
++        self.assertIn("Update branch", msg)
++        self.assertIn("origin/main", msg)
++        self.assertIn(f"re-issue without {a.name}", msg)
++
++    def test_a_squash_merge_whose_head_the_clone_never_had_is_named_too(self):
++        # A deleted branch's head may be in no clone at all: still on neither.
++        a = self.fx._publish("A", {"a.txt": "a\n"})
++        oid = self._squash("A")
++        self.fx._delete("fix/A")
++        self.pr_heads["A"] = ABSENT
++        msg = self._stopped(a)
++        self.assertIn(oid, msg)
++        self.assertNotIn(ELSEWHERE, msg)
++
++    def test_a_merge_commit_the_base_lacks_keeps_the_generic_message(self):
++        # (b) The PR merged into another branch: `release` has its merge commit, main not.
++        sb._git(self.fx.origin, "branch", "release", "main")
++        a = self.fx._publish("A", {"a.txt": "a\n"})
++        self._squash("A", into="release")
++        self.fx._delete("fix/A")
++        self.assertIn(f"{ELSEWHERE} origin/main", self._stopped(a))
++
++    def test_a_merge_commit_the_clone_does_not_have_keeps_the_generic_message(self):
++        a = self.fx._publish("A", {"a.txt": "a\n"})
++        self._squash("A")
++        self.merge_oid["A"] = ABSENT
++        self.fx._delete("fix/A")
++        self.assertIn(f"{ELSEWHERE} origin/main", self._stopped(a))
++
++    def test_an_empty_merge_commit_keeps_the_generic_message(self):
++        # (c3) `gh` reports none: fail closed.
++        a = self.fx._publish("A", {"a.txt": "a\n"})
++        self._squash("A")
++        del self.merge_oid["A"]
++        self.fx._delete("fix/A")
++        self.assertIn(f"{ELSEWHERE} origin/main", self._stopped(a))
++
++    def test_an_unreadable_merge_commit_keeps_the_generic_message(self):
++        # (c3) `gh` fails on the second read: fail closed.
++        a = self.fx._publish("A", {"a.txt": "a\n"})
++        self._squash("A")
++        self.fx._delete("fix/A")
++        self.gh_fail_merge_commit = True
++        self.assertIn(f"{ELSEWHERE} origin/main", self._stopped(a))
++
++    def test_a_merge_with_a_merge_commit_never_reads_it(self):
++        # The base has the head: the line takes the base in, as before, with no extra read.
++        a = self.fx._publish("A", {"a.txt": "a\n"})
++        self.pr_heads["A"], self.prs["A"] = self.fx._tip("fix/A"), "MERGED"
++        self.fx._merge_pr("A")
++        self.merge_oid["A"] = self.fx._tip("main")
++        self.fx._delete("fix/A")
++        with mock.patch.object(subprocess, "run", self._gh_stub), \
++                redirect_stderr(io.StringIO()):
++            integrate.fold(self.cfg, [self.z, a], folded_this_run={TARGET: self.t})
++        self.assertEqual(self.merge_commit_reads, [])
++        self.assertTrue(self.fx._ancestor(self.merge_oid["A"], sb.LINE))
++
++
++class ReissueCarry(_Git):
++    """(c), (c2), (c3): ``flow._drive_and_act`` with the leaves stubbed, a re-issued run. The
++    publisher is NOT a stub (a stub turns every fold into a dry-run, which holds nothing)."""
++
++    def setUp(self) -> None:
++        super().setUp()
++        self.cfg.publisher = dataclasses.replace(self.cfg.publisher, mode="command")
++        self.seen: dict[str, tuple[str, str]] = {}
++
++    def _finished(self, iid: str, on: str = "") -> Path:
++        """``iid`` finished in an earlier run; ``on``: built on that id's branch, and its
++        plain ``Depends on`` names it."""
++        d = self.fx._publish(iid, {f"{iid.lower()}.txt": f"{iid}\n"},
++                             cut_from=f"origin/fix/{on}" if on else "origin/main")
++        sb._brief(d, extra=f"- **Depends on:** {on}\n" if on else "")  # _publish rewrites it
++        sb._accept(d)
++        self.assertEqual(state.state(d), state.COMPLETE)
++        return d
++
++    def _planned(self, iid: str, depends_on: str) -> Path:
++        d = self.cfg.bundle(iid)
++        sb._brief(d, extra=f"- **Depends on:** {depends_on}\n")
++        return d
++
++    def _drive_wave(self, cfg, wave: list[Path], **_kw) -> int:
++        for d in wave:
++            self.seen[d.name] = (publish.read_stack_base(d), publish.read_stack_base_tip(d))
++            (d / "patch.diff").write_text(sb._new_file_patch(f"{d.name}.txt", d.name),
++                                          encoding="utf-8")
++            sb._accept(d)
++        return 1
++
++    def _publish_bundle(self, cfg, d: Path, **_kw) -> bool:
++        tip, line = publish.read_stack_base_tip(d), publish.read_stack_base(d)
++        self.fx._publish(d.name.removeprefix("issue_"), {f"{d.name}.txt": d.name + "\n"},
++                         cut_from=tip or (f"origin/{line}" if line else "origin/main"))
++        return True
++
++    def _run(self, drive: list[Path], batch: list[str]) -> None:
++        self.line = integrate.integration_branch(self.cfg, "main", batch)
++        self.seen = {}
++        err, out = io.StringIO(), io.StringIO()
++        with ExitStack() as stack:
++            stack.enter_context(mock.patch.object(subprocess, "run", self._gh_stub))
++            stack.enter_context(mock.patch.object(flow, "_drive_wave", self._drive_wave))
++            stack.enter_context(mock.patch.object(flow, "_publish_bundle",
++                                                  self._publish_bundle))
++            stack.enter_context(mock.patch.object(publish, "draft_texts",
++                                                  lambda *a, **k: True))
++            stack.enter_context(redirect_stdout(out))
++            stack.enter_context(redirect_stderr(err))
++            self.results = flow._drive_and_act(self.cfg, drive, do_publish=True, do_act=False,
++                                               by="T", today=TODAY, batch=batch)
++        self.err = err.getvalue()
++        self.assertNotIn("Traceback", self.err)
++
++    def _not_carried(self, iid: str) -> str:
++        """The ONE stderr line saying finished ``iid`` is not carried."""
++        lines = [x for x in self.err.splitlines()
++                 if x.startswith(f"flow: issue_{iid} (finished in an earlier run) is not")]
++        self.assertEqual(len(lines), 1, self.err)
++        return lines[0]
++
++    def _assert_never_built(self, iid: str) -> None:
++        self.assertNotIn(f"issue_{iid}", self.seen, self.err)
++        self.assertEqual(self.results[iid], state.PLANNED)
++
++    def _assert_named_squash(self, line: str, oid: str = "") -> None:
++        self.assertRegex(line, "squash- or rebase-merged")
++        self.assertIn("origin/main", line)
++        self.assertNotIn(EDGE_HINT, line)
++        if oid:
++            self.assertIn(oid[:12], line)
++
++    def test_a_squash_merged_prerequisite_is_named_and_its_dependent_stays_held(self):
++        # (c) Before: P got the `edge` hint, Q the `built_on` hint "get issue_P carried".
++        self._finished("P")
++        self._finished("Q", on="P")
++        oid = self._squash("P")
++        d = self._planned("D", "Q")
++        self._run([d], ["P", "Q", "D"])
++        self._assert_named_squash(self._not_carried("P"), oid)
++        q = self._not_carried("Q")
++        self.assertRegex(q, "issue_P was squash- or rebase-merged")
++        self.assertIn("issue_D", q)                         # Q holds D: Q is not carried
++        self.assertIn("Update branch", q)
++        self.assertIn("update issue_Q's branch from origin/main", q)
++        self.assertIn("rebuild issue_Q from origin/main", q)
++        self.assertNotIn("get issue_P carried", q)
++        self.assertNotIn(EDGE_HINT, q)
++        self.assertNotIn("carried issue_Q", self.err)
++        self.assertFalse(self.fx._has(self.line))           # no line holds anything
++        self._assert_never_built("D")
++
++    def test_a_chain_on_a_squash_merged_prerequisite_names_it_all_the_way(self):
++        # R builds on Q builds on P: the way out names P, not "get issue_Q carried".
++        self._finished("P")
++        self._finished("Q", on="P")
++        self._finished("R", on="Q")
++        self._squash("P")
++        d = self._planned("D", "R")
++        self._run([d], ["P", "Q", "R", "D"])
++        r = self._not_carried("R")
++        self.assertIn("issue_P was squash- or rebase-merged", r)
++        self.assertIn("update issue_R's branch from origin/main", r)
++        self.assertNotIn("get issue_Q carried", r)
++        self.assertIn("re-issue without issue_P", r)
++        self._assert_never_built("D")
++
++    def test_a_squash_merge_with_its_branch_deleted_is_named_too(self):
++        # The usual end of a squash merge: the head is on no ref any more, and may be in no
++        # clone. Before it read "not in <repo>", with the `open` hint.
++        p = self._finished("P")
++        self._finished("Q", on="P")
++        oid = self._squash("P")
++        self.fx._delete("fix/P")
++        self.pr_heads["P"] = ABSENT
++        self.assertTrue(integrate._has_patch(p))
++        d = self._planned("D", "P")
++        self._run([d], ["P", "Q", "D"])
++        line = self._not_carried("P")
++        self._assert_named_squash(line, oid)
++        self.assertIn("issue_D", line)
++        self.assertNotIn("get issue_P's PR open", line)
++        self._assert_never_built("D")
++
++    def test_a_merge_commit_the_base_lacks_keeps_the_edge_hint(self):
++        # (c2) The PR merged into another branch: as before.
++        sb._git(self.fx.origin, "branch", "release", "main")
++        self._finished("P")
++        self._squash("P", into="release")
++        d = self._planned("D", "P")
++        self._run([d], ["P", "D"])
++        line = self._not_carried("P")
++        self.assertIn("which neither origin/main nor the line has", line)
++        self.assertIn("remove the `Depends on: P` edge", line)
++        self.assertNotRegex(line, "squash|rebase")
++        self._assert_never_built("D")
++
++    def test_an_unreadable_merge_commit_keeps_the_edge_hint(self):
++        # (c3) `gh` fails on the second read: fail closed.
++        self._finished("P")
++        self._squash("P")
++        self.gh_fail_merge_commit = True
++        d = self._planned("D", "P")
++        self._run([d], ["P", "D"])
++        self.assertIn("P", self.merge_commit_reads)
++        self.assertIn("remove the `Depends on: P` edge", self._not_carried("P"))
++        self._assert_never_built("D")
++
++    def test_an_empty_merge_commit_keeps_the_edge_hint(self):
++        # (c3) `gh` reports no merge commit: fail closed.
++        self._finished("P")
++        self._squash("P")
++        del self.merge_oid["P"]
++        d = self._planned("D", "P")
++        self._run([d], ["P", "D"])
++        self.assertIn("remove the `Depends on: P` edge", self._not_carried("P"))
++        self._assert_never_built("D")
++
++    def test_a_built_on_hold_for_any_other_cause_is_unchanged(self):
++        # #652: a closed P keeps the `built_on` hint and no read of its merge commit.
++        self._finished("P")
++        self._finished("Q", on="P")
++        self.prs["P"] = "CLOSED"
++        d = self._planned("D", "Q")
++        self._run([d], ["P", "Q", "D"])
++        self.assertIn("get issue_P carried, or re-drive issue_Q on a base without it",
++                      self._not_carried("Q"))
++        self.assertEqual(self.merge_commit_reads, [])
++
++    def test_an_open_or_merge_committed_prerequisite_never_reads_the_merge_commit(self):
++        # The extra `gh` call is made only for a MERGED P whose head is on neither.
++        self._finished("O")
++        self._finished("M")
++        self.pr_heads["M"], self.prs["M"] = self.fx._tip("fix/M"), "MERGED"
++        self.fx._merge_pr("M")
++        d = self._planned("D", "O, M")
++        self._run([d], ["O", "M", "D"])
++        self.assertIn("carried issue_O, issue_M", self.err)
++        self.assertEqual(self.merge_commit_reads, [])
++        self.assertEqual(self.results["D"], state.COMPLETE)
++
++    def test_the_way_out_the_hold_gives_works(self):
++        # The hold says: update Q from the base, then re-issue without P. Followed: a run
++        # asked for Q and D carries Q, and D is built on a line that holds Q's branch and P's
++        # work under the squash commit, with no `Depends on: P` left to wait on.
++        self._finished("P")
++        self._finished("Q", on="P")
++        oid = self._squash("P")
++        d = self._planned("D", "Q, P")
++        self._run([d], ["P", "Q", "D"])
++        self._assert_never_built("D")
++        self.assertIn("re-issue without issue_P", self._not_carried("Q"))
++        self.fx._update_branch("Q")                  # GitHub's "Update branch"
++        self._run([d], ["Q", "D"])
++        self.assertIn("carried issue_Q", self.err)
++        self.assertIn("issue_D", self.seen, self.err)
++        self.assertEqual(self.results["D"], state.COMPLETE)
++        tip = self.seen["issue_D"][1]
++        self.assertTrue(tip, self.err)
++        self.assertTrue(self.fx._ancestor(oid, tip))
++        self.assertTrue(self.fx._ancestor(self.fx._tip("fix/Q"), tip))
++
++
++if __name__ == "__main__":
++    unittest.main()

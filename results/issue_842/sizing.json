@@ -1,0 +1,13 @@
+{
+  "band": "ok",
+  "independent_outcomes": [
+    "Make Config.load refuse an unknown [driver].wave_mode value (raise ValueError naming the value and 'stack | merge'), so a typo no longer runs as 'stack' with no error. One defect, one check at config.py:733, one new test file."
+  ],
+  "proposed_seams": [
+    "No seam. The brief has one defect and one fix site. The CLI leg needs no change, because cli.py:452-454 already turns the ValueError into one stderr line and exit 2. The tests cover the same check, so they cannot ship apart from it.",
+    "Not part of this brief, and already excluded: the other note-and-substitute keys in config.py (confirm_gating_fail, network_access, merge_requires, merge_wait_secs, expected_checks, sweep_worktrees, dependency_halt, [records] mode, merge_method). Those are separate outcomes, and the brief says the human files them as their own follow-up issue.",
+    "Not part of this brief, and already excluded: handoff_guard.py:45 shows a traceback for a bad wave_mode. That is a second outcome, and the brief says the human files it as its own issue."
+  ],
+  "confidence": "high",
+  "brief_sha": "bace791d375d745b"
+}

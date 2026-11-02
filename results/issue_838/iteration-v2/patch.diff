@@ -1,0 +1,550 @@
+diff --git a/docs/07-crosscutting.md b/docs/07-crosscutting.md
+index 1fc1759..44b9428 100644
+--- a/docs/07-crosscutting.md
++++ b/docs/07-crosscutting.md
+@@ -884,6 +884,11 @@ wave builds on, via `[driver].wave_mode`:
+   refuses a merge if the base moves after the driver's last read.
+   `[driver].merge_requires = "required"` opts back into host-config-only
+   semantics, and skips the behind check and the update too.
++  Under either setting, when `gh pr merge` fails on a PR the host reports
++  `BLOCKED` because of unresolved review threads or a review that requested
++  changes, the run stops saying so, with each thread's file and line, writes the
++  remarks to `merge-remarks.json` in the bundle (the bundle's next merge attempt
++  removes it first), and returns the PR to draft.
+   Under either setting, before it readies a PR the driver reads the PR's base on
+   the host and compares it with the bundle's own target base (the `Repo + branch
+   target` publish used). If they differ, the driver retargets the PR
+diff --git a/template/src/pdca_harness/merge.py b/template/src/pdca_harness/merge.py
+index 1f93c43..c0fe6c0 100644
+--- a/template/src/pdca_harness/merge.py
++++ b/template/src/pdca_harness/merge.py
+@@ -49,6 +49,16 @@ never resolving green, a failing ``gh pr merge`` — ``_undo_ready`` marks it ba
+ (``gh pr ready --undo``) before returning, so a stopped wave never leaves a PR advertising
+ a readiness no human granted (``docs/INTEGRATION.md`` §10).
+ 
++A green rollup can still be blocked by review remarks (issue #838): unresolved review
++threads, or a review that requested changes. That block only shows as a failed ``gh pr
++merge``, under either ``merge_requires`` value, so on that failure ``_remarks_block`` reads
++the PR's ``mergeStateStatus`` (polled while ``UNKNOWN``, bounded by ``merge_wait_secs``)
++and, for ``BLOCKED``, its unresolved threads (``gh api graphql``, every page) and reviews.
++When there are any, the run stops naming them, each thread with its path:line, and writes
++them to ``merge-remarks.json`` in the bundle; a block with none keeps the generic refusal.
++The next attempt to merge the bundle removes that file before it decides anything, so the
++file never outlives the stop it describes.
++
+ A green rollup also says nothing about the BASE it was earned against (issue #531). The
+ wave's PRs merge one after another, so once an earlier member lands, a later member's head
+ — and its rollup — still describe the old base: merging it lands a combination nothing
+@@ -482,6 +492,137 @@ def _refuse(d: Path, pr_url: str, why: str) -> int:
+     return 1
+ 
+ 
++# The unresolved review threads of a PR, read generically (any reviewer, human or bot) by
++# its URL: GraphQL `resource(url:)` takes the URL `publish.json` records, so no owner /
++# repo / number has to be parsed out of it. The first comment of a thread is its remark.
++# The host serves the threads at most 100 a page; `$cursor` asks for the page after one.
++_THREADS_QUERY = """\
++query($url: URI!, $cursor: String) {
++  resource(url: $url) {
++    ... on PullRequest {
++      reviewThreads(first: 100, after: $cursor) {
++        pageInfo { hasNextPage endCursor }
++        nodes {
++          id isResolved isOutdated path line originalLine
++          comments(first: 1) { nodes { body url author { login } } }
++        }
++      }
++    }
++  }
++}"""
++
++REMARKS_FILE = "merge-remarks.json"
++
++
++def _merge_state(pr_url: str, wait_secs: int, *,
++                 poll_interval: int = 5) -> dict | None:
++    """``gh pr view --json mergeStateStatus,reviewDecision,latestReviews`` of ``pr_url``
++    (``merged._pr_view``), or None when it cannot be read. GitHub computes
++    ``mergeStateStatus`` in the background, so straight after ``gh pr ready`` it can read
++    ``UNKNOWN``: that read is polled through ``_sleep``, bounded by ``wait_secs`` (the
++    ``[driver].merge_wait_secs`` budget the #462 rollup wait uses), and a state still
++    ``UNKNOWN`` when the budget is spent is returned as it is: not blocked by remarks."""
++    waited = 0
++    while True:
++        info = merged._pr_view(pr_url, "mergeStateStatus,reviewDecision,latestReviews")
++        if info is None or info.get("mergeStateStatus") != "UNKNOWN" or waited >= wait_secs:
++            return info
++        step = min(poll_interval, wait_secs - waited)
++        _sleep(step)
++        waited += step
++
++
++def _review_threads(pr_url: str) -> list[dict] | None:
++    """PR ``pr_url``'s UNRESOLVED review threads (``gh api graphql``), one dict per thread
++    — ``id``, ``path``, ``line``, ``outdated``, ``body``, ``author``, ``url`` — or None when
++    a query fails or its answer cannot be read. Every page is read, each one asked for with
++    the end cursor of the page before it: an unresolved thread can sit behind a full page
++    of resolved ones. A next page claimed with no cursor, or with one already followed,
++    cannot be read to the end, so that is None too, never an endless read. An outdated
++    thread has no ``line`` (it is ``null`` once the code under it changed), so its
++    ``originalLine`` is reported; a thread on a whole file has neither."""
++    threads: list[dict] = []
++    cursor = None
++    followed: set[str] = set()
++    while True:
++        cmd = ["gh", "api", "graphql", "-f", f"query={_THREADS_QUERY}", "-f", f"url={pr_url}"]
++        if cursor:
++            cmd += ["-f", f"cursor={cursor}"]
++        r = subprocess.run(cmd, capture_output=True, text=True)
++        if r.returncode != 0:
++            return None
++        try:
++            conn = json.loads(r.stdout or "")["data"]["resource"]["reviewThreads"]
++            nodes, page = conn["nodes"], conn["pageInfo"]
++        except (ValueError, KeyError, TypeError):
++            return None
++        if not isinstance(nodes, list) or not isinstance(page, dict):
++            return None
++        for t in nodes:
++            if not isinstance(t, dict) or t.get("isResolved"):
++                continue
++            first = ((t.get("comments") or {}).get("nodes") or [{}])[0] or {}
++            line = t.get("line")
++            threads.append({
++                "id": t.get("id"),
++                "path": t.get("path"),
++                "line": line if line is not None else t.get("originalLine"),
++                "outdated": bool(t.get("isOutdated")),
++                "body": first.get("body") or "",
++                "author": (first.get("author") or {}).get("login") or "",
++                "url": first.get("url") or "",
++            })
++        if not page.get("hasNextPage"):
++            return threads
++        cursor = page.get("endCursor")
++        if not isinstance(cursor, str) or not cursor or cursor in followed:
++            return None
++        followed.add(cursor)
++
++
++def _remarks_block(d: Path, pr_url: str, wait_secs: int) -> str:
++    """Why ``pr_url``'s failed ``gh pr merge`` is a block by review remarks, or "" when it
++    is not one this can name (issue #838). Only a ``BLOCKED`` merge state is looked into;
++    a block with no unresolved thread and no CHANGES_REQUESTED review (a required approval
++    still missing, a ruleset) returns "" so the caller keeps its generic refusal. When it is
++    a remarks block, the threads and the reviews requesting changes are written to
++    ``d/merge-remarks.json`` and the reason names each thread's path:line. ``_merge_one``
++    removes that file when an attempt starts, so it only ever names the remarks the attempt
++    that wrote it stopped on."""
++    info = _merge_state(pr_url, wait_secs)
++    if not info or info.get("mergeStateStatus") != "BLOCKED":
++        return ""
++    threads = _review_threads(pr_url)
++    reviews = info.get("latestReviews")
++    changes = sorted({str(((r.get("author") or {}).get("login")) or "?")
++                      for r in (reviews if isinstance(reviews, list) else [])
++                      if isinstance(r, dict) and r.get("state") == "CHANGES_REQUESTED"})
++    if not changes and info.get("reviewDecision") == "CHANGES_REQUESTED":
++        changes = ["?"]
++    if not threads and not changes:
++        if threads is None:
++            print(f"   merge: {pr_url} is BLOCKED, and its review threads could not be read "
++                  "(`gh api graphql` failed)", file=sys.stderr)
++        return ""
++    threads = threads or []
++    (d / REMARKS_FILE).write_text(json.dumps({
++        "pr_url": pr_url,
++        "mergeStateStatus": "BLOCKED",
++        "threads": threads,
++        "changes_requested_by": changes,
++    }, indent=2) + "\n", encoding="utf-8")
++    parts = []
++    if threads:
++        where = "; ".join(f"{t['path']}{'' if t['line'] is None else ':' + str(t['line'])}"
++                          f"{' (outdated)' if t['outdated'] else ''} by {t['author'] or '?'}"
++                          for t in threads)
++        parts.append(f"{len(threads)} unresolved review thread(s) — {where}")
++    if changes:
++        parts.append(f"a CHANGES_REQUESTED review by {', '.join(changes)}")
++    return (f"the host blocks its merge: it is blocked by {' and by '.join(parts)}. The "
++            f"remarks are written to {d / REMARKS_FILE}")
++
++
+ def _target_base(cfg: Config, d: Path, pr_url: str) -> tuple[str, str]:
+     """Put ``d``'s PR on its bundle's own target base before it is readied (issue #500):
+     ``(target, "")`` once the host reports the PR on ``target``, or ``("", why)`` to refuse.
+@@ -569,6 +710,11 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
+     if dry_run:
+         print(f"merge --dry-run — {d.name}: {' '.join(cmd)}")
+         return 0
++    # Issue #838: `merge-remarks.json` names the review remarks an attempt stopped on. Each
++    # attempt removes one an earlier run left before it decides anything, so a PR merged
++    # since, refused for another reason, or no longer blocked by remarks never leaves a
++    # stale file to act on; only `_remarks_block` writes it, for this attempt's own stop.
++    (d / REMARKS_FILE).unlink(missing_ok=True)
+     iid = d.name.removeprefix("issue_")
+     if merged.is_merged(cfg, iid):
+         return 0  # already merged (a resumed run) — idempotent
+@@ -715,6 +861,13 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
+     r = subprocess.run(cmd, capture_output=True, text=True)
+     if r.returncode != 0:
+         print((r.stderr or r.stdout).strip(), file=sys.stderr)
++        # Issue #838: a green rollup can still be blocked by review remarks (unresolved
++        # threads, a CHANGES_REQUESTED review). Under either merge_requires value that
++        # block shows only here, as a failed merge, so name it and write the remarks into
++        # the bundle; any other failure keeps the generic refusal below.
++        why = _remarks_block(d, str(pr_url), cfg.merge_wait_secs)
++        if why:
++            return _refuse(d, pr_url, why)
+         print(f"\n!!! merge: {d.name} ({pr_url}) did not merge — a conflict, no merge "
+               "rights on the base, a host-required check that failed or started after the "
+               "rollup gate above, a head that changed after that gate read it green (the "
+diff --git a/template/tests/test_merge_review_remarks.py b/template/tests/test_merge_review_remarks.py
+new file mode 100644
+index 0000000..837ea7e
+--- /dev/null
++++ b/template/tests/test_merge_review_remarks.py
+@@ -0,0 +1,343 @@
++"""Merge mode names a block by review remarks (issue #838).
++
++A non-final wave's PR can read green on its check rollup and still be refused by the host
++because review threads are unresolved or a review requested changes. `gh pr merge` then
++fails, and before #838 `_merge_one` printed only its generic refusal ("a conflict, no merge
++rights …") and wrote nothing to the bundle. Now, when the merge fails, it reads the PR's
++`mergeStateStatus` (`gh pr view`, polled while `UNKNOWN` on the `merge_wait_secs` budget)
++and, for `BLOCKED`, its unresolved review threads (`gh api graphql`, every page of them)
++and reviews: it names the block with each thread's path:line, writes `merge-remarks.json`
++into the bundle, and returns the PR to draft. A `BLOCKED` with no thread and no
++CHANGES_REQUESTED review keeps the generic refusal and writes no file. The file describes
++the attempt that wrote it: the next attempt to merge the bundle removes it first.
++
++`gh` and `git` are stubbed in front of `subprocess.run`, as `test_merge.py` does — no
++network. Run from template/:
++    PYTHONPATH=src python -m unittest tests.test_merge_review_remarks
++"""
++
++from __future__ import annotations
++
++import io
++import json
++import shutil
++import tempfile
++import unittest
++from contextlib import redirect_stderr, redirect_stdout
++from pathlib import Path
++from types import SimpleNamespace
++from unittest import mock
++
++from pdca_harness import merge, merged, state
++from pdca_harness.config import Config, LeafConfig
++
++PR = "https://github.com/org/repo/pull/7"
++HEAD = "1" * 40
++BASE_TIP = "b" * 40
++REMARKS = "merge-remarks.json"
++
++
++def _cfg(root: Path, **overrides: object) -> Config:
++    return Config(
++        root=root, bundle_root=root / "results", process_dir=root / "process",
++        templates_dir=root / "templates", default_branch="main", tracker_system="github",
++        tracker_url="", issue_id_example="#1",
++        builder=LeafConfig(mode="stub"), reviewer=LeafConfig(mode="stub"),
++        base_remote="origin", repo_checkouts={"org/repo": str(root / "repo")},
++        **overrides)
++
++
++def _res(code: int = 0, out: str = "", err: str = "") -> SimpleNamespace:
++    return SimpleNamespace(returncode=code, stdout=out, stderr=err)
++
++
++def _thread(tid: str, path: str, line: int | None, body: str, who: str, *,
++            original: int | None = None, resolved: bool = False,
++            outdated: bool | None = None) -> dict:
++    return {"id": tid, "isResolved": resolved,
++            "isOutdated": line is None if outdated is None else outdated, "path": path,
++            "line": line, "originalLine": original if original is not None else line,
++            "comments": {"nodes": [{"body": body, "url": f"{PR}#{tid}",
++                                    "author": {"login": who}}]}}
++
++
++def _page(nodes: list, more: bool, end: str | None) -> str:
++    """One `reviewThreads` page as `gh api graphql` prints it."""
++    return json.dumps({"data": {"resource": {"reviewThreads": {
++        "pageInfo": {"hasNextPage": more, "endCursor": end}, "nodes": nodes}}}})
++
++
++class _Gh:
++    """`subprocess.run` stub: the PR is on `main`, up to date with it, its rollup reads
++    `checks` (green by default); `gh pr merge` fails as a host does for a blocked PR unless
++    `merge_ok`. `states` is the sequence of `mergeStateStatus` reads (the last repeats),
++    `reviews` the `latestReviews`. The GraphQL thread nodes are `threads`, or `pages` of
++    them served the way the host pages `reviewThreads`: the page after cursor `c<k>` is
++    `pages[k]`. `stuck` makes every page claim a next page under the same cursor. Every
++    command is logged in `calls`, the cursor of each GraphQL request in `cursors`."""
++
++    def __init__(self, *, states=("BLOCKED",), threads=(), pages=None, reviews=(),
++                 decision: str = "", checks: str = "pass", merge_ok: bool = False,
++                 stuck: bool = False) -> None:
++        self.states = list(states)
++        self.pages = [list(p) for p in pages] if pages is not None else [list(threads)]
++        self.reviews = list(reviews)
++        self.decision = decision
++        self.checks = checks
++        self.merge_ok = merge_ok
++        self.stuck = stuck
++        self.calls: list[list[str]] = []
++        self.cursors: list[str | None] = []
++
++    def __call__(self, cmd, **kw):
++        self.calls.append(list(cmd))
++        if cmd[:1] == ["git"]:
++            if "rev-parse" in cmd:
++                return _res(out=BASE_TIP + "\n")
++            return _res()                       # fetch / cat-file / merge-base: up to date
++        if cmd[:3] == ["gh", "api", "graphql"]:
++            cursor = next((a.split("=", 1)[1] for a in cmd if a.startswith("cursor=")), None)
++            self.cursors.append(cursor)
++            if self.stuck:
++                if len(self.cursors) > 10:      # never hang the suite on a missing guard
++                    return _res(1, err="stub: too many pages")
++                return _res(out=_page(self.pages[0], True, "c1"))
++            k = 0 if cursor is None else int(cursor[1:])
++            return _res(out=_page(self.pages[k], k + 1 < len(self.pages), f"c{k + 1}"))
++        verb = cmd[2]
++        if verb == "view":
++            fields = cmd[cmd.index("--json") + 1]
++            if "mergeStateStatus" in fields:
++                st = self.states.pop(0) if len(self.states) > 1 else self.states[0]
++                return _res(out=json.dumps({"mergeStateStatus": st,
++                                            "reviewDecision": self.decision,
++                                            "latestReviews": self.reviews}))
++            return _res(out=json.dumps({"headRefOid": HEAD, "baseRefName": "main"}))
++        if verb == "checks":
++            return _res(0 if self.checks == "pass" else 1,
++                        out=json.dumps([{"name": "ci", "bucket": self.checks}]))
++        if verb == "merge":
++            if self.merge_ok:
++                return _res()
++            return _res(1, err="GraphQL: Pull request is not mergeable: the base branch "
++                               "policy prohibits the merge. (mergePullRequest)")
++        return _res()                           # ready / ready --undo / update-branch
++
++
++class MergeReviewRemarks(unittest.TestCase):
++    def setUp(self) -> None:
++        self.tmp = Path(tempfile.mkdtemp())
++        self.sleeps: list[int] = []
++        sleeper = mock.patch.object(merge, "_sleep", side_effect=self.sleeps.append)
++        sleeper.start()
++        self.addCleanup(sleeper.stop)
++
++    def tearDown(self) -> None:
++        shutil.rmtree(self.tmp, ignore_errors=True)
++
++    def _bundle(self, cfg: Config, iid: str = "838") -> Path:
++        d = cfg.bundle(iid)
++        d.mkdir(parents=True)
++        (d / "brief.md").write_text("- **Repo + branch target:** org/repo @ main\n",
++                                    encoding="utf-8")
++        (d / "patch.diff").write_text("diff\n", encoding="utf-8")
++        (d / "publish.json").write_text(json.dumps({"pr_url": PR, "repo": "org/repo",
++                                                    "base": "main"}), encoding="utf-8")
++        return d
++
++    def _run(self, gh: _Gh, d: Path | None = None, *, already_merged: bool = False,
++             dry_run: bool = False, **cfg_over: object) -> tuple[int, str, Path]:
++        cfg = _cfg(self.tmp, **cfg_over)
++        d = d or self._bundle(cfg)
++        with mock.patch.object(merge.subprocess, "run", side_effect=gh), \
++                mock.patch.object(merge.state, "state", return_value=state.COMPLETE), \
++                mock.patch.object(merged, "is_merged", return_value=already_merged), \
++                redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()) as err:
++            rc = merge.merge_wave(cfg, [d], dry_run=dry_run, method="merge")
++        return rc, err.getvalue(), d
++
++    def _assert_undone(self, gh: _Gh) -> None:
++        undo = ["gh", "pr", "ready", PR, "--undo"]
++        self.assertIn(undo, gh.calls)
++        # Nothing readies it again after the undo: it is not left marked ready.
++        last = len(gh.calls) - 1 - gh.calls[::-1].index(undo)
++        self.assertFalse(any(c == ["gh", "pr", "ready", PR] for c in gh.calls[last:]))
++
++    def _two_threads(self) -> list[dict]:
++        return [_thread("T1", "src/a.py", 12, "Use a context manager here.", "alice"),
++                _thread("T2", "src/b.py", 40, "Off by one?", "copilot"),
++                _thread("T3", "src/c.py", 3, "Done already.", "bob", resolved=True)]
++
++    def test_blocked_by_threads_is_named_and_written(self) -> None:
++        gh = _Gh(threads=self._two_threads())
++        rc, err, d = self._run(gh)
++        self.assertNotEqual(rc, 0)
++        self.assertIn("blocked by 2 unresolved review thread(s)", err)
++        self.assertIn("src/a.py:12", err)
++        self.assertIn("src/b.py:40", err)
++        self.assertNotIn("src/c.py", err)                  # a resolved thread is no remark
++        self.assertNotIn("a conflict, no merge rights", err)
++        f = d / REMARKS
++        self.assertTrue(f.is_file())
++        threads = json.loads(f.read_text(encoding="utf-8"))["threads"]
++        self.assertEqual(len(threads), 2)
++        for t in threads:
++            for key in ("id", "path", "line", "body", "author", "url"):
++                self.assertIn(key, t)
++        self.assertEqual(threads[0], {**threads[0], "id": "T1", "path": "src/a.py",
++                                      "line": 12, "body": "Use a context manager here.",
++                                      "author": "alice", "url": f"{PR}#T1"})
++        self._assert_undone(gh)
++
++    def test_threads_past_the_first_page_are_read(self) -> None:
++        # The host serves `reviewThreads` at most 100 a page. A PR whose first 100 threads
++        # are resolved is still blocked by the unresolved ones on the pages after them.
++        done = [_thread(f"R{i}", "src/done.py", i + 1, "ok", "bob", resolved=True)
++                for i in range(100)]
++        gh = _Gh(pages=[done,
++                        [_thread("T101", "src/late.py", 9, "Still open.", "alice"),
++                         *done[:99]],
++                        [_thread("T201", "src/later.py", 4, "And this.", "copilot")]])
++        rc, err, d = self._run(gh)
++        self.assertNotEqual(rc, 0)
++        self.assertEqual(gh.cursors, [None, "c1", "c2"])    # each page after the last one
++        self.assertIn("blocked by 2 unresolved review thread(s)", err)
++        self.assertIn("src/late.py:9", err)
++        self.assertIn("src/later.py:4", err)
++        self.assertNotIn("a conflict, no merge rights", err)
++        threads = json.loads((d / REMARKS).read_text(encoding="utf-8"))["threads"]
++        self.assertEqual([t["id"] for t in threads], ["T101", "T201"])
++        self._assert_undone(gh)
++
++    def test_a_page_cursor_that_repeats_ends_the_read(self) -> None:
++        # A host that claims another page under a cursor it already gave cannot be read to
++        # the end: the read stops there, and the refusal stays the generic one.
++        gh = _Gh(pages=[[_thread("T1", "src/a.py", 12, "Hm.", "alice")]], stuck=True)
++        rc, err, d = self._run(gh)
++        self.assertNotEqual(rc, 0)
++        self.assertEqual(gh.cursors, [None, "c1"])
++        self.assertIn("a conflict, no merge rights", err)
++        self.assertNotIn("unresolved review thread", err)
++        self.assertFalse((d / REMARKS).exists())
++        self._assert_undone(gh)
++
++    def test_a_later_attempt_removes_the_file_it_no_longer_describes(self) -> None:
++        # The file names the remarks the attempt that wrote it stopped on. Once they are
++        # resolved, the next attempt to merge the bundle removes it, whatever that attempt
++        # then ends on, so nothing acts on remarks that no longer block anything.
++        later = {
++            "merges": (dict(gh=_Gh(states=("CLEAN",), merge_ok=True)), 0),
++            "generic refusal": (dict(gh=_Gh(threads=[_thread("T1", "src/a.py", 12, "ok",
++                                                              "alice", resolved=True)],
++                                            decision="REVIEW_REQUIRED")), 1),
++            "refused before the merge": (dict(gh=_Gh(checks="fail")), 1),
++            "already merged": (dict(gh=_Gh(), already_merged=True), 0),
++        }
++        for i, (name, (run, want)) in enumerate(later.items()):
++            with self.subTest(name):
++                d = self._bundle(_cfg(self.tmp), f"838{i}")
++                rc, _, _ = self._run(_Gh(threads=self._two_threads()), d)
++                self.assertNotEqual(rc, 0)
++                self.assertTrue((d / REMARKS).is_file())    # the first attempt wrote it
++                rc, err, _ = self._run(d=d, **run)
++                self.assertEqual(rc, want)
++                self.assertNotIn("unresolved review thread", err)
++                self.assertFalse((d / REMARKS).exists())
++
++    def test_a_dry_run_leaves_the_file_alone(self) -> None:
++        # A dry run attempts nothing, so it has nothing to say about the remarks.
++        rc, _, d = self._run(_Gh(threads=self._two_threads()))
++        self.assertNotEqual(rc, 0)
++        self.assertTrue((d / REMARKS).is_file())            # the first attempt wrote it
++        before = (d / REMARKS).read_text(encoding="utf-8")
++        gh = _Gh(merge_ok=True)
++        rc, _, _ = self._run(gh, d, dry_run=True)
++        self.assertEqual(rc, 0)
++        self.assertEqual(gh.calls, [])
++        self.assertEqual((d / REMARKS).read_text(encoding="utf-8"), before)
++
++    def test_required_mode_detects_it_at_the_failed_merge(self) -> None:
++        # Leg (i): under "required" the rollup gate is skipped, so the block only shows
++        # as the failed `gh pr merge` — detection runs there too.
++        gh = _Gh(threads=self._two_threads())
++        rc, err, d = self._run(gh, merge_requires="required")
++        self.assertNotEqual(rc, 0)
++        self.assertFalse(any(c[:3] == ["gh", "pr", "checks"] for c in gh.calls))
++        self.assertIn("blocked by 2 unresolved review thread(s)", err)
++        self.assertIn("src/a.py:12", err)
++        self.assertIn("src/b.py:40", err)
++        self.assertEqual(len(json.loads((d / REMARKS).read_text())["threads"]), 2)
++        self._assert_undone(gh)
++
++    def test_blocked_without_remarks_keeps_generic_refusal(self) -> None:
++        # Leg (ii): REVIEW_REQUIRED / a ruleset — BLOCKED, but no thread and no review
++        # requesting changes.
++        gh = _Gh(threads=[_thread("T3", "src/c.py", 3, "ok", "bob", resolved=True)],
++                 decision="REVIEW_REQUIRED")
++        rc, err, d = self._run(gh)
++        self.assertNotEqual(rc, 0)
++        self.assertIn("a conflict, no merge rights", err)
++        self.assertNotIn("0 unresolved", err)
++        self.assertNotIn("review thread", err)
++        self.assertFalse((d / REMARKS).exists())
++        self._assert_undone(gh)
++
++    def test_unknown_is_polled_then_read(self) -> None:
++        # Leg (iii): UNKNOWN straight after the ready-mark is polled, then the BLOCKED
++        # read that follows is acted on.
++        gh = _Gh(states=("UNKNOWN", "UNKNOWN", "BLOCKED"), threads=self._two_threads())
++        rc, err, d = self._run(gh, merge_wait_secs=60)
++        self.assertNotEqual(rc, 0)
++        self.assertIn("blocked by 2 unresolved review thread(s)", err)
++        self.assertTrue((d / REMARKS).is_file())
++
++    def test_unknown_to_the_end_is_not_a_remarks_block(self) -> None:
++        # Leg (iii): an UNKNOWN that never resolves is polled within merge_wait_secs and
++        # then treated as not blocked by remarks.
++        gh = _Gh(states=("UNKNOWN",), threads=self._two_threads())
++        rc, err, d = self._run(gh, merge_wait_secs=20, merge_requires="required")
++        self.assertNotEqual(rc, 0)
++        views = [c for c in gh.calls if c[:3] == ["gh", "pr", "view"]
++                 and "mergeStateStatus" in c[-1]]
++        self.assertGreater(len(views), 1)                   # it was polled, not read once
++        self.assertTrue(self.sleeps)
++        self.assertLessEqual(sum(self.sleeps), 20)
++        self.assertIn("a conflict, no merge rights", err)
++        self.assertNotIn("review thread", err)
++        self.assertFalse((d / REMARKS).exists())
++        self._assert_undone(gh)
++
++    def test_outdated_thread_reports_original_line(self) -> None:
++        # Leg (iv): an outdated thread has `line: null`; its originalLine is reported. A
++        # thread on a whole file has no line at all and is reported by its path alone.
++        gh = _Gh(threads=[_thread("T9", "src/old.py", None, "Stale?", "carol", original=77),
++                          _thread("T8", "src/whole.py", None, "Split this file.", "dave",
++                                  outdated=False)])
++        rc, err, d = self._run(gh)
++        self.assertNotEqual(rc, 0)
++        self.assertIn("blocked by 2 unresolved review thread(s)", err)
++        self.assertIn("src/old.py:77 (outdated)", err)
++        self.assertIn("src/whole.py by dave", err)
++        self.assertNotIn(":None", err)
++        threads = json.loads((d / REMARKS).read_text())["threads"]
++        self.assertEqual([(t["line"], t["outdated"]) for t in threads],
++                         [(77, True), (None, False)])
++
++    def test_changes_requested_without_threads_is_named(self) -> None:
++        # Leg (v): a CHANGES_REQUESTED review with no threads.
++        gh = _Gh(threads=[], decision="CHANGES_REQUESTED",
++                 reviews=[{"author": {"login": "dave"}, "state": "CHANGES_REQUESTED"},
++                          {"author": {"login": "erin"}, "state": "APPROVED"}])
++        rc, err, d = self._run(gh)
++        self.assertNotEqual(rc, 0)
++        self.assertIn("CHANGES_REQUESTED", err)
++        self.assertIn("dave", err)
++        self.assertNotIn("erin", err)
++        self.assertNotIn("0 unresolved", err)
++        self.assertNotIn("a conflict, no merge rights", err)
++        self.assertTrue((d / REMARKS).is_file())
++        self._assert_undone(gh)
++
++
++if __name__ == "__main__":
++    unittest.main()

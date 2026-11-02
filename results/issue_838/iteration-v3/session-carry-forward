@@ -1,0 +1,6 @@
+The stop can blame the wrong cause: any open thread or CHANGES_REQUESTED review on a BLOCKED PR is named as the block, even when the real block is something else (for example a missing approval). Keep the detection and the wording the brief requires ("blocked by N unresolved review thread(s)"), and make the real signals visible:
+- Save `reviewDecision` and the failed `gh pr merge` error in `merge-remarks.json`.
+- Show `reviewDecision` in the stop message.
+- Add tests for both, including a BLOCKED + REVIEW_REQUIRED + open thread case.
+Do not read the host's branch rules: that needs more calls and permissions and is beyond this brief.
+Prior art is cleared by the human. The live read-only check against GitHub (real `gh api graphql` query) is held until the rebuilt change is bug free; it is not build work.

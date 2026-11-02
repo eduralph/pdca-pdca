@@ -1,0 +1,88 @@
+diff --git a/template/src/pdca_harness/config.py b/template/src/pdca_harness/config.py
+index 8da9640..30b41bc 100644
+--- a/template/src/pdca_harness/config.py
++++ b/template/src/pdca_harness/config.py
+@@ -730,7 +730,14 @@ class Config:
+         worktree = bool(driver_cfg.get("worktree", True))  # issue #94; on by default
+         overflow = max(0, int(driver_cfg.get("overflow", 0)))  # issue #226; 0 ⇒ heal in place
+         lane_preflight = driver_cfg.get("lane_preflight", "")  # issue #213
+-        wave_mode = driver_cfg.get("wave_mode", "stack")  # #wave-model: stack | merge
++        # #wave-model: stack | merge. An unknown value falls back to "stack" with a note
++        # (issue #842). The match is exact, with no case or whitespace folding: "Merge" has
++        # never enabled merge mode, and a typo must not start merging PRs.
++        wave_mode = driver_cfg.get("wave_mode", "stack")
++        if wave_mode not in ("stack", "merge"):
++            print(f"config: unknown [driver].wave_mode {wave_mode!r} — expected "
++                  "stack | merge; using 'stack'", file=sys.stderr)
++            wave_mode = "stack"
+         merge_method = driver_cfg.get("merge_method", "merge")  # merge | squash | rebase
+         # Check-rollup policy for merge mode (issue #413). An unknown value falls back to
+         # "all" with a note — the fail-safe direction is the STRICTER reading (verify the
+diff --git a/template/tests/test_config_wave_mode.py b/template/tests/test_config_wave_mode.py
+new file mode 100644
+index 0000000..4bf87da
+--- /dev/null
++++ b/template/tests/test_config_wave_mode.py
+@@ -0,0 +1,62 @@
++"""`[driver].wave_mode` is validated at load (issue #842).
++
++Every check downstream compares against "merge", so an unknown value used to behave as
++"stack" with no message. Through the REAL config loader, offline. Run from `template/`:
++    PYTHONPATH=src python -m unittest tests.test_config_wave_mode
++"""
++from __future__ import annotations
++
++import io
++import tempfile
++import unittest
++from contextlib import redirect_stderr
++from pathlib import Path
++
++from pdca_harness.config import Config
++
++
++class WaveModeValidation(unittest.TestCase):
++    def _load(self, driver_line: str | None) -> tuple[Config, str]:
++        with tempfile.TemporaryDirectory() as tmp:
++            root = Path(tmp)
++            text = '[paths]\nbundle_root = "results"\n'
++            if driver_line is not None:
++                text += f"\n[driver]\n{driver_line}\n"
++            (root / "pdca.toml").write_text(text, encoding="utf-8")
++            with redirect_stderr(io.StringIO()) as err:
++                cfg = Config.load(root)
++        return cfg, err.getvalue()
++
++    def test_known_values_and_absent_key_are_silent_and_kept(self) -> None:
++        for line, expected in (
++            ('wave_mode = "stack"', "stack"),
++            ('wave_mode = "merge"', "merge"),
++            (None, "stack"),
++        ):
++            with self.subTest(line=line):
++                cfg, err = self._load(line)
++                self.assertEqual(cfg.wave_mode, expected)
++                self.assertEqual(err, "")
++
++    def test_unknown_values_note_and_fall_back_to_stack(self) -> None:
++        # "Merge" and "merge " pin the exact match: neither enables merge mode today, and
++        # folding case or whitespace would start merging PRs for that instance. "none" is
++        # an ordinary unknown value until the sibling issue #843 adds it.
++        for line, shown in (
++            ('wave_mode = "bogus"', "bogus"),
++            ('wave_mode = "Merge"', "Merge"),
++            ('wave_mode = "merge "', "merge "),
++            ('wave_mode = "none"', "none"),
++            ("wave_mode = 1", "1"),
++        ):
++            with self.subTest(line=line):
++                cfg, err = self._load(line)
++                self.assertEqual(cfg.wave_mode, "stack")
++                self.assertEqual(len(err.splitlines()), 1, err)
++                self.assertIn("wave_mode", err)
++                self.assertIn(shown, err)
++                self.assertIn("stack | merge", err)
++
++
++if __name__ == "__main__":
++    unittest.main()

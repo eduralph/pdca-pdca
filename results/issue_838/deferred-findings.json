@@ -1,0 +1,5 @@
+{
+ "items": [
+  "`template/src/pdca_harness/merge.py:582-601` — The message says the PR \"is blocked by\" the threads or the CHANGES_REQUESTED review whenever `mergeStateStatus` is `BLOCKED` and any exist. GitHub only blocks on unresolved threads when \"require conversation resolution\" is on, and only blocks on a CHANGES_REQUESTED review when reviews are required. So a PR blocked by a missing approval or a ruleset, which also happens to have an open thread, is reported as a remarks block, and the real cause is dropped (for example, `reviewDecision == \"REVIEW_REQUIRED\"` never shows up in the message). The brief accepts this guess, but the wording claims a cause the driver cannot confirm. Decide whether that is acceptable, or soften the wording to something like \"BLOCKED; unresolved remarks: …\" and include `reviewDecision`."
+ ]
+}

@@ -1,0 +1,39 @@
+merge: name a PR blocked by unresolved review remarks
+
+In merge mode, a non-final wave's PR can pass every check and still be
+refused by the host because a review thread is unresolved or a reviewer
+requested changes. The driver only saw `gh pr merge` fail, printed the
+generic "did not merge — a conflict, no merge rights ..." refusal, and
+wrote nothing to the bundle. The operator had to open the PR to learn
+that the real block was a remark, and nothing downstream could act on it.
+
+Now, when `gh pr merge` fails, the driver reads the PR's merge state
+(polled while GitHub still reports UNKNOWN, on what is left of the one
+merge_wait_secs budget the update and rollup waits already share). For a
+BLOCKED PR it reads every page of unresolved review threads, on the host
+named in the PR's URL, plus the latest reviews. If there is anything to
+name, the stop says "blocked by N unresolved review thread(s)" with each
+thread's path:line (an outdated thread reports its original line) and/or
+"a CHANGES_REQUESTED review by <login>", shows the PR's reviewDecision,
+and writes merge-remarks.json into the bundle: one object per thread
+(id, path, line, body, author, url), the reviewers who requested changes,
+the reviewDecision, and the host's own merge error. The PR is returned to
+draft as before. This runs under both merge_requires values, since under
+"required" the rollup gate is skipped and the failed merge is the only
+place the block shows.
+
+A BLOCKED PR with no open thread and no changes-requested review (a
+missing approval, a ruleset) keeps the generic refusal and writes no
+file. Threads that could not be read are recorded as null, not as an
+empty list, and the stop says so. BLOCKED does not say which rule blocks
+the merge and the driver does not read the host's branch rules, so the
+reviewDecision and merge error are there for a reader to check the named
+block against.
+
+The file is written in one step through a sibling temp file, so a write
+that fails part-way leaves no file. Each merge attempt removes the file
+before it starts, and an iterate archives it with its attempt, so a stale
+file never outlives the stop it describes. The merge-mode section of
+docs/07-crosscutting.md gains a sentence on the new stop and file.
+
+Fixes #838

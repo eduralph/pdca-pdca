@@ -1,0 +1,1133 @@
+diff --git a/docs/07-crosscutting.md b/docs/07-crosscutting.md
+index 32f03bf..7fe0a63 100644
+--- a/docs/07-crosscutting.md
++++ b/docs/07-crosscutting.md
+@@ -902,6 +902,22 @@ wave builds on, via `[driver].wave_mode`:
+   Needs merge rights on the base remote and relaxes STOP discipline for the
+   batch; fails closed if a PR turns out non-mergeable. `[driver].merge_method`
+   picks the merge strategy (`"merge"` / `"squash"` / `"rebase"`).
++  A merge-mode run marks each PR it tries to merge as a non-final wave
++  (`"merge_eligible": true` in the bundle's `publish.json`, written before the
++  first ready-mark). The mark means a later merge-mode run may ready and merge
++  that PR unattended once its gates pass, so before wave 0 the run merges the
++  marked prerequisites the bundles it drives wait for, deepest first, whether or
++  not the command names them. Everything else unmerged holds the dependent,
++  named on one line with its base and the way out, for a plain `Depends on` and
++  a `Depends on (merged)` alike, and the rest of the run goes on. That covers a
++  PR with no mark (a final-wave or single-bundle PR waiting for you, or one
++  published before the mark existed: merge it by hand, then re-run); a marked PR
++  the gates refuse (the `merge:` lines above the hold line give the reason); and
++  a marked PR whose own prerequisites are not merged into that base. A dependent
++  is released only when the prerequisite is merged into its own target base. A
++  re-publish writes a fresh record without the mark. A refused PR goes back to
++  draft and keeps the mark, so a later run readies it again: to leave a marked
++  PR alone, merge or close it by hand, or remove the key.
+   Before each merge the driver reads that PR's **full check rollup** itself —
+   after the ready-mark, immediately before merging — and refuses (the run STOPs)
+   on any failing check, any still-running one, and on a rollup with nothing in it
+@@ -949,8 +965,8 @@ wave builds on, via `[driver].wave_mode`:
+   it builds no group member the run can see, meaning a bundle in the run whose
+   brief declares `Merges with`, or that another brief in the run names there.
+   That holds even when the whole group would sit in the final wave, which the
+-  driver does not merge: a later merge-mode run can still pick up its open PRs
+-  one at a time. `pdca flow <ids>` exits 2 before building anything, naming the
++  driver does not merge: a later merge-mode run can still pick up its marked
++  open PRs one at a time. `pdca flow <ids>` exits 2 before building anything, naming the
+   group and the two ways out: set `wave_mode = "stack"`, or fold the group into
+   one bundle. The `--from-csv` sweep holds the group and its dependents and
+   drives the rest. Bare `pdca waves` refuses (`unschedulable:`, exit 1) where
+diff --git a/template/pdca.toml.jinja b/template/pdca.toml.jinja
+index 89ebb92..4ee7bfc 100644
+--- a/template/pdca.toml.jinja
++++ b/template/pdca.toml.jinja
+@@ -128,7 +128,9 @@ overflow = 0
+ #       non-final wave's PRs so the next wave builds on the genuinely-merged base. Needs
+ #       MERGE RIGHTS on the base remote (a fork contributor lacks them upstream — keep
+ #       "stack" there) and relaxes the STOP discipline for the batch. Fail-closed: a
+-#       non-mergeable PR stops the run.
++#       non-mergeable PR stops the run. Each PR it tries is marked (`merge_eligible` in
++#       publish.json), and a later merge-mode run merges a marked prerequisite through the
++#       same gates before wave 0; an unmarked one holds its dependent until merged by hand.
+ #       A wave's PRs merge one after another, so under merge_requires = "all" a PR found
+ #       BEHIND its base (an earlier PR of the wave just merged) is first brought up to date
+ #       and its new head verified again before it merges — see merge_requires. Turn on
+diff --git a/template/src/pdca_harness/flow.py b/template/src/pdca_harness/flow.py
+index b92ef34..0f5d32f 100644
+--- a/template/src/pdca_harness/flow.py
++++ b/template/src/pdca_harness/flow.py
+@@ -687,7 +687,8 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
+               conflict_held: Mapping[str, Collection[str]] | None = None,
+               lines: Mapping[tuple[str, str], tuple[str, str | None]] | None = None,
+               on_line: Collection[str] | None = None,
+-              unbuilt: Collection[str] = frozenset()
++              unbuilt: Collection[str] = frozenset(),
++              merge_notes: Mapping[str, str] | None = None
+               ) -> list[Path]:
+     """Drop a wave bundle whose declared prerequisite isn't ready to build on top of.
+ 
+@@ -708,11 +709,14 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
+     prerequisite. It must wait until the PR is genuinely merged into the DEPENDENT's target
+     base — its repo and branch (``publish._resolve_target``), not just some branch
+     (``merged.merged_into``, #647) — a later ``pdca flow`` run then picks it up. With
+-    ``hold_unmerged`` (stack mode, publishing on, not a dry-run, #647) a plain ``Depends
+-    on`` prerequisite the run was NOT asked for — not in ``requested`` (bundle dir names;
+-    ``None``: ``batch_names``) — waits the same way when a line would carry it (a non-empty
++    ``hold_unmerged`` (publishing on, not a dry-run, #647; in merge mode too, #839) a plain
++    ``Depends on`` prerequisite the run was NOT asked for — not in ``requested`` (bundle dir
++    names; ``None``: ``batch_names``) — waits the same way when a line would carry it (a non-empty
+     patch and a usable target, ``integrate._fold_candidates``): no line of this run does.
+-    Either way the dependent is named on ONE stderr line, with what to do. A dependent with
++    Either way the dependent is named on ONE stderr line, with what to do. ``merge_notes``
++    (not ``None``: merge mode, #839, where the run has no line) maps a prerequisite to what
++    the pre-wave merge found (:func:`_merge_prereqs`); the line gives that, or the way out
++    its record leaves (:func:`_merge_way_out`), never a line's. A dependent with
+     no usable target of its own (publish skips it) has no base to wait for: no #647 hold,
+     and its ``Depends on (merged)`` keeps #186's answer — any merge counts. A finished named
+     id (an id the run was asked for that an earlier run finished, #646) is carried onto the
+@@ -832,7 +836,13 @@ def _runnable(cfg: Config, wave: list[Path], batch_names: set[str], *,
+                 # In batch: accepted, but no branch pushed this run: nothing to fold (#593).
+                 # Out of batch: a finished named id the carry could not put on the line (#646).
+                 unmet.append(dep)
+-        if unmerged:
++        if unmerged and merge_notes is not None:
++            ways = "; ".join(f"{n}: {merge_notes.get(n) or _merge_way_out(cfg, n, repo, base)}"
++                             for n in unmerged)
++            print(f"flow: {d.name} held — prerequisite(s) {', '.join(unmerged)} not merged "
++                  f"into {base} ({repo}); not built on a base missing them. {ways}.",
++                  file=sys.stderr)
++        elif unmerged:
+             todo = (f"name {', '.join(carryable)} in the same `pdca flow <ids>` command so "
+                     f"the run's line carries them, or wait" if carryable else "wait")
+             print(f"flow: {d.name} held — prerequisite(s) {', '.join(unmerged)} not merged "
+@@ -1422,6 +1432,99 @@ def _cascade_not_clean(cfg: Config, ids: list[Path], why: dict[str, tuple[str, s
+     return causes
+ 
+ 
++def _merge_way_out(cfg: Config, name: str, repo: str, base: str) -> str:
++    """Merge mode's way out for a dependent on ``repo`` @ ``base`` held for prerequisite
++    ``name``, when the pre-wave merge left no note on it (#839), read from its record: no
++    ``gh`` call."""
++    iid = name.removeprefix("issue_")
++    p = cfg.find_bundle(iid)
++    rec = publish._publish_record(p)
++    if not isinstance(rec, dict) or not rec.get("pr_url"):
++        return (f"it has no PR on record; publish it (`pdca publish {iid}`), merge the PR by "
++                f"hand, then re-run")
++    if tuple(publish._resolve_target(p)[:2]) != (repo, base):
++        return f"it does not target {base} ({repo}); get its work onto {base}, then re-run"
++    if rec.get("merge_eligible") is True:
++        return "let a merge-mode run merge it (it is marked), or merge the PR by hand, then re-run"
++    return ("no merge-mode run may merge it (it is not marked), so merge the PR by hand, then "
++            "re-run")
++
++
++def _merge_prereqs(cfg: Config, bundles: list[Path], batch_names: Collection[str]
++                   ) -> dict[str, str]:
++    """Before wave 0 of a publishing merge-mode run, merge the marked prerequisites the drive
++    set waits for (#839) — the merge-mode analogue of :func:`_carry_finished`. Returns what
++    happened to each one left unmerged, prerequisite name → the way out for its dependents'
++    hold line (:func:`_runnable`, which alone decides, with ``merged.merged_into``, whether
++    a dependent is released; a return code never does).
++
++    The walk starts at each drive-set bundle with a usable target, along its plain ``Depends
++    on`` and ``Depends on (merged)`` edges (those :func:`_runnable` holds on), then along
++    every edge kind of a prerequisite, and takes a COMPLETE bundle outside the drive set, a
++    finished named id included, deepest first. It stops at one with no patch (nothing to
++    merge) and at one for another target: merging that would not put it on the dependent's
++    base, so it is left alone and :func:`_runnable` holds the dependent.
++
++    Each one taken is merged (``merge._merge_one``, gates and all, ``merge_eligible`` being
++    the only licence to) when its record carries the marker, it is not merged yet, and its
++    own declared prerequisites are each merged into that base. A refusal, or anything
++    ``_merge_one`` raises, holds only its dependents: the run goes on, each message ending
++    with who is held. It runs once, before the waves: a split child adopted later is held,
++    not merged for."""
++    order: dict[str, tuple[Path, str, tuple[str, str]]] = {}   # deepest first: name → …
++    reach: dict[str, list[str]] = {}    # prerequisite name → the drive-set bundles waiting
++
++    def visit(iid: str, target: tuple[str, str], who: str, seen: set[str]) -> None:
++        p = cfg.find_bundle(iid)
++        if (p.name in seen or p.name in batch_names or state.state(p) != state.COMPLETE
++                or not integrate._has_patch(p)
++                or tuple(publish._resolve_target(p)[:2]) != target):
++            return
++        seen.add(p.name)
++        for dep in waves.declared_deps(p / "brief.md"):
++            visit(dep, target, who, seen)
++        reach.setdefault(p.name, []).append(who)
++        order.setdefault(p.name, (p, iid, target))
++
++    for b in bundles:
++        bp = b / "brief.md"
++        target = tuple(publish._resolve_target(b)[:2]) if bp.exists() else ("", "")
++        if not all(target):
++            continue
++        seen: set[str] = set()
++        for dep in [*brief.depends_on(bp), *brief.depends_on_merged(bp)]:
++            visit(dep, target, b.name, seen)
++
++    notes: dict[str, str] = {}
++    fetched: set[str] = set()
++    for name, (p, iid, (repo, base)) in order.items():
++        rec = publish._publish_record(p)
++        if not (isinstance(rec, dict) and rec.get("merge_eligible") is True):
++            continue    # never readied or merged: `_merge_way_out` says what to do
++        if merged.merged_into(cfg, iid, repo, base):
++            continue
++        blockers = [cfg.find_bundle(dep).name for dep in waves.declared_deps(p / "brief.md")
++                    if not merged.merged_into(cfg, dep, repo, base)]
++        if blockers:
++            notes[name] = (f"it was not merged, because its own prerequisite(s) "
++                           f"{', '.join(blockers)} are not merged into {base}; get them merged "
++                           f"(a merge-mode run merges a marked PR, else merge the PR by hand), "
++                           f"then re-run")
++            continue
++        who = reach[name]
++        held = (f"{', '.join(who)} {'is' if len(who) == 1 else 'are'} held; resolve at the PR, "
++                f"then re-run")
++        rc = _isolate(p, "merge before wave 0", lambda p=p, held=held: merge._merge_one(
++            cfg, p, dry_run=False, method=cfg.merge_method, fetched=fetched, held=held))
++        if rc != 0:     # a refusal, or None: `_isolate` caught and named an error
++            notes[name] = ("its PR did not pass the merge gates, see the `merge:` lines above; "
++                           "resolve at the PR, then re-run")
++        elif not merged.merged_into(cfg, iid, repo, base):
++            notes[name] = (f"its PR is not known to be merged into {base}, see the `merged:` "
++                           f"line above; get its work onto {base}, then re-run")
++    return notes
++
++
+ def _carry_finished(cfg: Config, bundles: list[Path], finished: list[Path], *,
+                     batch: list[str], integ: dict[tuple[str, str], str],
+                     folded_tips: dict[tuple[str, str], str | None], held: set[str],
+@@ -2895,14 +2998,21 @@ def _drive_and_act(
+     # read live below (never cached in a `last`), and an adopted child's wave is driven,
+     # published and folded by exactly the code every other wave goes through.
+     # A plain `Depends on` prerequisite the run was not asked for is on no line of this run,
+-    # so its dependent waits for its merge into the dependent's base (#647). Only where a
+-    # fold would run (stack mode, publishing on), and not in a dry-run, which asks no host
+-    # and holds nothing. The ids asked for are normalised as `_finished_named` does.
+-    hold_unmerged = (do_publish and cfg.wave_mode != "merge"
+-                     and cfg.publisher.mode != "stub")
++    # so its dependent waits for its merge into the dependent's base (#647). Only with
++    # publishing on, and not in a dry-run, which asks no host and holds nothing. The ids
++    # asked for are normalised as `_finished_named` does. Merge mode has no line at all, so
++    # there a prerequisite the run did ask for (a finished named id) waits the same way
++    # (#839): `_runnable` is given no ids that a line would carry.
++    merge_mode = cfg.wave_mode == "merge"
++    hold_unmerged = do_publish and cfg.publisher.mode != "stub"
+     # Where a bundle can get a base of its own (#727): where the line folds for real — the
+-    # same three conditions. Elsewhere every bundle is pointed as before.
+-    own_bases = hold_unmerged
++    # same conditions, in stack mode only. Elsewhere every bundle is pointed as before.
++    own_bases = hold_unmerged and not merge_mode
++    # Merge mode's pre-wave step (#839), not in `_runnable`, which runs for every wave and
++    # only reads state: a merge can wait `merge_wait_secs` and changes the host.
++    merge_notes = None
++    if merge_mode:
++        merge_notes = _merge_prereqs(cfg, bundles, batch_names) if hold_unmerged else {}
+     requested = set(named) | {cfg.bundle(str(i).removeprefix("issue_")).name
+                               for i in (batch or ())}
+     # The loop stopped on a fold error or a red re-gate: that run already ends non-zero, and
+@@ -2931,7 +3041,8 @@ def _drive_and_act(
+         runnable = _runnable(cfg, wave, batch_names,
+                              held=held_unpushed | held_finished | set(held_conflict)
+                              | held_base,
+-                             requested=requested, hold_unmerged=hold_unmerged,
++                             requested=frozenset() if merge_mode else requested,
++                             hold_unmerged=hold_unmerged, merge_notes=merge_notes,
+                              unpushed=held_unpushed,
+                              conflicts=(waves.conflict_map(cfg, bundles)
+                                         if held_unpushed or held_conflict or held_base
+diff --git a/template/src/pdca_harness/merge.py b/template/src/pdca_harness/merge.py
+index 178b1a3..6ff5b23 100644
+--- a/template/src/pdca_harness/merge.py
++++ b/template/src/pdca_harness/merge.py
+@@ -9,9 +9,9 @@ non-final wave's PRs (``gh pr merge``) and fetches the base, so the next wave's
+ (which resets to ``<base_remote>/<base>``) builds on the merged result.
+ 
+ Fail-closed: a PR that does not merge — a conflict, a failing required check, no merge
+-rights — returns non-zero so the caller STOPs; the next wave must never build on an
+-unmerged base. Idempotent (a resumed run skips an already-merged PR). Merging is
+-deterministic ``git``/``gh`` (no model); dry-run (stubbed publisher) prints the plan and
++rights — returns non-zero so the caller STOPs (or, before wave 0, holds the PR's dependents:
++issue #839); the next wave must never build on an unmerged base. Idempotent (a resumed run
++skips an already-merged PR). Merging is deterministic ``git``/``gh`` (no model); dry-run (stubbed publisher) prints the plan and
+ merges nothing. The harness's own ``gh pr merge`` runs in the orchestrator, outside the
+ ``builder_guard`` hook that blocks the model leaves from merging — exactly as publish's
+ ``gh pr create`` does.
+@@ -101,8 +101,16 @@ bundle's ``"stacked"`` record names the remote it pushed to, which may be a thir
+ not reached from ``_merge_one``, which refuses a ``"stacked"`` record (issue #658) before
+ it reads the head.
+ 
+-Merge mode readies and merges only a PR this run opened for the bundle (a ``"new-pr"`` /
+-``"stacked-pr"`` record). A ``"stacked"`` record is one commit added to an EXISTING PR —
++Merge mode readies and merges only a PR opened for the bundle (a ``"new-pr"`` /
++``"stacked-pr"`` record) that a merge-mode run opened as a non-final wave: this run's, or one
++an earlier run marked (issue #839). ``merge_wave`` writes ``publish.json["merge_eligible"] =
++true`` on each PR it attempts, before the first ``gh pr ready``, and a later merge-mode run
++may ready and merge a marked PR once its gates pass (``flow._merge_prereqs``, before wave 0,
++for a prerequisite of a bundle it drives). A re-publish writes a fresh record without the key.
++An unmarked PR, a final-wave or single-bundle PR waiting for the human among them, is never
++readied or merged. A refusal on that path holds only the dependents (``held``, below), so its
++message says so instead of "later waves are NOT run". A ``"stacked"`` record is one commit
++added to an EXISTING PR —
+ possibly someone else's, with other work on it and any base — so ``_merge_one`` refuses it
+ (issue #658) before any ``gh`` call for that PR, in a dry run too, and whether or not the
+ PR already reads merged, as ``merged.merged_into`` and the fold (``integrate._gone_branch``)
+@@ -151,10 +159,12 @@ _ROLLUP_PENDING = frozenset({"pending"})
+ def merge_wave(cfg: Config, bundles: list[Path], *, dry_run: bool = False,
+                method: str = "merge") -> int:
+     """Merge each accepted bundle's PR into its base, then fetch the base. Return 0 iff
+-    every bundle merged (or had nothing to merge); non-zero (STOP) on the first failure."""
++    every bundle merged (or had nothing to merge); non-zero (STOP) on the first failure.
++    Its only caller runs it for a non-final wave, so each PR it attempts is marked for a
++    later merge-mode run (``mark``, issue #839)."""
+     fetched: set[str] = set()
+     for d in bundles:
+-        rc = _merge_one(cfg, d, dry_run=dry_run, method=method, fetched=fetched)
++        rc = _merge_one(cfg, d, dry_run=dry_run, method=method, fetched=fetched, mark=True)
+         if rc:
+             return rc
+     return 0
+@@ -493,12 +503,20 @@ def _undo_ready(pr_url: str) -> None:
+               "— it is left marked ready; a human must re-draft it.", file=sys.stderr)
+ 
+ 
+-def _refuse(d: Path, pr_url: str, why: str) -> int:
+-    """Decline to merge ``d``'s already-readied PR (issue #531): say why, STOP, and undo
+-    the ready-mark (``_undo_ready``), as every other refusal in ``_merge_one`` does."""
+-    print(f"\n!!! merge: {d.name} ({pr_url}) was NOT merged — {why}. STOP: later waves are "
+-          "NOT run; resolve at the PR, then re-run (the run resumes idempotently).\n",
+-          file=sys.stderr)
++def _next(held: str | None, wave_text: str) -> str:
++    """What a ``_merge_one`` refusal ends with: ``wave_text`` at a wave boundary (``held``
++    None, the run stops), else ``held``, what the pre-wave merge's caller says instead: the
++    run goes on and only the PR's dependents wait (issue #839)."""
++    return wave_text if held is None else f"{held}."
++
++
++def _refuse(d: Path, pr_url: str, why: str, held: str | None = None) -> int:
++    """Decline to merge ``d``'s already-readied PR (issue #531): say why, STOP (or what
++    ``held`` says instead, ``_next``), and undo the ready-mark (``_undo_ready``), as every
++    other refusal in ``_merge_one`` does."""
++    end = _next(held, "STOP: later waves are NOT run; resolve at the PR, then re-run (the run "
++                      "resumes idempotently).")
++    print(f"\n!!! merge: {d.name} ({pr_url}) was NOT merged — {why}. {end}\n", file=sys.stderr)
+     _undo_ready(pr_url)
+     return 1
+ 
+@@ -729,9 +747,12 @@ def _target_base(cfg: Config, d: Path, pr_url: str) -> tuple[str, str]:
+ 
+ 
+ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
+-               fetched: set[str]) -> int:
++               fetched: set[str], mark: bool = False, held: str | None = None) -> int:
+     """Merge one bundle's recorded PR (idempotent, fail-closed). ``fetched`` dedupes the
+-    post-merge base fetch across bundles that share a checkout."""
++    post-merge base fetch across bundles that share a checkout. ``mark`` (``merge_wave``
++    only, issue #839) records that a merge-mode run opened this PR as a non-final wave.
++    ``held`` is the end of each refusal's message in place of its "STOP" (``_next``): the
++    pre-wave merge of a prerequisite, where the run goes on."""
+     if state.state(d) != state.COMPLETE:
+         return 0  # not accepted — nothing of this bundle's to merge
+     patch = d / "patch.diff"
+@@ -748,24 +769,25 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
+     pr_url = rec.get("pr_url") if rec else None
+     repo_spec = rec.get("repo") if rec else None
+     if not pr_url:
+-        print(f"merge: {d.name} is COMPLETE but has no recorded PR — cannot merge a wave "
+-              "whose member wasn't published. STOP.", file=sys.stderr)
++        end = _next(held, "cannot merge a wave whose member wasn't published. STOP.")
++        print(f"merge: {d.name} is COMPLETE but has no recorded PR — {end}", file=sys.stderr)
+         return 1
+     # Issue #658: an `Onto branch` bundle's `"stacked"` record is one commit added to an
+     # EXISTING PR (`publish._publish_stacked`), which may be someone else's, carry other
+-    # work, and target any base. Merge mode readies and merges only the PRs this run
+-    # opened, so it refuses such a record here, before any `gh` call for it (nothing to
+-    # undo), and above the dry-run plan and the `is_merged` skip: a dry run prints no
++    # work, and target any base. Merge mode readies and merges only the PRs a merge-mode
++    # run opened (issue #839), so it refuses such a record here, before any `gh` call for
++    # it (nothing to undo), and above the dry-run plan and the `is_merged` skip: a dry run prints no
+     # merge for it, and a PR that already reads merged is refused all the same, as
+     # `merged.merged_into` never counts a `"stacked"` record merged either.
+     if rec.get("mode") == "stacked":
++        end = _next(held, "STOP: later waves are NOT run. Run this batch in the "
++                          "default [driver] wave_mode = \"stack\", or take this bundle out of "
++                          "this merge-mode batch, then re-run. The PR itself stays the human's "
++                          "to ready or merge, but doing so does not let this merge-mode run "
++                          "continue: its record is refused the same way merged or not.")
+         print(f"\n!!! merge: {d.name} ({pr_url}) was NOT merged — it is an `Onto branch` "
+               "commit added to an existing PR, and merge mode does not ready or merge a PR "
+-              "this run did not open. STOP: later waves are NOT run. Run this batch in the "
+-              "default [driver] wave_mode = \"stack\", or take this bundle out of this "
+-              "merge-mode batch, then re-run. The PR itself stays the human's to ready or "
+-              "merge, but doing so does not let this merge-mode run continue: its record "
+-              "is refused the same way merged or not.\n", file=sys.stderr)
++              f"this run did not open. {end}\n", file=sys.stderr)
+         return 1
+ 
+     cmd = ["gh", "pr", "merge", str(pr_url), f"--{method}"]
+@@ -775,14 +797,28 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
+     iid = d.name.removeprefix("issue_")
+     if merged.is_merged(cfg, iid):
+         return 0  # already merged (a resumed run) — idempotent
++    # Issue #839: the marker goes on before anything below can refuse, so a PR stopped at
++    # the settings, its base, the ready-mark, the rollup or the merge is still marked: a
++    # later merge-mode run may try it again. It grants nothing by itself; the gates still
++    # run each time. In one step, so a failed write cannot tear the record the rest of this
++    # function and every later run read; a PR left unmarked by one is the safe default (its
++    # dependents hold until it merges), so it stops nothing.
++    if mark and rec.get("merge_eligible") is not True:
++        rec["merge_eligible"] = True
++        try:
++            leaves._replace_record(d / "publish.json", json.dumps(rec, indent=2) + "\n")
++        except OSError as e:
++            print(f"   merge: could not mark {d.name} in publish.json ({e}); if it does not "
++                  "merge now, a later run will not merge it for you", file=sys.stderr)
+     # Issue #621: a malformed [driver].expected_checks fails closed. Config.load keeps the
+     # list empty and records why; merging on that empty list would be the weakest reading
+     # of a setting the operator wrote to be stricter. Refused before the ready-mark, so the
+     # PR stays a draft with nothing to undo.
+     if cfg.expected_checks_error:
++        end = _next(held, "STOP: later waves are NOT run; fix the setting in pdca.toml, then "
++                          "re-run (the run resumes idempotently).")
+         print(f"\n!!! merge: {d.name} ({pr_url}) was NOT merged — "
+-              f"{cfg.expected_checks_error}. STOP: later waves are NOT run; fix the setting "
+-              "in pdca.toml, then re-run (the run resumes idempotently).\n", file=sys.stderr)
++              f"{cfg.expected_checks_error}. {end}\n", file=sys.stderr)
+         return 1
+     # Issue #500: merge only into the bundle's own target base, and only when that base
+     # exists independently of this run (#411) — never into whatever base the PR carries.
+@@ -791,9 +827,11 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
+     # ready-mark to undo: not `_refuse`, which always undoes one.
+     target, why = _target_base(cfg, d, str(pr_url))
+     if why:
+-        print(f"\n!!! merge: {d.name} ({pr_url}) was NOT merged — {why}. STOP: later waves "
+-              "are NOT run, and the PR is left draft or ready, as it was. Re-run once that "
+-              "is resolved (the run resumes idempotently).\n", file=sys.stderr)
++        end = _next(held, "STOP: later waves are NOT run, and the PR is left draft or ready, "
++                          "as it was. Re-run once that is resolved (the run resumes "
++                          "idempotently).")
++        print(f"\n!!! merge: {d.name} ({pr_url}) was NOT merged — {why}. {end}\n",
++              file=sys.stderr)
+         return 1
+     # The host now reports the PR on `target`, so the record must too: `merged.merged_into`
+     # compares the record's `base` with a dependent's target, and a record still naming the
+@@ -805,16 +843,17 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
+ 
+     # The publisher opens every PR as a draft (STOP discipline), but `gh pr merge` refuses a
+     # draft — so in merge mode a non-final wave's PRs must be readied before they can advance
+-    # the base (issue #279). `merge_wave` is only called for non-final waves, so this readies
+-    # exactly the PRs about to be merged; the final wave never reaches here and keeps its
+-    # draft for the human's ready-mark. Idempotent: `gh pr ready` on an already-ready PR is a
+-    # no-op. Fail-closed like the merge itself — if it can't be readied, it can't be merged.
++    # the base (issue #279). `merge_wave` is only called for non-final waves, and the pre-wave
++    # merge only for a PR one of those calls marked (issue #839), so this readies exactly the
++    # PRs about to be merged; a final-wave PR never reaches here, in this run or a later one,
++    # and keeps its draft for the human's ready-mark. Idempotent: `gh pr ready` on an
++    # already-ready PR is a no-op. Fail-closed like the merge itself — if it can't be readied, it can't be merged.
+     print(f"→ gh pr ready {pr_url}")
+     ready = subprocess.run(["gh", "pr", "ready", str(pr_url)], capture_output=True, text=True)
+     if ready.returncode != 0:
+         print((ready.stderr or ready.stdout).strip(), file=sys.stderr)
+-        print(f"\n!!! merge: {d.name} ({pr_url}) could not be marked ready to merge. "
+-              "STOP: later waves are NOT run; resolve at the PR, then re-run.\n",
++        end = _next(held, "STOP: later waves are NOT run; resolve at the PR, then re-run.")
++        print(f"\n!!! merge: {d.name} ({pr_url}) could not be marked ready to merge. {end}\n",
+               file=sys.stderr)
+         return 1
+ 
+@@ -840,7 +879,7 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
+         # rollup of the combination that merges.
+         if not repo_spec:
+             return _refuse(d, pr_url, "its publish record names no repo, so there is no "
+-                                      "checkout to read its base in")
++                                      "checkout to read its base in", held)
+         repo = publish._checkout_path(cfg, repo_spec)
+         # Issue #650: the head is read where publish put the branch, from the record as the
+         # fold reads it. A `"stacked"` record (whose remote may be neither the base remote
+@@ -851,7 +890,7 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
+         # a base edited on the host since is refused before anything is updated against it.
+         head, tip, behind, why = _base_read(cfg, repo, pub, str(pr_url), target=target)
+         if behind is None:
+-            return _refuse(d, pr_url, why)
++            return _refuse(d, pr_url, why, held)
+         if behind:
+             print(f"   head {head[:12]} lacks base commit {tip[:12]} — bringing it up to date")
+             print(f"→ gh pr update-branch {pr_url}")
+@@ -861,13 +900,13 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
+                 print((up.stderr or up.stdout).strip(), file=sys.stderr)
+                 return _refuse(d, pr_url, "it is behind its base and could not be brought up "
+                                "to date (`gh pr update-branch` failed: a conflict with the "
+-                               "base, the update refused, or a `gh` too old for it)")
++                               "base, the update refused, or a `gh` too old for it)", held)
+             # GitHub may apply the update after the command returns: poll for it, charged
+             # to the same merge_wait_secs budget the rollup wait below then gets.
+             head, waited, why = _wait_for_update(cfg, repo, pub, str(pr_url), head, tip,
+                                                  cfg.merge_wait_secs)
+             if not head:
+-                return _refuse(d, pr_url, why)
++                return _refuse(d, pr_url, why, held)
+             print(f"   updated: head {head[:12]} contains base commit {tip[:12]}")
+         else:
+             print(f"   head {head[:12]} contains base commit {tip[:12]} — up to date")
+@@ -888,13 +927,15 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
+                          f"— {detail}; absence of evidence is not green",
+                 "unreadable": f"the check rollup could not be read — {detail}",
+             }[verdict]
+-            print(f"\n!!! merge: {d.name} ({pr_url}) was NOT merged — {why}. The host's "
+-                  "required-checks config is not enough: this wave's base must be green "
+-                  "before the next wave builds on it. STOP: later waves are NOT run; "
+-                  "re-run once the checks are green (the run resumes idempotently), or set "
+-                  "[driver] merge_requires = \"required\" to merge on the host's required "
+-                  "checks alone, or raise [driver] merge_wait_secs if the checks just take "
+-                  "longer than that to report.\n", file=sys.stderr)
++            end = _next(held, "The host's required-checks config is not enough: this wave's "
++                              "base must be green before the next wave builds on it. STOP: "
++                              "later waves are NOT run; re-run once the checks are green (the "
++                              "run resumes idempotently), or set [driver] merge_requires = "
++                              "\"required\" to merge on the host's required checks alone, or "
++                              "raise [driver] merge_wait_secs if the checks just take longer "
++                              "than that to report.")
++            print(f"\n!!! merge: {d.name} ({pr_url}) was NOT merged — {why}. {end}\n",
++                  file=sys.stderr)
+             _undo_ready(pr_url)
+             return 1
+         # Positive evidence in the run log that this merge was gated, not merged blind.
+@@ -907,15 +948,15 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
+         # whatever branch the PR was moved to during the wait.
+         after, _, behind, why = _base_read(cfg, repo, pub, str(pr_url), target=target)
+         if behind is None:
+-            return _refuse(d, pr_url, why)
++            return _refuse(d, pr_url, why, held)
+         if after != head:
+             return _refuse(d, pr_url, f"its head changed from {head[:12]} to {after[:12]} "
+                            "while its checks were being read, so the green rollup may not "
+-                           "be that head's")
++                           "be that head's", held)
+         if behind:
+             return _refuse(d, pr_url, "its base moved while its checks were being read, so "
+                            "the green rollup is not of the combination it would merge; "
+-                           "re-run to bring it up to date and verify it again")
++                           "re-run to bring it up to date and verify it again", held)
+         cmd += ["--match-head-commit", head]
+ 
+     print(f"→ {' '.join(cmd)}")
+@@ -930,13 +971,13 @@ def _merge_one(cfg: Config, d: Path, *, dry_run: bool, method: str,
+         # below.
+         why = _remarks_block(d, str(pr_url), cfg.merge_wait_secs - waited, merge_error)
+         if why:
+-            return _refuse(d, pr_url, why)
++            return _refuse(d, pr_url, why, held)
++        end = _next(held, "STOP: later waves are NOT run; resolve at the PR, then re-run.")
+         print(f"\n!!! merge: {d.name} ({pr_url}) did not merge — a conflict, no merge "
+               "rights on the base, a host-required check that failed or started after the "
+               "rollup gate above, a head that changed after that gate read it green (the "
+               "merge is pinned to it), or a base that moved after the last read on a host "
+-              "that requires up-to-date branches. STOP: later waves are NOT run; resolve at "
+-              "the PR, then re-run.\n", file=sys.stderr)
++              f"that requires up-to-date branches. {end}\n", file=sys.stderr)
+         _undo_ready(pr_url)
+         return 1
+     # Refresh the base so the NEXT wave's worktree resets to the merged result.
+diff --git a/template/src/pdca_harness/merged.py b/template/src/pdca_harness/merged.py
+index a3167a2..1f6b358 100644
+--- a/template/src/pdca_harness/merged.py
++++ b/template/src/pdca_harness/merged.py
+@@ -85,8 +85,9 @@ def merged_into(cfg: Config, dep_id: str, repo: str, base: str) -> bool:
+     Otherwise as :func:`is_merged`: a close/no-fix prereq (COMPLETE, empty or no patch) ⇒
+     ``True``; not COMPLETE, or no recorded PR ⇒ ``False``. Fail-closed: a ``gh`` failure,
+     ``gh`` missing included (:func:`pr_state` guards it), is "not merged", said on stderr —
+-    never a traceback. Only ``flow._runnable`` calls it; :func:`is_merged` and its callers
+-    keep their answer."""
++    never a traceback. Only ``flow._runnable`` and the pre-wave merge
++    (``flow._merge_prereqs``, #839) call it; :func:`is_merged` and its callers keep their
++    answer."""
+     d = cfg.find_bundle(dep_id)  # a merged prereq may be archived to completed/ (#171)
+     if state.state(d) != state.COMPLETE:
+         return False
+diff --git a/template/tests/test_flow_out_of_batch_prereq_hold.py b/template/tests/test_flow_out_of_batch_prereq_hold.py
+index a9f1236..d568ef9 100644
+--- a/template/tests/test_flow_out_of_batch_prereq_hold.py
++++ b/template/tests/test_flow_out_of_batch_prereq_hold.py
+@@ -347,13 +347,25 @@ class OutOfBatchPrereqHold(unittest.TestCase):
+         self._built("D", "U")
+         self.assertEqual(self.gh_calls, [])
+ 
+-    def test_merge_mode_holds_nothing(self):
++    def test_merge_mode_holds_a_dependent_of_an_unmerged_prereq(self):
++        # #839 reverses #647's merge-mode exemption on purpose: D used to build on a base
++        # without P. An unmarked P is never merged, so the only `gh` call reads its state.
+         self.cfg.wave_mode = "merge"
+         self._prereq(pr="OPEN")
+         self._du()
+         self._run("ids", ["D", "U"])
+-        self._built("D", "U")
+-        self.assertEqual(self.gh_calls, [])
++        self.assertNotIn("issue_D", self.built, self.err)
++        self.assertEqual(self.results["D"], state.PLANNED)
++        self._built("U")
++        line = next(x for x in self.err.splitlines() if "issue_D held" in x)
++        self.assertIn("issue_P", line)
++        self.assertIn("not merged into main", line)
++        self.assertIn("merge the PR by hand", line)
++        self.assertNotIn("line of this run", line)
++        self.assertNotIn("carries them", line)
++        self.assertTrue(self.gh_calls)
++        for call in self.gh_calls:
++            self.assertEqual(call[:3], ["gh", "pr", "view"], call)
+ 
+     def test_a_dry_run_asks_no_host_and_holds_nothing(self):
+         self.cfg = _cfg(self.tmp, publisher="stub")
+diff --git a/template/tests/test_merge_resume_stranded_prereq.py b/template/tests/test_merge_resume_stranded_prereq.py
+new file mode 100644
+index 0000000..a688b22
+--- /dev/null
++++ b/template/tests/test_merge_resume_stranded_prereq.py
+@@ -0,0 +1,530 @@
++"""Merge mode merges a marked prerequisite before wave 0, and holds on anything else (#839).
++
++A dependent whose prerequisite is COMPLETE, published by an earlier run and still unmerged
++used to be built on a base without it (plain ``Depends on``, or the prerequisite named in the
++command), or held with no step ever merging it (``Depends on (merged)``). A PR a merge-mode
++run opened as a non-final wave now carries ``merge_eligible`` in its ``publish.json``, and a
++later merge-mode run merges it through ``merge._merge_one``'s gates before wave 0; anything
++else unmerged holds the dependent, with the reason and a way out that fits merge mode.
++
++Real git (the ``StackFoldGit`` fixture of tests/test_integrate_stack_bases.py: a bare
++``origin`` and a primary checkout), the real ``_merge_one`` and ``_runnable``, and the real
++``worktree.ensure`` for what a dependent would be built on. ``gh`` is a stub in front of
++``subprocess.run`` that really merges the PR's branch on ``origin``; the build and publish
++leaves are stubs.
++
++Only modules are imported (never a symbol the fix adds), so with the production change
++reverted these cases still load and run — and fail on their assertions.
++    cd template && PYTHONPATH=src python3 -m unittest tests.test_merge_resume_stranded_prereq
++"""
++
++from __future__ import annotations
++
++import dataclasses
++import importlib.util
++import io
++import json
++import shutil
++import subprocess
++import unittest
++from contextlib import ExitStack, redirect_stderr, redirect_stdout
++from pathlib import Path
++from unittest import mock
++
++from pdca_harness import cli, flow, leaves, merge, merged, publish, state, worktree
++
++_SPEC = importlib.util.spec_from_file_location(
++    "stack_bases_fixture", Path(__file__).with_name("test_integrate_stack_bases.py"))
++sb = importlib.util.module_from_spec(_SPEC)
++_SPEC.loader.exec_module(sb)
++
++TODAY = "2026-10-31"
++STOP = "STOP: later waves are NOT run"
++PLAIN = "Depends on"
++ON_MERGED = "Depends on (merged)"
++
++
++class MergeResume(unittest.TestCase):
++
++    def setUp(self) -> None:
++        self.fx = sb.StackFoldGit()          # the fixture's real-git setUp/tearDown and helpers
++        self.fx.setUp()
++        self.addCleanup(self.fx.tearDown)
++        self.cfg = self.fx.cfg
++        self.cfg.publisher = dataclasses.replace(self.cfg.publisher, mode="command")
++        self.cfg.wave_mode = "merge"
++        self.cfg.merge_wait_secs = 0         # read the rollup once
++        self.pr: dict[str, dict] = {}        # id → the host's PR: state, draft, rollup
++        self.gh_calls: list[list[str]] = []
++        self.events: list[str] = []          # gh ready / merge and builds, in order
++        self.built: list[str] = []
++        self.published: list[str] = []
++        self.base_files: dict[str, set[str]] = {}    # what each build's worktree held
++        self.marked_at_ready: dict[str, bool] = {}   # id → marker on disk at its first ready
++        self.finish: dict[str, dict[str, str]] = {}  # id → what its build publishes (files)
++        self._real_run = subprocess.run
++
++    # -- fixture ---------------------------------------------------------------------------
++
++    def _opened(self, iid: str, *, edges: str = "", marked: bool = False,
++                rollup: str = "pass") -> Path:
++        """``iid`` signed off and published by an earlier run: a draft PR, branch on origin."""
++        d = self.fx._publish(iid, {f"{iid}.txt": f"{iid}\n"})
++        sb._brief(d, extra=edges)
++        sb._accept(d)
++        if marked:
++            self._mark(d)
++        self.pr[iid] = {"state": "OPEN", "draft": True, "rollup": rollup}
++        self.assertEqual(state.state(d), state.COMPLETE)
++        return d
++
++    def _mark(self, d: Path) -> None:
++        rec = json.loads((d / "publish.json").read_text(encoding="utf-8"))
++        rec["merge_eligible"] = True
++        (d / "publish.json").write_text(json.dumps(rec), encoding="utf-8")
++
++    def _planned(self, iid: str, edges: str = "") -> Path:
++        d = self.cfg.bundle(iid)
++        sb._brief(d, extra=edges)
++        return d
++
++    def _du(self, field: str = PLAIN, prereq: str = "P") -> None:
++        self._planned("D", f"- **{field}:** {prereq}\n")
++        self._planned("U")
++
++    # -- stubs -----------------------------------------------------------------------------
++
++    def _gh(self, args, *a, **kw):
++        if not (isinstance(args, list) and args[:1] == ["gh"]):
++            return self._real_run(args, *a, **kw)
++        self.gh_calls.append(list(args))
++        verb, url = args[2], str(args[3])
++        iid = url.rsplit("/", 1)[-1]
++        pr = self.pr[iid]
++        out = ""
++        if verb == "view":
++            branch = f"fix/{iid}"
++            head = self.fx._tip(branch) if self.fx._has(branch) else ""
++            out = json.dumps({"state": pr["state"], "headRefOid": head, "baseRefName": "main",
++                              "mergeStateStatus": "CLEAN"})
++        elif verb == "checks":
++            out = json.dumps([{"name": "ci", "bucket": pr["rollup"]}])
++        elif verb == "ready":
++            if "--undo" in args:
++                pr["draft"] = True
++                self.events.append(f"undo issue_{iid}")
++            else:
++                pr["draft"] = False
++                self.events.append(f"ready issue_{iid}")
++                self.marked_at_ready.setdefault(iid, self._marker(iid))
++        elif verb == "update-branch":
++            self.fx._update_branch(iid)
++        elif verb == "merge":
++            self.events.append(f"merge issue_{iid}")
++            self.fx._merge_pr(iid)
++            pr["state"] = "MERGED"
++        return subprocess.CompletedProcess(args, 0, out, "")
++
++    def _marker(self, iid: str) -> bool:
++        rec = json.loads((self.cfg.bundle(iid) / "publish.json").read_text(encoding="utf-8"))
++        return rec.get("merge_eligible") is True
++
++    def _drive_wave(self, cfg, wave: list[Path], **_kw) -> int:
++        for d in wave:
++            self.built.append(d.name)
++            self.events.append(f"build {d.name}")
++            # What Do would actually be cut from: the real worktree off the real base.
++            wt = worktree.ensure(d, cfg)
++            self.base_files[d.name] = {p.name for p in wt.iterdir()} if wt else set()
++            iid = d.name.removeprefix("issue_")
++            brief_text = (d / "brief.md").read_text(encoding="utf-8")
++            if iid in self.finish:      # really published, as a later wave's merge needs
++                self.fx._publish(iid, self.finish[iid])
++                self.pr[iid] = {"state": "OPEN", "draft": True,
++                                "rollup": self.pr.get(iid, {}).get("rollup", "pass")}
++            else:
++                (d / "patch.diff").write_text(sb._new_file_patch(f"{iid}.txt", iid),
++                                              encoding="utf-8")
++            (d / "brief.md").write_text(brief_text, encoding="utf-8")
++            sb._accept(d)
++        return 1
++
++    def _publish_bundle(self, _cfg, d: Path, **_kw) -> bool:
++        self.published.append(d.name)
++        return True
++
++    def _run(self, ids: list[str], *, do_publish: bool = True, stack=()) -> None:
++        err = io.StringIO()
++        with ExitStack() as ctx:
++            ctx.enter_context(mock.patch.object(subprocess, "run", self._gh))
++            ctx.enter_context(mock.patch.object(flow, "_drive_wave", self._drive_wave))
++            ctx.enter_context(mock.patch.object(flow, "_publish_bundle", self._publish_bundle))
++            ctx.enter_context(mock.patch.object(publish, "draft_texts", lambda *a, **k: True))
++            ctx.enter_context(mock.patch.object(leaves, "do_plan_batch", lambda *a, **k: None))
++            for patcher in stack:
++                ctx.enter_context(patcher)
++            ctx.enter_context(redirect_stdout(io.StringIO()))
++            ctx.enter_context(redirect_stderr(err))
++            self.results = flow.flow_ids(self.cfg, ids, do_publish=do_publish, do_act=False,
++                                         by="T", today=TODAY)
++        self.err = err.getvalue()
++        self.assertNotIn("Traceback", self.err)
++
++    # -- assertions ------------------------------------------------------------------------
++
++    def _held_line(self, dependent: str = "D") -> str:
++        """``dependent`` was not built and stays PLANNED, and ONE line says so, naming its
++        base, in merge mode's terms: never a line of the run."""
++        self.assertNotIn(f"issue_{dependent}", self.built, self.err)
++        self.assertEqual(self.results[dependent], state.PLANNED)
++        lines = [x for x in self.err.splitlines() if f"flow: issue_{dependent} held" in x]
++        self.assertEqual(len(lines), 1, self.err)
++        line = lines[0]
++        self.assertIn("not merged into main (org/repo)", line)
++        for wrong in ("line of this run", "carries them", "in the same `pdca flow <ids>`"):
++            self.assertNotIn(wrong, line)
++        return line
++
++    def _no_merge_attempt(self) -> None:
++        verbs = {c[2] for c in self.gh_calls}
++        self.assertLessEqual(verbs, {"view"}, self.gh_calls)
++        for call in self.gh_calls:
++            self.assertIn("state", call[-1], call)
++        self.assertEqual(self.events.count("merge issue_P"), 0)
++
++    def _on_main(self, iid: str) -> bool:
++        tip = self.fx._tip("main")
++        return sb._run(self.fx.origin, "merge-base", "--is-ancestor",
++                       self.fx._tip(f"fix/{iid}"), tip).returncode == 0
++
++    # -- (1) the bug: built on a base without the prerequisite -----------------------------
++
++    def test_1_unmarked_plain_prereq_holds_the_dependent(self):
++        self._opened("P")
++        self._du()
++        self._run(["D", "U"])
++        line = self._held_line()
++        self.assertIn("issue_P", line)
++        self.assertIn("merge the PR by hand", line)
++        self._no_merge_attempt()
++        self.assertTrue(self.gh_calls)
++        self.assertIn("issue_U", self.built)
++
++    def test_1b_a_prereq_named_in_the_command_holds_the_dependent_too(self):
++        self._opened("P")
++        self._du()
++        self._run(["P", "D", "U"])
++        self.assertIn("issue_P", self._held_line())
++        self._no_merge_attempt()
++        self.assertNotIn("issue_P", self.built)
++
++    def test_1c_merge_mode_builds_no_bundle_base(self):
++        forbid = [mock.patch.object(flow, name, side_effect=AssertionError(name))
++                  for name in ("_base_plans", "_bundle_bases")]
++        self._opened("P")
++        self._du()
++        self._run(["D", "U"], stack=forbid)
++        self._held_line()
++        self.assertIn("issue_U", self.built)
++        for iid in ("D", "U", "P"):
++            self.assertFalse((self.cfg.bundle(iid) / "stack-base").exists(), iid)
++
++    def test_1c_no_out_of_batch_prereq_builds_no_bundle_base_either(self):
++        forbid = [mock.patch.object(flow, name, side_effect=AssertionError(name))
++                  for name in ("_base_plans", "_bundle_bases")]
++        self._planned("A")
++        self._planned("B")
++        self._run(["A", "B"], stack=forbid)
++        self.assertEqual(sorted(self.built), ["issue_A", "issue_B"])
++        for iid in ("A", "B"):
++            self.assertFalse((self.cfg.bundle(iid) / "stack-base").exists(), iid)
++        self.assertEqual(self.gh_calls, [])
++
++    # -- (2) a marked prerequisite is merged, and the dependent builds on it ----------------
++
++    def _merged_then_built(self, field: str) -> None:
++        self._opened("P", marked=True)
++        self._du(field)
++        self.assertFalse(self._on_main("P"))
++        self._run(["D", "U"])
++        self.assertTrue(self._on_main("P"), self.err)
++        self.assertLess(self.events.index("ready issue_P"), self.events.index("merge issue_P"))
++        self.assertLess(self.events.index("merge issue_P"),
++                        min(self.events.index("build issue_D"),
++                            self.events.index("build issue_U")))
++        self.assertIn("P.txt", self.base_files["issue_D"], self.err)
++        self.assertEqual(self.results["D"], state.COMPLETE)
++
++    def test_2_marked_plain_prereq_is_merged_and_the_dependent_builds_on_it(self):
++        self._merged_then_built(PLAIN)
++
++    def test_2_marked_depends_on_merged_prereq_is_merged_and_the_dependent_builds_on_it(self):
++        self._merged_then_built(ON_MERGED)
++
++    def test_2_a_marked_named_prereq_is_merged_too(self):
++        self._opened("P", marked=True)
++        self._du()
++        self._run(["P", "D", "U"])
++        self.assertTrue(self._on_main("P"), self.err)
++        self.assertIn("P.txt", self.base_files["issue_D"])
++
++    def test_2_a_marked_chain_merges_deepest_first(self):
++        self._opened("Q", marked=True)
++        self._opened("P", marked=True, edges="- **Depends on:** Q\n")
++        self._du()
++        self._run(["D", "U"])
++        self.assertLess(self.events.index("merge issue_Q"), self.events.index("merge issue_P"))
++        self.assertTrue(self.base_files["issue_D"] >= {"P.txt", "Q.txt"}, self.err)
++
++    def test_2b_a_merge_into_another_base_does_not_release_on_rc_0(self):
++        d = self._opened("P", marked=True)
++        rec = json.loads((d / "publish.json").read_text(encoding="utf-8"))
++        rec["base"] = "pdca-integration/main"
++        (d / "publish.json").write_text(json.dumps(rec), encoding="utf-8")
++        self.pr["P"]["state"] = "MERGED"
++        self._du()
++        rcs: list[int] = []
++        real = merge._merge_one
++
++        def spy(*a, **k):
++            rcs.append(real(*a, **k))
++            return rcs[-1]
++
++        self._run(["D", "U"], stack=[mock.patch.object(merge, "_merge_one", spy)])
++        self.assertEqual(rcs, [0], self.err)     # `_merge_one` was asked, and said "merged"
++        self.assertIn("issue_P", self._held_line())
++        self.assertNotIn("let a merge-mode run merge it", self.err)
++        self.assertNotIn("ready issue_P", self.events)
++
++    # -- (3) refusal, unmarked, chain, retry -------------------------------------------------
++
++    def test_3_a_refused_prereq_holds_only_its_dependent(self):
++        self._opened("P", marked=True, rollup="fail")
++        self._du()
++        self._run(["D", "U"])
++        line = self._held_line()
++        self.assertIn("issue_P", line)
++        self.assertIn("did not pass the merge gates", line)
++        self.assertNotIn(STOP, self.err)
++        self.assertIn("issue_D is held; resolve at the PR, then re-run", self.err)
++        self.assertIn("a check is FAILING", self.err)
++        self.assertIn("issue_U", self.built)
++        self.assertIn("issue_U", self.published)
++        self.assertEqual(self.results["U"], state.COMPLETE)
++        self.assertEqual(self.events[:2], ["ready issue_P", "undo issue_P"])
++        self.assertFalse(self._on_main("P"))
++        self.assertEqual(cli._results_rc(self.results), 1)
++
++    def test_3b_an_unmarked_draft_is_never_readied_or_merged(self):
++        for field in (PLAIN, ON_MERGED):
++            with self.subTest(field=field):
++                self.gh_calls.clear()
++                self.built.clear()
++                if "P" not in self.pr:
++                    self._opened("P")
++                self._du(field)
++                self._run(["D"])
++                line = self._held_line()
++                self.assertIn("issue_P", line)
++                self.assertIn("merge the PR by hand", line)
++                self._no_merge_attempt()
++                self.assertTrue(self.pr["P"]["draft"])
++
++    def test_3c_a_marked_prereq_of_an_unmerged_one_is_not_merged(self):
++        self._opened("Q")
++        self._opened("P", marked=True, edges="- **Depends on:** Q\n")
++        self._du()
++        self._run(["D", "U"])
++        line = self._held_line()
++        self.assertIn("issue_P", line)
++        self.assertIn("issue_Q", line)
++        self.assertEqual([c for c in self.gh_calls if c[2] != "view"], [])
++        self.assertFalse(self._on_main("P"))
++
++    def test_3d_a_refused_pr_is_readied_and_merged_by_the_next_run(self):
++        self._opened("P", marked=True, rollup="fail")
++        self._du()
++        self._run(["D"])
++        self._held_line()
++        self.assertTrue(self.pr["P"]["draft"])          # back to draft, marker kept
++        self.assertTrue(self._marker("P"))
++        self.pr["P"]["rollup"] = "pass"
++        self._run(["D"])
++        self.assertEqual(self.events.count("ready issue_P"), 2)
++        self.assertTrue(self._on_main("P"), self.err)
++        self.assertIn("P.txt", self.base_files["issue_D"], self.err)
++
++    def test_a_missing_gh_holds_the_dependent_without_a_traceback(self):
++        self._opened("P", marked=True)
++        self._du()
++
++        def gone(args, *a, **k):
++            if isinstance(args, list) and args[:1] == ["gh"]:
++                raise FileNotFoundError(2, "No such file or directory", "gh")
++            return self._real_run(args, *a, **k)
++
++        self._gh = gone     # type: ignore[method-assign]
++        self._run(["D", "U"])
++        self.assertIn("issue_P", self._held_line())
++        self.assertIn("issue_U", self.built)
++
++    def test_a_prereq_for_another_target_is_left_alone(self):
++        d = self._opened("P", marked=True)
++        (d / "brief.md").write_text("- **Slug:** p\n- **Repo + branch target:** org/repo @ rel\n",
++                                    encoding="utf-8")
++        self._du()
++        self._run(["D", "U"])
++        self.assertIn("it does not target main", self._held_line())
++        self.assertNotIn("ready issue_P", self.events)
++
++    # -- (4) nothing to merge ---------------------------------------------------------------
++
++    def test_4_a_close_prereq_releases_its_dependent_with_no_gh_call(self):
++        p = self._planned("P")
++        (p / "patch.diff").write_text("", encoding="utf-8")
++        sb._accept(p)
++        self.assertEqual(state.state(p), state.COMPLETE)
++        self._du()
++        self._run(["D", "U"])
++        self.assertIn("issue_D", self.built, self.err)
++        self.assertEqual(self.gh_calls, [])
++
++    # -- (5) dry run and --no-publish -------------------------------------------------------
++
++    def _nothing_happens(self) -> None:
++        self.assertEqual(self.gh_calls, [])
++        self.assertIn("issue_D", self.built, self.err)
++        self.assertFalse(self._on_main("P"))
++
++    def test_5_no_publish_merges_and_holds_nothing(self):
++        self._opened("P", marked=True)
++        self._du()
++        self._run(["D", "U"], do_publish=False)
++        self._nothing_happens()
++
++    def test_5_a_dry_run_merges_and_holds_nothing(self):
++        self.cfg.publisher = dataclasses.replace(self.cfg.publisher, mode="stub")
++        self._opened("P", marked=True)
++        self._du()
++        self._run(["D", "U"])
++        self._nothing_happens()
++
++    # -- the marker -------------------------------------------------------------------------
++
++    def test_merge_wave_marks_before_the_ready_mark_and_a_refusal_still_stops(self):
++        self.pr["A"] = {"state": "OPEN", "draft": True, "rollup": "fail"}
++        self.finish["A"] = {"A.txt": "A\n"}
++        self._planned("A")
++        self._planned("B", "- **Depends on:** A\n")
++        self._run(["A", "B"])
++        self.assertEqual(self.marked_at_ready.get("A"), True, self.err)
++        self.assertTrue(self._marker("A"))              # kept after the refusal
++        self.assertIn(STOP, self.err)                   # the wave boundary's text, unchanged
++        self.assertIn("flow: wave 0 did not merge; STOPPING", self.err)
++        self.assertNotIn("issue_B", self.built)
++
++    def test_the_final_wave_is_not_marked(self):
++        self.finish.update({"A": {"A.txt": "A\n"}, "B": {"B.txt": "B\n"}})
++        self._planned("A")
++        self._planned("B", "- **Depends on:** A\n")
++        self._run(["A", "B"])
++        self.assertTrue(self._marker("A"), self.err)
++        self.assertTrue(self._on_main("A"), self.err)
++        self.assertFalse(self._marker("B"), self.err)
++        self.assertTrue(self.pr["B"]["draft"])
++
++    def test_a_failed_marker_write_stops_nothing_and_leaves_the_record_whole(self):
++        d = self._opened("P")
++        before = (d / "publish.json").read_text(encoding="utf-8")
++        err = io.StringIO()
++        real_write = Path.write_text
++
++        def dies_part_way(path, text, *a, **k):
++            if "publish.json" in path.name:
++                real_write(path, text[:10], *a, **k)
++                raise OSError("No space left on device")
++            return real_write(path, text, *a, **k)
++
++        with mock.patch.object(subprocess, "run", self._gh), \
++                mock.patch.object(Path, "write_text", dies_part_way), \
++                redirect_stdout(io.StringIO()), redirect_stderr(err):
++            self.assertEqual(merge.merge_wave(self.cfg, [d]), 0)
++        self.assertIn("could not mark issue_P", err.getvalue())
++        self.assertEqual((d / "publish.json").read_text(encoding="utf-8"), before)
++        self.assertEqual(list(d.glob(".*partial")), [])
++        self.assertTrue(self._on_main("P"))
++
++    def test_merge_one_alone_does_not_mark(self):
++        d = self._opened("P")
++        with mock.patch.object(subprocess, "run", self._gh), \
++                redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
++            self.assertEqual(merge._merge_one(self.cfg, d, dry_run=False, method="merge",
++                                              fetched=set()), 0)
++        self.assertFalse(self._marker("P"))
++
++    # -- every refusal: "held" on this path, the wave boundary's text on the other ----------
++
++    def _refusal(self, *, fail: str = "", held: str | None = None, **pr) -> str:
++        iid = f"R{len(self.pr)}"    # a bundle and branch of its own for each call
++        d = self._opened(iid, marked=True)
++        self.pr[iid].update(pr)
++        real = self._gh
++
++        def gh(args, *a, **k):
++            if isinstance(args, list) and args[:3] == ["gh", "pr", fail]:
++                return subprocess.CompletedProcess(args, 1, "", "refused")
++            return real(args, *a, **k)
++
++        err = io.StringIO()
++        with mock.patch.object(subprocess, "run", gh), redirect_stdout(io.StringIO()), \
++                redirect_stderr(err):
++            rc = merge._merge_one(self.cfg, d, dry_run=False, method="merge", fetched=set(),
++                                  held=held)
++        self.assertEqual(rc, 1, err.getvalue())
++        return err.getvalue()
++
++    def test_refusals_say_held_on_the_prewave_path(self):
++        held = "issue_D is held; resolve at the PR, then re-run"
++        for name, kw in (("ready", {"fail": "ready"}),
++                         ("rollup", {"rollup": "fail"}),
++                         ("merge", {"fail": "merge"})):
++            with self.subTest(name):
++                out = self._refusal(held=held, **kw)
++                self.assertNotIn("STOP", out)
++                self.assertIn(held + ".", out)
++
++    def test_refusals_keep_the_wave_text_at_the_wave_boundary(self):
++        ready = ("could not be marked ready to merge. STOP: later waves are NOT run; resolve "
++                 "at the PR, then re-run.\n")
++        merge_fail = ("that requires up-to-date branches. STOP: later waves are NOT run; "
++                      "resolve at the PR, then re-run.\n")
++        rollup = ("The host's required-checks config is not enough: this wave's base must be "
++                  "green before the next wave builds on it. STOP: later waves are NOT run; "
++                  "re-run once the checks are green (the run resumes idempotently), or set "
++                  "[driver] merge_requires = \"required\" to merge on the host's required "
++                  "checks alone, or raise [driver] merge_wait_secs if the checks just take "
++                  "longer than that to report.\n")
++        for want, kw in ((ready, {"fail": "ready"}), (merge_fail, {"fail": "merge"}),
++                         (rollup, {"rollup": "fail"})):
++            with self.subTest(want[:20]):
++                self.assertIn(want, self._refusal(**kw))
++
++    def test_refuse_keeps_its_wave_text(self):
++        err = io.StringIO()
++        d = self.cfg.bundle("P")
++        with mock.patch.object(merge, "_undo_ready"), redirect_stderr(err):
++            merge._refuse(d, "url", "why")
++        self.assertIn("was NOT merged — why. STOP: later waves are NOT run; resolve at the PR, "
++                      "then re-run (the run resumes idempotently).\n", err.getvalue())
++
++    def test_the_merged_module_is_still_what_releases(self):
++        # `_runnable` reads `merged_into`; a stubbed "no" holds even a just-merged prereq.
++        self._opened("P", marked=True)
++        self._du()
++        no = mock.patch.object(merged, "merged_into", lambda *a, **k: False)
++        self._run(["D", "U"], stack=[no])
++        self.assertIn("issue_P", self._held_line())
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/template/tests/test_merge_review_remarks.py b/template/tests/test_merge_review_remarks.py
+index df94446..681f3b3 100644
+--- a/template/tests/test_merge_review_remarks.py
++++ b/template/tests/test_merge_review_remarks.py
+@@ -754,7 +754,10 @@ class MergeReviewRemarks(unittest.TestCase):
+ 
+         def dies_part_way(path: Path, text: str, **kw: object) -> int:
+             real_write(path, text[:len(text) // 2], **kw)
+-            partial.append(path.read_text(encoding="utf-8"))
++            # Only the remarks file: `merge_wave` also marks `publish.json` the same way
++            # (#839), and that write failing here must leave the record whole as well.
++            if "merge-remarks" in path.name:
++                partial.append(path.read_text(encoding="utf-8"))
+             raise OSError(errno.ENOSPC, "No space left on device")
+ 
+         faults = {

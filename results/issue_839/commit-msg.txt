@@ -1,0 +1,55 @@
+Merge mode: merge marked prerequisites before wave 0, hold the rest
+
+In merge mode, a `pdca flow` run that drives a bundle whose prerequisite
+was finished and published by an EARLIER run, and whose PR has not merged
+yet, got it wrong both ways. On a plain `Depends on` (or with the
+prerequisite named in the same command) the dependent was built on a base
+that lacks the prerequisite's change, because the #647 hold was switched
+off in merge mode and a named id was never a hold candidate. On a
+`Depends on (merged)` edge the dependent was held, but nothing ever
+merged the prerequisite, and the hold line gave stack-mode advice ("name
+it in the same command so the run's line carries it") that has no
+meaning in merge mode, where there is no line. A multi-bundle chain
+either stalled until someone merged by hand, or produced a PR built on
+the wrong base.
+
+Now a merge-mode run, before wave 0, merges the prerequisites that an
+earlier merge-mode run opened as a non-final wave, through the same gates
+`_merge_one` applies at a wave boundary (ready-mark, target base, full
+check rollup, pinned head). Such a PR carries `"merge_eligible": true` in
+its `publish.json`, written by `merge_wave` before the first `gh pr
+ready`, together with a hash of the `patch.diff` it was published from.
+Only a marked, open PR whose bundle still holds that patch is ever
+readied or merged on this path; a final-wave or single-bundle PR waiting
+for the human carries no mark and is never touched.
+
+Anything else unmerged holds the dependent on one line that names the
+prerequisite, the base, and a way out that fits that record: a PR with no
+mark (merge it by hand), a closed PR, a refusal by the gates (the `merge:`
+lines above say why; a refusal before wave 0 holds only the dependents
+and the rest of the run goes on, instead of "STOP"), a prerequisite whose
+own prerequisites are not merged, a bundle rebuilt since its PR was
+published, an `Onto branch` record or a PR for another base (merging it
+cannot release the dependent; land the work and drop the edge), and a
+bundle with no brief, no target or an unreadable patch. A close/no-fix
+prerequisite holds nobody. The dependent is released only when its
+prerequisite's record reads merged into the dependent's own target base,
+never on the merge's return code.
+
+The pre-wave step claims each prerequisite before it reads it, using the
+drive claims from fe8208f098556c8c3955aedec0c9f56cae2441dd, so two runs
+never ready or merge one PR together; one another live run holds is left
+alone and its dependents hold, naming that run.
+
+`hold_unmerged` is now on in merge mode; `own_bases` (per-bundle stack
+bases) stays stack-only. `test_merge_mode_holds_nothing` pinned the old
+merge-mode exemption and is rewritten on purpose to pin the hold.
+Dry runs and `--no-publish` still merge nothing, hold nothing and make no
+`gh` call. Docs: 07-crosscutting merge-mode bullet, 11-troubleshooting,
+fork-discipline, the `pdca.toml` template comment.
+
+Known limits, tracked separately: a refusal in `merge_wave` leaves the
+rest of that wave's PRs unmarked (#879); the mark is tied to the local
+patch, not to the PR's head commit (#880).
+
+Fixes #839

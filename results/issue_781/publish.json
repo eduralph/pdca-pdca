@@ -1,0 +1,11 @@
+{
+  "mode": "new-pr",
+  "branch": "fix/781-diff-files-git-quoted-paths",
+  "pr_url": "https://github.com/eduralph/pdca-harness/pull/847",
+  "base": "main",
+  "repo": "eduralph/pdca-harness",
+  "by": "Eduard Ralph",
+  "date": "2026-10-31",
+  "id_pending": false,
+  "host_ci_base": "3c11556651da9741e35f704c0497a5bf326cbd42"
+}

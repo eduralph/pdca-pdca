@@ -1,0 +1,15 @@
+{
+  "band": "oversized",
+  "independent_outcomes": [
+    "Hold, don't build: in merge mode, a dependent whose prerequisite is COMPLETE and unmerged is held with a reason and a manual way out, instead of being built on a base that lacks the prerequisite's change. This covers a plain 'Depends on' edge and a prerequisite named in the command, and fixes the wrong 'line of this run' hold text. It needs no marker and no new merge step.",
+    "Merge the prerequisite: a prerequisite PR that a merge-mode run opened as a non-final wave is marked in publish.json, then merged through _merge_one's gates in a pre-wave step, so the dependent builds on the merged base. This is the enhancement that closes the dead-chain gap for 'Depends on (merged)'. It needs the marker, the walk, the refusal-text change and the patch-hash guard."
+  ],
+  "proposed_seams": [
+    "Seam 1 (ships first, no dependency): flow._runnable and the hold_unmerged / own_bases split in flow._drive_and_act (flow.py:2901-2905), the merge-mode hold text (flow.py:836-841), the named-id hold candidate (flow.py:795-797), and the rewrite of test_merge_mode_holds_nothing. Covers legs (1), (1b), (1c), (4), (5). It also needs the missing-brief and unreadable-patch guards from the carry-forward rounds, since merge mode now reaches those reads. Leaves the 'Depends on (merged)' chain held until a human merges by hand, which is the documented way out.",
+    "Seam 2 (builds on seam 1): the marker written by _merge_one from merge_wave (flow.py:3078-3081), the patch-hash guard, the pre-wave walk (_merge_prereqs), the parameterised 'STOP: later waves are NOT run' text in merge.py, and the docs for the widened merge rule. Covers legs (2), (2b), (3), (3b), (3c), (3d). The walk releases dependents only through merged_into, so it needs seam 1's hold to exist first.",
+    "Keep the docs split with the seam that changes the behaviour. The docs/07-crosscutting.md:858-904 merge bullet and the pdca.toml.jinja sentence describe seam 2. The hold-text docs describe seam 1.",
+    "Alternative: keep one bundle but state in the brief that seam 2 is conditional on seam 1 landing. The brief's own 'One logical fix' scope note argues against this, because the carry-forward history shows the merge walk drives most of the findings and would be better reviewed alone."
+  ],
+  "confidence": "medium",
+  "brief_sha": "5a6eff29f481f59c"
+}
