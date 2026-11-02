@@ -121,6 +121,16 @@ class RunSuite(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("FAIL: test_the_one_that_broke", r.stdout + r.stderr)
 
+    def test_each_suite_run_gets_a_fresh_bytecode_cache(self) -> None:
+        # Issue #100 applied to T3: both suites run in the same worktree C4's
+        # legs (or an earlier run) compiled .pyc files into, so a stale cache
+        # can serve bytecode for a since-reverted source. Each invocation must
+        # compile under its own empty PYTHONPYCACHEPREFIX instead.
+        script = SCRIPT.read_text(encoding="utf-8")
+        self.assertIn('CACHE_ROOT="$(mktemp -d', script)
+        self.assertIn('PYTHONPYCACHEPREFIX="$CACHE_ROOT/root"', script)
+        self.assertIn('PYTHONPYCACHEPREFIX="$CACHE_ROOT/driver"', script)
+
 
 if __name__ == "__main__":
     unittest.main()

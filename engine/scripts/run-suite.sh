@@ -16,6 +16,13 @@ PY="$(pwd)/.venv/bin/python3"
 
 cd "$WT"
 
+# Fresh bytecode cache for this run (issue #100): the T3 gate runs in the same
+# worktree a C4 leg may already have compiled .pyc files into, and a reverted
+# production source keeps the green leg's fixed bytecode loadable when its size
+# and whole-second mtime still match what the .pyc header recorded. Nothing
+# compiled by another leg or an earlier run is visible under this prefix.
+CACHE_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/pdca-t3-pyc.XXXXXX")"
+
 # Each suite runs to completion and reports (no `set -e` abort partway), so the
 # PDCA-EVIDENCE verdict at the bottom always describes BOTH.
 root_rc=0
@@ -28,10 +35,10 @@ driver_rc=0
 # last-line rule forced — were 2026-08-02/08-06 stopgaps for a v0.56.0 driver that
 # had neither; both upstream fixes ship in v0.57.0 and the stopgaps are gone.
 echo "== T3: template-repo suite (render + update-compat)"
-"$PY" -m unittest discover -s tests -v 2>&1 || root_rc=$?
+PYTHONPYCACHEPREFIX="$CACHE_ROOT/root" "$PY" -m unittest discover -s tests -v 2>&1 || root_rc=$?
 
 echo "== T3: offline driver suite (template/tests, PYTHONPATH=src)"
-(cd template && PYTHONPATH=src "$PY" -m unittest discover -s tests) 2>&1 || driver_rc=$?
+(cd template && PYTHONPATH=src PYTHONPYCACHEPREFIX="$CACHE_ROOT/driver" "$PY" -m unittest discover -s tests) 2>&1 || driver_rc=$?
 
 _verdict() {
   if [ "$1" -eq 0 ]; then echo "OK"; else echo "FAILED (rc $1)"; fi
